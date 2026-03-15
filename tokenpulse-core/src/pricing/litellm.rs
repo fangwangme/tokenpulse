@@ -13,15 +13,14 @@ const CACHE_TTL_HOURS: i64 = 24;
 
 #[derive(Debug, Deserialize)]
 struct LiteLLMPricing {
-    input_cost_per_token: f64,
-    output_cost_per_token: f64,
+    input_cost_per_token: Option<f64>,
+    output_cost_per_token: Option<f64>,
     cache_read_input_token_cost: Option<f64>,
     cache_creation_input_token_cost: Option<f64>,
 }
 
 pub struct PricingCache {
     cache_path: PathBuf,
-    client: reqwest::Client,
 }
 
 impl PricingCache {
@@ -31,17 +30,20 @@ impl PricingCache {
 
         Self {
             cache_path: cache_dir.join("pricing.json"),
-            client: reqwest::Client::new(),
         }
     }
 
-    pub async fn get_pricing(&self) -> Result<HashMap<String, ModelPricing>> {
+    pub fn get_pricing_sync(&self) -> Result<HashMap<String, ModelPricing>> {
         if let Some(cached) = self.load_cached()? {
             debug!("Using cached pricing data");
             return Ok(cached);
         }
 
-        self.fetch_and_cache().await
+        self.fetch_and_cache_sync()
+    }
+
+    pub async fn get_pricing(&self) -> Result<HashMap<String, ModelPricing>> {
+        self.get_pricing_sync()
     }
 
     fn load_cached(&self) -> Result<Option<HashMap<String, ModelPricing>>> {
@@ -61,37 +63,37 @@ impl PricingCache {
         }
     }
 
-    async fn fetch_and_cache(&self) -> Result<HashMap<String, ModelPricing>> {
+    fn fetch_and_cache_sync(&self) -> Result<HashMap<String, ModelPricing>> {
         info!("Fetching pricing data from LiteLLM");
 
-        let response = self
-            .client
-            .get(LITELLM_PRICING_URL)
-            .send()
-            .await?;
+        let response = ureq::get(LITELLM_PRICING_URL)
+            .timeout(std::time::Duration::from_secs(30))
+            .call()?;
 
-        if !response.status().is_success() {
+        if response.status() >= 400 {
             warn!("Failed to fetch pricing, using stale cache if available");
             if let Some(cached) = self.load_cached()? {
                 return Ok(cached);
             }
-            anyhow::bail!("Failed to fetch pricing data");
+            anyhow::bail!("Failed to fetch pricing data: {}", response.status());
         }
 
-        let litellm_data: HashMap<String, LiteLLMPricing> = response.json().await?;
+        let litellm_data: HashMap<String, LiteLLMPricing> = response.into_json()?;
 
         let pricing: HashMap<String, ModelPricing> = litellm_data
             .into_iter()
-            .map(|(k, v)| {
-                (
+            .filter_map(|(k, v)| {
+                let input = v.input_cost_per_token?;
+                let output = v.output_cost_per_token?;
+                Some((
                     k,
                     ModelPricing {
-                        input_cost_per_token: v.input_cost_per_token,
-                        output_cost_per_token: v.output_cost_per_token,
+                        input_cost_per_token: input,
+                        output_cost_per_token: output,
                         cache_read_input_token_cost: v.cache_read_input_token_cost,
                         cache_creation_input_token_cost: v.cache_creation_input_token_cost,
                     },
-                )
+                ))
             })
             .collect();
 

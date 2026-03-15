@@ -115,12 +115,7 @@ impl SessionParser for OpenCodeSessionParser {
     }
 
     fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
-        let pricing = tokio::runtime::Handle::try_current()
-            .map(|handle| handle.block_on(self.pricing_cache.get_pricing()))
-            .unwrap_or_else(|_| {
-                let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(self.pricing_cache.get_pricing())
-            })?;
+        let pricing = self.pricing_cache.get_pricing_sync()?;
 
         let mut all_messages = Vec::new();
 

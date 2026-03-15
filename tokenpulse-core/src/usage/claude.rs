@@ -48,7 +48,7 @@ impl ClaudeSessionParser {
                     }
 
                     let message = match entry.message {
-                        Some(m) => m,
+                        Some(ref m) => m,
                         None => continue,
                     };
 
@@ -62,20 +62,28 @@ impl ClaudeSessionParser {
                     seen_ids.insert(dedup_key);
 
                     let model_id = message.model.clone();
-                    let usage = match message.usage {
+                    let usage = match &message.usage {
                         Some(u) => u,
                         None => continue,
                     };
 
-                    let session_id = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
+                    let session_id = entry.session_id.clone().unwrap_or_else(|| {
+                        path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("unknown")
+                            .to_string()
+                    });
 
+                    // Parse ISO timestamp
                     let timestamp = entry
                         .timestamp
+                        .map(|ts| {
+                            chrono::DateTime::parse_from_rfc3339(&ts)
+                                .map(|dt| dt.timestamp_millis())
+                                .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis())
+                        })
                         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+
                     let date = chrono::DateTime::from_timestamp_millis(timestamp)
                         .map(|dt| dt.format("%Y-%m-%d").to_string())
                         .unwrap_or_else(|| "unknown".to_string());
@@ -83,15 +91,15 @@ impl ClaudeSessionParser {
                     let tokens = TokenBreakdown {
                         input: usage.input_tokens.unwrap_or(0),
                         output: usage.output_tokens.unwrap_or(0),
-                        cache_read: usage.cache_read_input_tokens,
-                        cache_write: usage.cache_creation_input_tokens,
+                        cache_read: usage.cache_read_input_tokens.unwrap_or(0),
+                        cache_write: usage.cache_creation_input_tokens.unwrap_or(0),
                         reasoning: 0,
                     };
 
                     let cost = match lookup_model_pricing(&model_id, pricing) {
                         Some(p) => calculate_cost(&tokens, p),
                         None => {
-                            warn!("No pricing found for model: {}", model_id);
+                            debug!("No pricing found for model: {}", model_id);
                             0.0
                         }
                     };
@@ -136,12 +144,7 @@ impl SessionParser for ClaudeSessionParser {
     }
 
     fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
-        let pricing = tokio::runtime::Handle::try_current()
-            .map(|handle| handle.block_on(self.pricing_cache.get_pricing()))
-            .unwrap_or_else(|_| {
-                let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(self.pricing_cache.get_pricing())
-            })?;
+        let pricing = self.pricing_cache.get_pricing_sync()?;
 
         let mut all_messages = Vec::new();
 
@@ -170,7 +173,8 @@ struct ClaudeEntry {
     entry_type: String,
     message: Option<ClaudeMessage>,
     request_id: Option<String>,
-    timestamp: Option<i64>,
+    session_id: Option<String>,
+    timestamp: Option<String>, // ISO format
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,8 +188,6 @@ struct ClaudeMessage {
 struct ClaudeUsage {
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
-    #[serde(default)]
-    cache_read_input_tokens: i64,
-    #[serde(default)]
-    cache_creation_input_tokens: i64,
+    cache_read_input_tokens: Option<i64>,
+    cache_creation_input_tokens: Option<i64>,
 }
