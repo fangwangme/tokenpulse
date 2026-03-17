@@ -2,6 +2,7 @@ mod commands;
 mod tui;
 
 use clap::{Parser, Subcommand};
+use tokenpulse_core::config::ConfigManager;
 
 #[derive(Parser)]
 #[clap(name = "tokenpulse")]
@@ -14,23 +15,34 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Interactive setup wizard
+    Init {
+        /// Skip interactive prompts, auto-detect and enable found providers
+        #[clap(long)]
+        default: bool,
+    },
     Quota {
         #[clap(short, long)]
         provider: Option<String>,
-        
-        #[clap(long)]
-        json: bool,
     },
     Usage {
         #[clap(long)]
         since: Option<String>,
-        
+
         #[clap(short, long)]
         provider: Option<String>,
-        
-        #[clap(long)]
-        json: bool,
     },
+    Config {
+        #[clap(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    Show,
+    Enable { provider: String },
+    Disable { provider: String },
 }
 
 #[tokio::main]
@@ -40,13 +52,28 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Quota { provider, json } => {
-            commands::quota::run(provider, json).await?;
+        Commands::Init { default } => {
+            commands::init::run(default)?;
         }
-        Commands::Usage { since, provider, json } => {
-            commands::usage::run(since, provider, json).await?;
+        Commands::Quota { provider } => {
+            check_config_exists();
+            commands::quota::run(provider).await?;
+        }
+        Commands::Usage { since, provider } => {
+            check_config_exists();
+            commands::usage::run(since, provider).await?;
+        }
+        Commands::Config { action } => {
+            commands::config::run(action)?;
         }
     }
 
     Ok(())
+}
+
+fn check_config_exists() {
+    let config_manager = ConfigManager::new();
+    if !config_manager.exists() {
+        eprintln!("Hint: No configuration found. Run `tokenpulse init` for guided setup.\n");
+    }
 }

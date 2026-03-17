@@ -1,8 +1,12 @@
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
+pub mod gemini;
 
+pub use antigravity::AntigravityQuotaFetcher;
 pub use claude::ClaudeQuotaFetcher;
 pub use codex::CodexQuotaFetcher;
+pub use gemini::GeminiQuotaFetcher;
 
 use crate::{QuotaFetcher, QuotaSnapshot};
 use anyhow::Result;

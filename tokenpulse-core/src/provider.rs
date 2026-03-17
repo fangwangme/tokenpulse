@@ -18,6 +18,8 @@ pub struct RateWindow {
     pub label: String,
     pub used_percent: f64,
     pub resets_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub period_duration_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,11 +109,13 @@ mod tests {
             label: "Session (5h)".to_string(),
             used_percent: 42.5,
             resets_at: None,
+            period_duration_ms: Some(5 * 60 * 60 * 1000),
         };
 
         assert_eq!(window.label, "Session (5h)");
         assert!((window.used_percent - 42.5).abs() < 0.001);
         assert!(window.resets_at.is_none());
+        assert_eq!(window.period_duration_ms, Some(5 * 60 * 60 * 1000));
     }
 
     #[test]
@@ -150,11 +154,13 @@ mod tests {
                     label: "Session".to_string(),
                     used_percent: 50.0,
                     resets_at: None,
+                    period_duration_ms: Some(5 * 60 * 60 * 1000),
                 },
                 RateWindow {
                     label: "Weekly".to_string(),
                     used_percent: 25.0,
                     resets_at: None,
+                    period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
                 },
             ],
             credits: Some(CreditInfo {

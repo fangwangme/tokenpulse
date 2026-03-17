@@ -1,8 +1,8 @@
 use anyhow::Result;
 use chrono::NaiveDate;
-use tokenpulse_core::{SessionParser, UnifiedMessage, usage::{ClaudeSessionParser, CodexSessionParser, OpenCodeSessionParser, PiSessionParser, compute_usage_summary}};
+use tokenpulse_core::{SessionParser, usage::{ClaudeSessionParser, CodexSessionParser, OpenCodeSessionParser, PiSessionParser, compute_usage_summary}};
 
-pub async fn run(since: Option<String>, provider: Option<String>, json: bool) -> Result<()> {
+pub async fn run(since: Option<String>, provider: Option<String>) -> Result<()> {
     let since_date = since
         .map(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d"))
         .transpose()?;
@@ -29,9 +29,9 @@ pub async fn run(since: Option<String>, provider: Option<String>, json: bool) ->
         ],
     };
 
-    let mut all_messages: Vec<UnifiedMessage> = Vec::new();
+    let mut all_messages = Vec::new();
     let mut found_any = false;
-    
+
     for parser in &parsers {
         match parser.parse_sessions(since_date) {
             Ok(msgs) => {
@@ -51,35 +51,29 @@ pub async fn run(since: Option<String>, provider: Option<String>, json: bool) ->
     if !found_any {
         eprintln!("\nNo usage data found.\n");
         eprintln!("To see usage statistics, you need to have used one of these tools:");
-        eprintln!("  - Claude Code: ~/.claude/projects/");
-        eprintln!("  - Codex: ~/.codex/sessions/");
-        eprintln!("  - OpenCode: ~/.local/share/opencode/");
-        eprintln!("  - PI: ~/.pi/agent/sessions/\n");
+        eprintln!(" - Claude Code: ~/.claude/projects/");
+        eprintln!(" - Codex: ~/.codex/sessions/");
+        eprintln!(" - OpenCode: ~/.local/share/opencode/");
+        eprintln!(" - PI: ~/.pi/agent/sessions/\n");
         eprintln!("Run any of these tools first, then try again.");
         return Ok(());
     }
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&all_messages)?);
-        return Ok(());
-    }
-
-    // Print simple summary
     let summary = compute_usage_summary(&all_messages);
-    
+
     println!("\n=== Usage Summary ===");
     println!("Total cost: ${:.2}", summary.total_cost);
     println!("Total tokens: {}", summary.total_tokens);
     println!("Active days: {}", summary.active_days);
     println!("Avg daily cost: ${:.2}", summary.avg_daily_cost);
-    
+
     println!("\n=== By Provider ===");
     for prov in &summary.by_provider {
         println!("{}: ${:.2} ({:.1}%)", prov.provider.to_uppercase(), prov.cost, prov.percent);
     }
-    
+
     println!("\n=== By Model ===");
-    for model in &summary.by_model.iter().take(10).collect::<Vec<_>>() {
+    for model in summary.by_model.iter().take(10) {
         println!("{}: ${:.2} ({:.1}%)", model.model, model.cost, model.percent);
     }
 

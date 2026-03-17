@@ -1,15 +1,16 @@
-use crate::tui::{theme::Theme, widgets::GradientGauge};
+use crate::tui::theme::Theme;
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
-    widgets::{Block, Borders, Paragraph},
+    style::{Color, Style, Stylize},
+    text::Span,
+    widgets::{Block, Borders, Paragraph, Tabs},
     Terminal,
 };
 use tokenpulse_core::QuotaSnapshot;
@@ -24,6 +25,17 @@ pub fn run(results: Vec<anyhow::Result<QuotaSnapshot>>) -> Result<()> {
     let theme = Theme::default();
     let snapshots: Vec<&QuotaSnapshot> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
 
+    let mut selected_tab: usize = 0;
+    let tab_titles: Vec<&str> = if snapshots.is_empty() {
+        vec!["Overview"]
+    } else {
+        let mut tabs = vec!["Overview"];
+        for s in &snapshots {
+            tabs.push(s.provider.as_str());
+        }
+        tabs
+    };
+
     loop {
         terminal.draw(|f| {
             let size = f.area();
@@ -33,102 +45,44 @@ pub fn run(results: Vec<anyhow::Result<QuotaSnapshot>>) -> Result<()> {
                 .margin(1)
                 .constraints([
                     Constraint::Length(3),
+                    Constraint::Length(1),
                     Constraint::Min(10),
-                    Constraint::Length(2),
+                    Constraint::Length(1),
                 ])
                 .split(size);
 
-            let header = Paragraph::new("TokenPulse - Quota Overview")
+            let title = Paragraph::new(" TokenPulse - Quota Dashboard ")
+                .style(Style::default().fg(theme.fg).bold())
                 .block(Block::default().borders(Borders::ALL));
-            f.render_widget(header, chunks[0]);
+            f.render_widget(title, chunks[0]);
 
-            let provider_height = 8;
-            let mut y_offset = 0;
+            let tabs_widget = Tabs::new(
+                tab_titles
+                    .iter()
+                    .map(|t| Span::styled(*t, Style::default())),
+            )
+            .block(Block::default().borders(Borders::BOTTOM))
+            .select(selected_tab)
+            .style(Style::default().fg(theme.dim))
+            .highlight_style(Style::default().fg(theme.fg).bold());
+            f.render_widget(tabs_widget, chunks[1]);
 
-            for snapshot in &snapshots {
-                let provider_area = Rect::new(
-                    chunks[1].x,
-                    chunks[1].y + y_offset,
-                    chunks[1].width,
-                    provider_height.min(chunks[1].height - y_offset),
-                );
+            let content_area = chunks[2];
 
-                if provider_area.height < 3 {
-                    break;
+            if selected_tab == 0 {
+                render_overview(f, content_area, &snapshots, &theme);
+            } else {
+                let idx = selected_tab - 1;
+                if idx < snapshots.len() {
+                    render_provider(f, content_area, snapshots[idx], &theme);
                 }
-
-                let provider_block = Block::default()
-                    .title(format!(
-                        "{} ({})",
-                        snapshot.provider.to_uppercase(),
-                        snapshot.plan.as_deref().unwrap_or("Unknown")
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.provider_color(&snapshot.provider)));
-
-                f.render_widget(provider_block, provider_area);
-
-                let inner = Rect::new(
-                    provider_area.x + 1,
-                    provider_area.y + 2,
-                    provider_area.width.saturating_sub(2),
-                    provider_area.height.saturating_sub(3),
-                );
-
-                for (i, window) in snapshot.windows.iter().enumerate() {
-                    let gauge_area = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
-
-                    if gauge_area.y >= provider_area.y + provider_area.height - 1 {
-                        break;
-                    }
-
-                    let time_str = window
-                        .resets_at
-                        .map(|t| {
-                            let now = chrono::Utc::now();
-                            let diff = t.signed_duration_since(now);
-                            format!("{}h {}m", diff.num_hours(), diff.num_minutes() % 60)
-                        })
-                        .unwrap_or_default();
-
-                    let gauge = GradientGauge::new(&window.label, window.used_percent)
-                        .color(theme.gauge_color(window.used_percent))
-                        .time(&time_str);
-
-                    f.render_widget(gauge, gauge_area);
-                }
-
-                if let Some(ref credits) = snapshot.credits {
-                    let credits_text = if credits.limit.is_some() {
-                        format!(
-                            "Credits ${:.2} / ${:.2}",
-                            credits.used,
-                            credits.limit.unwrap()
-                        )
-                    } else {
-                        format!("Credits ${:.2} (unlimited)", credits.used)
-                    };
-
-                    let credits_area = Rect::new(
-                        inner.x,
-                        inner.y + snapshot.windows.len() as u16,
-                        inner.width,
-                        1,
-                    );
-
-                    let credits = Paragraph::new(credits_text).style(Style::default().fg(theme.fg));
-                    f.render_widget(credits, credits_area);
-                }
-
-                y_offset += provider_height;
             }
 
-            let footer_text = format!(
-                "Last fetched: {} | Press q to quit, r to refresh",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-            );
-            let footer = Paragraph::new(footer_text).style(Style::default().fg(theme.dim));
-            f.render_widget(footer, chunks[2]);
+            let footer_text = " q: quit | ←→: switch tab | r: refresh ";
+            let footer = Paragraph::new(footer_text)
+                .style(Style::default().fg(theme.dim))
+                .block(Block::default().borders(Borders::TOP));
+            f.render_widget(footer, chunks[3]);
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -136,6 +90,27 @@ pub fn run(results: Vec<anyhow::Result<QuotaSnapshot>>) -> Result<()> {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('r') => {}
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        if selected_tab > 0 {
+                            selected_tab -= 1;
+                        }
+                    }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        if selected_tab < tab_titles.len() - 1 {
+                            selected_tab += 1;
+                        }
+                    }
+                    KeyCode::Tab => {
+                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            if selected_tab > 0 {
+                                selected_tab -= 1;
+                            }
+                        } else {
+                            if selected_tab < tab_titles.len() - 1 {
+                                selected_tab += 1;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -146,4 +121,222 @@ pub fn run(results: Vec<anyhow::Result<QuotaSnapshot>>) -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
     Ok(())
+}
+
+fn render_overview(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    snapshots: &[&QuotaSnapshot],
+    theme: &Theme,
+) {
+    if snapshots.is_empty() {
+        let msg = Paragraph::new("No quota data available")
+            .style(Style::default().fg(theme.dim))
+            .block(Block::default().borders(Borders::ALL));
+        f.render_widget(msg, area);
+        return;
+    }
+
+    let provider_height = 7u16;
+    let mut y_offset = 0u16;
+
+    for snapshot in snapshots {
+        let provider_area = Rect::new(
+            area.x,
+            area.y + y_offset,
+            area.width,
+            provider_height.min(area.height.saturating_sub(y_offset)),
+        );
+
+        if provider_area.height < 3 {
+            break;
+        }
+
+        let border_color = get_provider_color(&snapshot.provider);
+
+        let title = format!(
+            "{} {}",
+            snapshot.provider.to_uppercase(),
+            snapshot
+                .plan
+                .as_deref()
+                .map(|p| format!("({})", p))
+                .unwrap_or_default()
+        );
+
+        let provider_block = Block::default()
+            .title(Span::styled(
+                title,
+                Style::default().fg(border_color).bold(),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color));
+
+        f.render_widget(provider_block, provider_area);
+
+        let inner = Rect::new(
+            provider_area.x + 1,
+            provider_area.y + 2,
+            provider_area.width.saturating_sub(2),
+            provider_area.height.saturating_sub(3),
+        );
+
+        for (i, window) in snapshot.windows.iter().enumerate() {
+            let gauge_y = inner.y + i as u16;
+            if gauge_y >= inner.y + inner.height {
+                break;
+            }
+
+            let used = window.used_percent;
+            let reset_str = window
+                .resets_at
+                .as_ref()
+                .map(|t| {
+                    let now = chrono::Utc::now();
+                    let diff = t.signed_duration_since(now);
+                    if diff.num_hours() > 24 {
+                        format!("{}d", diff.num_hours() / 24)
+                    } else if diff.num_hours() > 0 {
+                        format!("{}h", diff.num_hours())
+                    } else {
+                        format!("{}m", diff.num_minutes())
+                    }
+                })
+                .unwrap_or_default();
+
+            let percent_text = format!("{:.0}%", used);
+            let bar_width = (inner.width as f64 * used / 100.0) as usize;
+
+            let line = format!(
+                "{:12} [{}{}] {:5} {}",
+                window.label,
+                "█".repeat(bar_width.min(inner.width.saturating_sub(20) as usize)),
+                "░".repeat(
+                    (inner.width as usize)
+                        .saturating_sub(20)
+                        .saturating_sub(bar_width)
+                ),
+                percent_text,
+                reset_str
+            );
+
+            let gauge_color = get_gauge_color(used);
+            let para = Paragraph::new(line).style(Style::default().fg(gauge_color));
+
+            let gauge_area = Rect::new(inner.x, gauge_y, inner.width, 1);
+            f.render_widget(para, gauge_area);
+        }
+
+        y_offset += provider_height;
+    }
+}
+
+fn render_provider(f: &mut ratatui::Frame, area: Rect, snapshot: &QuotaSnapshot, theme: &Theme) {
+    let border_color = get_provider_color(&snapshot.provider);
+
+    let block = Block::default()
+        .title(format!(" {} ", snapshot.provider.to_uppercase()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    f.render_widget(block, area);
+
+    let inner = Rect::new(
+        area.x + 2,
+        area.y + 2,
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(4),
+    );
+
+    if let Some(ref plan) = snapshot.plan {
+        let plan_line =
+            Paragraph::new(format!("Plan: {}", plan)).style(Style::default().fg(theme.fg).bold());
+        f.render_widget(plan_line, Rect::new(inner.x, inner.y, inner.width, 1));
+    }
+
+    let mut y_offset = if snapshot.plan.is_some() { 2 } else { 0 };
+
+    for window in &snapshot.windows {
+        let y = inner.y + y_offset;
+        if y >= inner.y + inner.height {
+            break;
+        }
+
+        let used = window.used_percent;
+        let bar_width = (inner.width.saturating_sub(25) as f64 * used / 100.0) as usize;
+
+        let reset_str = window
+            .resets_at
+            .as_ref()
+            .map(|t| {
+                let now = chrono::Utc::now();
+                let diff = t.signed_duration_since(now);
+                if diff.num_hours() > 24 {
+                    format!(
+                        "resets in {}d {}h",
+                        diff.num_hours() / 24,
+                        diff.num_hours() % 24
+                    )
+                } else if diff.num_hours() > 0 {
+                    format!(
+                        "resets in {}h {}m",
+                        diff.num_hours(),
+                        diff.num_minutes() % 60
+                    )
+                } else {
+                    format!("resets in {}m", diff.num_minutes())
+                }
+            })
+            .unwrap_or_else(|| "no reset time".to_string());
+
+        let line = format!(
+            "{:12} {:5.0}%  {} {}",
+            window.label,
+            used,
+            "█".repeat(bar_width),
+            reset_str
+        );
+
+        let gauge_color = get_gauge_color(used);
+        let para = Paragraph::new(line).style(Style::default().fg(gauge_color));
+
+        f.render_widget(para, Rect::new(inner.x, y, inner.width, 1));
+        y_offset += 2;
+    }
+
+    if let Some(ref credits) = snapshot.credits {
+        let y = inner.y + y_offset;
+        if y < inner.y + inner.height {
+            let credit_text = if let Some(limit) = credits.limit {
+                format!("Credits: ${:.2} / ${:.2}", credits.used, limit)
+            } else {
+                format!("Credits: ${:.2} (unlimited)", credits.used)
+            };
+
+            let para = Paragraph::new(credit_text).style(Style::default().fg(theme.dim));
+            f.render_widget(para, Rect::new(inner.x, y, inner.width, 1));
+        }
+    }
+}
+
+fn get_provider_color(provider: &str) -> Color {
+    match provider.to_lowercase().as_str() {
+        "claude" => Color::Rgb(222, 115, 86),
+        "codex" => Color::Rgb(116, 170, 156),
+        "gemini" => Color::Rgb(66, 133, 244),
+        "antigravity" => Color::Rgb(147, 51, 234),
+        _ => Color::Gray,
+    }
+}
+
+fn get_gauge_color(percent: f64) -> Color {
+    if percent >= 90.0 {
+        Color::Red
+    } else if percent >= 70.0 {
+        Color::Yellow
+    } else if percent >= 50.0 {
+        Color::Rgb(255, 165, 0)
+    } else {
+        Color::Green
+    }
 }

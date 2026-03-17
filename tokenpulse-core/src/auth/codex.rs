@@ -1,3 +1,4 @@
+use super::CredentialStatus;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -6,13 +7,20 @@ use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexCredentials {
-    pub tokens: CodexTokens,
+    #[serde(default)]
+    pub tokens: Option<CodexTokens>,
+    #[serde(default)]
+    pub OPENAI_API_KEY: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexTokens {
     pub access_token: String,
     pub refresh_token: String,
+    #[serde(default)]
+    pub id_token: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 pub struct CodexAuth {
@@ -47,17 +55,29 @@ impl CodexAuth {
             if path.exists() {
                 let content = fs::read_to_string(&path)?;
                 let creds: CodexCredentials = serde_json::from_str(&content)?;
-                return Ok(creds);
+                if creds.tokens.is_some() || creds.OPENAI_API_KEY.is_some() {
+                    return Ok(creds);
+                }
             }
         }
 
         Err(anyhow!("Codex credentials not found"))
     }
 
-    pub fn save_credentials(&self, creds: &CodexCredentials) -> Result<()> {
-        let content = serde_json::to_string_pretty(creds)?;
-        fs::write(&self.credentials_path, content)?;
-        Ok(())
+    pub fn detect() -> bool {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+        let paths = vec![
+            home.join(".config").join("codex").join("auth.json"),
+            home.join(".codex").join("auth.json"),
+        ];
+        paths.iter().any(|p| p.exists())
+    }
+
+    pub fn credential_status(&self) -> CredentialStatus {
+        match self.load_credentials() {
+            Ok(_) => CredentialStatus::Valid,
+            Err(_) => CredentialStatus::NotFound,
+        }
     }
 }
 

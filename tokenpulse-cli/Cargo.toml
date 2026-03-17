@@ -19,3 +19,4 @@ crossterm.workspace = true
 humantime.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+dialoguer = "0.11"
