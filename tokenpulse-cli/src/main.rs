@@ -47,7 +47,9 @@ enum ConfigAction {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    if std::env::var_os("RUST_LOG").is_some() || std::env::var_os("TOKENPULSE_LOG").is_some() {
+        let _ = tracing_subscriber::fmt::try_init();
+    }
 
     let cli = Cli::parse();
 

@@ -1,8 +1,24 @@
 use anyhow::Result;
+use crossterm::terminal;
 use tokenpulse_core::{QuotaFetcher, quota::{ClaudeQuotaFetcher, CodexQuotaFetcher, GeminiQuotaFetcher, AntigravityQuotaFetcher, fetch_all}};
 use tokenpulse_core::config::{ConfigManager, QuotaDisplayMode};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const BAR_WIDTH: usize = 20;
+const GRID_GAP: usize = 4;
+const MIN_CARD_WIDTH: usize = 42;
+const MAX_CARD_WIDTH: usize = 56;
+const TWO_COLUMN_MIN_WIDTH: usize = MIN_CARD_WIDTH * 2 + GRID_GAP;
+
+fn display_provider_name(provider: &str) -> &'static str {
+    match provider {
+        "claude" => "CLAUDE CODE",
+        "gemini" => "GEMINI CLI",
+        "codex" => "CODEX",
+        "antigravity" => "ANTIGRAVITY",
+        _ => "UNKNOWN",
+    }
+}
 
 fn draw_progress_bar(used_percent: f64, remaining_percent: f64, period_duration_ms: Option<i64>, resets_at: Option<chrono::DateTime<chrono::Utc>>, display_mode: &QuotaDisplayMode) -> String {
     let used_blocks = ((used_percent / 100.0) * BAR_WIDTH as f64).round() as usize;
@@ -30,9 +46,13 @@ fn draw_progress_bar(used_percent: f64, remaining_percent: f64, period_duration_
     let mut bar = String::new();
     bar.push('[');
     for i in 0..BAR_WIDTH {
+        let filled = match display_mode {
+            QuotaDisplayMode::Used => i < used_blocks,
+            QuotaDisplayMode::Remaining => i < remaining_blocks,
+        };
         if marker_pos == Some(i) {
             bar.push('│');
-        } else if i < used_blocks {
+        } else if filled {
             bar.push('█');
         } else {
             bar.push('░');
@@ -49,6 +69,10 @@ fn draw_progress_bar(used_percent: f64, remaining_percent: f64, period_duration_
 fn calculate_pace(used_percent: f64, period_duration_ms: Option<i64>, resets_at: Option<chrono::DateTime<chrono::Utc>>) -> Option<(String, String)> {
     let period_ms = period_duration_ms?;
     let reset_time = resets_at?;
+
+    if used_percent >= 100.0 {
+        return None;
+    }
     
     let now = chrono::Utc::now();
     let period_start = reset_time - chrono::Duration::milliseconds(period_ms);
@@ -79,13 +103,192 @@ fn format_duration(ms: i64) -> String {
     let minutes = seconds / 60;
     let hours = minutes / 60;
     let days = hours / 24;
-    
-    if days > 0 {
+
+    if minutes > 24 * 60 {
         format!("{}d {}h", days, hours % 24)
     } else if hours > 0 {
         format!("{}h {}m", hours, minutes % 60)
     } else {
         format!("{}m", minutes)
+    }
+}
+
+fn pad_line(line: &str, width: usize) -> String {
+    let len = UnicodeWidthStr::width(line);
+    if len >= width {
+        truncate_display_width(line, width)
+    } else {
+        format!("{}{}", line, " ".repeat(width - len))
+    }
+}
+
+fn truncate_display_width(line: &str, width: usize) -> String {
+    let mut result = String::new();
+    let mut used = 0;
+
+    for ch in line.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > width {
+            break;
+        }
+        result.push(ch);
+        used += ch_width;
+    }
+
+    result
+}
+
+fn terminal_width() -> usize {
+    terminal::size()
+        .ok()
+        .map(|(width, _)| width as usize)
+        .or_else(|| {
+            std::env::var("COLUMNS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+        })
+        .filter(|v| *v >= MIN_CARD_WIDTH)
+        .unwrap_or(100)
+}
+
+fn format_window_block(
+    window: &tokenpulse_core::RateWindow,
+    display_mode: &QuotaDisplayMode,
+) -> Vec<String> {
+    let remaining_percent = (100.0 - window.used_percent).max(0.0);
+    let mut lines = vec![
+        window.label.clone(),
+        draw_progress_bar(
+            window.used_percent,
+            remaining_percent,
+            window.period_duration_ms,
+            window.resets_at,
+            display_mode,
+        ),
+    ];
+
+    if let Some((status, pace_text)) =
+        calculate_pace(window.used_percent, window.period_duration_ms, window.resets_at)
+    {
+        let indicator = match status.as_str() {
+            "ahead" => "🟢",
+            "on-track" => "🟡",
+            "behind" => "🔴",
+            _ => "⚪",
+        };
+        lines.push(format!("{} {}", indicator, pace_text));
+    }
+
+    if let Some(ref resets_at) = window.resets_at {
+        let now = chrono::Utc::now();
+        let duration = resets_at.signed_duration_since(now);
+        if duration.num_seconds() > 0 {
+            lines.push(format!("Resets in {}", format_duration(duration.num_milliseconds())));
+        }
+    }
+
+    lines
+}
+
+fn format_provider_content(
+    snapshot: &tokenpulse_core::QuotaSnapshot,
+    display_mode: &QuotaDisplayMode,
+) -> Vec<String> {
+    let mut lines = vec![display_provider_name(&snapshot.provider).to_string()];
+
+    for window in &snapshot.windows {
+        lines.push(String::new());
+        for line in format_window_block(window, display_mode) {
+            lines.push(line);
+        }
+    }
+
+    if let Some(ref credits) = snapshot.credits {
+        lines.push(String::new());
+        lines.push(format!("Credits: ${:.2}", credits.used));
+        if let Some(limit) = credits.limit {
+            lines.push(format!("Limit: ${:.2}", limit));
+        }
+    }
+
+    lines
+}
+
+fn format_provider_card(
+    snapshot: &tokenpulse_core::QuotaSnapshot,
+    display_mode: &QuotaDisplayMode,
+    width: usize,
+) -> Vec<String> {
+    let inner_width = width.saturating_sub(2).max(1);
+    let content = format_provider_content(snapshot, display_mode);
+    let title = pad_line(
+        &format!(" {} ", display_provider_name(&snapshot.provider)),
+        inner_width,
+    );
+    let mut lines = vec![format!("┌{}┐", title)];
+
+    for line in content.into_iter().skip(1) {
+        lines.push(format!("│{}│", pad_line(&line, inner_width)));
+    }
+
+    lines.push(format!("└{}┘", "─".repeat(inner_width)));
+    lines
+}
+
+fn print_provider_block(
+    snapshot: &tokenpulse_core::QuotaSnapshot,
+    display_mode: &QuotaDisplayMode,
+) {
+    let width = terminal_width().clamp(MIN_CARD_WIDTH, MAX_CARD_WIDTH);
+    println!();
+    for line in format_provider_card(snapshot, display_mode, width) {
+        println!("{}", line);
+    }
+}
+
+fn provider_grid_columns(total_width: usize, count: usize) -> usize {
+    if total_width < TWO_COLUMN_MIN_WIDTH {
+        return 1;
+    }
+
+    for cols in (1..=count.min(2)).rev() {
+        let width = (total_width.saturating_sub(GRID_GAP * cols.saturating_sub(1))) / cols;
+        if width >= MIN_CARD_WIDTH {
+            return cols;
+        }
+    }
+    1
+}
+
+fn print_provider_grid(
+    snapshots: &[tokenpulse_core::QuotaSnapshot],
+    display_mode: &QuotaDisplayMode,
+) {
+    let total_width = terminal_width();
+    let cols = provider_grid_columns(total_width, snapshots.len());
+    let col_width = (total_width.saturating_sub(GRID_GAP * cols.saturating_sub(1)) / cols)
+        .clamp(MIN_CARD_WIDTH, MAX_CARD_WIDTH);
+    let blocks: Vec<Vec<String>> = snapshots
+        .iter()
+        .map(|snapshot| format_provider_card(snapshot, display_mode, col_width))
+        .collect();
+
+    println!();
+    for row in blocks.chunks(cols) {
+        let row_height = row.iter().map(|block| block.len()).max().unwrap_or(0);
+
+        for idx in 0..row_height {
+            let mut rendered = Vec::with_capacity(row.len());
+            for block in row {
+                rendered.push(
+                    block.get(idx)
+                        .map(|line| pad_line(line, col_width))
+                        .unwrap_or_else(|| " ".repeat(col_width)),
+                );
+            }
+            println!("{}", rendered.join(&" ".repeat(GRID_GAP)));
+        }
+        println!();
     }
 }
 
@@ -101,7 +304,7 @@ pub async fn run(provider: Option<String>) -> Result<()> {
         .collect::<Vec<_>>();
 
     let providers: Vec<Box<dyn QuotaFetcher>> = match provider {
-        Some(p) => {
+        Some(ref p) => {
             match p.as_str() {
                 "claude" => vec![Box::new(ClaudeQuotaFetcher::new())],
                 "codex" => vec![Box::new(CodexQuotaFetcher::new())],
@@ -136,6 +339,15 @@ pub async fn run(provider: Option<String>) -> Result<()> {
 
     let success_count = results.iter().filter(|r| r.is_ok()).count();
     if success_count == 0 {
+        if provider.is_some() {
+            for result in &results {
+                if let Err(e) = result {
+                    eprintln!("\nError: {}", e);
+                }
+            }
+            return Ok(());
+        }
+
         eprintln!("\nNo providers configured.\n");
         eprintln!("To use tokenpulse, you need to have at least one of these tools installed:");
         eprintln!(" - Claude Code: https://docs.anthropic.com/en/docs/claude-code");
@@ -146,64 +358,25 @@ pub async fn run(provider: Option<String>) -> Result<()> {
         return Ok(());
     }
 
+    let snapshots: Vec<_> = results
+        .iter()
+        .filter_map(|result| result.as_ref().ok())
+        .cloned()
+        .collect();
+
+    if snapshots.len() > 1 && provider.is_none() {
+        print_provider_grid(&snapshots, display_mode);
+    } else {
+        for snapshot in &snapshots {
+            print_provider_block(snapshot, display_mode);
+        }
+    }
+
     for result in &results {
-        match result {
-            Ok(snapshot) => {
-                println!("\n=== {} ===", snapshot.provider.to_uppercase());
-                if let Some(ref plan) = snapshot.plan {
-                    println!("Plan: {}", plan);
-                }
-                for window in &snapshot.windows {
-                    let remaining_percent = (100.0 - window.used_percent).max(0.0);
-
-                    println!("\n  {}", window.label);
-                    println!("  {}", draw_progress_bar(window.used_percent, remaining_percent, window.period_duration_ms, window.resets_at, display_mode));
-
-                    if let Some((status, pace_text)) = calculate_pace(window.used_percent, window.period_duration_ms, window.resets_at) {
-                        let indicator = match status.as_str() {
-                            "ahead" => "🟢",
-                            "on-track" => "🟡",
-                            "behind" => "🔴",
-                            _ => "⚪",
-                        };
-                        println!("  {} {}", indicator, pace_text);
-                    }
-
-                    if let Some(ref resets_at) = window.resets_at {
-                        let now = chrono::Utc::now();
-                        let duration = resets_at.signed_duration_since(now);
-                        if duration.num_seconds() > 0 {
-                            println!("  Resets in {}", format_duration(duration.num_milliseconds()));
-                        }
-                    }
-                }
-                if let Some(ref credits) = snapshot.credits {
-                    println!("\n  Credits: ${:.2}", credits.used);
-                    if let Some(limit) = credits.limit {
-                        println!("  Limit: ${:.2}", limit);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("\nError: {}", e);
-            }
+        if let Err(e) = result {
+            eprintln!("\nError: {}", e);
         }
     }
 
     Ok(())
-}
-
-fn extract_provider_name(e: &anyhow::Error) -> Option<String> {
-    let msg = e.to_string().to_lowercase();
-    if msg.contains("claude") {
-        Some("Claude Code".to_string())
-    } else if msg.contains("codex") {
-        Some("Codex".to_string())
-    } else if msg.contains("gemini") {
-        Some("Gemini".to_string())
-    } else if msg.contains("antigravity") {
-        Some("Antigravity".to_string())
-    } else {
-        None
-    }
 }

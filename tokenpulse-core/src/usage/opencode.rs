@@ -34,7 +34,7 @@ impl OpenCodeSessionParser {
         };
 
         let mut stmt = match conn
-            .prepare("SELECT id, session_id, data, timestamp FROM message ORDER BY timestamp")
+            .prepare("SELECT session_id, data, timestamp FROM message ORDER BY timestamp")
         {
             Ok(s) => s,
             Err(e) => {
@@ -45,10 +45,9 @@ impl OpenCodeSessionParser {
 
         let rows = stmt.query_map([], |row| {
             Ok(OpenCodeRow {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                data: row.get(2)?,
-                timestamp: row.get(3)?,
+                session_id: row.get(0)?,
+                data: row.get(1)?,
+                timestamp: row.get(2)?,
             })
         });
 
@@ -114,7 +113,7 @@ impl SessionParser for OpenCodeSessionParser {
             .join("opencode.db")]
     }
 
-    fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
+    fn parse_sessions(&self, _since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
         let pricing = self.pricing_cache.get_pricing_sync()?;
 
         let mut all_messages = Vec::new();
@@ -136,7 +135,6 @@ impl SessionParser for OpenCodeSessionParser {
 
 #[derive(Debug)]
 struct OpenCodeRow {
-    id: String,
     session_id: String,
     data: String,
     timestamp: i64,

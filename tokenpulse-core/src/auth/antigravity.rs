@@ -192,7 +192,8 @@ fn read_fields(data: &[u8]) -> std::collections::HashMap<u64, FieldValue> {
                     }
                     None => break,
                 };
-                fields.insert(field_num, FieldValue::Varint(val));
+                let _ = val;
+                fields.insert(field_num, FieldValue::Varint(()));
             }
             2 => {
                 let len = match read_varint(data, pos) {
@@ -217,7 +218,7 @@ fn read_fields(data: &[u8]) -> std::collections::HashMap<u64, FieldValue> {
 
 #[derive(Debug, Clone)]
 enum FieldValue {
-    Varint(u64),
+    Varint(()),
     Bytes(Vec<u8>),
 }
 

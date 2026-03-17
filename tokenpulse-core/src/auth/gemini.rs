@@ -10,7 +10,7 @@ pub struct GeminiCredentials {
     pub access_token: Option<String>,
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
-    pub expiry_date: Option<i64>,
+    pub expiry_date: Option<f64>,
 }
 
 pub struct GeminiAuth {
@@ -60,6 +60,12 @@ impl GeminiAuth {
         Ok(settings)
     }
 
+    pub fn save_credentials(&self, creds: &GeminiCredentials) -> Result<()> {
+        let content = serde_json::to_string_pretty(creds)?;
+        fs::write(&self.credentials_path, content)?;
+        Ok(())
+    }
+
     pub fn detect() -> bool {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
         home.join(".gemini").join("oauth_creds.json").exists()
@@ -81,14 +87,15 @@ impl GeminiAuth {
     pub fn is_token_expired(&self, creds: &GeminiCredentials) -> bool {
         match creds.expiry_date {
             Some(expiry) => {
-                let now = chrono::Utc::now().timestamp();
-                let buffer = 300;
-                let expiry_ms = if expiry > 10_000_000_000 {
-                    expiry
+                let now = chrono::Utc::now().timestamp() as f64;
+                let buffer = 300.0;
+                // expiry could be in seconds or milliseconds
+                let expiry_secs = if expiry > 10_000_000_000.0 {
+                    expiry / 1000.0
                 } else {
-                    expiry * 1000
+                    expiry
                 };
-                expiry_ms / 1000 <= now + buffer
+                expiry_secs <= now + buffer
             }
             None => true,
         }
@@ -105,4 +112,31 @@ impl Default for GeminiAuth {
 pub struct GeminiSettings {
     #[serde(rename = "authType")]
     pub auth_type: Option<String>,
+    #[serde(default)]
+    pub security: Option<GeminiSecuritySettings>,
+}
+
+impl GeminiSettings {
+    pub fn selected_auth_type(&self) -> Option<&str> {
+        self.auth_type
+            .as_deref()
+            .or_else(|| {
+                self.security
+                    .as_ref()
+                    .and_then(|security| security.auth.as_ref())
+                    .and_then(|auth| auth.selected_type.as_deref())
+            })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GeminiSecuritySettings {
+    #[serde(default)]
+    pub auth: Option<GeminiSecurityAuthSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GeminiSecurityAuthSettings {
+    #[serde(default, rename = "selectedType")]
+    pub selected_type: Option<String>,
 }

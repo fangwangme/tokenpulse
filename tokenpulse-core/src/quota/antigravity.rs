@@ -25,7 +25,13 @@ const CLOUD_CODE_URLS: &[&str] = &[
     "https://daily-cloudcode-pa.googleapis.com",
     "https://cloudcode-pa.googleapis.com",
 ];
+const LOAD_CODE_ASSIST_PATH: &str = "/v1internal:loadCodeAssist";
+const ONBOARD_USER_PATH: &str = "/v1internal:onboardUser";
 const FETCH_MODELS_PATH: &str = "/v1internal:fetchAvailableModels";
+const GOOGLE_OAUTH_URL: &str = "https://oauth2.googleapis.com/token";
+const GOOGLE_CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+const GOOGLE_CLIENT_SECRET: &str = "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";
+const USER_AGENT: &str = "antigravity";
 
 const CC_MODEL_BLACKLIST: &[&str] = &[
     "MODEL_CHAT_20706",
@@ -57,15 +63,17 @@ struct LsUserStatusResponse {
     cascade_model_config_data: Option<CascadeModelConfigData>,
     #[serde(default, rename = "userStatus")]
     user_status: Option<UserStatus>,
+    #[serde(default, rename = "clientModelConfigs")]
+    client_model_configs: Vec<ClientModelConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct CascadeModelConfigData {
     #[serde(default, rename = "clientModelConfigs")]
     client_model_configs: Vec<ClientModelConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ClientModelConfig {
     #[serde(default)]
     label: Option<String>,
@@ -75,13 +83,13 @@ struct ClientModelConfig {
     quota_info: Option<LsQuotaInfo>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ModelOrAlias {
     #[serde(default)]
     model: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct LsQuotaInfo {
     #[serde(default, rename = "remainingFraction")]
     remaining_fraction: Option<f64>,
@@ -93,6 +101,8 @@ struct LsQuotaInfo {
 struct UserStatus {
     #[serde(default, rename = "planStatus")]
     plan_status: Option<PlanStatus>,
+    #[serde(default, rename = "cascadeModelConfigData")]
+    cascade_model_config_data: Option<CascadeModelConfigData>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,27 +127,82 @@ struct FetchModelsResponse {
 
 #[derive(Debug, Deserialize)]
 struct CloudModelInfo {
-    #[serde(default)]
+    #[serde(default, rename = "displayName")]
     display_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "isInternal")]
     is_internal: Option<bool>,
-    #[serde(default)]
+    #[serde(default, rename = "quotaInfo")]
     quota_info: Option<CloudQuotaInfo>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CloudQuotaInfo {
-    #[serde(default)]
+    #[serde(default, rename = "remainingFraction")]
     remaining_fraction: Option<f64>,
-    #[serde(default)]
+    #[serde(default, rename = "resetTime")]
     reset_time: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoadCodeAssistResponse {
+    #[serde(default, rename = "currentTier")]
+    current_tier: Option<Tier>,
+    #[serde(default, rename = "paidTier")]
+    paid_tier: Option<Tier>,
+    #[serde(default, rename = "allowedTiers")]
+    allowed_tiers: Option<Vec<AllowedTier>>,
+    #[serde(default, rename = "cloudaicompanionProject")]
+    project: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Tier {
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AllowedTier {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default, rename = "isDefault")]
+    is_default: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OnboardUserResponse {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    done: Option<bool>,
+    #[serde(default)]
+    response: Option<OnboardResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OnboardResponse {
+    #[serde(default, rename = "cloudaicompanionProject")]
+    project: Option<serde_json::Value>,
 }
 
 // ── Unified pool data ──
 
+#[derive(Debug, Clone)]
+struct PoolQuota {
+    remaining_fraction: f64,
+    reset_time: Option<String>,
+    period_duration_ms: i64,
+}
+
 struct PoolData {
-    pools: HashMap<String, (f64, Option<String>)>,
+    pools: HashMap<String, PoolQuota>,
     plan: Option<String>,
+}
+
+struct CloudCodeContext {
+    project_id: Option<String>,
+    plan: Option<String>,
+    tier_id: Option<String>,
 }
 
 // ── Main fetcher ──
@@ -149,6 +214,9 @@ pub struct AntigravityQuotaFetcher {
 }
 
 impl AntigravityQuotaFetcher {
+    const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1000;
+    const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
     pub fn new() -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
@@ -253,7 +321,8 @@ impl AntigravityQuotaFetcher {
         let mut metadata = serde_json::json!({
             "ideName": "antigravity",
             "extensionName": "antigravity",
-            "extensionVersion": "1.0.0",
+            "ideVersion": "unknown",
+            "locale": "en",
         });
         if let Some(ref key) = api_key {
             metadata["apiKey"] = serde_json::Value::String(key.clone());
@@ -295,6 +364,8 @@ impl AntigravityQuotaFetcher {
             "metadata": {
                 "ideName": "antigravity",
                 "extensionName": "antigravity",
+                "ideVersion": "unknown",
+                "locale": "en",
             }
         });
 
@@ -335,11 +406,13 @@ impl AntigravityQuotaFetcher {
                     .await;
 
                 match result {
-                    Ok(_) => {
-                        // Any response means port is alive
-                        debug!("LS port alive: {}:{}", scheme, port);
+                    Ok(response) if response.status().is_success() => {
+                        debug!("LS port alive: {}:{} ({})", scheme, port, response.status());
                         let scheme_str: &'static str = if *scheme == "https" { "https" } else { "http" };
                         return Some((scheme_str, port));
+                    }
+                    Ok(response) => {
+                        debug!("LS probe {}:{} returned {}", scheme, port, response.status());
                     }
                     Err(e) => {
                         debug!("LS probe {}:{} failed: {}", scheme, port, e);
@@ -363,7 +436,8 @@ impl AntigravityQuotaFetcher {
                     .json(&serde_json::json!({}))
                     .send()
                     .await
-                    .is_ok()
+                    .map(|response| response.status().is_success())
+                    .unwrap_or(false)
                 {
                     let scheme_str: &'static str = if *scheme == "https" { "https" } else { "http" };
                     return Some((scheme_str, ext_port));
@@ -375,7 +449,17 @@ impl AntigravityQuotaFetcher {
     }
 
     fn parse_ls_response(&self, data: LsUserStatusResponse) -> Option<PoolData> {
-        let configs = data.cascade_model_config_data?.client_model_configs;
+        let configs = data
+            .user_status
+            .as_ref()
+            .and_then(|u| u.cascade_model_config_data.as_ref())
+            .map(|c| c.client_model_configs.clone())
+            .or_else(|| {
+                data.cascade_model_config_data
+                    .as_ref()
+                    .map(|c| c.client_model_configs.clone())
+            })
+            .unwrap_or_else(|| data.client_model_configs.clone());
         if configs.is_empty() {
             return None;
         }
@@ -385,7 +469,7 @@ impl AntigravityQuotaFetcher {
             .and_then(|p| p.plan_info)
             .and_then(|i| i.plan_name);
 
-        let mut pools: HashMap<String, (f64, Option<String>)> = HashMap::new();
+        let mut pools: HashMap<String, PoolQuota> = HashMap::new();
 
         for config in &configs {
             let label = config.label.as_deref().unwrap_or("");
@@ -404,10 +488,19 @@ impl AntigravityQuotaFetcher {
 
             // Determine pool from label or model name
             let pool_name = self.pool_label_from_ls(label, model);
+            let period_duration_ms = self.infer_period_duration_ms(reset_time.as_deref(), &pool_name);
 
-            let entry = pools.entry(pool_name).or_insert((frac, reset_time.clone()));
-            if frac < entry.0 {
-                *entry = (frac, reset_time);
+            let entry = pools.entry(pool_name).or_insert(PoolQuota {
+                remaining_fraction: frac,
+                reset_time: reset_time.clone(),
+                period_duration_ms,
+            });
+            if frac < entry.remaining_fraction {
+                *entry = PoolQuota {
+                    remaining_fraction: frac,
+                    reset_time,
+                    period_duration_ms,
+                };
             }
         }
 
@@ -429,7 +522,311 @@ impl AntigravityQuotaFetcher {
         }
     }
 
+    fn pool_period_duration_ms(&self, pool_label: &str) -> i64 {
+        if pool_label.to_lowercase().contains("flash") {
+            Self::FIVE_HOURS_MS
+        } else {
+            Self::SEVEN_DAYS_MS
+        }
+    }
+
+    fn infer_period_duration_ms(&self, reset_time: Option<&str>, pool_label: &str) -> i64 {
+        let Some(reset_time) = reset_time else {
+            return self.pool_period_duration_ms(pool_label);
+        };
+
+        let Some(reset_at) = DateTime::parse_from_rfc3339(reset_time)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc)) else {
+            return self.pool_period_duration_ms(pool_label);
+        };
+
+        if reset_at.signed_duration_since(Utc::now()).num_milliseconds() <= Self::FIVE_HOURS_MS {
+            Self::FIVE_HOURS_MS
+        } else {
+            Self::SEVEN_DAYS_MS
+        }
+    }
+
     // ── Layer 2: Cloud Code API (fallback) ──
+
+    async fn refresh_google_access_token(&self, refresh_token: &str) -> Result<String> {
+        let response = self.client
+            .post(GOOGLE_OAUTH_URL)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .form(&[
+                ("client_id", GOOGLE_CLIENT_ID),
+                ("client_secret", GOOGLE_CLIENT_SECRET),
+                ("refresh_token", refresh_token),
+                ("grant_type", "refresh_token"),
+            ])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Google OAuth refresh failed {}: {}", status, text));
+        }
+
+        let value: serde_json::Value = response.json().await?;
+        value
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("Google OAuth refresh response missing access_token"))
+    }
+
+    fn build_load_code_assist_payload(&self, project_id: Option<&str>) -> serde_json::Value {
+        let mut payload = serde_json::json!({
+            "metadata": {
+                "ideType": "ANTIGRAVITY",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI"
+            }
+        });
+
+        if let Some(project_id) = project_id.filter(|id| !id.trim().is_empty()) {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "cloudaicompanionProject".to_string(),
+                    serde_json::Value::String(project_id.to_string()),
+                );
+            }
+        }
+
+        payload
+    }
+
+    fn extract_project_id(&self, value: &serde_json::Value) -> Option<String> {
+        if let Some(text) = value.as_str() {
+            if !text.trim().is_empty() {
+                return Some(text.to_string());
+            }
+        }
+        if let Some(obj) = value.as_object() {
+            for key in ["id", "projectId"] {
+                if let Some(text) = obj.get(key).and_then(|v| v.as_str()) {
+                    if !text.trim().is_empty() {
+                        return Some(text.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn pick_onboard_tier(&self, allowed_tiers: &[AllowedTier]) -> Option<String> {
+        if let Some(default) = allowed_tiers.iter().find(|tier| tier.is_default.unwrap_or(false)) {
+            if let Some(id) = default.id.clone() {
+                return Some(id);
+            }
+        }
+        allowed_tiers.iter().find_map(|tier| tier.id.clone())
+    }
+
+    async fn load_cloud_code_context(
+        &self,
+        access_token: &str,
+        base_url: &str,
+    ) -> Result<CloudCodeContext> {
+        let response = self.client
+            .post(format!("{}{}", base_url, LOAD_CODE_ASSIST_PATH))
+            .bearer_auth(access_token)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", USER_AGENT)
+            .json(&self.build_load_code_assist_payload(None))
+            .send()
+            .await?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            || response.status() == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(anyhow!("auth_failed"));
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("loadCodeAssist failed {}: {}", status, text));
+        }
+
+        let data: LoadCodeAssistResponse = response.json().await?;
+        let plan = data
+            .paid_tier
+            .as_ref()
+            .and_then(|tier| tier.id.clone())
+            .or_else(|| data.current_tier.as_ref().and_then(|tier| tier.id.clone()));
+        let tier_id = data
+            .paid_tier
+            .as_ref()
+            .and_then(|tier| tier.id.clone())
+            .or_else(|| data.current_tier.as_ref().and_then(|tier| tier.id.clone()))
+            .or_else(|| {
+                data.allowed_tiers
+                    .as_ref()
+                    .and_then(|tiers| self.pick_onboard_tier(tiers))
+            });
+        let project_id = data.project.as_ref().and_then(|value| self.extract_project_id(value));
+
+        Ok(CloudCodeContext {
+            project_id,
+            plan,
+            tier_id,
+        })
+    }
+
+    async fn try_onboard_user(
+        &self,
+        access_token: &str,
+        base_url: &str,
+        tier_id: &str,
+        project_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        let mut payload = serde_json::json!({
+            "tierId": tier_id,
+            "metadata": {
+                "ideType": "ANTIGRAVITY",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI"
+            }
+        });
+        if let Some(project_id) = project_id.filter(|id| !id.trim().is_empty()) {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "cloudaicompanionProject".to_string(),
+                    serde_json::Value::String(project_id.to_string()),
+                );
+            }
+        }
+
+        let response = self.client
+            .post(format!("{}{}", base_url, ONBOARD_USER_PATH))
+            .bearer_auth(access_token)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", USER_AGENT)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("onboardUser failed {}: {}", status, text));
+        }
+
+        let mut data: OnboardUserResponse = response.json().await?;
+        loop {
+            if data.done.unwrap_or(false) {
+                return Ok(data
+                    .response
+                    .and_then(|resp| resp.project)
+                    .as_ref()
+                    .and_then(|value| self.extract_project_id(value)));
+            }
+
+            let op_name = data
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("onboardUser missing operation name"))?;
+
+            let response = self.client
+                .get(format!("{}/v1internal/{}", base_url, op_name))
+                .bearer_auth(access_token)
+                .header("Content-Type", "application/json")
+                .header("User-Agent", USER_AGENT)
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                return Err(anyhow!("onboardUser poll failed {}: {}", status, text));
+            }
+
+            data = response.json().await?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    async fn fetch_cloud_models_with_token(
+        &self,
+        access_token: &str,
+    ) -> Result<Option<PoolData>> {
+        for base_url in CLOUD_CODE_URLS {
+            let mut context = match self.load_cloud_code_context(access_token, base_url).await {
+                Ok(ctx) => ctx,
+                Err(e) if e.to_string() == "auth_failed" => return Err(e),
+                Err(e) => {
+                    debug!("Cloud Code context failed {}: {}", base_url, e);
+                    continue;
+                }
+            };
+
+            if context.project_id.is_none() {
+                if let Some(tier_id) = context.tier_id.clone() {
+                    match self
+                        .try_onboard_user(
+                            access_token,
+                            base_url,
+                            &tier_id,
+                            context.project_id.as_deref(),
+                        )
+                        .await
+                    {
+                        Ok(project_id) => context.project_id = project_id,
+                        Err(e) => debug!("onboardUser failed {}: {}", base_url, e),
+                    }
+                }
+            }
+
+            let payload = context
+                .project_id
+                .as_ref()
+                .map(|id| serde_json::json!({ "project": id }))
+                .unwrap_or_else(|| serde_json::json!({}));
+
+            let response = match self.client
+                .post(format!("{}{}", base_url, FETCH_MODELS_PATH))
+                .bearer_auth(access_token)
+                .header("Content-Type", "application/json")
+                .header("User-Agent", USER_AGENT)
+                .json(&payload)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    debug!("Cloud Code fetchAvailableModels {} failed: {}", base_url, e);
+                    continue;
+                }
+            };
+
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                || response.status() == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(anyhow!("auth_failed"));
+            }
+
+            if !response.status().is_success() {
+                debug!("Cloud Code fetchAvailableModels {} status {}", base_url, response.status());
+                continue;
+            }
+
+            let data: FetchModelsResponse = response.json().await?;
+            let pools = self.parse_cloud_response(data);
+            if !pools.is_empty() {
+                return Ok(Some(PoolData {
+                    pools,
+                    plan: context.plan,
+                }));
+            }
+        }
+
+        Ok(None)
+    }
 
     async fn fetch_via_cloud_api(&self) -> Result<PoolData> {
         let creds = self.auth.load_credentials()?;
@@ -449,49 +846,26 @@ impl AntigravityQuotaFetcher {
         }
 
         for token in &tokens_to_try {
-            for base_url in CLOUD_CODE_URLS {
-                let url = format!("{}{}", base_url, FETCH_MODELS_PATH);
+            match self.fetch_cloud_models_with_token(token).await {
+                Ok(Some(pool_data)) => return Ok(pool_data),
+                Ok(None) => {}
+                Err(e) if e.to_string() == "auth_failed" => {}
+                Err(e) => debug!("Cloud Code token attempt failed: {}", e),
+            }
+        }
 
-                let response = match self.client
-                    .post(&url)
-                    .bearer_auth(token)
-                    .header("Content-Type", "application/json")
-                    .header("User-Agent", "antigravity")
-                    .json(&serde_json::json!({}))
-                    .send()
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        debug!("Cloud Code {} failed: {}", base_url, e);
-                        continue;
-                    }
-                };
-
-                let status = response.status().as_u16();
-                debug!("Cloud Code {} status: {}", base_url, status);
-
-                if status == 401 || status == 403 {
-                    continue;
-                }
-
-                if !response.status().is_success() {
-                    continue;
-                }
-
-                let data: FetchModelsResponse = response.json().await?;
-                let pools = self.parse_cloud_response(data);
-                if !pools.is_empty() {
-                    return Ok(PoolData { pools, plan: None });
-                }
+        if let Some(refresh_token) = creds.refresh_token.as_deref() {
+            let refreshed_access_token = self.refresh_google_access_token(refresh_token).await?;
+            if let Some(pool_data) = self.fetch_cloud_models_with_token(&refreshed_access_token).await? {
+                return Ok(pool_data);
             }
         }
 
         Err(anyhow!("Antigravity session expired. Please open Antigravity to refresh your session."))
     }
 
-    fn parse_cloud_response(&self, data: FetchModelsResponse) -> HashMap<String, (f64, Option<String>)> {
-        let mut pools: HashMap<String, (f64, Option<String>)> = HashMap::new();
+    fn parse_cloud_response(&self, data: FetchModelsResponse) -> HashMap<String, PoolQuota> {
+        let mut pools: HashMap<String, PoolQuota> = HashMap::new();
 
         let models = match data.models {
             Some(m) => m,
@@ -512,13 +886,21 @@ impl AntigravityQuotaFetcher {
 
             let normalized = display_name.replace(|c| c == '(' || c == ')', "").trim().to_string();
             let pool = self.pool_label_from_ls(&normalized, &model_id);
-
             let frac = info.quota_info.as_ref().and_then(|q| q.remaining_fraction).unwrap_or(0.0);
             let reset_time = info.quota_info.as_ref().and_then(|q| q.reset_time.clone());
+            let period_duration_ms = self.infer_period_duration_ms(reset_time.as_deref(), &pool);
 
-            let entry = pools.entry(pool).or_insert((frac, reset_time.clone()));
-            if frac < entry.0 {
-                *entry = (frac, reset_time);
+            let entry = pools.entry(pool).or_insert(PoolQuota {
+                remaining_fraction: frac,
+                reset_time: reset_time.clone(),
+                period_duration_ms,
+            });
+            if frac < entry.remaining_fraction {
+                *entry = PoolQuota {
+                    remaining_fraction: frac,
+                    reset_time,
+                    period_duration_ms,
+                };
             }
         }
 
@@ -540,9 +922,9 @@ impl AntigravityQuotaFetcher {
             key(&a.0).cmp(key(&b.0))
         });
 
-        for (pool, (frac, reset_time)) in sorted_pools {
-            let used = ((1.0 - frac.clamp(0.0, 1.0)) * 100.0).round();
-            let resets_at = reset_time.and_then(|s| {
+        for (pool, quota) in sorted_pools {
+            let used = ((1.0 - quota.remaining_fraction.clamp(0.0, 1.0)) * 100.0).round();
+            let resets_at = quota.reset_time.and_then(|s| {
                 DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
             });
 
@@ -550,7 +932,7 @@ impl AntigravityQuotaFetcher {
                 label: pool,
                 used_percent: used,
                 resets_at,
-                period_duration_ms: Some(5 * 60 * 60 * 1000),
+                period_duration_ms: Some(quota.period_duration_ms),
             });
         }
 
@@ -653,17 +1035,107 @@ fn find_listening_ports(pid: i32) -> Vec<u16> {
     let mut ports = std::collections::BTreeSet::new();
 
     for line in stdout.lines().skip(1) {
-        // lsof output: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
-        // NAME is like "127.0.0.1:42150" or "*:42150"
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if let Some(name) = parts.last() {
-            if let Some(colon_pos) = name.rfind(':') {
-                if let Ok(port) = name[colon_pos + 1..].parse::<u16>() {
-                    ports.insert(port);
-                }
-            }
+        // lsof output ends with "127.0.0.1:42150 (LISTEN)".
+        let Some(colon_pos) = line.rfind(':') else {
+            continue;
+        };
+        let port_text: String = line[colon_pos + 1..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        if let Ok(port) = port_text.parse::<u16>() {
+            ports.insert(port);
         }
     }
 
     ports.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pool_period_duration_matches_pool_type() {
+        let fetcher = AntigravityQuotaFetcher::new();
+
+        assert_eq!(
+            fetcher.pool_period_duration_ms("Gemini Flash"),
+            AntigravityQuotaFetcher::FIVE_HOURS_MS
+        );
+        assert_eq!(
+            fetcher.pool_period_duration_ms("Gemini Pro"),
+            AntigravityQuotaFetcher::SEVEN_DAYS_MS
+        );
+        assert_eq!(
+            fetcher.pool_period_duration_ms("Claude"),
+            AntigravityQuotaFetcher::SEVEN_DAYS_MS
+        );
+    }
+
+    #[test]
+    fn infer_period_duration_uses_reset_time_before_pool_default() {
+        let fetcher = AntigravityQuotaFetcher::new();
+        let short_reset = (Utc::now() + chrono::Duration::hours(4)).to_rfc3339();
+        let long_reset = (Utc::now() + chrono::Duration::hours(6)).to_rfc3339();
+
+        assert_eq!(
+            fetcher.infer_period_duration_ms(Some(&short_reset), "Claude"),
+            AntigravityQuotaFetcher::FIVE_HOURS_MS
+        );
+        assert_eq!(
+            fetcher.infer_period_duration_ms(Some(&long_reset), "Gemini Flash"),
+            AntigravityQuotaFetcher::SEVEN_DAYS_MS
+        );
+        assert_eq!(
+            fetcher.infer_period_duration_ms(None, "Gemini Flash"),
+            AntigravityQuotaFetcher::FIVE_HOURS_MS
+        );
+    }
+
+    #[test]
+    fn pools_to_snapshot_preserves_per_pool_periods() {
+        let fetcher = AntigravityQuotaFetcher::new();
+        let snapshot = fetcher.pools_to_snapshot(PoolData {
+            pools: HashMap::from([
+                (
+                    "Gemini Flash".to_string(),
+                    PoolQuota {
+                        remaining_fraction: 0.9,
+                        reset_time: Some("2026-03-18T00:00:00Z".to_string()),
+                        period_duration_ms: AntigravityQuotaFetcher::FIVE_HOURS_MS,
+                    },
+                ),
+                (
+                    "Claude".to_string(),
+                    PoolQuota {
+                        remaining_fraction: 0.2,
+                        reset_time: Some("2026-03-24T00:00:00Z".to_string()),
+                        period_duration_ms: AntigravityQuotaFetcher::SEVEN_DAYS_MS,
+                    },
+                ),
+            ]),
+            plan: Some("test".to_string()),
+        });
+
+        let flash = snapshot
+            .windows
+            .iter()
+            .find(|window| window.label == "Gemini Flash")
+            .unwrap();
+        let claude = snapshot
+            .windows
+            .iter()
+            .find(|window| window.label == "Claude")
+            .unwrap();
+
+        assert_eq!(
+            flash.period_duration_ms,
+            Some(AntigravityQuotaFetcher::FIVE_HOURS_MS)
+        );
+        assert_eq!(
+            claude.period_duration_ms,
+            Some(AntigravityQuotaFetcher::SEVEN_DAYS_MS)
+        );
+    }
 }

@@ -15,6 +15,30 @@ use ratatui::{
 };
 use tokenpulse_core::QuotaSnapshot;
 
+fn display_provider_name(provider: &str) -> &'static str {
+    match provider {
+        "claude" => "CLAUDE CODE",
+        "gemini" => "GEMINI CLI",
+        "codex" => "CODEX",
+        "antigravity" => "ANTIGRAVITY",
+        _ => "UNKNOWN",
+    }
+}
+
+fn format_reset_duration(diff: chrono::Duration) -> String {
+    let total_minutes = diff.num_minutes();
+    let total_hours = diff.num_hours();
+    let days = total_hours / 24;
+
+    if total_minutes > 24 * 60 {
+        format!("{}d {}h", days, total_hours % 24)
+    } else if total_hours > 0 {
+        format!("{}h {}m", total_hours, total_minutes % 60)
+    } else {
+        format!("{}m", total_minutes)
+    }
+}
+
 pub fn run(results: Vec<anyhow::Result<QuotaSnapshot>>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -137,10 +161,10 @@ fn render_overview(
         return;
     }
 
-    let provider_height = 7u16;
     let mut y_offset = 0u16;
 
     for snapshot in snapshots {
+        let provider_height = (snapshot.windows.len() as u16 + 3).max(7);
         let provider_area = Rect::new(
             area.x,
             area.y + y_offset,
@@ -154,15 +178,7 @@ fn render_overview(
 
         let border_color = get_provider_color(&snapshot.provider);
 
-        let title = format!(
-            "{} {}",
-            snapshot.provider.to_uppercase(),
-            snapshot
-                .plan
-                .as_deref()
-                .map(|p| format!("({})", p))
-                .unwrap_or_default()
-        );
+        let title = display_provider_name(&snapshot.provider).to_string();
 
         let provider_block = Block::default()
             .title(Span::styled(
@@ -194,13 +210,7 @@ fn render_overview(
                 .map(|t| {
                     let now = chrono::Utc::now();
                     let diff = t.signed_duration_since(now);
-                    if diff.num_hours() > 24 {
-                        format!("{}d", diff.num_hours() / 24)
-                    } else if diff.num_hours() > 0 {
-                        format!("{}h", diff.num_hours())
-                    } else {
-                        format!("{}m", diff.num_minutes())
-                    }
+                    format_reset_duration(diff)
                 })
                 .unwrap_or_default();
 
@@ -235,7 +245,7 @@ fn render_provider(f: &mut ratatui::Frame, area: Rect, snapshot: &QuotaSnapshot,
     let border_color = get_provider_color(&snapshot.provider);
 
     let block = Block::default()
-        .title(format!(" {} ", snapshot.provider.to_uppercase()))
+        .title(format!(" {} ", display_provider_name(&snapshot.provider)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
@@ -248,13 +258,7 @@ fn render_provider(f: &mut ratatui::Frame, area: Rect, snapshot: &QuotaSnapshot,
         area.height.saturating_sub(4),
     );
 
-    if let Some(ref plan) = snapshot.plan {
-        let plan_line =
-            Paragraph::new(format!("Plan: {}", plan)).style(Style::default().fg(theme.fg).bold());
-        f.render_widget(plan_line, Rect::new(inner.x, inner.y, inner.width, 1));
-    }
-
-    let mut y_offset = if snapshot.plan.is_some() { 2 } else { 0 };
+    let mut y_offset = 0;
 
     for window in &snapshot.windows {
         let y = inner.y + y_offset;
@@ -271,21 +275,7 @@ fn render_provider(f: &mut ratatui::Frame, area: Rect, snapshot: &QuotaSnapshot,
             .map(|t| {
                 let now = chrono::Utc::now();
                 let diff = t.signed_duration_since(now);
-                if diff.num_hours() > 24 {
-                    format!(
-                        "resets in {}d {}h",
-                        diff.num_hours() / 24,
-                        diff.num_hours() % 24
-                    )
-                } else if diff.num_hours() > 0 {
-                    format!(
-                        "resets in {}h {}m",
-                        diff.num_hours(),
-                        diff.num_minutes() % 60
-                    )
-                } else {
-                    format!("resets in {}m", diff.num_minutes())
-                }
+                format!("resets in {}", format_reset_duration(diff))
             })
             .unwrap_or_else(|| "no reset time".to_string());
 

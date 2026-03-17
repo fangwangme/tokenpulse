@@ -1,8 +1,8 @@
 use crate::auth::codex::CodexAuth;
-use crate::provider::{QuotaFetcher, QuotaSnapshot, RateWindow, CreditInfo};
+use crate::provider::{QuotaFetcher, QuotaSnapshot, RateWindow};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
@@ -16,8 +16,6 @@ const QUOTA_API_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 struct CodexQuotaResponse {
     #[serde(default)]
     rate_limit: Option<RateLimit>,
-    #[serde(default)]
-    credits: Option<Credits>,
     #[serde(default)]
     plan_type: Option<String>,
 }
@@ -40,12 +38,6 @@ struct WindowInfo {
     reset_after_seconds: Option<i64>,
     #[serde(default)]
     reset_at: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Credits {
-    #[serde(default)]
-    balance: FlexNumber,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +93,33 @@ impl CodexQuotaFetcher {
         Self {
             client,
             auth: CodexAuth::new(),
+        }
+    }
+
+    fn rate_window_from_window(
+        &self,
+        label: &str,
+        window: WindowInfo,
+        fallback_window_seconds: i64,
+    ) -> RateWindow {
+        let resets_at = if let Some(ts) = window.reset_at {
+            Utc.timestamp_opt(ts, 0).single()
+        } else if let Some(reset_after_seconds) = window.reset_after_seconds {
+            Some(Utc::now() + chrono::Duration::seconds(reset_after_seconds))
+        } else {
+            None
+        };
+
+        RateWindow {
+            label: label.to_string(),
+            used_percent: window.used_percent.0,
+            resets_at,
+            period_duration_ms: Some(
+                window
+                    .limit_window_seconds
+                    .unwrap_or(fallback_window_seconds)
+                    * 1000,
+            ),
         }
     }
 }
@@ -162,41 +181,19 @@ impl QuotaFetcher for CodexQuotaFetcher {
 
         if let Some(rate_limit) = quota.rate_limit {
             if let Some(primary) = rate_limit.primary_window {
-                let resets_at = primary.reset_at.map(|ts| {
-                    chrono::TimeZone::timestamp(&Utc, ts, 0)
-                });
-                windows.push(RateWindow {
-                    label: "Session (5h)".to_string(),
-                    used_percent: primary.used_percent.0,
-                    resets_at,
-                    period_duration_ms: Some(5 * 60 * 60 * 1000),
-                });
+                windows.push(self.rate_window_from_window("Session (5h)", primary, 5 * 60 * 60));
             }
 
             if let Some(secondary) = rate_limit.secondary_window {
-                let resets_at = secondary.reset_at.map(|ts| {
-                    chrono::TimeZone::timestamp(&Utc, ts, 0)
-                });
-                windows.push(RateWindow {
-                    label: "Weekly (7d)".to_string(),
-                    used_percent: secondary.used_percent.0,
-                    resets_at,
-                    period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
-                });
+                windows.push(self.rate_window_from_window("Weekly (7d)", secondary, 7 * 24 * 60 * 60));
             }
         }
-
-        let credits = quota.credits.map(|c| CreditInfo {
-            used: c.balance.0,
-            limit: None,
-            currency: "USD".to_string(),
-        });
 
         Ok(QuotaSnapshot {
             provider: "codex".to_string(),
             plan: quota.plan_type,
             windows,
-            credits,
+            credits: None,
             fetched_at: Utc::now(),
         })
     }

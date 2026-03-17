@@ -9,8 +9,8 @@ use tracing::debug;
 pub struct CodexCredentials {
     #[serde(default)]
     pub tokens: Option<CodexTokens>,
-    #[serde(default)]
-    pub OPENAI_API_KEY: Option<String>,
+    #[serde(default, rename = "OPENAI_API_KEY")]
+    pub openai_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +55,7 @@ impl CodexAuth {
             if path.exists() {
                 let content = fs::read_to_string(&path)?;
                 let creds: CodexCredentials = serde_json::from_str(&content)?;
-                if creds.tokens.is_some() || creds.OPENAI_API_KEY.is_some() {
+                if creds.tokens.is_some() || creds.openai_api_key.is_some() {
                     return Ok(creds);
                 }
             }

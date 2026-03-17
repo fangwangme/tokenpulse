@@ -5,13 +5,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracing::debug;
 
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 
 const LOAD_CODE_ASSIST_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 const QUOTA_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
+const PROJECTS_URL: &str = "https://cloudresourcemanager.googleapis.com/v1/projects";
+const TOKEN_REFRESH_URL: &str = "https://oauth2.googleapis.com/token";
 
 #[derive(Debug, Deserialize)]
 struct LoadCodeAssistResponse {
@@ -21,12 +26,45 @@ struct LoadCodeAssistResponse {
     user_tier: Option<String>,
     #[serde(default)]
     subscription_tier: Option<String>,
+    #[serde(default)]
+    current_tier: Option<CurrentTier>,
+    #[serde(default, rename = "cloudaicompanionProject")]
+    cloudaicompanion_project: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CurrentTier {
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[derive(Debug)]
+struct GeminiCodeAssistStatus {
+    plan: Option<String>,
+    project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct QuotaResponse {
-    #[serde(default)]
+    #[serde(default, alias = "quotaBuckets")]
+    buckets: Option<serde_json::Value>,
+    #[serde(default, alias = "quota_buckets")]
     quota_buckets: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenRefreshResponse {
+    access_token: String,
+    #[serde(default)]
+    expires_in: Option<f64>,
+    #[serde(default)]
+    id_token: Option<String>,
+}
+
+#[derive(Debug)]
+struct OAuthClientCredentials {
+    client_id: String,
+    client_secret: String,
 }
 
 pub struct GeminiQuotaFetcher {
@@ -46,17 +84,133 @@ impl GeminiQuotaFetcher {
         }
     }
 
-    async fn fetch_load_code_assist(&self, access_token: &str) -> Result<(Option<String>, String)> {
+    fn gemini_binary_path(&self) -> Option<PathBuf> {
+        let path_var = env::var_os("PATH")?;
+        for dir in env::split_paths(&path_var) {
+            let candidate = dir.join("gemini");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn resolve_oauth_config_path(&self) -> Option<PathBuf> {
+        let gemini_path = self.gemini_binary_path()?;
+        let real_path = fs::canonicalize(&gemini_path).ok().unwrap_or(gemini_path);
+        let bin_dir = real_path.parent()?;
+        let base_dir = bin_dir.parent()?;
+        let oauth_file = Path::new("dist/src/code_assist/oauth2.js");
+        let candidates = [
+            base_dir.join(
+                "lib/node_modules/@google/gemini-cli/node_modules/@google/gemini-cli-core",
+            ).join(oauth_file),
+            base_dir
+                .join("node_modules/@google/gemini-cli-core")
+                .join(oauth_file),
+            base_dir
+                .join("../gemini-cli-core")
+                .join(oauth_file),
+            base_dir
+                .join("share/gemini-cli/node_modules/@google/gemini-cli-core")
+                .join(oauth_file),
+        ];
+
+        candidates.into_iter().find(|path| path.is_file())
+    }
+
+    fn parse_js_constant(content: &str, constant: &str) -> Option<String> {
+        let needle = format!("{constant} = ");
+        let start = content.find(&needle)? + needle.len();
+        let rest = &content[start..];
+        let quote = rest.chars().next()?;
+        if quote != '\'' && quote != '"' {
+            return None;
+        }
+        let value_start = 1;
+        let value_end = rest[value_start..].find(quote)? + value_start;
+        Some(rest[value_start..value_end].to_string())
+    }
+
+    fn extract_oauth_client_credentials(&self) -> Result<OAuthClientCredentials> {
+        let oauth_path = self
+            .resolve_oauth_config_path()
+            .ok_or_else(|| anyhow!("Could not locate Gemini CLI OAuth configuration"))?;
+        let content = fs::read_to_string(oauth_path)?;
+        let client_id = Self::parse_js_constant(&content, "OAUTH_CLIENT_ID")
+            .ok_or_else(|| anyhow!("Could not parse Gemini CLI OAuth client id"))?;
+        let client_secret = Self::parse_js_constant(&content, "OAUTH_CLIENT_SECRET")
+            .ok_or_else(|| anyhow!("Could not parse Gemini CLI OAuth client secret"))?;
+        Ok(OAuthClientCredentials {
+            client_id,
+            client_secret,
+        })
+    }
+
+    async fn refresh_access_token(
+        &self,
+        refresh_token: &str,
+        creds: &mut crate::auth::gemini::GeminiCredentials,
+    ) -> Result<String> {
+        let oauth_creds = self.extract_oauth_client_credentials()?;
+        let response = self
+            .client
+            .post(TOKEN_REFRESH_URL)
+            .form(&[
+                ("client_id", oauth_creds.client_id.as_str()),
+                ("client_secret", oauth_creds.client_secret.as_str()),
+                ("refresh_token", refresh_token),
+                ("grant_type", "refresh_token"),
+            ])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Gemini token refresh failed: {}",
+                response.status()
+            ));
+        }
+
+        let refreshed: TokenRefreshResponse = response.json().await?;
+        creds.access_token = Some(refreshed.access_token.clone());
+        if let Some(id_token) = refreshed.id_token {
+            creds.id_token = Some(id_token);
+        }
+        if let Some(expires_in) = refreshed.expires_in {
+            creds.expiry_date =
+                Some((Utc::now().timestamp_millis() as f64) + (expires_in * 1000.0));
+        }
+        self.auth.save_credentials(creds)?;
+        Ok(refreshed.access_token)
+    }
+
+    async fn access_token(&self) -> Result<String> {
+        let mut creds = self.auth.load_credentials()?;
+
+        if !self.auth.is_token_expired(&creds) {
+            return creds
+                .access_token
+                .ok_or_else(|| anyhow!("No Gemini access token found. Please run `gemini` to login."));
+        }
+
+        let refresh_token = creds
+            .refresh_token
+            .clone()
+            .ok_or_else(|| anyhow!("Gemini token expired and no refresh token is available. Please run `gemini` to refresh your session."))?;
+
+        self.refresh_access_token(&refresh_token, &mut creds).await
+    }
+
+    async fn fetch_load_code_assist(&self, access_token: &str) -> Result<GeminiCodeAssistStatus> {
         let response = self
             .client
             .post(LOAD_CODE_ASSIST_URL)
             .bearer_auth(access_token)
             .json(&serde_json::json!({
                 "metadata": {
-                    "ideType": "IDE_UNSPECIFIED",
-                    "platform": "PLATFORM_UNSPECIFIED",
-                    "pluginType": "GEMINI",
-                    "duetProject": "default"
+                    "ideType": "GEMINI_CLI",
+                    "pluginType": "GEMINI"
                 }
             }))
             .send()
@@ -72,7 +226,12 @@ impl GeminiQuotaFetcher {
         }
 
         let data: LoadCodeAssistResponse = response.json().await?;
-        let tier = data.tier.or(data.user_tier).or(data.subscription_tier);
+        let tier = data
+            .current_tier
+            .and_then(|t| t.id)
+            .or(data.tier)
+            .or(data.user_tier)
+            .or(data.subscription_tier);
 
         let plan = match tier.as_deref().map(|s| s.to_lowercase()) {
             Some(s) if s.contains("standard") => Some("Paid".to_string()),
@@ -81,7 +240,58 @@ impl GeminiQuotaFetcher {
             _ => None,
         };
 
-        Ok((plan, access_token.to_string()))
+        let project_id = match data.cloudaicompanion_project {
+            Some(serde_json::Value::String(project)) => Some(project),
+            Some(serde_json::Value::Object(obj)) => obj
+                .get("id")
+                .or_else(|| obj.get("projectId"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            _ => None,
+        };
+
+        Ok(GeminiCodeAssistStatus { plan, project_id })
+    }
+
+    async fn discover_project_id(&self, access_token: &str) -> Result<Option<String>> {
+        let response = self
+            .client
+            .get(PROJECTS_URL)
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let value: serde_json::Value = response.json().await?;
+        let projects = value
+            .get("projects")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for project in projects {
+            let Some(project_id) = project.get("projectId").and_then(|v| v.as_str()) else {
+                continue;
+            };
+
+            if project_id.starts_with("gen-lang-client") {
+                return Ok(Some(project_id.to_string()));
+            }
+
+            if project
+                .get("labels")
+                .and_then(|v| v.as_object())
+                .map(|labels| labels.contains_key("generative-language"))
+                .unwrap_or(false)
+            {
+                return Ok(Some(project_id.to_string()));
+            }
+        }
+
+        Ok(None)
     }
 
     async fn fetch_quota_api(&self, access_token: &str, project_id: Option<&str>) -> Result<QuotaResponse> {
@@ -146,6 +356,66 @@ impl GeminiQuotaFetcher {
             _ => {}
         }
     }
+
+    fn rate_window_from_bucket(&self, label: &str, bucket: &QuotaBucket) -> RateWindow {
+        let used = ((1.0 - bucket.remaining_fraction.clamp(0.0, 1.0)) * 100.0).round();
+        RateWindow {
+            label: label.to_string(),
+            used_percent: used,
+            resets_at: bucket.reset_time.as_ref().and_then(|s| {
+                DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+            }),
+            period_duration_ms: Some(24 * 60 * 60 * 1000),
+        }
+    }
+
+    fn classify_model(model_id: &str) -> Option<(GeminiCategory, Vec<u32>, bool)> {
+        let lower = model_id.to_lowercase();
+        let category = if lower.contains("flash-lite") {
+            GeminiCategory::FlashLite
+        } else if lower.contains("flash") {
+            GeminiCategory::Flash
+        } else if lower.contains("pro") {
+            GeminiCategory::Pro
+        } else {
+            return None;
+        };
+
+        let version = lower
+            .strip_prefix("gemini-")
+            .and_then(|rest| rest.split('-').next())
+            .map(|version_text| {
+                version_text
+                    .split('.')
+                    .filter_map(|part| part.parse::<u32>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|parts| !parts.is_empty())
+            .unwrap_or_default();
+
+        let is_preview = lower.contains("preview");
+
+        Some((category, version, is_preview))
+    }
+
+    fn category_label(category: GeminiCategory, version: &[u32], is_preview: bool) -> String {
+        let mut label = category.label().to_string();
+        if !version.is_empty() {
+            label.push_str(" (");
+            label.push_str(
+                &version
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("."),
+            );
+            if is_preview {
+                label.push_str(" preview");
+            }
+            label.push(')');
+        }
+        label
+    }
 }
 
 #[derive(Debug)]
@@ -153,6 +423,30 @@ struct QuotaBucket {
     model_id: String,
     remaining_fraction: f64,
     reset_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GeminiCategory {
+    Pro,
+    Flash,
+    FlashLite,
+}
+
+impl GeminiCategory {
+    fn label(self) -> &'static str {
+        match self {
+            GeminiCategory::Pro => "Pro",
+            GeminiCategory::Flash => "Flash",
+            GeminiCategory::FlashLite => "Flash Lite",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SelectedBucket {
+    bucket: QuotaBucket,
+    version: Vec<u32>,
+    is_preview: bool,
 }
 
 impl Default for GeminiQuotaFetcher {
@@ -173,7 +467,7 @@ impl QuotaFetcher for GeminiQuotaFetcher {
 
     async fn fetch_quota(&self) -> Result<QuotaSnapshot> {
         let settings = self.auth.load_settings()?;
-        if let Some(auth_type) = settings.auth_type.as_ref() {
+        if let Some(auth_type) = settings.selected_auth_type() {
             let auth_lower = auth_type.to_lowercase();
             if auth_lower == "api-key" {
                 return Err(anyhow!("Gemini API key auth not supported yet"));
@@ -183,64 +477,77 @@ impl QuotaFetcher for GeminiQuotaFetcher {
             }
         }
 
-        let creds = self.auth.load_credentials()?;
-
-        if self.auth.is_token_expired(&creds) {
-            return Err(anyhow!("Gemini token expired. Please run `gemini` to refresh your session."));
-        }
-
-        let access_token = match creds.access_token {
-            Some(t) => t,
-            None => {
-                return Err(anyhow!("No Gemini access token found. Please run `gemini` to login."));
-            }
+        let access_token = self.access_token().await?;
+        let code_assist_status = self.fetch_load_code_assist(&access_token).await?;
+        let project_id = match code_assist_status.project_id.as_deref() {
+            Some(project_id) => Some(project_id.to_string()),
+            None => self.discover_project_id(&access_token).await?,
         };
 
-        let (plan, token) = self.fetch_load_code_assist(&access_token).await?;
+        let quota_resp = self
+            .fetch_quota_api(&access_token, project_id.as_deref())
+            .await?;
+        let bucket_value = quota_resp
+            .buckets
+            .or(quota_resp.quota_buckets)
+            .unwrap_or(serde_json::Value::Null);
+        let buckets = self.extract_quota_buckets(&bucket_value);
 
-        let quota_resp = self.fetch_quota_api(&token, None).await?;
-        let buckets = self.extract_quota_buckets(&quota_resp.quota_buckets.unwrap_or(serde_json::Value::Null));
-
-        let mut pro_bucket: Option<&QuotaBucket> = None;
-        let mut flash_bucket: Option<&QuotaBucket> = None;
-
-        for bucket in &buckets {
-            let lower = bucket.model_id.to_lowercase();
-            if lower.contains("gemini") && lower.contains("pro") {
-                if pro_bucket.is_none() || bucket.remaining_fraction < pro_bucket.unwrap().remaining_fraction {
-                    pro_bucket = Some(bucket);
+        let mut model_buckets: BTreeMap<String, QuotaBucket> = BTreeMap::new();
+        for bucket in buckets {
+            let key = bucket.model_id.to_lowercase();
+            match model_buckets.get(&key) {
+                Some(existing) if existing.remaining_fraction <= bucket.remaining_fraction => {}
+                _ => {
+                    model_buckets.insert(key, bucket);
                 }
-            } else if lower.contains("gemini") && lower.contains("flash") {
-                if flash_bucket.is_none() || bucket.remaining_fraction < flash_bucket.unwrap().remaining_fraction {
-                    flash_bucket = Some(bucket);
+            }
+        }
+
+        let mut selected_by_category: BTreeMap<GeminiCategory, SelectedBucket> = BTreeMap::new();
+        for bucket in model_buckets.into_values() {
+            let Some((category, version, is_preview)) = Self::classify_model(&bucket.model_id) else {
+                continue;
+            };
+
+            let replace = match selected_by_category.get(&category) {
+                None => true,
+                Some(existing) if version > existing.version => true,
+                Some(existing) if version == existing.version && existing.is_preview && !is_preview => true,
+                Some(existing)
+                    if version == existing.version
+                        && existing.is_preview == is_preview
+                        && bucket.remaining_fraction < existing.bucket.remaining_fraction =>
+                {
+                    true
                 }
+                _ => false,
+            };
+
+            if replace {
+                selected_by_category.insert(
+                    category,
+                    SelectedBucket {
+                        bucket,
+                        version,
+                        is_preview,
+                    },
+                );
             }
         }
 
         let mut windows = Vec::new();
-
-        if let Some(pro) = pro_bucket {
-            let used = ((1.0 - pro.remaining_fraction.clamp(0.0, 1.0)) * 100.0).round();
-            windows.push(RateWindow {
-                label: "Pro".to_string(),
-                used_percent: used,
-                resets_at: pro.reset_time.as_ref().and_then(|s| {
-                    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
-                }),
-                period_duration_ms: Some(5 * 60 * 60 * 1000),
-            });
-        }
-
-        if let Some(flash) = flash_bucket {
-            let used = ((1.0 - flash.remaining_fraction.clamp(0.0, 1.0)) * 100.0).round();
-            windows.push(RateWindow {
-                label: "Flash".to_string(),
-                used_percent: used,
-                resets_at: flash.reset_time.as_ref().and_then(|s| {
-                    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
-                }),
-                period_duration_ms: Some(5 * 60 * 60 * 1000),
-            });
+        for category in [
+            GeminiCategory::Pro,
+            GeminiCategory::Flash,
+            GeminiCategory::FlashLite,
+        ] {
+            if let Some(selected) = selected_by_category.get(&category) {
+                windows.push(self.rate_window_from_bucket(
+                    &Self::category_label(category, &selected.version, selected.is_preview),
+                    &selected.bucket,
+                ));
+            }
         }
 
         if windows.is_empty() {
@@ -254,7 +561,7 @@ impl QuotaFetcher for GeminiQuotaFetcher {
 
         Ok(QuotaSnapshot {
             provider: "gemini".to_string(),
-            plan,
+            plan: code_assist_status.plan,
             windows,
             credits: None,
             fetched_at: Utc::now(),

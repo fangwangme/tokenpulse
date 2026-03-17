@@ -9,7 +9,7 @@ pub use codex::CodexSessionParser;
 pub use opencode::OpenCodeSessionParser;
 pub use pi::PiSessionParser;
 
-use crate::provider::{TokenBreakdown, UnifiedMessage};
+use crate::provider::UnifiedMessage;
 use std::collections::{BTreeMap, HashMap};
 
 pub fn group_by_date(messages: &[UnifiedMessage]) -> BTreeMap<String, Vec<&UnifiedMessage>> {
@@ -155,6 +155,7 @@ pub fn compute_usage_summary(messages: &[UnifiedMessage]) -> UsageSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::TokenBreakdown;
 
     fn make_message(client: &str, model: &str, date: &str, cost: f64) -> UnifiedMessage {
         UnifiedMessage {
