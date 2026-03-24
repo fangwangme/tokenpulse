@@ -27,9 +27,9 @@ pub async fn run(
     let store = UsageStore::new();
 
     if rebuild_all {
-        store.clear_all(refresh_pricing)?;
+        store.clear_sources(&provider_names, refresh_pricing)?;
     } else if let Some(range) = refresh_range {
-        store.delete_date_range(range, refresh_pricing)?;
+        store.delete_sources_in_date_range(range, &provider_names, refresh_pricing)?;
     }
 
     let mut found_any_source = false;

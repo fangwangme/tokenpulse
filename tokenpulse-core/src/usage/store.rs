@@ -6,8 +6,9 @@ use chrono::{Duration, NaiveDate, Utc};
 use rusqlite::{
     params, params_from_iter, types::Value, Connection, OptionalExtension, Transaction,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct DailyUsageRow {
@@ -102,7 +103,17 @@ impl UsageStore {
         }
 
         let pricing_cache = PricingCache::new();
-        let pricing = pricing_cache.get_pricing_sync()?;
+        let pricing = match pricing_cache.get_pricing_sync() {
+            Ok(pricing) => Some(pricing),
+            Err(error) if !refresh_pricing => {
+                warn!(
+                    "Failed to load pricing data during usage ingest; continuing without refreshed pricing: {}",
+                    error
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
 
         let mut conn = self.open()?;
         let tx = conn.transaction()?;
@@ -110,7 +121,8 @@ impl UsageStore {
         let mut affected_dates = BTreeSet::new();
 
         for message in messages {
-            let snapshot = ensure_pricing_snapshot(&tx, &pricing, message, refresh_pricing)?;
+            let snapshot =
+                ensure_pricing_snapshot(&tx, pricing.as_ref(), message, refresh_pricing)?;
             let cost = snapshot
                 .as_ref()
                 .map(|pricing| calculate_cost(&message.tokens, pricing))
@@ -174,6 +186,19 @@ impl UsageStore {
 
         tx.commit()?;
         Ok(affected_dates)
+    }
+
+    pub fn delete_sources_in_date_range(
+        &self,
+        range: DateRange,
+        sources: &[String],
+        refresh_pricing: bool,
+    ) -> Result<()> {
+        self.delete_scoped(Some(range), sources, refresh_pricing)
+    }
+
+    pub fn clear_sources(&self, sources: &[String], refresh_pricing: bool) -> Result<()> {
+        self.delete_scoped(None, sources, refresh_pricing)
     }
 
     pub fn delete_date_range(&self, range: DateRange, refresh_pricing: bool) -> Result<()> {
@@ -426,6 +451,48 @@ impl UsageStore {
         )?;
         Ok(conn)
     }
+
+    fn delete_scoped(
+        &self,
+        range: Option<DateRange>,
+        sources: &[String],
+        refresh_pricing: bool,
+    ) -> Result<()> {
+        if sources.is_empty() {
+            return match range {
+                Some(range) => self.delete_date_range(range, refresh_pricing),
+                None => self.clear_all(refresh_pricing),
+            };
+        }
+
+        let mut conn = self.open()?;
+        let tx = conn.transaction()?;
+        let snapshot_keys = if refresh_pricing {
+            load_pricing_snapshot_keys(&tx, range, sources)?
+        } else {
+            Vec::new()
+        };
+
+        let mut message_sql = String::from("DELETE FROM usage_messages WHERE 1=1");
+        let message_params = append_range_and_source_filters(&mut message_sql, range, sources);
+        tx.execute(&message_sql, params_from_iter(message_params))?;
+
+        let mut daily_sql = String::from("DELETE FROM daily_model_usage WHERE 1=1");
+        let daily_params = append_range_and_source_filters(&mut daily_sql, range, sources);
+        tx.execute(&daily_sql, params_from_iter(daily_params))?;
+
+        if refresh_pricing {
+            for (date, provider_id, model_id) in snapshot_keys {
+                tx.execute(
+                    "DELETE FROM daily_pricing_snapshots WHERE date = ?1 AND provider_id = ?2 AND model_id = ?3",
+                    params![date, provider_id, model_id],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 impl Default for UsageStore {
@@ -459,6 +526,54 @@ fn append_common_filters(
     }
 
     params
+}
+
+fn append_range_and_source_filters(
+    sql: &mut String,
+    range: Option<DateRange>,
+    sources: &[String],
+) -> Vec<Value> {
+    let mut params = Vec::new();
+
+    if let Some(range) = range {
+        sql.push_str(" AND date >= ?");
+        params.push(Value::from(range.start.to_string()));
+        sql.push_str(" AND date <= ?");
+        params.push(Value::from(range.end.to_string()));
+    }
+
+    if !sources.is_empty() {
+        sql.push_str(" AND source IN (");
+        for (idx, source) in sources.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
+            sql.push('?');
+            params.push(Value::from(source.clone()));
+        }
+        sql.push(')');
+    }
+
+    params
+}
+
+fn load_pricing_snapshot_keys(
+    tx: &Transaction<'_>,
+    range: Option<DateRange>,
+    sources: &[String],
+) -> Result<Vec<(String, String, String)>> {
+    let mut sql =
+        String::from("SELECT DISTINCT date, provider_id, model_id FROM usage_messages WHERE 1=1");
+    let params = append_range_and_source_filters(&mut sql, range, sources);
+    let mut stmt = tx.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(params), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    Ok(rows.flatten().collect())
 }
 
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnifiedMessage> {
@@ -585,7 +700,7 @@ fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<
 
 fn ensure_pricing_snapshot(
     tx: &Transaction<'_>,
-    pricing: &std::collections::HashMap<String, ModelPricing>,
+    pricing: Option<&HashMap<String, ModelPricing>>,
     message: &UnifiedMessage,
     replace_existing: bool,
 ) -> Result<Option<ModelPricing>> {
@@ -619,6 +734,10 @@ fn ensure_pricing_snapshot(
     if existing.is_some() {
         return Ok(existing);
     }
+
+    let Some(pricing) = pricing else {
+        return Ok(None);
+    };
 
     let looked_up = lookup_model_pricing(&message.model_id, pricing).cloned();
     let snapshot = looked_up.unwrap_or_else(|| ModelPricing::simple(0.0, 0.0));
@@ -692,9 +811,43 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
         store
-            .ingest_messages(&[sample_message("2024-03-10", "m1")], true)
+            .ingest_messages(&[sample_message("2024-03-10", "m1")], false)
             .unwrap();
         let since = store.default_since("claude", None).unwrap().unwrap();
         assert_eq!(since, NaiveDate::from_ymd_opt(2024, 3, 9).unwrap());
+    }
+
+    #[test]
+    fn delete_sources_in_date_range_preserves_other_sources() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        let mut claude = sample_message("2024-03-10", "claude-m1");
+        claude.client = "claude".to_string();
+        let mut codex = sample_message("2024-03-10", "codex-m1");
+        codex.client = "codex".to_string();
+        codex.provider_id = "openai".to_string();
+
+        store
+            .ingest_messages(&[claude.clone(), codex.clone()], false)
+            .unwrap();
+
+        store
+            .delete_sources_in_date_range(
+                DateRange {
+                    start: NaiveDate::from_ymd_opt(2024, 3, 10).unwrap(),
+                    end: NaiveDate::from_ymd_opt(2024, 3, 10).unwrap(),
+                },
+                &["claude".to_string()],
+                false,
+            )
+            .unwrap();
+
+        let remaining_codex = store.load_messages(None, &["codex".to_string()]).unwrap();
+        let remaining_claude = store.load_messages(None, &["claude".to_string()]).unwrap();
+
+        assert_eq!(remaining_codex.len(), 1);
+        assert_eq!(remaining_codex[0].client, "codex");
+        assert!(remaining_claude.is_empty());
     }
 }

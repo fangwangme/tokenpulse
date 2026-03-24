@@ -5,6 +5,7 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use rusqlite::Connection;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, warn};
 
@@ -22,7 +23,8 @@ impl OpenCodeSessionParser {
     fn parse_database(
         &self,
         db_path: &PathBuf,
-        pricing: &std::collections::HashMap<String, crate::pricing::ModelPricing>,
+        pricing: &HashMap<String, crate::pricing::ModelPricing>,
+        since: Option<NaiveDate>,
     ) -> Vec<UnifiedMessage> {
         let conn = match Connection::open(db_path) {
             Ok(connection) => connection,
@@ -32,34 +34,62 @@ impl OpenCodeSessionParser {
             }
         };
 
+        let since_timestamp_ms = since.and_then(start_of_day_timestamp_ms);
         let mut rows = self
-            .load_rows_with_timestamp(&conn)
+            .load_rows_with_timestamp(&conn, since_timestamp_ms)
             .or_else(|| self.load_rows_without_timestamp(&conn))
             .unwrap_or_default();
         rows.sort_by_key(|row| row.timestamp.unwrap_or_default());
 
-        rows.into_iter()
+        let mut messages: Vec<UnifiedMessage> = rows
+            .into_iter()
             .filter_map(|row| self.parse_row(row, pricing))
-            .collect()
+            .collect();
+
+        if let Some(since) = since {
+            messages.retain(|message| message_on_or_after(message, since));
+        }
+
+        messages
     }
 
-    fn load_rows_with_timestamp(&self, conn: &Connection) -> Option<Vec<OpenCodeRow>> {
-        let mut stmt = conn
-            .prepare("SELECT id, session_id, data, timestamp FROM message ORDER BY timestamp")
-            .ok()?;
+    fn load_rows_with_timestamp(
+        &self,
+        conn: &Connection,
+        since_timestamp_ms: Option<i64>,
+    ) -> Option<Vec<OpenCodeRow>> {
+        let sql = if since_timestamp_ms.is_some() {
+            "SELECT id, session_id, data, timestamp FROM message WHERE timestamp >= ?1 ORDER BY timestamp"
+        } else {
+            "SELECT id, session_id, data, timestamp FROM message ORDER BY timestamp"
+        };
+        let mut stmt = conn.prepare(sql).ok()?;
 
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(OpenCodeRow {
-                    message_id: row.get::<_, Option<String>>(0)?,
-                    session_id: row.get::<_, Option<String>>(1)?,
-                    data: row.get(2)?,
-                    timestamp: row.get::<_, Option<i64>>(3)?,
+        if let Some(since_timestamp_ms) = since_timestamp_ms {
+            let rows = stmt
+                .query_map([since_timestamp_ms], |row| {
+                    Ok(OpenCodeRow {
+                        message_id: row.get::<_, Option<String>>(0)?,
+                        session_id: row.get::<_, Option<String>>(1)?,
+                        data: row.get(2)?,
+                        timestamp: row.get::<_, Option<i64>>(3)?,
+                    })
                 })
-            })
-            .ok()?;
-
-        Some(rows.flatten().collect())
+                .ok()?;
+            Some(rows.flatten().collect())
+        } else {
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(OpenCodeRow {
+                        message_id: row.get::<_, Option<String>>(0)?,
+                        session_id: row.get::<_, Option<String>>(1)?,
+                        data: row.get(2)?,
+                        timestamp: row.get::<_, Option<i64>>(3)?,
+                    })
+                })
+                .ok()?;
+            Some(rows.flatten().collect())
+        }
     }
 
     fn load_rows_without_timestamp(&self, conn: &Connection) -> Option<Vec<OpenCodeRow>> {
@@ -174,7 +204,16 @@ impl SessionParser for OpenCodeSessionParser {
     }
 
     fn parse_sessions(&self, _since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
-        let pricing = self.pricing_cache.get_pricing_sync()?;
+        let pricing = match self.pricing_cache.get_pricing_sync() {
+            Ok(pricing) => pricing,
+            Err(error) => {
+                warn!(
+                    "Failed to load pricing data for OpenCode usage parsing; continuing without refreshed pricing: {}",
+                    error
+                );
+                HashMap::new()
+            }
+        };
         let mut all_messages = Vec::new();
 
         for db_path in self.session_paths() {
@@ -183,13 +222,24 @@ impl SessionParser for OpenCodeSessionParser {
             }
 
             debug!("Parsing OpenCode database: {:?}", db_path);
-            let msgs = self.parse_database(&db_path, &pricing);
+            let msgs = self.parse_database(&db_path, &pricing, _since);
             all_messages.extend(msgs);
         }
 
         all_messages.sort_by_key(|message| message.timestamp);
         Ok(all_messages)
     }
+}
+
+fn start_of_day_timestamp_ms(date: NaiveDate) -> Option<i64> {
+    date.and_hms_opt(0, 0, 0)
+        .map(|dt| dt.and_utc().timestamp_millis())
+}
+
+fn message_on_or_after(message: &UnifiedMessage, since: NaiveDate) -> bool {
+    NaiveDate::parse_from_str(&message.date, "%Y-%m-%d")
+        .map(|date| date >= since)
+        .unwrap_or(false)
 }
 
 #[derive(Debug)]
