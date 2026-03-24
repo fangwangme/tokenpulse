@@ -1,7 +1,13 @@
 use anyhow::Result;
 use crossterm::terminal;
-use tokenpulse_core::{QuotaFetcher, quota::{ClaudeQuotaFetcher, CodexQuotaFetcher, GeminiQuotaFetcher, AntigravityQuotaFetcher, fetch_all}};
 use tokenpulse_core::config::{ConfigManager, QuotaDisplayMode};
+use tokenpulse_core::{
+    quota::{
+        fetch_all, AntigravityQuotaFetcher, ClaudeQuotaFetcher, CodexQuotaFetcher,
+        GeminiQuotaFetcher, QuotaCacheStore,
+    },
+    QuotaFetcher,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const BAR_WIDTH: usize = 20;
@@ -20,11 +26,17 @@ fn display_provider_name(provider: &str) -> &'static str {
     }
 }
 
-fn draw_progress_bar(used_percent: f64, remaining_percent: f64, period_duration_ms: Option<i64>, resets_at: Option<chrono::DateTime<chrono::Utc>>, display_mode: &QuotaDisplayMode) -> String {
+fn draw_progress_bar(
+    used_percent: f64,
+    remaining_percent: f64,
+    period_duration_ms: Option<i64>,
+    resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    display_mode: &QuotaDisplayMode,
+) -> String {
     let used_blocks = ((used_percent / 100.0) * BAR_WIDTH as f64).round() as usize;
     let used_blocks = used_blocks.min(BAR_WIDTH);
     let remaining_blocks = BAR_WIDTH - used_blocks;
-    
+
     // Calculate expected position (vertical line marker)
     let marker_pos = if let (Some(period_ms), Some(reset_time)) = (period_duration_ms, resets_at) {
         let now = chrono::Utc::now();
@@ -41,7 +53,7 @@ fn draw_progress_bar(used_percent: f64, remaining_percent: f64, period_duration_
     } else {
         None
     };
-    
+
     // Build progress bar with optional marker
     let mut bar = String::new();
     bar.push('[');
@@ -59,42 +71,52 @@ fn draw_progress_bar(used_percent: f64, remaining_percent: f64, period_duration_
         }
     }
     bar.push(']');
-    
+
     match display_mode {
         QuotaDisplayMode::Used => format!("{} {:.0}% used", bar, used_percent),
         QuotaDisplayMode::Remaining => format!("{} {:.0}% left", bar, remaining_percent),
     }
 }
 
-fn calculate_pace(used_percent: f64, period_duration_ms: Option<i64>, resets_at: Option<chrono::DateTime<chrono::Utc>>) -> Option<(String, String)> {
+fn calculate_pace(
+    used_percent: f64,
+    period_duration_ms: Option<i64>,
+    resets_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<(String, String)> {
     let period_ms = period_duration_ms?;
     let reset_time = resets_at?;
 
     if used_percent >= 100.0 {
         return None;
     }
-    
+
     let now = chrono::Utc::now();
     let period_start = reset_time - chrono::Duration::milliseconds(period_ms);
     let elapsed_ms = (now - period_start).num_milliseconds();
-    
+
     if elapsed_ms <= 0 || now >= reset_time {
         return None;
     }
-    
+
     let elapsed_fraction = elapsed_ms as f64 / period_ms as f64;
     let expected_usage = elapsed_fraction * 100.0;
     let deficit = used_percent - expected_usage;
-    
+
     if deficit.abs() < 5.0 {
         return Some(("on-track".to_string(), "On track".to_string()));
     } else if deficit > 0.0 {
         let rate = used_percent / elapsed_ms as f64;
         let remaining_ms = (100.0 - used_percent) / rate;
         let eta_text = format_duration(remaining_ms as i64);
-        return Some(("behind".to_string(), format!("+{:.0}% deficit, runs out in {}", deficit, eta_text)));
+        return Some((
+            "behind".to_string(),
+            format!("+{:.0}% deficit, runs out in {}", deficit, eta_text),
+        ));
     } else {
-        return Some(("ahead".to_string(), format!("{:.0}% under budget", deficit.abs())));
+        return Some((
+            "ahead".to_string(),
+            format!("{:.0}% under budget", deficit.abs()),
+        ));
     }
 }
 
@@ -167,9 +189,11 @@ fn format_window_block(
         ),
     ];
 
-    if let Some((status, pace_text)) =
-        calculate_pace(window.used_percent, window.period_duration_ms, window.resets_at)
-    {
+    if let Some((status, pace_text)) = calculate_pace(
+        window.used_percent,
+        window.period_duration_ms,
+        window.resets_at,
+    ) {
         let indicator = match status.as_str() {
             "ahead" => "🟢",
             "on-track" => "🟡",
@@ -183,7 +207,10 @@ fn format_window_block(
         let now = chrono::Utc::now();
         let duration = resets_at.signed_duration_since(now);
         if duration.num_seconds() > 0 {
-            lines.push(format!("Resets in {}", format_duration(duration.num_milliseconds())));
+            lines.push(format!(
+                "Resets in {}",
+                format_duration(duration.num_milliseconds())
+            ));
         }
     }
 
@@ -281,7 +308,8 @@ fn print_provider_grid(
             let mut rendered = Vec::with_capacity(row.len());
             for block in row {
                 rendered.push(
-                    block.get(idx)
+                    block
+                        .get(idx)
                         .map(|line| pad_line(line, col_width))
                         .unwrap_or_else(|| " ".repeat(col_width)),
                 );
@@ -292,10 +320,12 @@ fn print_provider_grid(
     }
 }
 
-pub async fn run(provider: Option<String>) -> Result<()> {
+pub async fn run(provider: Option<String>, refresh: bool) -> Result<()> {
     let config_manager = ConfigManager::new();
     let config = config_manager.load().unwrap_or_default();
     let display_mode = &config.display.quota_display_mode;
+    let observed_at = chrono::Utc::now();
+    let cache_store = QuotaCacheStore::new();
     let enabled_providers = config
         .providers
         .iter()
@@ -304,19 +334,17 @@ pub async fn run(provider: Option<String>) -> Result<()> {
         .collect::<Vec<_>>();
 
     let providers: Vec<Box<dyn QuotaFetcher>> = match provider {
-        Some(ref p) => {
-            match p.as_str() {
-                "claude" => vec![Box::new(ClaudeQuotaFetcher::new())],
-                "codex" => vec![Box::new(CodexQuotaFetcher::new())],
-                "gemini" => vec![Box::new(GeminiQuotaFetcher::new())],
-                "antigravity" => vec![Box::new(AntigravityQuotaFetcher::new())],
-                _ => {
-                    eprintln!("Unknown provider: {}", p);
-                    eprintln!("Supported providers: claude, codex, gemini, antigravity");
-                    return Ok(());
-                }
+        Some(ref p) => match p.as_str() {
+            "claude" => vec![Box::new(ClaudeQuotaFetcher::new())],
+            "codex" => vec![Box::new(CodexQuotaFetcher::new())],
+            "gemini" => vec![Box::new(GeminiQuotaFetcher::new())],
+            "antigravity" => vec![Box::new(AntigravityQuotaFetcher::new())],
+            _ => {
+                eprintln!("Unknown provider: {}", p);
+                eprintln!("Supported providers: claude, codex, gemini, antigravity");
+                return Ok(());
             }
-        }
+        },
         None => {
             let mut list: Vec<Box<dyn QuotaFetcher>> = Vec::new();
             if enabled_providers.contains(&"claude".to_string()) {
@@ -335,7 +363,35 @@ pub async fn run(provider: Option<String>) -> Result<()> {
         }
     };
 
-    let results = fetch_all(providers).await;
+    let mut results: Vec<Option<Result<tokenpulse_core::QuotaSnapshot>>> =
+        (0..providers.len()).map(|_| None).collect();
+    let mut fetch_indices = Vec::new();
+    let mut to_fetch = Vec::new();
+
+    for (idx, quota_fetcher) in providers.into_iter().enumerate() {
+        let provider_name = quota_fetcher.provider_name().to_string();
+
+        if !refresh {
+            if let Some(cached) = cache_store.load_valid(&provider_name, observed_at)? {
+                results[idx] = Some(Ok(cached.snapshot));
+                continue;
+            }
+        }
+
+        fetch_indices.push((idx, provider_name));
+        to_fetch.push(quota_fetcher);
+    }
+
+    let fetched_results = fetch_all(to_fetch).await;
+    for ((idx, provider_name), result) in fetch_indices.into_iter().zip(fetched_results) {
+        if let Ok(snapshot) = &result {
+            cache_store.save(&provider_name, observed_at, snapshot)?;
+        }
+        results[idx] = Some(result);
+    }
+
+    let results: Vec<Result<tokenpulse_core::QuotaSnapshot>> =
+        results.into_iter().flatten().collect();
 
     let success_count = results.iter().filter(|r| r.is_ok()).count();
     if success_count == 0 {

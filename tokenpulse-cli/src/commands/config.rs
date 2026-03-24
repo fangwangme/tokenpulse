@@ -1,7 +1,7 @@
 use crate::ConfigAction;
-use tokenpulse_core::config::QuotaDisplayMode;
 use anyhow::Result;
 use tokenpulse_core::config::ConfigManager;
+use tokenpulse_core::config::QuotaDisplayMode;
 
 pub fn run(action: ConfigAction) -> Result<()> {
     let manager = ConfigManager::new();

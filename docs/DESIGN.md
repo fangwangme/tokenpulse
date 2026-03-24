@@ -4,13 +4,33 @@
 
 A Rust CLI tool with two core features:
 1. **Quota** - On-demand check of remaining usage quota for coding agents
-2. **Usage** - Fancy TUI dashboard for session usage statistics with cost calculation
+2. **Usage** - Ledger-backed historical usage dashboard with cost estimation
 
-**Supported Agents (Phase 1):** Claude Code, Codex, OpenCode, PI
-**Future Agents:** Antigravity, Gemini CLI
+**Current Usage Scope:** Claude Code, Codex, OpenCode, Gemini CLI, PI
+**Current Quota Scope:** Claude Code, Codex, Gemini CLI, Antigravity
+**Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI is provisional. Antigravity historical usage is not complete yet.
 
 **Language:** Rust
 **Key Principle:** On-demand only. No auto-refresh, no polling. Run command → see results → exit.
+
+---
+
+## Current State
+
+As of 2026-03-24:
+
+- usage parsing writes normalized messages into a local SQLite ledger
+- the dashboard reads daily aggregates from the ledger, not from raw files in the TUI layer
+- the usage TUI is organized around `GitHub`, `By Day`, and `By Model`
+- CLI usage output includes daily, weekly, and monthly summaries
+- pricing snapshots are stored per day/model so historical cost does not silently drift
+
+Known gaps:
+
+- durable scan-state persistence for append-only sources is not finished
+- Gemini CLI historical coverage still needs more sample validation
+- Antigravity historical usage is still staged work
+- weekly/monthly session counts should not yet be treated as fully deduplicated unique-session metrics
 
 ---
 
@@ -23,58 +43,46 @@ tokenpulse/
 ├── docs/
 │   └── DESIGN.md                 # this file
 │
-├── crates/
-│   ├── tokenpulse-core/          # library crate
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── provider.rs       # Provider trait + registry
-│   │       │
-│   │       ├── auth/             # credential loading & token refresh
-│   │       │   ├── mod.rs
-│   │       │   ├── claude.rs     # ~/.claude/.credentials.json + Keychain
-│   │       │   ├── codex.rs      # ~/.config/codex/auth.json
-│   │       │   ├── opencode.rs   # (if needed for future quota)
-│   │       │   └── pi.rs         # (if needed for future quota)
-│   │       │
-│   │       ├── quota/            # API-based quota fetching
-│   │       │   ├── mod.rs        # QuotaSnapshot, RateWindow structs
-│   │       │   ├── claude.rs     # GET api.anthropic.com/api/oauth/usage
-│   │       │   └── codex.rs      # GET chatgpt.com/backend-api/wham/usage
-│   │       │
-│   │       ├── usage/            # local session file parsing
-│   │       │   ├── mod.rs        # UnifiedMessage, TokenBreakdown structs
-│   │       │   ├── scanner.rs    # parallel file discovery (walkdir + rayon)
-│   │       │   ├── claude.rs     # JSONL parser: ~/.claude/projects/
-│   │       │   ├── codex.rs      # JSONL parser: ~/.codex/sessions/
-│   │       │   ├── opencode.rs   # SQLite parser: ~/.local/share/opencode/
-│   │       │   └── pi.rs         # JSONL parser: ~/.pi/agent/sessions/
-│   │       │
-│   │       └── pricing/          # model pricing & cost calculation
-│   │           ├── mod.rs        # ModelPricing, cost calculation
-│   │           └── litellm.rs    # fetch & cache LiteLLM pricing data
-│   │
-│   └── tokenpulse-cli/           # binary crate
-│       ├── Cargo.toml
-│       └── src/
-│           ├── main.rs
-│           ├── commands/
-│           │   ├── mod.rs
-│           │   ├── quota.rs      # `tokenpulse quota` command
-│           │   └── usage.rs      # `tokenpulse usage` command
-│           └── tui/
-│               ├── mod.rs        # TUI app state & event loop
-│               ├── theme.rs      # colors, styles, gradients
-│               ├── widgets/
-│               │   ├── mod.rs
-│               │   ├── gauge.rs      # fancy progress bars
-│               │   ├── sparkline.rs  # mini trend charts
-│               │   ├── barchart.rs   # usage bar charts
-│               │   └── table.rs      # styled tables
-│               └── views/
-│                   ├── mod.rs
-│                   ├── quota.rs      # quota dashboard view
-│                   └── usage.rs      # usage dashboard view
+├── tokenpulse-core/              # library crate
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── provider.rs           # UnifiedMessage, TokenBreakdown, provider traits
+│       ├── auth/                 # credential loading and token refresh
+│       ├── quota/                # API-based quota fetching and cache
+│       ├── usage/
+│       │   ├── mod.rs            # dashboard contracts and summary builders
+│       │   ├── store.rs          # SQLite usage ledger
+│       │   ├── scanner.rs        # local discovery
+│       │   ├── claude.rs         # Claude Code parser
+│       │   ├── codex.rs          # Codex parser
+│       │   ├── opencode.rs       # OpenCode parser
+│       │   ├── gemini.rs         # Gemini CLI parser
+│       │   └── pi.rs             # PI parser
+│       └── pricing/              # model pricing and cost calculation
+│
+└── tokenpulse-cli/               # binary crate
+    ├── Cargo.toml
+    └── src/
+        ├── main.rs
+        ├── commands/
+        │   ├── mod.rs
+        │   ├── quota.rs
+        │   └── usage.rs
+        └── tui/
+            ├── mod.rs
+            ├── theme.rs
+            ├── widgets/
+            │   ├── mod.rs
+            │   ├── gauge.rs
+            │   ├── heatmap.rs
+            │   ├── trend.rs
+            │   ├── barchart.rs
+            │   └── table.rs
+            └── views/
+                ├── mod.rs
+                ├── quota.rs
+                └── usage.rs
 ```
 
 ---
@@ -106,11 +114,14 @@ tokenpulse quota                          # all providers
 tokenpulse quota -p claude                # single provider
 tokenpulse quota --json                   # JSON output for scripting
 
-# Usage dashboard - fancy TUI
-tokenpulse usage                          # interactive TUI dashboard
+# Usage summary / dashboard
+tokenpulse usage                          # ledger-backed text summary
+tokenpulse usage --tui                    # interactive TUI dashboard
 tokenpulse usage --since 2026-03-01       # filter by date
 tokenpulse usage -p claude,codex          # filter by provider
-tokenpulse usage --json                   # non-interactive JSON dump
+tokenpulse usage --refresh-days 2026-03-01:2026-03-07
+tokenpulse usage --refresh-pricing
+tokenpulse usage --rebuild-all
 ```
 
 ---
@@ -146,7 +157,7 @@ tokenpulse usage --json                   # non-interactive JSON dump
   Press q to quit │ r to refresh │ j/k to scroll
 ```
 
-### Usage Dashboard (`tokenpulse usage`)
+### Usage Dashboard (`tokenpulse usage --tui`)
 
 ```
 ╭─────────────────────────────────────────────────────────────────────╮
@@ -198,9 +209,15 @@ tokenpulse usage --json                   # non-interactive JSON dump
   │  other          █░░░░░░░░░░░░░░░░░░░░░░░░░   3%    $2.30         │
   ╰───────────────────────────────────────────────────────────────────╯
 
-  Tab: [Overview] [Daily] [Models] [Sessions]
+  Tab: [GitHub] [By Day] [By Model]
   Press q to quit │ r to refresh │ ←/→ switch tabs │ j/k scroll
 ```
+
+Current usage TUI notes:
+
+- `GitHub` is the primary historical dashboard
+- `By Day` focuses on daily totals plus weekly/monthly rollups
+- `By Model` focuses on provider and model attribution
 
 ---
 

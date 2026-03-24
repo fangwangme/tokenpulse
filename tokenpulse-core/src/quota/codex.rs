@@ -71,7 +71,9 @@ impl<'de> Deserialize<'de> for FlexNumber {
                 Ok(FlexNumber(v as f64))
             }
             fn visit_str<E>(self, v: &str) -> Result<FlexNumber, E>
-            where E: de::Error {
+            where
+                E: de::Error,
+            {
                 v.parse::<f64>().map(FlexNumber).map_err(de::Error::custom)
             }
         }
@@ -143,7 +145,10 @@ impl QuotaFetcher for CodexQuotaFetcher {
     async fn fetch_quota(&self) -> Result<QuotaSnapshot> {
         let creds = self.auth.load_credentials()?;
 
-        let tokens = creds.tokens.as_ref().ok_or_else(|| anyhow!("No tokens found in Codex credentials"))?;
+        let tokens = creds
+            .tokens
+            .as_ref()
+            .ok_or_else(|| anyhow!("No tokens found in Codex credentials"))?;
 
         debug!("Fetching Codex quota with access token");
 
@@ -157,7 +162,9 @@ impl QuotaFetcher for CodexQuotaFetcher {
         debug!("Codex quota response status: {}", response.status());
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(anyhow!("Codex session expired. Please run `codex` to refresh your session."));
+            return Err(anyhow!(
+                "Codex session expired. Please run `codex` to refresh your session."
+            ));
         }
 
         if !response.status().is_success() {
@@ -167,12 +174,19 @@ impl QuotaFetcher for CodexQuotaFetcher {
         }
 
         let response_text = response.text().await?;
-        debug!("Codex quota response body length: {} bytes", response_text.len());
+        debug!(
+            "Codex quota response body length: {} bytes",
+            response_text.len()
+        );
 
         let quota: CodexQuotaResponse = match serde_json::from_str(&response_text) {
             Ok(q) => q,
             Err(e) => {
-                return Err(anyhow!("Failed to parse Codex quota response: {}. First 200 chars: {}", e, &response_text[..response_text.len().min(200)]));
+                return Err(anyhow!(
+                    "Failed to parse Codex quota response: {}. First 200 chars: {}",
+                    e,
+                    &response_text[..response_text.len().min(200)]
+                ));
             }
         };
         debug!("Quota response: {:?}", quota);
@@ -185,7 +199,11 @@ impl QuotaFetcher for CodexQuotaFetcher {
             }
 
             if let Some(secondary) = rate_limit.secondary_window {
-                windows.push(self.rate_window_from_window("Weekly (7d)", secondary, 7 * 24 * 60 * 60));
+                windows.push(self.rate_window_from_window(
+                    "Weekly (7d)",
+                    secondary,
+                    7 * 24 * 60 * 60,
+                ));
             }
         }
 

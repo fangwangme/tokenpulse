@@ -48,16 +48,80 @@ impl TokenBreakdown {
     }
 }
 
+impl Default for TokenBreakdown {
+    fn default() -> Self {
+        Self {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedMessage {
     pub client: String,
     pub model_id: String,
     pub provider_id: String,
     pub session_id: String,
+    pub message_key: String,
     pub timestamp: i64,
     pub date: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    pub pricing_day: String,
+    pub parser_version: String,
+}
+
+impl UnifiedMessage {
+    pub fn new(
+        client: impl Into<String>,
+        model_id: impl Into<String>,
+        provider_id: impl Into<String>,
+        session_id: impl Into<String>,
+        message_key: impl Into<String>,
+        timestamp: i64,
+        tokens: TokenBreakdown,
+    ) -> Self {
+        let date = chrono::DateTime::from_timestamp_millis(timestamp)
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        Self {
+            client: client.into(),
+            model_id: model_id.into(),
+            provider_id: provider_id.into(),
+            session_id: session_id.into(),
+            message_key: message_key.into(),
+            timestamp,
+            date: date.clone(),
+            tokens,
+            cost: 0.0,
+            pricing_day: date,
+            parser_version: "v1".to_string(),
+        }
+    }
+
+    pub fn with_cost(mut self, cost: f64) -> Self {
+        self.cost = cost.max(0.0);
+        self
+    }
+
+    pub fn with_parser_version(mut self, parser_version: impl Into<String>) -> Self {
+        self.parser_version = parser_version.into();
+        self
+    }
+
+    pub fn with_pricing_day(mut self, pricing_day: impl Into<String>) -> Self {
+        self.pricing_day = pricing_day.into();
+        self
+    }
+
+    pub fn total_tokens(&self) -> i64 {
+        self.tokens.total()
+    }
 }
 
 #[async_trait]
@@ -71,6 +135,9 @@ pub trait SessionParser: Send + Sync {
     fn provider_name(&self) -> &str;
     fn session_paths(&self) -> Vec<PathBuf>;
     fn parse_sessions(&self, since: Option<chrono::NaiveDate>) -> Result<Vec<UnifiedMessage>>;
+    fn parser_version(&self) -> &str {
+        "v1"
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +251,7 @@ mod tests {
             model_id: "claude-opus-4".to_string(),
             provider_id: "anthropic".to_string(),
             session_id: "session-123".to_string(),
+            message_key: "msg-123".to_string(),
             timestamp: 1700000000000,
             date: "2024-01-15".to_string(),
             tokens: TokenBreakdown {
@@ -194,6 +262,8 @@ mod tests {
                 reasoning: 0,
             },
             cost: 0.05,
+            pricing_day: "2024-01-15".to_string(),
+            parser_version: "test".to_string(),
         };
 
         assert_eq!(msg.client, "claude");
@@ -213,6 +283,7 @@ mod tests {
             model_id: "claude-3-opus".to_string(),
             provider_id: "anthropic".to_string(),
             session_id: "s1".to_string(),
+            message_key: "m1".to_string(),
             timestamp: 1000,
             date: "2024-01-01".to_string(),
             tokens: TokenBreakdown {
@@ -223,6 +294,8 @@ mod tests {
                 reasoning: 0,
             },
             cost: 0.01,
+            pricing_day: "2024-01-01".to_string(),
+            parser_version: "test".to_string(),
         };
 
         let codex_msg = UnifiedMessage {
@@ -230,6 +303,7 @@ mod tests {
             model_id: "gpt-4".to_string(),
             provider_id: "openai".to_string(),
             session_id: "s2".to_string(),
+            message_key: "m2".to_string(),
             timestamp: 2000,
             date: "2024-01-02".to_string(),
             tokens: TokenBreakdown {
@@ -240,6 +314,8 @@ mod tests {
                 reasoning: 0,
             },
             cost: 0.02,
+            pricing_day: "2024-01-02".to_string(),
+            parser_version: "test".to_string(),
         };
 
         assert_ne!(claude_msg.client, codex_msg.client);
@@ -258,7 +334,7 @@ mod tests {
 
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(json.contains("claude"));
-        
+
         let deserialized: QuotaSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.provider, "claude");
     }
@@ -270,6 +346,7 @@ mod tests {
             model_id: "claude-3".to_string(),
             provider_id: "anthropic".to_string(),
             session_id: "s1".to_string(),
+            message_key: "m1".to_string(),
             timestamp: 1000,
             date: "2024-01-01".to_string(),
             tokens: TokenBreakdown {
@@ -280,11 +357,13 @@ mod tests {
                 reasoning: 0,
             },
             cost: 0.01,
+            pricing_day: "2024-01-01".to_string(),
+            parser_version: "test".to_string(),
         };
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("claude"));
-        
+
         let deserialized: UnifiedMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.client, "claude");
         assert_eq!(deserialized.tokens.total(), 150);

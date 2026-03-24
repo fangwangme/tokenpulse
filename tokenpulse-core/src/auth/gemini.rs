@@ -118,14 +118,12 @@ pub struct GeminiSettings {
 
 impl GeminiSettings {
     pub fn selected_auth_type(&self) -> Option<&str> {
-        self.auth_type
-            .as_deref()
-            .or_else(|| {
-                self.security
-                    .as_ref()
-                    .and_then(|security| security.auth.as_ref())
-                    .and_then(|auth| auth.selected_type.as_deref())
-            })
+        self.auth_type.as_deref().or_else(|| {
+            self.security
+                .as_ref()
+                .and_then(|security| security.auth.as_ref())
+                .and_then(|auth| auth.selected_type.as_deref())
+        })
     }
 }
 

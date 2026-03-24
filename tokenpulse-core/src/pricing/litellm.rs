@@ -1,4 +1,4 @@
-use super::{ModelPricing, calculate_cost, lookup_model_pricing};
+use super::{calculate_cost, lookup_model_pricing, ModelPricing};
 use crate::provider::UnifiedMessage;
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
@@ -8,7 +8,8 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
-const LITELLM_PRICING_URL: &str = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+const LITELLM_PRICING_URL: &str =
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 const CACHE_TTL_HOURS: i64 = 24;
 
 #[derive(Debug, Deserialize)]
@@ -123,7 +124,10 @@ struct CachedPricing {
     fetched_at: DateTime<Utc>,
 }
 
-pub fn calculate_message_cost(message: &UnifiedMessage, pricing: &HashMap<String, ModelPricing>) -> f64 {
+pub fn calculate_message_cost(
+    message: &UnifiedMessage,
+    pricing: &HashMap<String, ModelPricing>,
+) -> f64 {
     match lookup_model_pricing(&message.model_id, pricing) {
         Some(p) => calculate_cost(&message.tokens, p),
         None => {

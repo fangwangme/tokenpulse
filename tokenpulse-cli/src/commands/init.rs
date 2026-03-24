@@ -1,10 +1,10 @@
 use anyhow::Result;
-use dialoguer::{MultiSelect, Select, theme::ColorfulTheme};
+use dialoguer::{theme::ColorfulTheme, MultiSelect, Select};
+use std::collections::HashMap;
 use tokenpulse_core::auth::detect_providers;
 use tokenpulse_core::config::{
     Config, ConfigManager, DisplayConfig, ProviderConfig, QuotaDisplayMode,
 };
-use std::collections::HashMap;
 
 /// Supported providers — init selection is based on this list,
 /// not on what's detected locally. Detection is only for hints.
@@ -31,16 +31,21 @@ pub fn run(use_defaults: bool) -> Result<()> {
             _ => ("\u{2717}", "not detected"),
         };
         let padding = 14usize.saturating_sub(display_name.len());
-        println!("  {} {}{} ({})", icon, display_name, " ".repeat(padding.max(1)), hint);
+        println!(
+            "  {} {}{} ({})",
+            icon,
+            display_name,
+            " ".repeat(padding.max(1)),
+            hint
+        );
     }
     println!();
 
     let (selected_names, display_mode) = if use_defaults {
         // Auto-enable providers whose credentials were detected
-        let auto_enabled: Vec<&str> = SUPPORTED_PROVIDERS.iter()
-            .filter(|(name, _)| {
-                detected.iter().any(|d| d.name == *name && d.detected)
-            })
+        let auto_enabled: Vec<&str> = SUPPORTED_PROVIDERS
+            .iter()
+            .filter(|(name, _)| detected.iter().any(|d| d.name == *name && d.detected))
             .map(|(name, _)| *name)
             .collect();
 
@@ -53,7 +58,8 @@ pub fn run(use_defaults: bool) -> Result<()> {
         (auto_enabled, QuotaDisplayMode::Remaining)
     } else {
         // Interactive: show all supported providers with detection hints
-        let items: Vec<String> = SUPPORTED_PROVIDERS.iter()
+        let items: Vec<String> = SUPPORTED_PROVIDERS
+            .iter()
             .map(|(name, display_name)| {
                 let is_detected = detected.iter().any(|d| d.name == *name && d.detected);
                 let status = if is_detected { "detected" } else { "not found" };
@@ -61,10 +67,9 @@ pub fn run(use_defaults: bool) -> Result<()> {
             })
             .collect();
 
-        let defaults: Vec<bool> = SUPPORTED_PROVIDERS.iter()
-            .map(|(name, _)| {
-                detected.iter().any(|d| d.name == *name && d.detected)
-            })
+        let defaults: Vec<bool> = SUPPORTED_PROVIDERS
+            .iter()
+            .map(|(name, _)| detected.iter().any(|d| d.name == *name && d.detected))
             .collect();
 
         let selections = MultiSelect::with_theme(&ColorfulTheme::default())
@@ -73,7 +78,8 @@ pub fn run(use_defaults: bool) -> Result<()> {
             .defaults(&defaults)
             .interact()?;
 
-        let selected: Vec<&str> = selections.iter()
+        let selected: Vec<&str> = selections
+            .iter()
             .map(|&i| SUPPORTED_PROVIDERS[i].0)
             .collect();
 

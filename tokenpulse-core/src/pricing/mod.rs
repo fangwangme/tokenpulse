@@ -78,7 +78,7 @@ pub fn lookup_model_pricing<'a>(
     let base_model = model_id
         .trim_end_matches(|c: char| c.is_ascii_digit())
         .trim_end_matches('-');
-    
+
     if base_model != model_id {
         if let Some(p) = pricing_map.get(base_model) {
             return Some(p);
@@ -138,13 +138,17 @@ mod tests {
         let cost = calculate_cost(&tokens, &pricing);
 
         // input + output + cache_read + cache_write
-        let expected = 
-            1000.0 * 0.00001 +    // input
+        let expected = 1000.0 * 0.00001 +    // input
             500.0 * 0.00003 +     // output
             200.0 * 0.000001 +    // cache_read
-            100.0 * 0.0000125;    // cache_write
+            100.0 * 0.0000125; // cache_write
 
-        assert!((cost - expected).abs() < 0.0000001, "Expected {}, got {}", expected, cost);
+        assert!(
+            (cost - expected).abs() < 0.0000001,
+            "Expected {}, got {}",
+            expected,
+            cost
+        );
     }
 
     #[test]
@@ -179,13 +183,17 @@ mod tests {
         let cost = calculate_cost(&tokens, &pricing);
 
         // cache_read defaults to 10% of input, cache_write defaults to 125% of input
-        let expected = 
-            1000.0 * 0.00001 +                    // input
+        let expected = 1000.0 * 0.00001 +                    // input
             500.0 * 0.00003 +                     // output
             200.0 * 0.00001 * 0.1 +               // cache_read (10% of input)
-            100.0 * 0.00001 * 1.25;               // cache_write (125% of input)
+            100.0 * 0.00001 * 1.25; // cache_write (125% of input)
 
-        assert!((cost - expected).abs() < 0.0000001, "Expected {}, got {}", expected, cost);
+        assert!(
+            (cost - expected).abs() < 0.0000001,
+            "Expected {}, got {}",
+            expected,
+            cost
+        );
     }
 
     #[test]
@@ -207,7 +215,10 @@ mod tests {
     #[test]
     fn test_lookup_model_pricing_exact() {
         let mut map = HashMap::new();
-        map.insert("claude-3-opus".to_string(), make_pricing(0.000015, 0.000075));
+        map.insert(
+            "claude-3-opus".to_string(),
+            make_pricing(0.000015, 0.000075),
+        );
 
         let result = lookup_model_pricing("claude-3-opus", &map);
         assert!(result.is_some());
@@ -245,7 +256,10 @@ mod tests {
     #[test]
     fn test_lookup_model_pricing_strip_date_suffix() {
         let mut map = HashMap::new();
-        map.insert("claude-3-opus".to_string(), make_pricing(0.000015, 0.000075));
+        map.insert(
+            "claude-3-opus".to_string(),
+            make_pricing(0.000015, 0.000075),
+        );
 
         let result = lookup_model_pricing("claude-3-opus-20240229", &map);
         assert!(result.is_some());
@@ -272,7 +286,7 @@ mod tests {
     #[test]
     fn test_large_token_count() {
         let tokens = TokenBreakdown {
-            input: 1_000_000,  // 1M tokens
+            input: 1_000_000, // 1M tokens
             output: 500_000,
             cache_read: 100_000,
             cache_write: 50_000,

@@ -102,15 +102,13 @@ impl GeminiQuotaFetcher {
         let base_dir = bin_dir.parent()?;
         let oauth_file = Path::new("dist/src/code_assist/oauth2.js");
         let candidates = [
-            base_dir.join(
-                "lib/node_modules/@google/gemini-cli/node_modules/@google/gemini-cli-core",
-            ).join(oauth_file),
+            base_dir
+                .join("lib/node_modules/@google/gemini-cli/node_modules/@google/gemini-cli-core")
+                .join(oauth_file),
             base_dir
                 .join("node_modules/@google/gemini-cli-core")
                 .join(oauth_file),
-            base_dir
-                .join("../gemini-cli-core")
-                .join(oauth_file),
+            base_dir.join("../gemini-cli-core").join(oauth_file),
             base_dir
                 .join("share/gemini-cli/node_modules/@google/gemini-cli-core")
                 .join(oauth_file),
@@ -189,9 +187,9 @@ impl GeminiQuotaFetcher {
         let mut creds = self.auth.load_credentials()?;
 
         if !self.auth.is_token_expired(&creds) {
-            return creds
-                .access_token
-                .ok_or_else(|| anyhow!("No Gemini access token found. Please run `gemini` to login."));
+            return creds.access_token.ok_or_else(|| {
+                anyhow!("No Gemini access token found. Please run `gemini` to login.")
+            });
         }
 
         let refresh_token = creds
@@ -218,7 +216,9 @@ impl GeminiQuotaFetcher {
 
         let status = response.status().as_u16();
         if status == 401 || status == 403 {
-            return Err(anyhow!("Gemini session expired. Please run `gemini` to refresh your session."));
+            return Err(anyhow!(
+                "Gemini session expired. Please run `gemini` to refresh your session."
+            ));
         }
 
         if !response.status().is_success() {
@@ -294,7 +294,11 @@ impl GeminiQuotaFetcher {
         Ok(None)
     }
 
-    async fn fetch_quota_api(&self, access_token: &str, project_id: Option<&str>) -> Result<QuotaResponse> {
+    async fn fetch_quota_api(
+        &self,
+        access_token: &str,
+        project_id: Option<&str>,
+    ) -> Result<QuotaResponse> {
         let body = if let Some(pid) = project_id {
             serde_json::json!({ "project": pid })
         } else {
@@ -363,7 +367,9 @@ impl GeminiQuotaFetcher {
             label: label.to_string(),
             used_percent: used,
             resets_at: bucket.reset_time.as_ref().and_then(|s| {
-                DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+                DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
             }),
             period_duration_ms: Some(24 * 60 * 60 * 1000),
         }
@@ -506,14 +512,19 @@ impl QuotaFetcher for GeminiQuotaFetcher {
 
         let mut selected_by_category: BTreeMap<GeminiCategory, SelectedBucket> = BTreeMap::new();
         for bucket in model_buckets.into_values() {
-            let Some((category, version, is_preview)) = Self::classify_model(&bucket.model_id) else {
+            let Some((category, version, is_preview)) = Self::classify_model(&bucket.model_id)
+            else {
                 continue;
             };
 
             let replace = match selected_by_category.get(&category) {
                 None => true,
                 Some(existing) if version > existing.version => true,
-                Some(existing) if version == existing.version && existing.is_preview && !is_preview => true,
+                Some(existing)
+                    if version == existing.version && existing.is_preview && !is_preview =>
+                {
+                    true
+                }
                 Some(existing)
                     if version == existing.version
                         && existing.is_preview == is_preview

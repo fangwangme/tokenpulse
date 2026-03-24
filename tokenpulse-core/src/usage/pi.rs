@@ -1,4 +1,3 @@
-use crate::pricing::{calculate_cost, lookup_model_pricing, PricingCache};
 use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
 use crate::usage::scanner;
 
@@ -8,22 +7,14 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use tracing::{debug, warn};
 
-pub struct PiSessionParser {
-    pricing_cache: PricingCache,
-}
+pub struct PiSessionParser {}
 
 impl PiSessionParser {
     pub fn new() -> Self {
-        Self {
-            pricing_cache: PricingCache::new(),
-        }
+        Self {}
     }
 
-    fn parse_file(
-        &self,
-        path: PathBuf,
-        pricing: &std::collections::HashMap<String, crate::pricing::ModelPricing>,
-    ) -> Vec<UnifiedMessage> {
+    fn parse_file(&self, path: PathBuf) -> Vec<UnifiedMessage> {
         let mut messages = Vec::new();
         let mut current_session: Option<String> = None;
         let mut current_model: Option<String> = None;
@@ -66,21 +57,18 @@ impl PiSessionParser {
                                     reasoning: 0,
                                 };
 
-                                let cost = match lookup_model_pricing(model, pricing) {
-                                    Some(p) => calculate_cost(&tokens, p),
-                                    None => 0.0,
-                                };
-
-                                let msg = UnifiedMessage {
-                                    client: "pi".to_string(),
-                                    model_id: model.clone(),
-                                    provider_id: "anthropic".to_string(),
-                                    session_id: session_id.clone(),
+                                let msg = UnifiedMessage::new(
+                                    "pi",
+                                    model.clone(),
+                                    "anthropic",
+                                    session_id.clone(),
+                                    format!("{}:{}:{}", session_id, timestamp, model),
                                     timestamp,
-                                    date,
                                     tokens,
-                                    cost,
-                                };
+                                )
+                                .with_cost(0.0)
+                                .with_pricing_day(date)
+                                .with_parser_version("pi-v2");
 
                                 messages.push(msg);
                             }
@@ -115,8 +103,6 @@ impl SessionParser for PiSessionParser {
     }
 
     fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
-        let pricing = self.pricing_cache.get_pricing_sync()?;
-
         let mut all_messages = Vec::new();
 
         for root in self.session_paths() {
@@ -128,7 +114,7 @@ impl SessionParser for PiSessionParser {
             debug!("Found {} files for PI", files.len());
 
             for file in files {
-                let msgs = self.parse_file(file, &pricing);
+                let msgs = self.parse_file(file);
                 all_messages.extend(msgs);
             }
         }

@@ -29,7 +29,8 @@ const LOAD_CODE_ASSIST_PATH: &str = "/v1internal:loadCodeAssist";
 const ONBOARD_USER_PATH: &str = "/v1internal:onboardUser";
 const FETCH_MODELS_PATH: &str = "/v1internal:fetchAvailableModels";
 const GOOGLE_OAUTH_URL: &str = "https://oauth2.googleapis.com/token";
-const GOOGLE_CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+const GOOGLE_CLIENT_ID: &str =
+    "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 const GOOGLE_CLIENT_SECRET: &str = "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";
 const USER_AGENT: &str = "antigravity";
 
@@ -277,8 +278,8 @@ impl AntigravityQuotaFetcher {
             };
 
             // Extract extension port (optional)
-            let extension_port = extract_flag(line, "--extension_server_port")
-                .and_then(|p| p.parse::<u16>().ok());
+            let extension_port =
+                extract_flag(line, "--extension_server_port").and_then(|p| p.parse::<u16>().ok());
 
             // Find listening ports via lsof
             let ports = find_listening_ports(pid);
@@ -288,7 +289,10 @@ impl AntigravityQuotaFetcher {
                 continue;
             }
 
-            info!("Discovered Antigravity LS: pid={}, ports={:?}, ext_port={:?}", pid, ports, extension_port);
+            info!(
+                "Discovered Antigravity LS: pid={}, ports={:?}, ext_port={:?}",
+                pid, ports, extension_port
+            );
 
             return Some(LsDiscovery {
                 pid,
@@ -315,8 +319,7 @@ impl AntigravityQuotaFetcher {
         );
 
         // Load API key from SQLite for the request (optional)
-        let api_key = self.auth.load_credentials().ok()
-            .and_then(|c| c.api_key);
+        let api_key = self.auth.load_credentials().ok().and_then(|c| c.api_key);
 
         let mut metadata = serde_json::json!({
             "ideName": "antigravity",
@@ -330,7 +333,8 @@ impl AntigravityQuotaFetcher {
 
         let body = serde_json::json!({ "metadata": metadata });
 
-        let response = self.ls_client
+        let response = self
+            .ls_client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Connect-Protocol-Version", "1")
@@ -369,7 +373,8 @@ impl AntigravityQuotaFetcher {
             }
         });
 
-        let response = self.ls_client
+        let response = self
+            .ls_client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Connect-Protocol-Version", "1")
@@ -388,7 +393,10 @@ impl AntigravityQuotaFetcher {
         self.parse_ls_response(data)
     }
 
-    async fn find_working_port<'a>(&self, discovery: &'a LsDiscovery) -> Option<(&'static str, u16)> {
+    async fn find_working_port<'a>(
+        &self,
+        discovery: &'a LsDiscovery,
+    ) -> Option<(&'static str, u16)> {
         // Try all discovered ports: HTTPS first, then HTTP
         for &port in &discovery.ports {
             for scheme in &["https", "http"] {
@@ -396,7 +404,8 @@ impl AntigravityQuotaFetcher {
                     "{}://127.0.0.1:{}/{}/GetUnleashData",
                     scheme, port, LS_SERVICE
                 );
-                let result = self.ls_client
+                let result = self
+                    .ls_client
                     .post(&url)
                     .header("Content-Type", "application/json")
                     .header("Connect-Protocol-Version", "1")
@@ -408,11 +417,17 @@ impl AntigravityQuotaFetcher {
                 match result {
                     Ok(response) if response.status().is_success() => {
                         debug!("LS port alive: {}:{} ({})", scheme, port, response.status());
-                        let scheme_str: &'static str = if *scheme == "https" { "https" } else { "http" };
+                        let scheme_str: &'static str =
+                            if *scheme == "https" { "https" } else { "http" };
                         return Some((scheme_str, port));
                     }
                     Ok(response) => {
-                        debug!("LS probe {}:{} returned {}", scheme, port, response.status());
+                        debug!(
+                            "LS probe {}:{} returned {}",
+                            scheme,
+                            port,
+                            response.status()
+                        );
                     }
                     Err(e) => {
                         debug!("LS probe {}:{} failed: {}", scheme, port, e);
@@ -428,7 +443,8 @@ impl AntigravityQuotaFetcher {
                     "{}://127.0.0.1:{}/{}/GetUnleashData",
                     scheme, ext_port, LS_SERVICE
                 );
-                if self.ls_client
+                if self
+                    .ls_client
                     .post(&url)
                     .header("Content-Type", "application/json")
                     .header("Connect-Protocol-Version", "1")
@@ -439,7 +455,8 @@ impl AntigravityQuotaFetcher {
                     .map(|response| response.status().is_success())
                     .unwrap_or(false)
                 {
-                    let scheme_str: &'static str = if *scheme == "https" { "https" } else { "http" };
+                    let scheme_str: &'static str =
+                        if *scheme == "https" { "https" } else { "http" };
                     return Some((scheme_str, ext_port));
                 }
             }
@@ -464,7 +481,8 @@ impl AntigravityQuotaFetcher {
             return None;
         }
 
-        let plan = data.user_status
+        let plan = data
+            .user_status
             .and_then(|u| u.plan_status)
             .and_then(|p| p.plan_info)
             .and_then(|i| i.plan_name);
@@ -473,7 +491,9 @@ impl AntigravityQuotaFetcher {
 
         for config in &configs {
             let label = config.label.as_deref().unwrap_or("");
-            let model = config.model_or_alias.as_ref()
+            let model = config
+                .model_or_alias
+                .as_ref()
                 .and_then(|m| m.model.as_deref())
                 .unwrap_or("");
 
@@ -488,7 +508,8 @@ impl AntigravityQuotaFetcher {
 
             // Determine pool from label or model name
             let pool_name = self.pool_label_from_ls(label, model);
-            let period_duration_ms = self.infer_period_duration_ms(reset_time.as_deref(), &pool_name);
+            let period_duration_ms =
+                self.infer_period_duration_ms(reset_time.as_deref(), &pool_name);
 
             let entry = pools.entry(pool_name).or_insert(PoolQuota {
                 remaining_fraction: frac,
@@ -537,11 +558,16 @@ impl AntigravityQuotaFetcher {
 
         let Some(reset_at) = DateTime::parse_from_rfc3339(reset_time)
             .ok()
-            .map(|dt| dt.with_timezone(&Utc)) else {
+            .map(|dt| dt.with_timezone(&Utc))
+        else {
             return self.pool_period_duration_ms(pool_label);
         };
 
-        if reset_at.signed_duration_since(Utc::now()).num_milliseconds() <= Self::FIVE_HOURS_MS {
+        if reset_at
+            .signed_duration_since(Utc::now())
+            .num_milliseconds()
+            <= Self::FIVE_HOURS_MS
+        {
             Self::FIVE_HOURS_MS
         } else {
             Self::SEVEN_DAYS_MS
@@ -551,7 +577,8 @@ impl AntigravityQuotaFetcher {
     // ── Layer 2: Cloud Code API (fallback) ──
 
     async fn refresh_google_access_token(&self, refresh_token: &str) -> Result<String> {
-        let response = self.client
+        let response = self
+            .client
             .post(GOOGLE_OAUTH_URL)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .form(&[
@@ -617,7 +644,10 @@ impl AntigravityQuotaFetcher {
     }
 
     fn pick_onboard_tier(&self, allowed_tiers: &[AllowedTier]) -> Option<String> {
-        if let Some(default) = allowed_tiers.iter().find(|tier| tier.is_default.unwrap_or(false)) {
+        if let Some(default) = allowed_tiers
+            .iter()
+            .find(|tier| tier.is_default.unwrap_or(false))
+        {
             if let Some(id) = default.id.clone() {
                 return Some(id);
             }
@@ -630,7 +660,8 @@ impl AntigravityQuotaFetcher {
         access_token: &str,
         base_url: &str,
     ) -> Result<CloudCodeContext> {
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}{}", base_url, LOAD_CODE_ASSIST_PATH))
             .bearer_auth(access_token)
             .header("Content-Type", "application/json")
@@ -667,7 +698,10 @@ impl AntigravityQuotaFetcher {
                     .as_ref()
                     .and_then(|tiers| self.pick_onboard_tier(tiers))
             });
-        let project_id = data.project.as_ref().and_then(|value| self.extract_project_id(value));
+        let project_id = data
+            .project
+            .as_ref()
+            .and_then(|value| self.extract_project_id(value));
 
         Ok(CloudCodeContext {
             project_id,
@@ -700,7 +734,8 @@ impl AntigravityQuotaFetcher {
             }
         }
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}{}", base_url, ONBOARD_USER_PATH))
             .bearer_auth(access_token)
             .header("Content-Type", "application/json")
@@ -732,7 +767,8 @@ impl AntigravityQuotaFetcher {
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| anyhow!("onboardUser missing operation name"))?;
 
-            let response = self.client
+            let response = self
+                .client
                 .get(format!("{}/v1internal/{}", base_url, op_name))
                 .bearer_auth(access_token)
                 .header("Content-Type", "application/json")
@@ -751,10 +787,7 @@ impl AntigravityQuotaFetcher {
         }
     }
 
-    async fn fetch_cloud_models_with_token(
-        &self,
-        access_token: &str,
-    ) -> Result<Option<PoolData>> {
+    async fn fetch_cloud_models_with_token(&self, access_token: &str) -> Result<Option<PoolData>> {
         for base_url in CLOUD_CODE_URLS {
             let mut context = match self.load_cloud_code_context(access_token, base_url).await {
                 Ok(ctx) => ctx,
@@ -788,7 +821,8 @@ impl AntigravityQuotaFetcher {
                 .map(|id| serde_json::json!({ "project": id }))
                 .unwrap_or_else(|| serde_json::json!({}));
 
-            let response = match self.client
+            let response = match self
+                .client
                 .post(format!("{}{}", base_url, FETCH_MODELS_PATH))
                 .bearer_auth(access_token)
                 .header("Content-Type", "application/json")
@@ -811,7 +845,11 @@ impl AntigravityQuotaFetcher {
             }
 
             if !response.status().is_success() {
-                debug!("Cloud Code fetchAvailableModels {} status {}", base_url, response.status());
+                debug!(
+                    "Cloud Code fetchAvailableModels {} status {}",
+                    base_url,
+                    response.status()
+                );
                 continue;
             }
 
@@ -842,7 +880,9 @@ impl AntigravityQuotaFetcher {
         }
 
         if tokens_to_try.is_empty() {
-            return Err(anyhow!("No Antigravity credentials found. Please open Antigravity to login."));
+            return Err(anyhow!(
+                "No Antigravity credentials found. Please open Antigravity to login."
+            ));
         }
 
         for token in &tokens_to_try {
@@ -856,12 +896,17 @@ impl AntigravityQuotaFetcher {
 
         if let Some(refresh_token) = creds.refresh_token.as_deref() {
             let refreshed_access_token = self.refresh_google_access_token(refresh_token).await?;
-            if let Some(pool_data) = self.fetch_cloud_models_with_token(&refreshed_access_token).await? {
+            if let Some(pool_data) = self
+                .fetch_cloud_models_with_token(&refreshed_access_token)
+                .await?
+            {
                 return Ok(pool_data);
             }
         }
 
-        Err(anyhow!("Antigravity session expired. Please open Antigravity to refresh your session."))
+        Err(anyhow!(
+            "Antigravity session expired. Please open Antigravity to refresh your session."
+        ))
     }
 
     fn parse_cloud_response(&self, data: FetchModelsResponse) -> HashMap<String, PoolQuota> {
@@ -884,9 +929,16 @@ impl AntigravityQuotaFetcher {
                 None => continue,
             };
 
-            let normalized = display_name.replace(|c| c == '(' || c == ')', "").trim().to_string();
+            let normalized = display_name
+                .replace(|c| c == '(' || c == ')', "")
+                .trim()
+                .to_string();
             let pool = self.pool_label_from_ls(&normalized, &model_id);
-            let frac = info.quota_info.as_ref().and_then(|q| q.remaining_fraction).unwrap_or(0.0);
+            let frac = info
+                .quota_info
+                .as_ref()
+                .and_then(|q| q.remaining_fraction)
+                .unwrap_or(0.0);
             let reset_time = info.quota_info.as_ref().and_then(|q| q.reset_time.clone());
             let period_duration_ms = self.infer_period_duration_ms(reset_time.as_deref(), &pool);
 
@@ -915,9 +967,13 @@ impl AntigravityQuotaFetcher {
         let mut sorted_pools: Vec<_> = pool_data.pools.into_iter().collect();
         sorted_pools.sort_by(|a, b| {
             let key = |name: &str| -> &str {
-                if name.contains("Pro") { "0" }
-                else if name.contains("Flash") { "1" }
-                else { "2" }
+                if name.contains("Pro") {
+                    "0"
+                } else if name.contains("Flash") {
+                    "1"
+                } else {
+                    "2"
+                }
             };
             key(&a.0).cmp(key(&b.0))
         });
@@ -925,7 +981,9 @@ impl AntigravityQuotaFetcher {
         for (pool, quota) in sorted_pools {
             let used = ((1.0 - quota.remaining_fraction.clamp(0.0, 1.0)) * 100.0).round();
             let resets_at = quota.reset_time.and_then(|s| {
-                DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+                DateTime::parse_from_rfc3339(&s)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
             });
 
             windows.push(RateWindow {
@@ -975,7 +1033,10 @@ impl QuotaFetcher for AntigravityQuotaFetcher {
         // Layer 1: Try Language Server discovery (local, zero network cost)
         if let Some(discovery) = self.discover_ls() {
             if let Some(pool_data) = self.probe_ls(&discovery).await {
-                info!("Antigravity quota fetched via Language Server (pid={})", discovery.pid);
+                info!(
+                    "Antigravity quota fetched via Language Server (pid={})",
+                    discovery.pid
+                );
                 return Ok(self.pools_to_snapshot(pool_data));
             }
             warn!("LS discovered but probe failed, falling back to Cloud API");
@@ -1016,14 +1077,7 @@ fn extract_flag(command_line: &str, flag: &str) -> Option<String> {
 
 fn find_listening_ports(pid: i32) -> Vec<u16> {
     let output = Command::new("lsof")
-        .args([
-            "-nP",
-            "-iTCP",
-            "-sTCP:LISTEN",
-            "-a",
-            "-p",
-            &pid.to_string(),
-        ])
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &pid.to_string()])
         .output();
 
     let output = match output {

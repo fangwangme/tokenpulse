@@ -1,4 +1,3 @@
-use crate::pricing::{calculate_cost, lookup_model_pricing, PricingCache};
 use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
 use crate::usage::scanner;
 
@@ -7,120 +6,108 @@ use chrono::NaiveDate;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use tracing::{debug, warn};
+use tracing::debug;
 
-pub struct ClaudeSessionParser {
-    pricing_cache: PricingCache,
-}
+const PARSER_VERSION: &str = "claude-v2";
+
+pub struct ClaudeSessionParser;
 
 impl ClaudeSessionParser {
     pub fn new() -> Self {
-        Self {
-            pricing_cache: PricingCache::new(),
-        }
+        Self
     }
 
-    fn parse_file(
-        &self,
-        path: PathBuf,
-        pricing: &std::collections::HashMap<String, crate::pricing::ModelPricing>,
-    ) -> Vec<UnifiedMessage> {
+    fn parse_file(&self, path: PathBuf, seen_keys: &mut HashSet<String>) -> Vec<UnifiedMessage> {
         let mut messages = Vec::new();
-        let mut seen_ids: HashSet<String> = HashSet::new();
+        let session_id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to read {:?}: {}", path, e);
-                return messages;
-            }
+            Ok(content) => content,
+            Err(_) => return messages,
         };
 
-        for line in content.lines() {
-            if line.trim().is_empty() {
+        for (line_index, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
 
-            match serde_json::from_str::<ClaudeEntry>(line) {
-                Ok(entry) => {
-                    if entry.entry_type != "assistant" {
-                        continue;
-                    }
-
-                    let message = match entry.message {
-                        Some(ref m) => m,
-                        None => continue,
-                    };
-
-                    let message_id = message.id.clone();
-                    let request_id = entry.request_id.clone().unwrap_or_default();
-                    let dedup_key = format!("{}:{}", message_id, request_id);
-
-                    if seen_ids.contains(&dedup_key) {
-                        continue;
-                    }
-                    seen_ids.insert(dedup_key);
-
-                    let model_id = message.model.clone();
-                    let usage = match &message.usage {
-                        Some(u) => u,
-                        None => continue,
-                    };
-
-                    let session_id = entry.session_id.clone().unwrap_or_else(|| {
-                        path.file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("unknown")
-                            .to_string()
-                    });
-
-                    // Parse ISO timestamp
-                    let timestamp = entry
-                        .timestamp
-                        .map(|ts| {
-                            chrono::DateTime::parse_from_rfc3339(&ts)
-                                .map(|dt| dt.timestamp_millis())
-                                .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis())
-                        })
-                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-
-                    let date = chrono::DateTime::from_timestamp_millis(timestamp)
-                        .map(|dt| dt.format("%Y-%m-%d").to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
-
-                    let tokens = TokenBreakdown {
-                        input: usage.input_tokens.unwrap_or(0),
-                        output: usage.output_tokens.unwrap_or(0),
-                        cache_read: usage.cache_read_input_tokens.unwrap_or(0),
-                        cache_write: usage.cache_creation_input_tokens.unwrap_or(0),
-                        reasoning: 0,
-                    };
-
-                    let cost = match lookup_model_pricing(&model_id, pricing) {
-                        Some(p) => calculate_cost(&tokens, p),
-                        None => {
-                            debug!("No pricing found for model: {}", model_id);
-                            0.0
-                        }
-                    };
-
-                    let msg = UnifiedMessage {
-                        client: "claude".to_string(),
-                        model_id,
-                        provider_id: "anthropic".to_string(),
-                        session_id,
-                        timestamp,
-                        date,
-                        tokens,
-                        cost,
-                    };
-
-                    messages.push(msg);
+            let entry: ClaudeEntry = match serde_json::from_str(trimmed) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    debug!("Failed to parse Claude entry in {:?}: {}", path, error);
+                    continue;
                 }
-                Err(e) => {
-                    debug!("Failed to parse line: {}", e);
-                }
+            };
+
+            if entry.entry_type != "assistant" {
+                continue;
             }
+
+            let message = match entry.message {
+                Some(message) => message,
+                None => continue,
+            };
+            let usage = match message.usage {
+                Some(usage) => usage,
+                None => continue,
+            };
+            let model_id = match message.model {
+                Some(model_id) => model_id,
+                None => continue,
+            };
+
+            let timestamp = entry
+                .timestamp
+                .as_deref()
+                .and_then(parse_rfc3339_ms)
+                .unwrap_or_default();
+
+            let message_key = match (message.id.as_deref(), entry.request_id.as_deref()) {
+                (Some(message_id), Some(request_id)) if !request_id.is_empty() => {
+                    format!("{message_id}:{request_id}")
+                }
+                (Some(message_id), _) => message_id.to_string(),
+                _ => format!(
+                    "{}:{}:{}:{}:{}:{}:{}",
+                    session_id,
+                    timestamp,
+                    model_id,
+                    line_index,
+                    usage.input_tokens.unwrap_or(0),
+                    usage.output_tokens.unwrap_or(0),
+                    usage.cache_read_input_tokens.unwrap_or(0)
+                ),
+            };
+
+            if !seen_keys.insert(message_key.clone()) {
+                continue;
+            }
+
+            let tokens = TokenBreakdown {
+                input: usage.input_tokens.unwrap_or(0).max(0),
+                output: usage.output_tokens.unwrap_or(0).max(0),
+                cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
+                cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
+                reasoning: 0,
+            };
+
+            messages.push(
+                UnifiedMessage::new(
+                    "claude",
+                    model_id,
+                    "anthropic",
+                    entry.session_id.unwrap_or_else(|| session_id.clone()),
+                    message_key,
+                    timestamp,
+                    tokens,
+                )
+                .with_parser_version(PARSER_VERSION),
+            );
         }
 
         messages
@@ -140,47 +127,54 @@ impl SessionParser for ClaudeSessionParser {
 
     fn session_paths(&self) -> Vec<PathBuf> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-        vec![home.join(".claude").join("projects")]
+        vec![
+            home.join(".claude").join("projects"),
+            home.join(".claude").join("transcripts"),
+        ]
     }
 
     fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
-        let pricing = self.pricing_cache.get_pricing_sync()?;
-
         let mut all_messages = Vec::new();
-
+        let mut seen_keys = HashSet::new();
         for root in self.session_paths() {
             if !root.exists() {
                 continue;
             }
-
             let files = scanner::discover_files(&root, "jsonl", since);
-            debug!("Found {} files for Claude", files.len());
-
             for file in files {
-                let msgs = self.parse_file(file, &pricing);
-                all_messages.extend(msgs);
+                all_messages.extend(self.parse_file(file, &mut seen_keys));
             }
         }
-
-        all_messages.sort_by_key(|m| m.timestamp);
+        all_messages.sort_by_key(|message| message.timestamp);
         Ok(all_messages)
     }
+
+    fn parser_version(&self) -> &str {
+        PARSER_VERSION
+    }
+}
+
+fn parse_rfc3339_ms(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
 }
 
 #[derive(Debug, Deserialize)]
 struct ClaudeEntry {
     #[serde(rename = "type")]
     entry_type: String,
-    message: Option<ClaudeMessage>,
+    #[serde(rename = "requestId", alias = "request_id")]
     request_id: Option<String>,
     session_id: Option<String>,
-    timestamp: Option<String>, // ISO format
+    timestamp: Option<String>,
+    message: Option<ClaudeMessage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ClaudeMessage {
-    id: String,
-    model: String,
+    id: Option<String>,
+    model: Option<String>,
     usage: Option<ClaudeUsage>,
 }
 

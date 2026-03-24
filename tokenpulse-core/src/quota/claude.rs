@@ -1,5 +1,5 @@
 use crate::auth::claude::ClaudeAuth;
-use crate::provider::{QuotaFetcher, QuotaSnapshot, RateWindow, CreditInfo};
+use crate::provider::{CreditInfo, QuotaFetcher, QuotaSnapshot, RateWindow};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -82,7 +82,9 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
         let creds = self.auth.load_credentials()?;
 
         if self.auth.is_token_expired(&creds) {
-            return Err(anyhow!("Claude token expired. Please run `claude` to refresh your session."));
+            return Err(anyhow!(
+                "Claude token expired. Please run `claude` to refresh your session."
+            ));
         }
 
         let response = self
@@ -96,18 +98,29 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
 
         let status = response.status();
         let body = response.text().await?;
-        debug!("Claude quota response status: {}, body: {}", status, &body[..body.len().min(500)]);
+        debug!(
+            "Claude quota response status: {}, body: {}",
+            status,
+            &body[..body.len().min(500)]
+        );
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(anyhow!("Claude session expired. Please run `claude` to refresh your session."));
+            return Err(anyhow!(
+                "Claude session expired. Please run `claude` to refresh your session."
+            ));
         }
 
         if !status.is_success() {
             return Err(anyhow!("Quota API error {}: {}", status, body));
         }
 
-        let quota: ClaudeQuotaResponse = serde_json::from_str(&body)
-            .map_err(|e| anyhow!("Failed to parse Claude quota response: {}. Body: {}", e, &body[..body.len().min(200)]))?;
+        let quota: ClaudeQuotaResponse = serde_json::from_str(&body).map_err(|e| {
+            anyhow!(
+                "Failed to parse Claude quota response: {}. Body: {}",
+                e,
+                &body[..body.len().min(200)]
+            )
+        })?;
         debug!("Quota response: {:?}", quota);
 
         let mut windows = Vec::new();
@@ -116,7 +129,11 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
             windows.push(RateWindow {
                 label: "Session (5h)".to_string(),
                 used_percent: five_hour.utilization,
-                resets_at: five_hour.resets_at.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                resets_at: five_hour.resets_at.and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                }),
                 period_duration_ms: Some(5 * 60 * 60 * 1000),
             });
         }
@@ -125,7 +142,11 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
             windows.push(RateWindow {
                 label: "Weekly (7d)".to_string(),
                 used_percent: seven_day.utilization,
-                resets_at: seven_day.resets_at.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                resets_at: seven_day.resets_at.and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                }),
                 period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
             });
         }
@@ -134,7 +155,11 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
             windows.push(RateWindow {
                 label: "Sonnet (7d)".to_string(),
                 used_percent: sonnet.utilization,
-                resets_at: sonnet.resets_at.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                resets_at: sonnet.resets_at.and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                }),
                 period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
             });
         }
@@ -143,7 +168,11 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
             windows.push(RateWindow {
                 label: "Opus (7d)".to_string(),
                 used_percent: opus.utilization,
-                resets_at: opus.resets_at.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                resets_at: opus.resets_at.and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                }),
                 period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
             });
         }

@@ -1,152 +1,176 @@
-use crate::pricing::{calculate_cost, lookup_model_pricing, PricingCache};
 use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
 use crate::usage::scanner;
 
 use anyhow::Result;
 use chrono::NaiveDate;
-use serde::Deserialize;
+use serde_json::Value;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use tracing::{debug, warn};
+use tracing::debug;
 
-pub struct CodexSessionParser {
-    pricing_cache: PricingCache,
-}
+const PARSER_VERSION: &str = "codex-v2";
+
+pub struct CodexSessionParser;
 
 impl CodexSessionParser {
     pub fn new() -> Self {
-        Self {
-            pricing_cache: PricingCache::new(),
-        }
+        Self
     }
 
-    fn parse_file(
-        &self,
-        path: PathBuf,
-        pricing: &std::collections::HashMap<String, crate::pricing::ModelPricing>,
-    ) -> Vec<UnifiedMessage> {
+    fn parse_file(&self, path: &PathBuf) -> Vec<UnifiedMessage> {
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(_) => return Vec::new(),
+        };
+
         let mut messages = Vec::new();
         let mut current_model: Option<String> = None;
-        let mut accumulated_tokens = CodexTokens::default();
+        let mut previous_totals: Option<CodexUsage> = None;
+        let mut provider_id = String::from("openai");
         let mut session_id = path
             .file_stem()
-            .and_then(|s| s.to_str())
+            .and_then(|stem| stem.to_str())
             .unwrap_or("unknown")
             .to_string();
 
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to read {:?}: {}", path, e);
-                return messages;
-            }
-        };
-
-        let mut last_timestamp: i64 = 0;
-
-        for line in content.lines() {
-            if line.trim().is_empty() {
+        for line in BufReader::new(file).lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => continue,
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
 
-            match serde_json::from_str::<CodexEntry>(line) {
-                Ok(entry) => match entry.entry_type.as_str() {
-                    "model" => {
-                        if let Some(model) = entry.model {
-                            current_model = Some(model);
-                        }
-                    }
-                    "tokens" => {
-                        if let Some(tokens) = entry.tokens {
-                            accumulated_tokens.input += tokens.input.unwrap_or(0);
-                            accumulated_tokens.output += tokens.output.unwrap_or(0);
-                            accumulated_tokens.cache_read += tokens.cache_read.unwrap_or(0);
-                        }
-                    }
-                    "session" => {
-                        if let Some(id) = entry.session_id {
-                            session_id = id;
-                        }
-                    }
-                    "message" | "response" => {
-                        if let Some(ts) = entry.timestamp {
-                            last_timestamp = ts;
-                        }
-                    }
-                    "end" | "complete" => {
-                        if let Some(model) = current_model.take() {
-                            let date = chrono::DateTime::from_timestamp_millis(last_timestamp)
-                                .map(|dt| dt.format("%Y-%m-%d").to_string())
-                                .unwrap_or_else(|| "unknown".to_string());
-
-                            let tokens = TokenBreakdown {
-                                input: accumulated_tokens.input,
-                                output: accumulated_tokens.output,
-                                cache_read: accumulated_tokens.cache_read,
-                                cache_write: 0,
-                                reasoning: 0,
-                            };
-
-                            let cost = match lookup_model_pricing(&model, pricing) {
-                                Some(p) => calculate_cost(&tokens, p),
-                                None => 0.0,
-                            };
-
-                            let msg = UnifiedMessage {
-                                client: "codex".to_string(),
-                                model_id: model,
-                                provider_id: "openai".to_string(),
-                                session_id: session_id.clone(),
-                                timestamp: last_timestamp,
-                                date,
-                                tokens,
-                                cost,
-                            };
-
-                            messages.push(msg);
-                            accumulated_tokens = CodexTokens::default();
-                        }
-                    }
-                    _ => {}
-                },
-                Err(e) => {
-                    debug!("Failed to parse line: {}", e);
+            let value: Value = match serde_json::from_str(trimmed) {
+                Ok(value) => value,
+                Err(error) => {
+                    debug!("Failed to parse Codex line in {:?}: {}", path, error);
+                    continue;
                 }
+            };
+
+            let entry_type = value
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let payload = value.get("payload");
+
+            if entry_type == "session_meta" {
+                if let Some(id) = payload
+                    .and_then(|payload| payload.get("id"))
+                    .and_then(Value::as_str)
+                {
+                    session_id = id.to_string();
+                }
+                if let Some(provider) = payload
+                    .and_then(|payload| payload.get("model_provider"))
+                    .and_then(Value::as_str)
+                {
+                    provider_id = provider.to_string();
+                }
+                if let Some(model) = extract_model(payload.or(Some(&value))) {
+                    current_model = Some(model);
+                }
+                continue;
             }
-        }
 
-        if current_model.is_some()
-            && (accumulated_tokens.input > 0 || accumulated_tokens.output > 0)
-        {
-            let model = current_model.unwrap();
-            let date = chrono::DateTime::from_timestamp_millis(last_timestamp)
-                .map(|dt| dt.format("%Y-%m-%d").to_string())
+            if let Some(model) = extract_model(payload.or(Some(&value))) {
+                current_model = Some(model);
+            }
+
+            if entry_type != "event_msg"
+                || payload
+                    .and_then(|payload| payload.get("type"))
+                    .and_then(Value::as_str)
+                    != Some("token_count")
+            {
+                continue;
+            }
+
+            let info = match payload.and_then(|payload| payload.get("info")) {
+                Some(info) => info,
+                None => continue,
+            };
+
+            if let Some(model) = extract_model(Some(info)) {
+                current_model = Some(model);
+            }
+
+            let model_id = current_model
+                .clone()
                 .unwrap_or_else(|| "unknown".to_string());
+            let timestamp = extract_timestamp_ms(&value)
+                .or_else(|| payload.and_then(extract_timestamp_ms))
+                .unwrap_or_default();
 
-            let tokens = TokenBreakdown {
-                input: accumulated_tokens.input,
-                output: accumulated_tokens.output,
-                cache_read: accumulated_tokens.cache_read,
-                cache_write: 0,
-                reasoning: 0,
+            let last_usage = info
+                .get("last_token_usage")
+                .and_then(parse_usage)
+                .filter(|usage| usage.total() > 0);
+            let total_usage = info
+                .get("total_token_usage")
+                .and_then(parse_usage)
+                .filter(|usage| usage.total() > 0);
+
+            let usage = if let Some(last_usage) = last_usage {
+                if let (Some(previous), Some(total_usage)) = (previous_totals, total_usage) {
+                    if total_usage.total() == previous.total() {
+                        continue;
+                    }
+                    if total_usage.total() < previous.total()
+                        && total_usage.total() + last_usage.total() >= previous.total()
+                    {
+                        continue;
+                    }
+                }
+                if let Some(total_usage) = total_usage {
+                    previous_totals = Some(total_usage);
+                }
+                last_usage
+            } else if let (Some(total_usage), Some(previous)) = (total_usage, previous_totals) {
+                let delta = total_usage.delta(previous);
+                previous_totals = Some(total_usage);
+                match delta {
+                    Some(delta) if delta.total() > 0 => delta,
+                    _ => continue,
+                }
+            } else if let Some(total_usage) = total_usage {
+                previous_totals = Some(total_usage);
+                total_usage
+            } else {
+                continue;
             };
 
-            let cost = match lookup_model_pricing(&model, pricing) {
-                Some(p) => calculate_cost(&tokens, p),
-                None => 0.0,
-            };
+            let tokens = usage.to_tokens();
+            if tokens.is_empty() {
+                continue;
+            }
 
-            let msg = UnifiedMessage {
-                client: "codex".to_string(),
-                model_id: model,
-                provider_id: "openai".to_string(),
+            let message_key = format!(
+                "{}:{}:{}:{}:{}:{}:{}",
                 session_id,
-                timestamp: last_timestamp,
-                date,
-                tokens,
-                cost,
-            };
+                timestamp,
+                model_id,
+                tokens.input,
+                tokens.output,
+                tokens.cache_read,
+                tokens.reasoning
+            );
 
-            messages.push(msg);
+            messages.push(
+                UnifiedMessage::new(
+                    "codex",
+                    model_id,
+                    provider_id.clone(),
+                    session_id.clone(),
+                    message_key,
+                    timestamp,
+                    tokens,
+                )
+                .with_parser_version(PARSER_VERSION),
+            );
         }
 
         messages
@@ -166,59 +190,137 @@ impl SessionParser for CodexSessionParser {
 
     fn session_paths(&self) -> Vec<PathBuf> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+        let codex_home = std::env::var("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join(".codex"));
+
         vec![
             home.join(".codex").join("sessions"),
-            std::env::var("CODEX_HOME")
-                .map(PathBuf::from)
-                .map(|p| p.join("sessions"))
-                .unwrap_or_else(|_| home.join(".codex").join("sessions")),
+            home.join(".codex").join("archived_sessions"),
+            codex_home.join("sessions"),
         ]
     }
 
     fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
-        let pricing = self.pricing_cache.get_pricing_sync()?;
-
         let mut all_messages = Vec::new();
-
         for root in self.session_paths() {
             if !root.exists() {
                 continue;
             }
-
             let files = scanner::discover_files(&root, "jsonl", since);
-            debug!("Found {} files for Codex", files.len());
-
             for file in files {
-                let msgs = self.parse_file(file, &pricing);
-                all_messages.extend(msgs);
+                all_messages.extend(self.parse_file(&file));
             }
         }
-
-        all_messages.sort_by_key(|m| m.timestamp);
+        all_messages.sort_by_key(|message| message.timestamp);
         Ok(all_messages)
+    }
+
+    fn parser_version(&self) -> &str {
+        PARSER_VERSION
     }
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct CodexEntry {
-    #[serde(rename = "type")]
-    entry_type: String,
-    model: Option<String>,
-    tokens: Option<CodexTokensRaw>,
-    session_id: Option<String>,
-    timestamp: Option<i64>,
-}
-
-#[derive(Debug, Default)]
-struct CodexTokens {
+#[derive(Clone, Copy, Debug, Default)]
+struct CodexUsage {
     input: i64,
     output: i64,
-    cache_read: i64,
+    cached: i64,
+    reasoning: i64,
 }
 
-#[derive(Debug, Deserialize)]
-struct CodexTokensRaw {
-    input: Option<i64>,
-    output: Option<i64>,
-    cache_read: Option<i64>,
+impl CodexUsage {
+    fn total(self) -> i64 {
+        self.input + self.output + self.cached + self.reasoning
+    }
+
+    fn delta(self, previous: Self) -> Option<Self> {
+        if self.input < previous.input
+            || self.output < previous.output
+            || self.cached < previous.cached
+            || self.reasoning < previous.reasoning
+        {
+            return None;
+        }
+
+        Some(Self {
+            input: self.input - previous.input,
+            output: self.output - previous.output,
+            cached: self.cached - previous.cached,
+            reasoning: self.reasoning - previous.reasoning,
+        })
+    }
+
+    fn to_tokens(self) -> TokenBreakdown {
+        let cached = self.cached.min(self.input).max(0);
+        TokenBreakdown {
+            input: (self.input - cached).max(0),
+            output: self.output.max(0),
+            cache_read: cached,
+            cache_write: 0,
+            reasoning: self.reasoning.max(0),
+        }
+    }
+}
+
+fn parse_usage(value: &Value) -> Option<CodexUsage> {
+    let input = value
+        .get("input_tokens")
+        .and_then(Value::as_i64)
+        .or_else(|| value.get("input").and_then(Value::as_i64))?
+        .max(0);
+    Some(CodexUsage {
+        input,
+        output: value
+            .get("output_tokens")
+            .and_then(Value::as_i64)
+            .or_else(|| value.get("output").and_then(Value::as_i64))
+            .unwrap_or(0)
+            .max(0),
+        cached: value
+            .get("cached_input_tokens")
+            .and_then(Value::as_i64)
+            .or_else(|| value.get("cache_read_input_tokens").and_then(Value::as_i64))
+            .or_else(|| value.get("cached_tokens").and_then(Value::as_i64))
+            .unwrap_or(0)
+            .max(0),
+        reasoning: value
+            .get("reasoning_output_tokens")
+            .and_then(Value::as_i64)
+            .or_else(|| value.get("reasoning_tokens").and_then(Value::as_i64))
+            .unwrap_or(0)
+            .max(0),
+    })
+}
+
+fn extract_model(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    value
+        .get("model")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("model_name").and_then(Value::as_str))
+        .or_else(|| {
+            value
+                .get("model_info")
+                .and_then(|info| info.get("slug"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| payload.get("model"))
+                .and_then(Value::as_str)
+        })
+        .map(ToOwned::to_owned)
+}
+
+fn extract_timestamp_ms(value: &Value) -> Option<i64> {
+    if let Some(raw) = value.get("timestamp").and_then(Value::as_i64) {
+        return Some(raw);
+    }
+    value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+        .map(|dt| dt.timestamp_millis())
 }

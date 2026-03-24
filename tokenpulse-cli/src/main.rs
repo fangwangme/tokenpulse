@@ -24,6 +24,9 @@ enum Commands {
     Quota {
         #[clap(short, long)]
         provider: Option<String>,
+
+        #[clap(long)]
+        refresh: bool,
     },
     Usage {
         #[clap(long)]
@@ -31,6 +34,18 @@ enum Commands {
 
         #[clap(short, long)]
         provider: Option<String>,
+
+        #[clap(long)]
+        refresh_days: Option<String>,
+
+        #[clap(long)]
+        refresh_pricing: bool,
+
+        #[clap(long)]
+        rebuild_all: bool,
+
+        #[clap(long)]
+        tui: bool,
     },
     Config {
         #[clap(subcommand)]
@@ -57,13 +72,28 @@ async fn main() -> anyhow::Result<()> {
         Commands::Init { default } => {
             commands::init::run(default)?;
         }
-        Commands::Quota { provider } => {
+        Commands::Quota { provider, refresh } => {
             check_config_exists();
-            commands::quota::run(provider).await?;
+            commands::quota::run(provider, refresh).await?;
         }
-        Commands::Usage { since, provider } => {
+        Commands::Usage {
+            since,
+            provider,
+            refresh_days,
+            refresh_pricing,
+            rebuild_all,
+            tui,
+        } => {
             check_config_exists();
-            commands::usage::run(since, provider).await?;
+            commands::usage::run(
+                since,
+                provider,
+                refresh_days,
+                refresh_pricing,
+                rebuild_all,
+                tui,
+            )
+            .await?;
         }
         Commands::Config { action } => {
             commands::config::run(action)?;
