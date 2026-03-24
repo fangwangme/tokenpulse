@@ -2,6 +2,7 @@
 .shared/
 .worktrees
 .worktrees/
-.venv
-node_modules
 .sisyphus/
+
+# Rust
+/target/
