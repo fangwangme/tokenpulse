@@ -1,4 +1,4 @@
-use crate::pricing::{calculate_cost, lookup_model_pricing, PricingCache};
+use crate::pricing::{calculate_cost, lookup_model_pricing_or_warn, PricingCache};
 use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
 
 use anyhow::Result;
@@ -162,7 +162,7 @@ impl OpenCodeSessionParser {
             reasoning: tokens.reasoning.unwrap_or(0).max(0),
         };
 
-        let cost = lookup_model_pricing(&model_id, pricing)
+        let cost = lookup_model_pricing_or_warn(&model_id, pricing)
             .map(|pricing| calculate_cost(&token_breakdown, pricing))
             .unwrap_or(source_cost);
 

@@ -1,4 +1,4 @@
-use crate::pricing::{calculate_cost, lookup_model_pricing, ModelPricing, PricingCache};
+use crate::pricing::{calculate_cost, lookup_model_pricing_or_warn, ModelPricing, PricingCache};
 use crate::provider::{TokenBreakdown, UnifiedMessage};
 use crate::usage::{DashboardDay, ModelSummary, ProviderSummary};
 use anyhow::Result;
@@ -739,7 +739,7 @@ fn ensure_pricing_snapshot(
         return Ok(None);
     };
 
-    let looked_up = lookup_model_pricing(&message.model_id, pricing).cloned();
+    let looked_up = lookup_model_pricing_or_warn(&message.model_id, pricing).cloned();
     let snapshot = looked_up.unwrap_or_else(|| ModelPricing::simple(0.0, 0.0));
     let pricing_source =
         if snapshot.input_cost_per_token > 0.0 || snapshot.output_cost_per_token > 0.0 {

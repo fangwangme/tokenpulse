@@ -4,6 +4,9 @@ pub use litellm::PricingCache;
 
 use crate::provider::TokenBreakdown;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPricing {
@@ -59,39 +62,137 @@ pub fn calculate_cost(tokens: &TokenBreakdown, pricing: &ModelPricing) -> f64 {
 
 pub fn lookup_model_pricing<'a>(
     model_id: &str,
-    pricing_map: &'a std::collections::HashMap<String, ModelPricing>,
+    pricing_map: &'a HashMap<String, ModelPricing>,
 ) -> Option<&'a ModelPricing> {
-    // 1. Exact match
-    if let Some(p) = pricing_map.get(model_id) {
-        return Some(p);
-    }
+    let candidates = pricing_lookup_candidates(model_id);
 
-    // 2. Try with provider prefix
-    if let Some(p) = pricing_map.get(&format!("anthropic/{}", model_id)) {
-        return Some(p);
-    }
-    if let Some(p) = pricing_map.get(&format!("openai/{}", model_id)) {
-        return Some(p);
-    }
+    for candidate in &candidates {
+        if let Some(pricing) = pricing_map.get(candidate) {
+            return Some(pricing);
+        }
 
-    // 3. Strip date suffix (e.g., claude-3-opus-20240229 -> claude-3-opus)
-    let base_model = model_id
-        .trim_end_matches(|c: char| c.is_ascii_digit())
-        .trim_end_matches('-');
-
-    if base_model != model_id {
-        if let Some(p) = pricing_map.get(base_model) {
-            return Some(p);
+        if let Some(key) = find_case_insensitive_key(candidate, pricing_map) {
+            return pricing_map.get(key);
         }
     }
 
     None
 }
 
+fn pricing_lookup_candidates(model_id: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    push_candidate(&mut candidates, &mut seen, model_id.to_string());
+
+    if let Some(alias) = explicit_model_alias(model_id) {
+        push_candidate(&mut candidates, &mut seen, alias.to_string());
+    }
+
+    if !model_id.contains('/') && !model_id.contains('.') {
+        push_candidate(
+            &mut candidates,
+            &mut seen,
+            format!("anthropic/{}", model_id),
+        );
+        push_candidate(&mut candidates, &mut seen, format!("openai/{}", model_id));
+    }
+
+    if let Some(stripped) = strip_date_suffix(model_id) {
+        push_candidate(&mut candidates, &mut seen, stripped.clone());
+
+        if let Some(alias) = explicit_model_alias(&stripped) {
+            push_candidate(&mut candidates, &mut seen, alias.to_string());
+        }
+    }
+
+    if model_id.contains('/') {
+        push_candidate(&mut candidates, &mut seen, model_id.replacen('/', ".", 1));
+        push_candidate(&mut candidates, &mut seen, model_id.replace('/', "."));
+    }
+
+    candidates
+}
+
+fn push_candidate(candidates: &mut Vec<String>, seen: &mut HashSet<String>, candidate: String) {
+    if !candidate.is_empty() && seen.insert(candidate.clone()) {
+        candidates.push(candidate);
+    }
+}
+
+fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
+    match model_id {
+        "antigravity-gemini-3-pro" => Some("gemini-3-pro-preview"),
+        "antigravity-gemini-3-pro-high" => Some("gemini-3-pro-preview"),
+        "antigravity-gemini-3-pro-low" => Some("gemini-3-pro-preview"),
+        "antigravity-gemini-3-flash" => Some("gemini-3-flash-preview"),
+        "antigravity-claude-opus-4-5-thinking" => Some("claude-opus-4-5"),
+        "antigravity-claude-opus-4-5-thinking-high" => Some("claude-opus-4-5"),
+        "antigravity-claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
+        "antigravity-claude-opus-4-6-thinking" => Some("claude-opus-4-6"),
+        "moonshotai/kimi-k2.5" => Some("moonshot/kimi-k2.5"),
+        "z-ai/glm5" => Some("zai/glm-5"),
+        "z-ai/glm4.7" => Some("zai/glm-4.7"),
+        "z-ai/glm-4.7" => Some("zai/glm-4.7"),
+        "qwen/qwen3.5-397b-a17b" => Some("openrouter/qwen/qwen3.5-397b-a17b"),
+        "deepseek-ai/deepseek-v3.2" => Some("deepseek/deepseek-v3.2"),
+        "minimaxai/minimax-m2.1" => Some("minimax/MiniMax-M2.1"),
+        "minimaxai/minimax-m2.5" => Some("minimax/MiniMax-M2.5"),
+        "nvidia/llama-3.3-nemotron-super-49b-v1.5" => {
+            Some("deepinfra/nvidia/Llama-3.3-Nemotron-Super-49B-v1.5")
+        }
+        "nvidia/llama-3.1-nemotron-ultra-253b-v1" => {
+            Some("nebius/nvidia/Llama-3.1-Nemotron-Ultra-253B-v1")
+        }
+        _ => None,
+    }
+}
+
+fn strip_date_suffix(model_id: &str) -> Option<String> {
+    let base_model = model_id
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .trim_end_matches('-');
+
+    (base_model != model_id).then(|| base_model.to_string())
+}
+
+fn find_case_insensitive_key<'a>(
+    candidate: &str,
+    pricing_map: &'a HashMap<String, ModelPricing>,
+) -> Option<&'a str> {
+    pricing_map
+        .keys()
+        .filter(|key| key.eq_ignore_ascii_case(candidate))
+        .min_by_key(|key| key.len())
+        .map(String::as_str)
+}
+
+pub fn lookup_model_pricing_or_warn<'a>(
+    model_id: &str,
+    pricing_map: &'a HashMap<String, ModelPricing>,
+) -> Option<&'a ModelPricing> {
+    let pricing = lookup_model_pricing(model_id, pricing_map);
+
+    if pricing.is_none() && should_warn_for_missing_model(model_id) {
+        warn!("No pricing found for model: {}", model_id);
+    }
+
+    pricing
+}
+
+fn should_warn_for_missing_model(model_id: &str) -> bool {
+    static WARNED_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+    WARNED_MODELS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut warned_models| warned_models.insert(model_id.to_string()))
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn make_pricing(input: f64, output: f64) -> ModelPricing {
         ModelPricing::simple(input, output)
@@ -233,6 +334,13 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_model_warning_is_deduplicated_per_model() {
+        assert!(should_warn_for_missing_model("missing-model-a"));
+        assert!(!should_warn_for_missing_model("missing-model-a"));
+        assert!(should_warn_for_missing_model("missing-model-b"));
+    }
+
+    #[test]
     fn test_lookup_model_pricing_with_anthropic_prefix() {
         let mut map = HashMap::new();
         map.insert(
@@ -263,6 +371,82 @@ mod tests {
 
         let result = lookup_model_pricing("claude-3-opus-20240229", &map);
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_uses_explicit_antigravity_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "gemini-3-pro-preview".to_string(),
+            make_pricing(0.000002, 0.000012),
+        );
+
+        let result = lookup_model_pricing("antigravity-gemini-3-pro-high", &map);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().input_cost_per_token, 0.000002);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_uses_explicit_moonshot_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "moonshot/kimi-k2.5".to_string(),
+            make_pricing(0.0000006, 0.000003),
+        );
+
+        let result = lookup_model_pricing("moonshotai/kimi-k2.5", &map);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().output_cost_per_token, 0.000003);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_uses_explicit_qwen_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "openrouter/qwen/qwen3.5-397b-a17b".to_string(),
+            make_pricing(0.0000006, 0.0000036),
+        );
+
+        let result = lookup_model_pricing("qwen/qwen3.5-397b-a17b", &map);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().output_cost_per_token, 0.0000036);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_uses_explicit_minimax_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "minimax/MiniMax-M2.1".to_string(),
+            make_pricing(0.0000003, 0.0000012),
+        );
+
+        let result = lookup_model_pricing("minimaxai/minimax-m2.1", &map);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().input_cost_per_token, 0.0000003);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_uses_explicit_glm_alias() {
+        let mut map = HashMap::new();
+        map.insert("zai/glm-5".to_string(), make_pricing(0.0000005, 0.000002));
+
+        let result = lookup_model_pricing("z-ai/glm5", &map);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().output_cost_per_token, 0.000002);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_matches_case_insensitive_exact_key() {
+        let mut map = HashMap::new();
+        map.insert(
+            "deepinfra/nvidia/Llama-3.3-Nemotron-Super-49B-v1.5".to_string(),
+            make_pricing(0.0000001, 0.0000004),
+        );
+
+        let result =
+            lookup_model_pricing("deepinfra/nvidia/llama-3.3-nemotron-super-49b-v1.5", &map);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().output_cost_per_token, 0.0000004);
     }
 
     #[test]

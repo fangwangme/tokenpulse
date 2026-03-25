@@ -1,4 +1,4 @@
-use super::{calculate_cost, lookup_model_pricing, ModelPricing};
+use super::{calculate_cost, lookup_model_pricing_or_warn, ModelPricing};
 use crate::provider::UnifiedMessage;
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
@@ -128,11 +128,8 @@ pub fn calculate_message_cost(
     message: &UnifiedMessage,
     pricing: &HashMap<String, ModelPricing>,
 ) -> f64 {
-    match lookup_model_pricing(&message.model_id, pricing) {
+    match lookup_model_pricing_or_warn(&message.model_id, pricing) {
         Some(p) => calculate_cost(&message.tokens, p),
-        None => {
-            warn!("No pricing found for model: {}", message.model_id);
-            0.0
-        }
+        None => 0.0,
     }
 }
