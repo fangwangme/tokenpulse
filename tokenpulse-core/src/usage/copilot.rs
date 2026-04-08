@@ -1,5 +1,6 @@
 use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
 use crate::usage::scanner;
+use crate::usage::utils::parse_timestamp_str;
 
 use anyhow::Result;
 use chrono::NaiveDate;
@@ -9,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use tracing::debug;
 
-const PARSER_VERSION: &str = "copilot-v1";
+const PARSER_VERSION: &str = "copilot-v2";
 const EVENT_NAME: &str = "gen_ai.client.inference.operation.details";
 
 pub struct CopilotSessionParser;
@@ -20,6 +21,10 @@ impl CopilotSessionParser {
     }
 
     fn parse_file(&self, path: &PathBuf) -> Vec<UnifiedMessage> {
+        if is_agent_session_file(path) {
+            return self.parse_agent_session_file(path);
+        }
+
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(_) => return Vec::new(),
@@ -27,7 +32,6 @@ impl CopilotSessionParser {
 
         let mut messages = Vec::new();
         let mut seen_response_ids = HashSet::new();
-        // Cache estimation: track previous input per (session_id, model)
         let mut prev_input: HashMap<(String, String), i64> = HashMap::new();
 
         for line in BufReader::new(file).lines() {
@@ -48,99 +52,72 @@ impl CopilotSessionParser {
                 }
             };
 
-            let attrs = match value.get("attributes") {
-                Some(attrs) => attrs,
-                None => continue,
-            };
-
-            let event_name = attrs
-                .get("event.name")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if event_name != EVENT_NAME {
-                continue;
+            if let Some(message) = parse_otel_event(&value, &mut seen_response_ids, &mut prev_input)
+            {
+                messages.push(message);
             }
-
-            let input_tokens = attrs
-                .get("gen_ai.usage.input_tokens")
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            let output_tokens = attrs
-                .get("gen_ai.usage.output_tokens")
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-
-            if input_tokens == 0 && output_tokens == 0 {
-                continue;
-            }
-
-            // Deduplicate by response_id
-            let response_id = attrs
-                .get("gen_ai.response.id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if !response_id.is_empty() && !seen_response_ids.insert(response_id.to_string()) {
-                continue;
-            }
-
-            let model_id = attrs
-                .get("gen_ai.response.model")
-                .or_else(|| attrs.get("gen_ai.request.model"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string();
-
-            let session_id = extract_session_id(&value).unwrap_or_else(|| "unknown".to_string());
-
-            let timestamp = extract_hr_time(&value).unwrap_or(0);
-
-            let provider_id = detect_provider(&model_id);
-
-            // Cache estimation within a session using the same model
-            let cache_key = (session_id.clone(), model_id.clone());
-            let mut cache_read = 0i64;
-            let mut effective_input = input_tokens;
-
-            if let Some(&prev) = prev_input.get(&cache_key) {
-                if input_tokens >= prev {
-                    cache_read = prev;
-                    effective_input = input_tokens - prev;
-                }
-            }
-            prev_input.insert(cache_key, input_tokens);
-
-            let tokens = TokenBreakdown {
-                input: effective_input.max(0),
-                output: output_tokens.max(0),
-                cache_read: cache_read.max(0),
-                cache_write: 0,
-                reasoning: 0,
-            };
-
-            let message_key = if !response_id.is_empty() {
-                format!("copilot:{}", response_id)
-            } else {
-                format!(
-                    "copilot:{}:{}:{}:{}:{}",
-                    session_id, timestamp, model_id, input_tokens, output_tokens
-                )
-            };
-
-            messages.push(
-                UnifiedMessage::new(
-                    "copilot",
-                    model_id,
-                    provider_id,
-                    session_id,
-                    message_key,
-                    timestamp,
-                    tokens,
-                )
-                .with_parser_version(PARSER_VERSION),
-            );
         }
 
         messages
+    }
+
+    fn parse_agent_session_file(&self, path: &PathBuf) -> Vec<UnifiedMessage> {
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(_) => return Vec::new(),
+        };
+
+        let default_session_id = path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let mut current_session_id = default_session_id;
+        let mut current_model = "unknown".to_string();
+        let mut fallback_messages = Vec::new();
+        let mut latest_shutdown = None;
+
+        for line in BufReader::new(file).lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => continue,
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let value: Value = match serde_json::from_str(trimmed) {
+                Ok(value) => value,
+                Err(error) => {
+                    debug!(
+                        "Failed to parse Copilot session-state line in {:?}: {}",
+                        path, error
+                    );
+                    continue;
+                }
+            };
+
+            if let Some((session_id, model_id)) = extract_agent_session_start(&value) {
+                current_session_id = session_id;
+                current_model = model_id;
+                continue;
+            }
+
+            if let Some(messages) = parse_session_shutdown(&value, &current_session_id) {
+                latest_shutdown = Some(messages);
+                continue;
+            }
+
+            if let Some(message) =
+                parse_agent_session_event(&value, &current_session_id, &current_model)
+            {
+                fallback_messages.push(message);
+            }
+        }
+
+        latest_shutdown.unwrap_or(fallback_messages)
     }
 }
 
@@ -160,7 +137,10 @@ impl SessionParser for CopilotSessionParser {
         let data_dir = std::env::var("XDG_DATA_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| home.join(".local").join("share"));
-        vec![data_dir.join("github-copilot")]
+        vec![
+            data_dir.join("github-copilot"),
+            home.join(".copilot").join("session-state"),
+        ]
     }
 
     fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
@@ -198,6 +178,101 @@ fn extract_session_id(value: &Value) -> Option<String> {
     None
 }
 
+fn extract_agent_session_start(value: &Value) -> Option<(String, String)> {
+    if value.get("type")?.as_str()? != "session.start" {
+        return None;
+    }
+    let data = value.get("data")?;
+    let session_id = data.get("sessionId")?.as_str()?.to_string();
+    let model_id = data
+        .get("selectedModel")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    Some((session_id, model_id))
+}
+
+fn parse_session_shutdown(value: &Value, session_id: &str) -> Option<Vec<UnifiedMessage>> {
+    if value.get("type")?.as_str()? != "session.shutdown" {
+        return None;
+    }
+
+    let data = value.get("data")?;
+    let timestamp = parse_timestamp_str(value.get("timestamp")?.as_str()?)?;
+    let model_metrics = data.get("modelMetrics")?.as_object()?;
+    let mut messages = Vec::new();
+
+    for (model_id, metric) in model_metrics {
+        let requests = metric.get("requests")?;
+        let usage = metric.get("usage")?;
+        let request_count = requests
+            .get("count")
+            .and_then(Value::as_u64)
+            .map(|count| count as usize)
+            .unwrap_or(0)
+            .max(1);
+        let total_cost = requests.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
+        let input_tokens = usage
+            .get("inputTokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0);
+        let output_tokens = usage
+            .get("outputTokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0);
+        let cache_read_tokens = usage
+            .get("cacheReadTokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0);
+        let cache_write_tokens = usage
+            .get("cacheWriteTokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0);
+
+        if input_tokens == 0
+            && output_tokens == 0
+            && cache_read_tokens == 0
+            && cache_write_tokens == 0
+            && total_cost <= 0.0
+        {
+            continue;
+        }
+
+        let provider_id = detect_provider(model_id);
+        for idx in 0..request_count {
+            messages.push(
+                UnifiedMessage::new(
+                    "copilot",
+                    model_id.clone(),
+                    provider_id.clone(),
+                    session_id.to_string(),
+                    format!("copilot-session:{}:{}:{}", session_id, model_id, idx),
+                    timestamp + idx as i64,
+                    TokenBreakdown {
+                        input: distribute_i64(input_tokens, request_count, idx),
+                        output: distribute_i64(output_tokens, request_count, idx),
+                        cache_read: distribute_i64(cache_read_tokens, request_count, idx),
+                        cache_write: distribute_i64(cache_write_tokens, request_count, idx),
+                        reasoning: 0,
+                    },
+                )
+                .with_cost(distribute_f64(total_cost, request_count, idx))
+                .with_parser_version(PARSER_VERSION),
+            );
+        }
+    }
+
+    if messages.is_empty() {
+        None
+    } else {
+        Some(messages)
+    }
+}
+
 fn extract_hr_time(value: &Value) -> Option<i64> {
     let hr_time = value.get("hrTime")?.as_array()?;
     if hr_time.len() >= 2 {
@@ -207,6 +282,172 @@ fn extract_hr_time(value: &Value) -> Option<i64> {
     } else {
         None
     }
+}
+
+fn parse_otel_event(
+    value: &Value,
+    seen_response_ids: &mut HashSet<String>,
+    prev_input: &mut HashMap<(String, String), i64>,
+) -> Option<UnifiedMessage> {
+    let attrs = value.get("attributes")?;
+
+    let event_name = attrs
+        .get("event.name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if event_name != EVENT_NAME {
+        return None;
+    }
+
+    let input_tokens = attrs
+        .get("gen_ai.usage.input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let output_tokens = attrs
+        .get("gen_ai.usage.output_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+
+    if input_tokens == 0 && output_tokens == 0 {
+        return None;
+    }
+
+    let response_id = attrs
+        .get("gen_ai.response.id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !response_id.is_empty() && !seen_response_ids.insert(response_id.to_string()) {
+        return None;
+    }
+
+    let model_id = attrs
+        .get("gen_ai.response.model")
+        .or_else(|| attrs.get("gen_ai.request.model"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+
+    let session_id = extract_session_id(value).unwrap_or_else(|| "unknown".to_string());
+    let timestamp = extract_hr_time(value).unwrap_or(0);
+    let provider_id = detect_provider(&model_id);
+
+    let cache_key = (session_id.clone(), model_id.clone());
+    let mut cache_read = 0i64;
+    let mut effective_input = input_tokens;
+
+    if let Some(&prev) = prev_input.get(&cache_key) {
+        if input_tokens >= prev {
+            cache_read = prev;
+            effective_input = input_tokens - prev;
+        }
+    }
+    prev_input.insert(cache_key, input_tokens);
+
+    let tokens = TokenBreakdown {
+        input: effective_input.max(0),
+        output: output_tokens.max(0),
+        cache_read: cache_read.max(0),
+        cache_write: 0,
+        reasoning: 0,
+    };
+
+    let message_key = if !response_id.is_empty() {
+        format!("copilot:{}", response_id)
+    } else {
+        format!(
+            "copilot:{}:{}:{}:{}:{}",
+            session_id, timestamp, model_id, input_tokens, output_tokens
+        )
+    };
+
+    Some(
+        UnifiedMessage::new(
+            "copilot",
+            model_id,
+            provider_id,
+            session_id,
+            message_key,
+            timestamp,
+            tokens,
+        )
+        .with_parser_version(PARSER_VERSION),
+    )
+}
+
+fn parse_agent_session_event(
+    value: &Value,
+    session_id: &str,
+    model_id: &str,
+) -> Option<UnifiedMessage> {
+    if value.get("type")?.as_str()? != "assistant.message" {
+        return None;
+    }
+
+    let data = value.get("data")?;
+    let output_tokens = data
+        .get("outputTokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if output_tokens <= 0 {
+        return None;
+    }
+
+    let timestamp = parse_timestamp_str(value.get("timestamp")?.as_str()?)?;
+    let message_id = data
+        .get("messageId")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let interaction_id = data
+        .get("interactionId")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let provider_id = detect_provider(model_id);
+
+    Some(
+        UnifiedMessage::new(
+            "copilot",
+            model_id.to_string(),
+            provider_id,
+            session_id.to_string(),
+            format!("copilot-agent:{}:{}", interaction_id, message_id),
+            timestamp,
+            TokenBreakdown {
+                input: 0,
+                output: output_tokens,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+        )
+        .with_parser_version(PARSER_VERSION),
+    )
+}
+
+fn distribute_i64(total: i64, parts: usize, idx: usize) -> i64 {
+    if parts == 0 {
+        return 0;
+    }
+    let base = total / parts as i64;
+    let remainder = (total % parts as i64).max(0);
+    base + i64::from((idx as i64) < remainder)
+}
+
+fn distribute_f64(total: f64, parts: usize, idx: usize) -> f64 {
+    if parts == 0 {
+        return 0.0;
+    }
+    if idx + 1 == parts {
+        total - (total / parts as f64) * (parts as f64 - 1.0)
+    } else {
+        total / parts as f64
+    }
+}
+
+fn is_agent_session_file(path: &PathBuf) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
+        && path.ancestors().any(|ancestor| {
+            ancestor.file_name().and_then(|name| name.to_str()) == Some("session-state")
+        })
 }
 
 fn detect_provider(model: &str) -> String {
@@ -324,6 +565,96 @@ mod tests {
         assert_eq!(msg.tokens.output, 200);
         assert_eq!(msg.tokens.cache_read, 0);
         assert_eq!(msg.message_key, "copilot:chatcmpl-abc123");
+    }
+
+    #[test]
+    fn parse_agent_session_event_line() {
+        let parser = CopilotSessionParser::new();
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("session-state").join("sess-agent-1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let file = session_dir.join("events.jsonl");
+
+        let session_start = serde_json::json!({
+            "type": "session.start",
+            "data": {
+                "sessionId": "sess-agent-1",
+                "selectedModel": "claude-opus-4.6"
+            },
+            "timestamp": "2026-04-08T18:12:06.646Z"
+        });
+        let assistant_message = serde_json::json!({
+            "type": "assistant.message",
+            "data": {
+                "messageId": "msg-1",
+                "interactionId": "interaction-1",
+                "outputTokens": 482
+            },
+            "timestamp": "2026-04-08T18:12:19.679Z"
+        });
+
+        std::fs::write(&file, format!("{}\n{}\n", session_start, assistant_message)).unwrap();
+        let messages = parser.parse_file(&file);
+
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.client, "copilot");
+        assert_eq!(msg.model_id, "claude-opus-4.6");
+        assert_eq!(msg.provider_id, "anthropic");
+        assert_eq!(msg.session_id, "sess-agent-1");
+        assert_eq!(msg.tokens.input, 0);
+        assert_eq!(msg.tokens.output, 482);
+        assert_eq!(msg.message_key, "copilot-agent:interaction-1:msg-1");
+    }
+
+    #[test]
+    fn parse_session_shutdown_summary() {
+        let parser = CopilotSessionParser::new();
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("session-state").join("sess-agent-1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let file = session_dir.join("events.jsonl");
+
+        let session_start = serde_json::json!({
+            "type": "session.start",
+            "data": {
+                "sessionId": "sess-agent-1",
+                "selectedModel": "claude-opus-4.6"
+            },
+            "timestamp": "2026-04-08T18:12:06.646Z"
+        });
+        let shutdown = serde_json::json!({
+            "type": "session.shutdown",
+            "data": {
+                "modelMetrics": {
+                    "claude-opus-4.6": {
+                        "requests": {"count": 3, "cost": 3.0},
+                        "usage": {
+                            "inputTokens": 9,
+                            "outputTokens": 6,
+                            "cacheReadTokens": 3,
+                            "cacheWriteTokens": 0
+                        }
+                    }
+                }
+            },
+            "timestamp": "2026-04-08T19:48:47.935Z"
+        });
+
+        std::fs::write(&file, format!("{}\n{}\n", session_start, shutdown)).unwrap();
+        let messages = parser.parse_file(&file);
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 9);
+        assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 6);
+        assert_eq!(messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(), 3);
+        assert_eq!(messages[0].session_id, "sess-agent-1");
+        assert_eq!(messages[0].model_id, "claude-opus-4.6");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(
+            messages[0].message_key,
+            "copilot-session:sess-agent-1:claude-opus-4.6:0"
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod opencode;
 pub mod pi;
 pub mod scanner;
 pub mod store;
+pub(crate) mod utils;
 
 pub use claude::ClaudeSessionParser;
 pub use codex::CodexSessionParser;
