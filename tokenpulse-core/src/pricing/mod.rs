@@ -131,10 +131,12 @@ fn push_candidate(candidates: &mut Vec<String>, seen: &mut HashSet<String>, cand
 fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
     match model_id {
         // Antigravity variants → canonical models
-        "antigravity-gemini-3-pro" | "antigravity-gemini-3-pro-high"
+        "antigravity-gemini-3-pro"
+        | "antigravity-gemini-3-pro-high"
         | "antigravity-gemini-3-pro-low" => Some("gemini-3-pro-preview"),
         "antigravity-gemini-3-flash" => Some("gemini-3-flash-preview"),
-        "antigravity-claude-opus-4-5-thinking" | "antigravity-claude-opus-4-5-thinking-high"
+        "antigravity-claude-opus-4-5-thinking"
+        | "antigravity-claude-opus-4-5-thinking-high"
         | "antigravity-claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
         "antigravity-claude-opus-4-6-thinking" => Some("claude-opus-4-6"),
 
@@ -477,7 +479,10 @@ mod tests {
         );
 
         let result = lookup_model_pricing("kimi-k2.5-free", &map);
-        assert!(result.is_some(), "kimi-k2.5-free should resolve via -free stripping + alias");
+        assert!(
+            result.is_some(),
+            "kimi-k2.5-free should resolve via -free stripping + alias"
+        );
         assert_eq!(result.unwrap().output_cost_per_token, 0.000003);
     }
 
@@ -490,7 +495,10 @@ mod tests {
         );
 
         let result = lookup_model_pricing("minimax-m2.5-free", &map);
-        assert!(result.is_some(), "minimax-m2.5-free should resolve via -free stripping + alias");
+        assert!(
+            result.is_some(),
+            "minimax-m2.5-free should resolve via -free stripping + alias"
+        );
     }
 
     #[test]
@@ -499,7 +507,10 @@ mod tests {
         map.insert("zai/glm-4.7".to_string(), make_pricing(0.0000005, 0.000002));
 
         let result = lookup_model_pricing("glm-4.7-free", &map);
-        assert!(result.is_some(), "glm-4.7-free should resolve via -free stripping + alias");
+        assert!(
+            result.is_some(),
+            "glm-4.7-free should resolve via -free stripping + alias"
+        );
     }
 
     #[test]
@@ -523,7 +534,10 @@ mod tests {
         );
 
         let result = lookup_model_pricing("gemini-3-pro-high", &map);
-        assert!(result.is_some(), "gemini-3-pro-high should resolve via alias");
+        assert!(
+            result.is_some(),
+            "gemini-3-pro-high should resolve via alias"
+        );
     }
 
     #[test]

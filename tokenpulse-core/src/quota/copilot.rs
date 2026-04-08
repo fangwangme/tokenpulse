@@ -83,73 +83,93 @@ impl QuotaFetcher for CopilotQuotaFetcher {
     }
 
     async fn fetch_quota(&self) -> Result<QuotaSnapshot> {
-        let token = self.auth.load_token()?;
+        let candidates = self.auth.token_candidates();
+        if candidates.is_empty() {
+            return Err(anyhow!("GitHub Copilot credentials not found"));
+        }
 
         debug!("Fetching Copilot quota");
 
-        let response = self
-            .client
-            .get(COPILOT_API_URL)
-            .header("Authorization", format!("token {}", token))
-            .header("Accept", "application/json")
-            .header("Editor-Version", "vscode/1.96.2")
-            .header("Editor-Plugin-Version", "copilot-chat/0.26.7")
-            .header("User-Agent", "GitHubCopilotChat/0.26.7")
-            .header("X-Github-Api-Version", "2025-04-01")
-            .send()
-            .await?;
+        let mut saw_unauthorized = false;
+        let mut last_error = None;
 
-        debug!("Copilot quota response status: {}", response.status());
+        for token in candidates {
+            let response = self
+                .client
+                .get(COPILOT_API_URL)
+                .header("Authorization", format!("token {}", token))
+                .header("Accept", "application/json")
+                .header("Editor-Version", "vscode/1.96.2")
+                .header("Editor-Plugin-Version", "copilot-chat/0.26.7")
+                .header("User-Agent", "GitHubCopilotChat/0.26.7")
+                .header("X-Github-Api-Version", "2025-04-01")
+                .send()
+                .await?;
 
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            debug!("Copilot quota response status: {}", response.status());
+
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+                saw_unauthorized = true;
+                continue;
+            }
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await?;
+                last_error = Some(anyhow!("Copilot API error {}: {}", status, text));
+                break;
+            }
+
+            let response_text = response.text().await?;
+            debug!(
+                "Copilot quota response body length: {} bytes",
+                response_text.len()
+            );
+
+            let data: CopilotUserResponse = match serde_json::from_str(&response_text) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Err(anyhow!(
+                        "Failed to parse Copilot quota response: {}. First 200 chars: {}",
+                        e,
+                        &response_text[..response_text.len().min(200)]
+                    ));
+                }
+            };
+            debug!("Copilot response: {:?}", data);
+
+            let windows = if let Some(snapshots) = &data.quota_snapshots {
+                self.parse_paid_tier(snapshots, &data.quota_reset_date)
+            } else if let Some(remaining) = &data.limited_user_quotas {
+                self.parse_free_tier(
+                    remaining,
+                    &data.monthly_quotas,
+                    &data.limited_user_reset_date,
+                )
+            } else {
+                Vec::new()
+            };
+
+            return Ok(QuotaSnapshot {
+                provider: "copilot".to_string(),
+                plan: data.copilot_plan,
+                windows,
+                credits: None,
+                fetched_at: Utc::now(),
+            });
+        }
+
+        if saw_unauthorized {
             return Err(anyhow!(
                 "GitHub Copilot session expired. Please run `gh auth login` or update GITHUB_TOKEN."
             ));
         }
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await?;
-            return Err(anyhow!("Copilot API error {}: {}", status, text));
+        if let Some(error) = last_error {
+            return Err(error);
         }
 
-        let response_text = response.text().await?;
-        debug!(
-            "Copilot quota response body length: {} bytes",
-            response_text.len()
-        );
-
-        let data: CopilotUserResponse = match serde_json::from_str(&response_text) {
-            Ok(d) => d,
-            Err(e) => {
-                return Err(anyhow!(
-                    "Failed to parse Copilot quota response: {}. First 200 chars: {}",
-                    e,
-                    &response_text[..response_text.len().min(200)]
-                ));
-            }
-        };
-        debug!("Copilot response: {:?}", data);
-
-        let windows = if let Some(snapshots) = &data.quota_snapshots {
-            self.parse_paid_tier(snapshots, &data.quota_reset_date)
-        } else if let Some(remaining) = &data.limited_user_quotas {
-            self.parse_free_tier(
-                remaining,
-                &data.monthly_quotas,
-                &data.limited_user_reset_date,
-            )
-        } else {
-            Vec::new()
-        };
-
-        Ok(QuotaSnapshot {
-            provider: "copilot".to_string(),
-            plan: data.copilot_plan,
-            windows,
-            credits: None,
-            fetched_at: Utc::now(),
-        })
+        Err(anyhow!("GitHub Copilot credentials not found"))
     }
 }
 

@@ -80,6 +80,11 @@ enum SortField {
 #[derive(Debug, Clone, Default)]
 struct DayBreakdown {
     provider_id: String,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    reasoning_tokens: i64,
     tokens: i64,
     cost_usd: f64,
     messages: i64,
@@ -130,6 +135,39 @@ impl DailyStats {
 
     fn cache_tokens(&self) -> i64 {
         self.cache_read_tokens + self.cache_write_tokens
+    }
+
+    fn filtered(&self, enabled: &BTreeSet<String>) -> Option<Self> {
+        let providers: HashMap<String, DayBreakdown> = self
+            .providers
+            .iter()
+            .filter(|(source, _)| enabled.contains(*source))
+            .map(|(source, stats)| (source.clone(), stats.clone()))
+            .collect();
+        if providers.is_empty() {
+            return None;
+        }
+
+        let models: HashMap<String, DayBreakdown> = self
+            .models
+            .iter()
+            .filter(|(model_key, _)| enabled.contains(model_source(model_key)))
+            .map(|(model_key, stats)| (model_key.clone(), stats.clone()))
+            .collect();
+
+        let mut filtered = self.clone();
+        filtered.input_tokens = providers.values().map(|row| row.input_tokens).sum();
+        filtered.output_tokens = providers.values().map(|row| row.output_tokens).sum();
+        filtered.cache_read_tokens = providers.values().map(|row| row.cache_read_tokens).sum();
+        filtered.cache_write_tokens = providers.values().map(|row| row.cache_write_tokens).sum();
+        filtered.reasoning_tokens = providers.values().map(|row| row.reasoning_tokens).sum();
+        filtered.total_tokens = providers.values().map(|row| row.tokens).sum();
+        filtered.cost_usd = providers.values().map(|row| row.cost_usd).sum();
+        filtered.messages = providers.values().map(|row| row.messages).sum();
+        filtered.sessions = providers.values().map(|row| row.sessions).sum();
+        filtered.providers = providers;
+        filtered.models = models;
+        Some(filtered)
     }
 
     fn token_composition(&self) -> TokenComposition {
@@ -190,6 +228,13 @@ fn compare_breakdown(left: &DayBreakdown, right: &DayBreakdown) -> std::cmp::Ord
     })
 }
 
+fn model_source(model_key: &str) -> &str {
+    model_key
+        .split_once(" / ")
+        .map(|(source, _)| source)
+        .unwrap_or("")
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard aggregate
 // ---------------------------------------------------------------------------
@@ -218,6 +263,11 @@ impl UsageDashboard {
 
             let provider = day.providers.entry(row.source.clone()).or_default();
             provider.provider_id = row.provider_id.clone();
+            provider.input_tokens += row.input_tokens;
+            provider.output_tokens += row.output_tokens;
+            provider.cache_read_tokens += row.cache_read_tokens;
+            provider.cache_write_tokens += row.cache_write_tokens;
+            provider.reasoning_tokens += row.reasoning_tokens;
             provider.tokens += row.total_tokens;
             provider.cost_usd += row.cost_usd;
             provider.messages += row.message_count;
@@ -226,6 +276,11 @@ impl UsageDashboard {
             let model_key = format!("{} / {}", row.source, row.model_id);
             let model = day.models.entry(model_key).or_default();
             model.provider_id = row.provider_id.clone();
+            model.input_tokens += row.input_tokens;
+            model.output_tokens += row.output_tokens;
+            model.cache_read_tokens += row.cache_read_tokens;
+            model.cache_write_tokens += row.cache_write_tokens;
+            model.reasoning_tokens += row.reasoning_tokens;
             model.tokens += row.total_tokens;
             model.cost_usd += row.cost_usd;
             model.messages += row.message_count;
@@ -249,6 +304,13 @@ impl UsageDashboard {
 
     fn day(&self, date: NaiveDate) -> Option<&DailyStats> {
         self.daily.iter().find(|d| d.date == date)
+    }
+
+    fn filtered_daily(&self, enabled: &BTreeSet<String>) -> Vec<DailyStats> {
+        self.daily
+            .iter()
+            .filter_map(|day| day.filtered(enabled))
+            .collect()
     }
 
     fn move_selection(&self, selected: Option<NaiveDate>, offset: isize) -> Option<NaiveDate> {
@@ -291,13 +353,18 @@ impl UsageDashboard {
         &self,
         window: HeatmapWindow,
         selected: Option<NaiveDate>,
+        enabled: &BTreeSet<String>,
     ) -> Vec<&DailyStats> {
         let Some((start, end)) = self.bounds_for_window(window, selected) else {
             return Vec::new();
         };
         self.daily
             .iter()
-            .filter(|d| d.date >= start && d.date <= end)
+            .filter(|d| {
+                d.date >= start
+                    && d.date <= end
+                    && d.providers.keys().any(|source| enabled.contains(source))
+            })
             .collect()
     }
 
@@ -306,10 +373,14 @@ impl UsageDashboard {
         metric: HeatmapMetric,
         window: HeatmapWindow,
         selected: Option<NaiveDate>,
+        enabled: &BTreeSet<String>,
     ) -> Vec<(NaiveDate, f64)> {
-        self.days_in_window(window, selected)
+        self.days_in_window(window, selected, enabled)
             .into_iter()
-            .map(|d| (d.date, d.metric_value(metric)))
+            .filter_map(|d| {
+                d.filtered(enabled)
+                    .map(|filtered| (filtered.date, filtered.metric_value(metric)))
+            })
             .collect()
     }
 
@@ -318,10 +389,14 @@ impl UsageDashboard {
         metric: HeatmapMetric,
         window: HeatmapWindow,
         selected: Option<NaiveDate>,
+        enabled: &BTreeSet<String>,
     ) -> Vec<f64> {
-        self.days_in_window(window, selected)
+        self.days_in_window(window, selected, enabled)
             .into_iter()
-            .map(|d| d.metric_value(metric))
+            .filter_map(|d| {
+                d.filtered(enabled)
+                    .map(|filtered| filtered.metric_value(metric))
+            })
             .collect()
     }
 
@@ -329,13 +404,14 @@ impl UsageDashboard {
         &self,
         window: HeatmapWindow,
         selected: Option<NaiveDate>,
-    ) -> Option<&DailyStats> {
+        enabled: &BTreeSet<String>,
+    ) -> Option<DailyStats> {
         let (start, end) = self.bounds_for_window(window, selected)?;
         let sel = selected?;
         if sel < start || sel > end {
             return None;
         }
-        self.day(sel)
+        self.day(sel)?.filtered(enabled)
     }
 
     fn active_days_in_window(
@@ -343,9 +419,11 @@ impl UsageDashboard {
         metric: HeatmapMetric,
         window: HeatmapWindow,
         selected: Option<NaiveDate>,
+        enabled: &BTreeSet<String>,
     ) -> usize {
-        self.days_in_window(window, selected)
+        self.days_in_window(window, selected, enabled)
             .into_iter()
+            .filter_map(|d| d.filtered(enabled))
             .filter(|d| d.metric_value(metric) > 0.0)
             .count()
     }
@@ -355,14 +433,18 @@ impl UsageDashboard {
         metric: HeatmapMetric,
         window: HeatmapWindow,
         selected: Option<NaiveDate>,
+        enabled: &BTreeSet<String>,
     ) -> usize {
         let Some((start, end)) = self.bounds_for_window(window, selected) else {
             return 0;
         };
         let values: HashMap<NaiveDate, f64> = self
-            .days_in_window(window, selected)
+            .days_in_window(window, selected, enabled)
             .into_iter()
-            .map(|d| (d.date, d.metric_value(metric)))
+            .filter_map(|d| {
+                d.filtered(enabled)
+                    .map(|filtered| (filtered.date, filtered.metric_value(metric)))
+            })
             .collect();
         let mut cursor = start;
         let (mut current, mut best) = (0usize, 0usize);
@@ -383,14 +465,18 @@ impl UsageDashboard {
         metric: HeatmapMetric,
         window: HeatmapWindow,
         selected: Option<NaiveDate>,
+        enabled: &BTreeSet<String>,
     ) -> usize {
         let Some((start, end)) = self.bounds_for_window(window, selected) else {
             return 0;
         };
         let values: HashMap<NaiveDate, f64> = self
-            .days_in_window(window, selected)
+            .days_in_window(window, selected, enabled)
             .into_iter()
-            .map(|d| (d.date, d.metric_value(metric)))
+            .filter_map(|d| {
+                d.filtered(enabled)
+                    .map(|filtered| (filtered.date, filtered.metric_value(metric)))
+            })
             .collect();
         let mut cursor = end;
         let mut streak = 0usize;
@@ -785,7 +871,7 @@ fn render_dashboard(
             render_models_page(f, root[2], dashboard, summary, state, theme);
         }
         UsagePage::Daily => {
-            render_daily_page(f, root[2], dashboard, summary, state, theme);
+            render_daily_page(f, root[2], dashboard, state, theme);
         }
         UsagePage::Heatmap => render_heatmap_page(f, root[2], dashboard, state, theme),
     }
@@ -1343,7 +1429,6 @@ fn render_daily_page(
     f: &mut ratatui::Frame,
     area: Rect,
     dashboard: &UsageDashboard,
-    summary: &UsageSummary,
     state: &UsageState,
     theme: &Theme,
 ) {
@@ -1353,40 +1438,56 @@ fn render_daily_page(
         .split(area);
 
     // Summary header
-    render_daily_summary(f, sections[0], summary, theme);
+    render_daily_summary(f, sections[0], dashboard, state, theme);
 
     // Table
     render_daily_table(f, sections[1], dashboard, state, theme);
 }
 
-fn render_daily_summary(f: &mut ratatui::Frame, area: Rect, summary: &UsageSummary, theme: &Theme) {
+fn render_daily_summary(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    dashboard: &UsageDashboard,
+    state: &UsageState,
+    theme: &Theme,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let days = dashboard.filtered_daily(&state.enabled_sources);
+    let total_cost: f64 = days.iter().map(|day| day.cost_usd).sum();
+    let avg_daily_cost = if days.is_empty() {
+        0.0
+    } else {
+        total_cost / days.len() as f64
+    };
+    let max_daily_cost = days.iter().map(|day| day.cost_usd).fold(0.0, f64::max);
+    let active_days = days.iter().filter(|day| day.total_tokens > 0).count();
+
     let line = Line::from(vec![
         Span::styled("Period Total ", Style::default().fg(theme.dim)),
         Span::styled(
-            format!("${:.2}", summary.total_cost),
+            format!("${:.2}", total_cost),
             Style::default().fg(theme.gauge_high).bold(),
         ),
         Span::raw("    "),
         Span::styled("Avg Daily ", Style::default().fg(theme.dim)),
         Span::styled(
-            format!("${:.2}", summary.avg_daily_cost),
+            format!("${:.2}", avg_daily_cost),
             Style::default().fg(theme.fg),
         ),
         Span::raw("    "),
         Span::styled("Max Daily ", Style::default().fg(theme.dim)),
         Span::styled(
-            format!("${:.2}", summary.max_daily_cost),
+            format!("${:.2}", max_daily_cost),
             Style::default().fg(theme.fg),
         ),
         Span::raw("    "),
         Span::styled(
-            format!("{} active days", summary.active_days),
+            format!("{} active days", active_days),
             Style::default().fg(theme.dim),
         ),
     ]);
@@ -1410,7 +1511,8 @@ fn render_daily_table(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if dashboard.daily.is_empty() {
+    let mut days = dashboard.filtered_daily(&state.enabled_sources);
+    if days.is_empty() {
         f.render_widget(
             Paragraph::new("No daily data").style(Style::default().fg(theme.dim)),
             inner,
@@ -1419,7 +1521,6 @@ fn render_daily_table(
     }
 
     // Sort daily data
-    let mut days: Vec<&DailyStats> = dashboard.daily.iter().collect();
     match state.sort_field {
         SortField::Date => {
             days.sort_by_key(|d| d.date);
@@ -1546,8 +1647,11 @@ fn render_heatmap_page(
     state: &UsageState,
     theme: &Theme,
 ) {
-    let selected_day =
-        dashboard.selected_day_in_window(state.heatmap_window, state.selected_heatmap_date);
+    let selected_day = dashboard.selected_day_in_window(
+        state.heatmap_window,
+        state.selected_heatmap_date,
+        &state.enabled_sources,
+    );
     let bounds = dashboard.bounds_for_window(state.heatmap_window, state.selected_heatmap_date);
 
     let split = Layout::default()
@@ -1581,11 +1685,12 @@ fn render_heatmap_page(
         state.heatmap_metric,
         state.heatmap_window,
         state.selected_heatmap_date,
+        &state.enabled_sources,
     );
     let heatmap = YearHeatmap::new(&points, state.heatmap_metric)
         .palette(palette)
         .empty(theme.empty_heatmap)
-        .selected(state.selected_heatmap_date)
+        .selected(selected_day.as_ref().map(|day| day.date))
         .range_opt(bounds);
     f.render_widget(heatmap, heat_inner);
 
@@ -1627,11 +1732,18 @@ fn render_heatmap_page(
         state.heatmap_window,
         state.heatmap_metric,
         state.selected_heatmap_date,
+        &state.enabled_sources,
         theme,
     );
-    render_heatmap_day_detail(f, right[1], selected_day, state.heatmap_metric, theme);
-    render_heatmap_token_breakdown(f, right[2], selected_day, theme);
-    render_heatmap_day_models(f, right[3], selected_day, theme);
+    render_heatmap_day_detail(
+        f,
+        right[1],
+        selected_day.as_ref(),
+        state.heatmap_metric,
+        theme,
+    );
+    render_heatmap_token_breakdown(f, right[2], selected_day.as_ref(), theme);
+    render_heatmap_day_models(f, right[3], selected_day.as_ref(), theme);
 }
 
 fn render_heatmap_summary_card(
@@ -1641,6 +1753,7 @@ fn render_heatmap_summary_card(
     window: HeatmapWindow,
     metric: HeatmapMetric,
     selected: Option<NaiveDate>,
+    enabled: &BTreeSet<String>,
     theme: &Theme,
 ) {
     let block = Block::default()
@@ -1653,7 +1766,7 @@ fn render_heatmap_summary_card(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let values = dashboard.values_in_window(metric, window, selected);
+    let values = dashboard.values_in_window(metric, window, selected, enabled);
     let total = values.iter().sum::<f64>();
     let avg = if values.is_empty() {
         0.0
@@ -1661,9 +1774,9 @@ fn render_heatmap_summary_card(
         total / values.len() as f64
     };
     let peak = values.iter().copied().fold(0.0, f64::max);
-    let active_days = dashboard.active_days_in_window(metric, window, selected);
-    let current_streak = dashboard.current_streak_in_window(metric, window, selected);
-    let longest_streak = dashboard.longest_streak_in_window(metric, window, selected);
+    let active_days = dashboard.active_days_in_window(metric, window, selected, enabled);
+    let current_streak = dashboard.current_streak_in_window(metric, window, selected, enabled);
+    let longest_streak = dashboard.longest_streak_in_window(metric, window, selected, enabled);
 
     let lines = vec![
         Line::from(vec![
@@ -1961,4 +2074,127 @@ fn truncate(text: &str, width: usize) -> String {
     }
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokenpulse_core::usage::UsageRollup;
+
+    fn sample_dashboard() -> UsageDashboard {
+        let summary = UsageSummary {
+            total_cost: 3.0,
+            total_tokens: 300,
+            message_count: 3,
+            session_count: 3,
+            active_days: 1,
+            avg_daily_cost: 3.0,
+            max_daily_cost: 3.0,
+            avg_daily_tokens: 300.0,
+            max_daily_tokens: 300,
+            daily: vec![DashboardDay {
+                date: "2026-04-01".to_string(),
+                total_tokens: 300,
+                total_cost_usd: 3.0,
+                input_tokens: 120,
+                output_tokens: 140,
+                cache_read_tokens: 30,
+                cache_write_tokens: 10,
+                reasoning_tokens: 0,
+                message_count: 3,
+                session_count: 3,
+                intensity_tokens: 1,
+                intensity_cost: 1,
+            }],
+            weekly: Vec::<UsageRollup>::new(),
+            monthly: Vec::<UsageRollup>::new(),
+            by_provider: Vec::new(),
+            by_model: vec![
+                ModelSummary {
+                    model: "claude-1".to_string(),
+                    provider: "anthropic".to_string(),
+                    source: "claude".to_string(),
+                    cost: 1.0,
+                    tokens: 100,
+                    message_count: 1,
+                    session_count: 1,
+                    percent: 33.0,
+                },
+                ModelSummary {
+                    model: "gpt-5".to_string(),
+                    provider: "openai".to_string(),
+                    source: "codex".to_string(),
+                    cost: 2.0,
+                    tokens: 200,
+                    message_count: 2,
+                    session_count: 2,
+                    percent: 67.0,
+                },
+            ],
+        };
+        let daily_rows = vec![
+            DailyUsageRow {
+                date: "2026-04-01".to_string(),
+                source: "claude".to_string(),
+                provider_id: "anthropic".to_string(),
+                model_id: "claude-1".to_string(),
+                input_tokens: 40,
+                output_tokens: 50,
+                cache_read_tokens: 5,
+                cache_write_tokens: 5,
+                reasoning_tokens: 0,
+                total_tokens: 100,
+                cost_usd: 1.0,
+                message_count: 1,
+                session_count: 1,
+            },
+            DailyUsageRow {
+                date: "2026-04-01".to_string(),
+                source: "codex".to_string(),
+                provider_id: "openai".to_string(),
+                model_id: "gpt-5".to_string(),
+                input_tokens: 80,
+                output_tokens: 90,
+                cache_read_tokens: 25,
+                cache_write_tokens: 5,
+                reasoning_tokens: 0,
+                total_tokens: 200,
+                cost_usd: 2.0,
+                message_count: 2,
+                session_count: 2,
+            },
+        ];
+
+        UsageDashboard::build(&summary, &daily_rows)
+    }
+
+    #[test]
+    fn filtered_daily_recomputes_day_totals_from_enabled_sources() {
+        let dashboard = sample_dashboard();
+        let enabled = BTreeSet::from(["codex".to_string()]);
+
+        let days = dashboard.filtered_daily(&enabled);
+
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].total_tokens, 200);
+        assert_eq!(days[0].cost_usd, 2.0);
+        assert_eq!(days[0].input_tokens, 80);
+        assert_eq!(days[0].output_tokens, 90);
+        assert_eq!(days[0].cache_tokens(), 30);
+        assert_eq!(days[0].messages, 2);
+        assert_eq!(days[0].provider_rows().len(), 1);
+        assert_eq!(days[0].model_rows_sorted().len(), 1);
+    }
+
+    #[test]
+    fn heatmap_selection_uses_filtered_sources() {
+        let dashboard = sample_dashboard();
+        let enabled = BTreeSet::from(["codex".to_string()]);
+        let selected = NaiveDate::from_ymd_opt(2026, 4, 1);
+
+        let day = dashboard.selected_day_in_window(HeatmapWindow::SelectedYear, selected, &enabled);
+
+        assert!(day.is_some());
+        assert_eq!(day.unwrap().total_tokens, 200);
+    }
 }

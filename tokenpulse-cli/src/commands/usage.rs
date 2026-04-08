@@ -2,7 +2,6 @@ use crate::tui;
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use tokenpulse_core::{
-    config::ConfigManager,
     usage::{
         build_usage_summary_from_daily, ClaudeSessionParser, CodexSessionParser,
         CopilotSessionParser, DateRange, GeminiSessionParser, OpenCodeSessionParser,
@@ -10,6 +9,9 @@ use tokenpulse_core::{
     },
     SessionParser, UnifiedMessage,
 };
+
+const SUPPORTED_USAGE_PROVIDERS: &[&str] =
+    &["claude", "codex", "copilot", "opencode", "gemini", "pi"];
 
 pub async fn run(
     since: Option<String>,
@@ -111,10 +113,10 @@ fn parse_provider_names(provider: Option<&str>) -> Vec<String> {
             .filter(|name| !name.is_empty())
             .map(ToOwned::to_owned)
             .collect(),
-        None => {
-            let config_manager = ConfigManager::new();
-            config_manager.get_enabled_providers()
-        }
+        None => SUPPORTED_USAGE_PROVIDERS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
     }
 }
 
@@ -257,5 +259,25 @@ fn format_int<T: ToString>(value: T) -> String {
         format!("-{}", formatted)
     } else {
         formatted
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_provider_names;
+
+    #[test]
+    fn parse_provider_names_defaults_to_all_supported_usage_sources() {
+        assert_eq!(
+            parse_provider_names(None),
+            vec![
+                "claude".to_string(),
+                "codex".to_string(),
+                "copilot".to_string(),
+                "opencode".to_string(),
+                "gemini".to_string(),
+                "pi".to_string(),
+            ]
+        );
     }
 }

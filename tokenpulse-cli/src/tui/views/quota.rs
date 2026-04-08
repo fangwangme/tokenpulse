@@ -81,7 +81,11 @@ fn calculate_pace(window: &RateWindow) -> Option<(&'static str, String)> {
         let remaining_ms = (100.0 - window.used_percent) / rate;
         Some((
             "behind",
-            format!("+{:.0}% pace | eta {}", deficit, format_reset_duration(chrono::Duration::milliseconds(remaining_ms as i64))),
+            format!(
+                "+{:.0}% pace | eta {}",
+                deficit,
+                format_reset_duration(chrono::Duration::milliseconds(remaining_ms as i64))
+            ),
         ))
     } else {
         Some(("ahead", format!("{:.0}% under pace", deficit.abs())))
@@ -235,7 +239,10 @@ fn render_header(
                 Style::default().fg(theme.gemini),
             ),
             Span::raw("  "),
-            Span::styled(format!("last fetch {}", last_fetch), Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("last fetch {}", last_fetch),
+                Style::default().fg(theme.dim),
+            ),
         ]),
     ];
 
@@ -361,7 +368,15 @@ fn render_snapshot_card(
     for window in &snapshot.windows {
         let gauge_area = sections[cursor];
         cursor += 1;
-        render_window_block(f, gauge_area, snapshot, window, display_mode, theme, compact);
+        render_window_block(
+            f,
+            gauge_area,
+            snapshot,
+            window,
+            display_mode,
+            theme,
+            compact,
+        );
     }
 
     if let Some(credits) = &snapshot.credits {
@@ -376,7 +391,10 @@ fn render_snapshot_card(
                 credits.currency, credits.used, credits.currency, limit, percent
             )
         } else {
-            format!("Credits {}{:.2} (unlimited)", credits.currency, credits.used)
+            format!(
+                "Credits {}{:.2} (unlimited)",
+                credits.currency, credits.used
+            )
         };
         let line = Paragraph::new(credit_text)
             .style(Style::default().fg(theme.dim))
@@ -415,11 +433,7 @@ fn render_window_block(
 
     let shown_percent = quota_percent(display_mode, window.used_percent);
     let label = truncate(
-        &format!(
-            "{} {}",
-            window.label,
-            quota_suffix(display_mode)
-        ),
+        &format!("{} {}", window.label, quota_suffix(display_mode)),
         area.width.saturating_sub(18) as usize,
     );
     let reset_str = window
@@ -445,9 +459,7 @@ fn render_window_block(
     }
 
     let pace = pace_result
-        .map(|(status, text)| {
-            Span::styled(text, Style::default().fg(theme.pace_color(status)))
-        })
+        .map(|(status, text)| Span::styled(text, Style::default().fg(theme.pace_color(status))))
         .unwrap_or_else(|| Span::styled("No pace data", Style::default().fg(theme.dim)));
 
     let primary = match display_mode {

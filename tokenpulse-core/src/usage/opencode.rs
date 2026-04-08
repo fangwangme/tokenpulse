@@ -1,8 +1,10 @@
 use crate::pricing::{calculate_cost, lookup_model_pricing_or_warn, PricingCache};
-use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
+use crate::provider::{
+    local_date_string_from_timestamp, SessionParser, TokenBreakdown, UnifiedMessage,
+};
 
 use anyhow::Result;
-use chrono::NaiveDate;
+use chrono::{Local, LocalResult, NaiveDate, TimeZone};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -147,9 +149,7 @@ impl OpenCodeSessionParser {
             })
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
         let tokens = msg_data.tokens?;
-        let date = chrono::DateTime::from_timestamp_millis(timestamp)
-            .map(|dt| dt.format("%Y-%m-%d").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let date = local_date_string_from_timestamp(timestamp);
         let message_key = message_id
             .clone()
             .unwrap_or_else(|| format!("{}:{}:{}", session_id, timestamp, model_id));
@@ -232,8 +232,12 @@ impl SessionParser for OpenCodeSessionParser {
 }
 
 fn start_of_day_timestamp_ms(date: NaiveDate) -> Option<i64> {
-    date.and_hms_opt(0, 0, 0)
-        .map(|dt| dt.and_utc().timestamp_millis())
+    let start = date.and_hms_opt(0, 0, 0)?;
+    match Local.from_local_datetime(&start) {
+        LocalResult::Single(dt) => Some(dt.timestamp_millis()),
+        LocalResult::Ambiguous(early, _) => Some(early.timestamp_millis()),
+        LocalResult::None => None,
+    }
 }
 
 fn message_on_or_after(message: &UnifiedMessage, since: NaiveDate) -> bool {

@@ -1,4 +1,6 @@
-use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
+use crate::provider::{
+    local_date_string_from_timestamp, SessionParser, TokenBreakdown, UnifiedMessage,
+};
 use crate::usage::scanner;
 
 use anyhow::Result;
@@ -45,9 +47,7 @@ impl PiSessionParser {
                                 let timestamp = entry
                                     .timestamp
                                     .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-                                let date = chrono::DateTime::from_timestamp_millis(timestamp)
-                                    .map(|dt| dt.format("%Y-%m-%d").to_string())
-                                    .unwrap_or_else(|| "unknown".to_string());
+                                let date = local_date_string_from_timestamp(timestamp);
 
                                 let tokens = TokenBreakdown {
                                     input: usage.input_tokens.unwrap_or(0),

@@ -22,24 +22,10 @@ impl CopilotAuth {
     pub fn load_token(&self) -> Result<String> {
         debug!("Loading GitHub Copilot token");
 
-        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-            if !token.is_empty() {
-                debug!("Found GITHUB_TOKEN env var");
-                return Ok(token);
-            }
-        }
-
-        if let Some(token) = Self::load_from_gh_cli() {
-            debug!("Found token via gh CLI");
-            return Ok(token);
-        }
-
-        if let Some(token) = self.load_from_config_file() {
-            debug!("Found token in config file");
-            return Ok(token);
-        }
-
-        Err(anyhow!("GitHub Copilot credentials not found"))
+        self.token_candidates()
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("GitHub Copilot credentials not found"))
     }
 
     fn load_from_gh_cli() -> Option<String> {
@@ -77,6 +63,32 @@ impl CopilotAuth {
         None
     }
 
+    pub fn token_candidates(&self) -> Vec<String> {
+        let mut tokens = Vec::new();
+
+        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            Self::push_unique_token(&mut tokens, token, "GITHUB_TOKEN env var");
+        }
+
+        if let Some(token) = Self::load_from_gh_cli() {
+            Self::push_unique_token(&mut tokens, token, "gh CLI");
+        }
+
+        if let Some(token) = self.load_from_config_file() {
+            Self::push_unique_token(&mut tokens, token, "config file");
+        }
+
+        tokens
+    }
+
+    fn push_unique_token(tokens: &mut Vec<String>, token: String, source: &str) {
+        if token.is_empty() || tokens.iter().any(|existing| existing == &token) {
+            return;
+        }
+        debug!("Found Copilot token via {}", source);
+        tokens.push(token);
+    }
+
     pub fn detect() -> bool {
         if std::env::var("GITHUB_TOKEN").map_or(false, |t| !t.is_empty()) {
             return true;
@@ -92,9 +104,10 @@ impl CopilotAuth {
     }
 
     pub fn credential_status(&self) -> CredentialStatus {
-        match self.load_token() {
-            Ok(_) => CredentialStatus::Valid,
-            Err(_) => CredentialStatus::NotFound,
+        if self.token_candidates().is_empty() {
+            CredentialStatus::NotFound
+        } else {
+            CredentialStatus::Valid
         }
     }
 

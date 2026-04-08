@@ -17,12 +17,8 @@ pub fn discover_files(root: &PathBuf, extension: &str, since: Option<NaiveDate>)
             if let Some(since_date) = since {
                 if let Ok(metadata) = e.metadata() {
                     if let Ok(modified) = metadata.modified() {
-                        use std::time::UNIX_EPOCH;
-                        let modified_time = modified.duration_since(UNIX_EPOCH).unwrap_or_default();
-                        let modified_datetime =
-                            chrono::DateTime::from_timestamp(modified_time.as_secs() as i64, 0)
-                                .unwrap_or_else(|| chrono::Utc::now());
-                        let modified_date = modified_datetime.date_naive();
+                        let modified_date =
+                            chrono::DateTime::<chrono::Local>::from(modified).date_naive();
                         return modified_date >= since_date;
                     }
                 }
