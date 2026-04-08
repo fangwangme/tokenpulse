@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod copilot;
 pub mod gemini;
 pub mod opencode;
 pub mod pi;
@@ -8,6 +9,7 @@ pub mod store;
 
 pub use claude::ClaudeSessionParser;
 pub use codex::CodexSessionParser;
+pub use copilot::CopilotSessionParser;
 pub use gemini::GeminiSessionParser;
 pub use opencode::OpenCodeSessionParser;
 pub use pi::PiSessionParser;

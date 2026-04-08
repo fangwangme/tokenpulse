@@ -88,6 +88,7 @@ impl<'a> YearHeatmap<'a> {
         self
     }
 
+    #[allow(dead_code)]
     pub fn range(mut self, start: NaiveDate, end: NaiveDate) -> Self {
         self.range = Some((start, end));
         self
@@ -118,11 +119,7 @@ impl<'a> YearHeatmap<'a> {
 }
 
 fn compute_quantiles(cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
-    let mut sorted: Vec<f64> = cell_values
-        .values()
-        .copied()
-        .filter(|&v| v > 0.0)
-        .collect();
+    let mut sorted: Vec<f64> = cell_values.values().copied().filter(|&v| v > 0.0).collect();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     if sorted.is_empty() {
         return [0.0; 4];

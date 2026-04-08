@@ -14,10 +14,11 @@ Current goals:
 
 ## Provider Status
 
-Current provider maturity as of 2026-03-24:
+Current provider maturity:
 
 - `Claude Code`: usable for daily token tracking
 - `Codex`: usable for daily token tracking
+- `Copilot`: usable for daily token tracking (OTEL events)
 - `OpenCode`: usable for daily token tracking
 - `Gemini CLI`: provisional parser, needs more real-world validation
 - `PI`: parser retained, secondary product scope
@@ -32,6 +33,7 @@ usage/
 ├── scanner.rs      # local file discovery
 ├── claude.rs       # Claude Code JSONL parser
 ├── codex.rs        # Codex JSONL parser
+├── copilot.rs      # GitHub Copilot OTEL JSONL parser
 ├── opencode.rs     # OpenCode SQLite parser
 ├── gemini.rs       # Gemini CLI JSON parser
 └── pi.rs           # PI JSONL parser
@@ -160,6 +162,17 @@ Important rule:
   - `~/.pi/agent/sessions/**/*.jsonl`
 - retained but not a primary dashboard target
 
+### GitHub Copilot
+
+- source path:
+  - `~/.local/share/github-copilot/events.jsonl`
+- parses OTEL JSONL events (OpenTelemetry format)
+- event name filter: `gen_ai.client.inference.operation.details`
+- deduplication by `response_id` within each parse run
+- cache estimation: tracks input token growth within session+model pairs
+- provider detection from model name (claude→anthropic, gpt→openai, gemini→google, etc.)
+- requires VS Code setting: `"github.copilot.chat.otel.enabled": true`
+
 ## CLI Behavior
 
 Current command shape:
@@ -188,37 +201,56 @@ Non-TUI output includes:
 
 ## TUI Model
 
-The usage TUI is centered on three tabs:
+The usage TUI is organized into four tabs:
 
-- `GitHub`
-- `By Day`
-- `By Model`
+- `Overview` - 60-day stacked bar chart + top models by cost
+- `Models` - Full sortable model table with provider-based coloring
+- `Daily` - Daily summary table with sorting
+- `Heatmap` - GitHub-style contribution graph with drill-down
 
-### `GitHub`
+### Source Filtering
+
+All tabs support runtime source filtering:
+- Press `s` to open filter overlay
+- Toggle individual providers on/off
+- Data in all views updates immediately
+- Config file (`~/.config/tokenpulse/config.toml`) controls which providers are loaded
+
+### `Overview`
 
 Primary historical dashboard view:
 
-- contribution heatmap
-- metric switching
-- range switching
-- selected-day detail
-- day-level source breakdown
+- 60-day stacked bar chart (tokens by provider)
+- Top 10 models by cost
+- Provider-colored legend
 
-### `By Day`
+### `Models`
+
+Model attribution view:
+
+- Sortable table (cost, tokens, date)
+- Provider-colored model names
+- Filtered by enabled sources
+
+### `Daily`
 
 Daily operations view:
 
-- daily totals table
-- latest week and month summary cards
-- token, cost, message, and cache totals
+- Summary cards (cost, tokens, messages, sessions)
+- Daily table with today highlighted
+- Sortable by date/cost/tokens
 
-### `By Model`
+### `Heatmap`
 
-Consumption attribution view:
+GitHub-style contribution graph:
 
-- provider ranking
-- model ranking
-- provider/model token and cost splits
+- 7 switchable metrics
+- 3 window modes (26w/52w/year)
+- Day drill-down with:
+  - Provider breakdown
+  - Token composition (input/output/cache/reasoning)
+  - Top models for selected day
+- Streak tracking
 
 ## Known Limits
 

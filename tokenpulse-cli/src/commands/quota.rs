@@ -5,7 +5,7 @@ use tokenpulse_core::config::{ConfigManager, QuotaDisplayMode};
 use tokenpulse_core::{
     quota::{
         fetch_all, AntigravityQuotaFetcher, ClaudeQuotaFetcher, CodexQuotaFetcher,
-        GeminiQuotaFetcher, QuotaCacheStore,
+        CopilotQuotaFetcher, GeminiQuotaFetcher, QuotaCacheStore,
     },
     QuotaFetcher,
 };
@@ -22,6 +22,7 @@ fn display_provider_name(provider: &str) -> &'static str {
         "claude" => "CLAUDE CODE",
         "gemini" => "GEMINI CLI",
         "codex" => "CODEX",
+        "copilot" => "GITHUB COPILOT",
         "antigravity" => "ANTIGRAVITY",
         _ => "UNKNOWN",
     }
@@ -51,8 +52,7 @@ fn draw_progress_bar(
                 QuotaDisplayMode::Used => elapsed_fraction * 100.0,
                 QuotaDisplayMode::Remaining => (1.0 - elapsed_fraction).max(0.0) * 100.0,
             };
-            let expected_blocks =
-                ((expected_percent / 100.0) * BAR_WIDTH as f64).round() as usize;
+            let expected_blocks = ((expected_percent / 100.0) * BAR_WIDTH as f64).round() as usize;
             Some(expected_blocks.min(BAR_WIDTH))
         } else {
             None
@@ -339,11 +339,12 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
         Some(ref p) => match p.as_str() {
             "claude" => vec![Box::new(ClaudeQuotaFetcher::new())],
             "codex" => vec![Box::new(CodexQuotaFetcher::new())],
+            "copilot" => vec![Box::new(CopilotQuotaFetcher::new())],
             "gemini" => vec![Box::new(GeminiQuotaFetcher::new())],
             "antigravity" => vec![Box::new(AntigravityQuotaFetcher::new())],
             _ => {
                 eprintln!("Unknown provider: {}", p);
-                eprintln!("Supported providers: claude, codex, gemini, antigravity");
+                eprintln!("Supported providers: claude, codex, copilot, gemini, antigravity");
                 return Ok(());
             }
         },
@@ -354,6 +355,9 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
             }
             if enabled_providers.contains(&"codex".to_string()) {
                 list.push(Box::new(CodexQuotaFetcher::new()));
+            }
+            if enabled_providers.contains(&"copilot".to_string()) {
+                list.push(Box::new(CopilotQuotaFetcher::new()));
             }
             if enabled_providers.contains(&"gemini".to_string()) {
                 list.push(Box::new(GeminiQuotaFetcher::new()));
@@ -410,6 +414,7 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
         eprintln!("To use tokenpulse, you need to have at least one of these tools installed:");
         eprintln!(" - Claude Code: https://docs.anthropic.com/en/docs/claude-code");
         eprintln!(" - Codex: https://github.com/openai/codex");
+        eprintln!(" - GitHub Copilot: https://github.com/features/copilot");
         eprintln!(" - Gemini CLI: https://github.com/google-gemini/gemini-cli");
         eprintln!(" - Antigravity: https://antigravity.com\n");
         eprintln!("After installing, run the tool to login, then try again.");

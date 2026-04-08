@@ -2,9 +2,11 @@ use crate::tui;
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use tokenpulse_core::{
+    config::ConfigManager,
     usage::{
-        build_usage_summary_from_daily, ClaudeSessionParser, CodexSessionParser, DateRange,
-        GeminiSessionParser, OpenCodeSessionParser, PiSessionParser, UsageStore,
+        build_usage_summary_from_daily, ClaudeSessionParser, CodexSessionParser,
+        CopilotSessionParser, DateRange, GeminiSessionParser, OpenCodeSessionParser,
+        PiSessionParser, UsageStore,
     },
     SessionParser, UnifiedMessage,
 };
@@ -72,6 +74,7 @@ pub async fn run(
             eprintln!("Checked providers:");
             eprintln!(" - Claude Code: ~/.claude/projects/ or ~/.claude/transcripts/");
             eprintln!(" - Codex: ~/.codex/sessions/");
+            eprintln!(" - Copilot: ~/.local/share/github-copilot/events.jsonl");
             eprintln!(" - OpenCode: ~/.local/share/opencode/");
             eprintln!(" - Gemini CLI: ~/.gemini/tmp/");
             eprintln!(" - PI: ~/.pi/agent/sessions/");
@@ -108,12 +111,10 @@ fn parse_provider_names(provider: Option<&str>) -> Vec<String> {
             .filter(|name| !name.is_empty())
             .map(ToOwned::to_owned)
             .collect(),
-        None => vec![
-            "claude".to_string(),
-            "codex".to_string(),
-            "opencode".to_string(),
-            "gemini".to_string(),
-        ],
+        None => {
+            let config_manager = ConfigManager::new();
+            config_manager.get_enabled_providers()
+        }
     }
 }
 
@@ -123,6 +124,7 @@ fn build_parsers(provider_names: &[String]) -> Vec<Box<dyn SessionParser>> {
         .filter_map(|provider| match provider.as_str() {
             "claude" => Some(Box::new(ClaudeSessionParser::new()) as Box<dyn SessionParser>),
             "codex" => Some(Box::new(CodexSessionParser::new()) as Box<dyn SessionParser>),
+            "copilot" => Some(Box::new(CopilotSessionParser::new()) as Box<dyn SessionParser>),
             "opencode" => Some(Box::new(OpenCodeSessionParser::new()) as Box<dyn SessionParser>),
             "gemini" => Some(Box::new(GeminiSessionParser::new()) as Box<dyn SessionParser>),
             "pi" => Some(Box::new(PiSessionParser::new()) as Box<dyn SessionParser>),

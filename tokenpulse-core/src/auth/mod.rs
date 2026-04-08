@@ -1,11 +1,13 @@
 pub mod antigravity;
 pub mod claude;
 pub mod codex;
+pub mod copilot;
 pub mod gemini;
 
 pub use antigravity::AntigravityAuth;
 pub use claude::ClaudeAuth;
 pub use codex::CodexAuth;
+pub use copilot::CopilotAuth;
 pub use gemini::GeminiAuth;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +66,12 @@ pub fn detect_providers() -> Vec<DetectedProvider> {
             } else {
                 "not detected".to_string()
             },
+        },
+        DetectedProvider {
+            name: "copilot".to_string(),
+            display_name: "GitHub Copilot".to_string(),
+            detected: CopilotAuth::detect(),
+            credential_hint: CopilotAuth::credential_hint(),
         },
     ]
 }
