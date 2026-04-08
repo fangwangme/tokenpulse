@@ -1,5 +1,7 @@
 use crate::tui::theme::Theme;
-use crate::tui::widgets::{GradientGauge, HeatmapMetric, StyledTable, YearHeatmap};
+use crate::tui::widgets::{
+    GradientGauge, HeatmapMetric, StackedBarChart, StyledTable, TrendSparkline, YearHeatmap,
+};
 use anyhow::Result;
 use chrono::{Datelike, Duration, NaiveDate};
 use crossterm::{
@@ -78,6 +80,25 @@ struct DailyStats {
     models: HashMap<String, DayBreakdown>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct TokenComposition {
+    input: i64,
+    output: i64,
+    cache: i64,
+    reasoning: i64,
+    total: i64,
+}
+
+impl TokenComposition {
+    fn share(self, value: i64) -> f64 {
+        if self.total <= 0 {
+            0.0
+        } else {
+            (value as f64 / self.total as f64 * 100.0).clamp(0.0, 100.0)
+        }
+    }
+}
+
 impl DailyStats {
     fn from_day(day: &DashboardDay) -> Option<Self> {
         Some(Self {
@@ -98,6 +119,16 @@ impl DailyStats {
 
     fn cache_tokens(&self) -> i64 {
         self.cache_read_tokens + self.cache_write_tokens
+    }
+
+    fn token_composition(&self) -> TokenComposition {
+        TokenComposition {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            cache: self.cache_tokens(),
+            reasoning: self.reasoning_tokens,
+            total: self.total_tokens,
+        }
     }
 
     fn metric_value(&self, metric: HeatmapMetric) -> f64 {
@@ -380,6 +411,23 @@ impl UsageDashboard {
         }
         streak
     }
+
+    fn recent_days(&self, limit: usize) -> Vec<&DailyStats> {
+        let start = self.daily.len().saturating_sub(limit);
+        self.daily[start..].iter().collect()
+    }
+
+    fn total_token_composition(&self) -> TokenComposition {
+        self.daily.iter().fold(TokenComposition::default(), |mut acc, day| {
+            let composition = day.token_composition();
+            acc.input += composition.input;
+            acc.output += composition.output;
+            acc.cache += composition.cache;
+            acc.reasoning += composition.reasoning;
+            acc.total += composition.total;
+            acc
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -528,7 +576,6 @@ fn render_dashboard(
 ) {
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
         .constraints([
             Constraint::Length(4),
             Constraint::Length(3),
@@ -559,15 +606,9 @@ fn render_header(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent_soft));
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let inner = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
 
     let title = Line::from(vec![
         Span::styled("TokenPulse", Style::default().fg(theme.accent).bold()),
@@ -676,16 +717,16 @@ fn render_github_page(
     let bounds = dashboard.bounds_for_window(state.heatmap_window, state.selected_heatmap_date);
     let split = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(area);
 
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(14), Constraint::Length(2)])
+        .constraints([Constraint::Min(16), Constraint::Length(3)])
         .split(split[0]);
 
     let heat_title = format!(
-        " Contribution Grid - {} / {} ",
+        " Activity Grid - {} / {} ",
         state.heatmap_window.label(),
         state.heatmap_metric.label()
     );
@@ -695,15 +736,9 @@ fn render_github_page(
             Style::default().fg(theme.accent).bold(),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent));
+        .border_style(Style::default().fg(theme.border));
+    let inner = heat_block.inner(left[0]);
     f.render_widget(heat_block, left[0]);
-
-    let inner = Rect::new(
-        left[0].x + 1,
-        left[0].y + 1,
-        left[0].width.saturating_sub(2),
-        left[0].height.saturating_sub(2),
-    );
 
     let palette = heatmap_palette(theme, state.heatmap_metric);
     let points = dashboard.points_in_window(
@@ -724,13 +759,13 @@ fn render_github_page(
     let legend = Paragraph::new(Line::from(vec![
         Span::styled("low", Style::default().fg(theme.dim)),
         Span::raw("  "),
-        Span::styled("▁▂▃▄▅▆▇█", Style::default().fg(palette[4])),
+        Span::styled("░▒▓█", Style::default().fg(palette[4])),
         Span::raw("  "),
         Span::styled("high", Style::default().fg(theme.dim)),
         Span::raw("  "),
         Span::styled(
             format!(
-                "{} | {}",
+                "{}  |  selected {}",
                 range_label,
                 selected_day
                     .map(|day| day.date.format("%Y-%m-%d").to_string())
@@ -739,15 +774,19 @@ fn render_github_page(
             Style::default().fg(theme.fg),
         ),
     ]))
-    .block(Block::default().borders(Borders::ALL));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border)),
+    );
     f.render_widget(legend, left[1]);
 
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Min(10),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Min(12),
         ])
         .split(split[1]);
 
@@ -775,19 +814,13 @@ fn render_heatmap_summary_card(
 ) {
     let block = Block::default()
         .title(Span::styled(
-            " Range Summary ",
+            " Range Overview ",
             Style::default().fg(theme.accent_soft).bold(),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent_soft));
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let inner = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
 
     let values = dashboard.values_in_window(metric, window, selected);
     let total = values.iter().sum::<f64>();
@@ -807,18 +840,16 @@ fn render_heatmap_summary_card(
             Span::styled("Total ", Style::default().fg(theme.dim)),
             Span::styled(
                 format_metric(metric, total),
-                Style::default().fg(theme.fg).bold(),
+                Style::default().fg(theme.accent).bold(),
             ),
+            Span::raw("  "),
+            Span::styled("Peak ", Style::default().fg(theme.dim)),
+            Span::styled(format_metric(metric, peak), Style::default().fg(theme.fg)),
         ]),
         Line::from(vec![
             Span::styled("Avg   ", Style::default().fg(theme.dim)),
             Span::styled(format_metric(metric, avg), Style::default().fg(theme.fg)),
-        ]),
-        Line::from(vec![
-            Span::styled("Peak  ", Style::default().fg(theme.dim)),
-            Span::styled(format_metric(metric, peak), Style::default().fg(theme.fg)),
-        ]),
-        Line::from(vec![
+            Span::raw("  "),
             Span::styled("Latest", Style::default().fg(theme.dim)),
             Span::styled(format_metric(metric, latest), Style::default().fg(theme.fg)),
         ]),
@@ -826,6 +857,9 @@ fn render_heatmap_summary_card(
             Span::styled("Active", Style::default().fg(theme.dim)),
             Span::styled(active_days.to_string(), Style::default().fg(theme.fg)),
             Span::styled(" days", Style::default().fg(theme.dim)),
+            Span::raw("  "),
+            Span::styled("Window ", Style::default().fg(theme.dim)),
+            Span::styled(window.label(), Style::default().fg(theme.fg)),
         ]),
         Line::from(vec![
             Span::styled("Streak", Style::default().fg(theme.dim)),
@@ -856,15 +890,9 @@ fn render_selected_day_card(
             Style::default().fg(theme.opencode).bold(),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.opencode));
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let inner = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
 
     let Some(day) = day else {
         f.render_widget(
@@ -891,52 +919,37 @@ fn render_selected_day_card(
 
     let lines = vec![
         Line::from(vec![
-            Span::styled("Date   ", Style::default().fg(theme.dim)),
             Span::styled(
                 day.date.format("%Y-%m-%d").to_string(),
-                Style::default().fg(theme.fg),
+                Style::default().fg(theme.opencode).bold(),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("Value  ", Style::default().fg(theme.dim)),
+            Span::raw("  "),
+            Span::styled("Value ", Style::default().fg(theme.dim)),
             Span::styled(
                 format_metric(metric, day.metric_value(metric)),
                 Style::default().fg(theme.fg).bold(),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Cost   ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format!("${:.2}", day.cost_usd),
-                Style::default().fg(theme.fg),
-            ),
+            Span::styled("Cost ", Style::default().fg(theme.dim)),
+            Span::styled(format!("${:.2}", day.cost_usd), Style::default().fg(theme.fg)),
+            Span::raw("  "),
+            Span::styled("Tokens ", Style::default().fg(theme.dim)),
+            Span::styled(format_compact(day.total_tokens), Style::default().fg(theme.fg)),
         ]),
         Line::from(vec![
-            Span::styled("Msgs   ", Style::default().fg(theme.dim)),
+            Span::styled("Msgs ", Style::default().fg(theme.dim)),
             Span::styled(format_compact(day.messages), Style::default().fg(theme.fg)),
-            Span::styled("  Sess ", Style::default().fg(theme.dim)),
+            Span::raw("  "),
+            Span::styled("Sess ", Style::default().fg(theme.dim)),
             Span::styled(format_compact(day.sessions), Style::default().fg(theme.fg)),
         ]),
         Line::from(vec![
-            Span::styled("Cache  ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format_compact(day.cache_tokens()),
-                Style::default().fg(theme.fg),
-            ),
-            Span::styled("  Rsn  ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format_compact(day.reasoning_tokens),
-                Style::default().fg(theme.fg),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Top src", Style::default().fg(theme.dim)),
-            Span::raw(" "),
+            Span::styled("Top src ", Style::default().fg(theme.dim)),
             Span::styled(top_provider, Style::default().fg(theme.fg)),
         ]),
         Line::from(vec![
-            Span::styled("Top mdl", Style::default().fg(theme.dim)),
-            Span::raw(" "),
+            Span::styled("Top mdl ", Style::default().fg(theme.dim)),
             Span::styled(top_model, Style::default().fg(theme.fg)),
         ]),
     ];
@@ -955,19 +968,13 @@ fn render_heatmap_breakdown_card(
 ) {
     let block = Block::default()
         .title(Span::styled(
-            " Day Breakdown ",
+            " Token Mix + Sources ",
             Style::default().fg(theme.gemini).bold(),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.gemini));
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let inner = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
 
     let Some(day) = day else {
         f.render_widget(
@@ -977,29 +984,72 @@ fn render_heatmap_breakdown_card(
         return;
     };
 
-    let rows = day
-        .provider_rows()
-        .into_iter()
-        .take(inner.height.saturating_sub(1) as usize)
-        .map(|(provider, stats)| {
-            vec![
-                provider.to_uppercase(),
-                format_compact(stats.tokens),
-                format!("${:.2}", stats.cost_usd),
-                format_compact(stats.messages),
-            ]
-        })
-        .collect::<Vec<_>>();
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(4)])
+        .split(inner);
 
-    let mut table = StyledTable::new(vec!["Src", "Tokens", "Cost", "Msgs"])
-        .widths(vec![10, 12, 10, 8])
-        .header_color(theme.gemini);
+    let composition = day.token_composition();
+    let mix_rows = [
+        ("Input", composition.input, theme.claude),
+        ("Output", composition.output, theme.codex),
+        ("Cache", composition.cache, theme.gemini),
+        ("Reason", composition.reasoning, theme.opencode),
+    ];
+    let mix_areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Length(1); mix_rows.len() + 1])
+        .split(split[0]);
 
-    for row in rows {
-        table = table.row(row);
+    for (idx, (label, value, color)) in mix_rows.into_iter().enumerate() {
+        let title = format!("{} {}", label, format_compact(value));
+        let gauge = GradientGauge::new(&title, composition.share(value))
+            .width(split[0].width.saturating_sub(18) as usize)
+            .color(color);
+        f.render_widget(gauge, mix_areas[idx]);
+    }
+    f.render_widget(
+        Paragraph::new(format!("{} total tokens", format_compact(day.total_tokens)))
+            .style(Style::default().fg(theme.dim)),
+        mix_areas[mix_rows.len()],
+    );
+
+    let provider_rows = day.provider_rows();
+    if provider_rows.is_empty() {
+        f.render_widget(
+            Paragraph::new("No provider split").style(Style::default().fg(theme.dim)),
+            split[1],
+        );
+        return;
     }
 
-    f.render_widget(table, inner);
+    let provider_areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            provider_rows
+                .iter()
+                .take(split[1].height as usize)
+                .map(|_| Constraint::Length(1))
+                .collect::<Vec<_>>(),
+        )
+        .split(split[1]);
+
+    for (idx, (provider, stats)) in provider_rows
+        .into_iter()
+        .take(provider_areas.len())
+        .enumerate()
+    {
+        let percent = if day.total_tokens <= 0 {
+            0.0
+        } else {
+            (stats.tokens as f64 / day.total_tokens as f64 * 100.0).clamp(0.0, 100.0)
+        };
+        let label = format!("{} {}", provider.to_uppercase(), format_compact(stats.tokens));
+        let gauge = GradientGauge::new(&label, percent)
+            .width(split[1].width.saturating_sub(18) as usize)
+            .color(theme.provider_color(&provider));
+        f.render_widget(gauge, provider_areas[idx]);
+    }
 }
 
 fn render_by_day_page(
@@ -1012,14 +1062,35 @@ fn render_by_day_page(
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),
+            Constraint::Length(4),
+            Constraint::Length(11),
             Constraint::Length(10),
-            Constraint::Min(12),
+            Constraint::Min(10),
         ])
         .split(area);
 
     render_metric_row(f, sections[0], summary, dashboard, theme);
-    render_rollup_row(f, sections[1], dashboard, theme);
+
+    let middle = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(sections[1]);
+    render_recent_trends_card(f, middle[0], dashboard, theme);
+    render_token_mix_card(
+        f,
+        middle[1],
+        " Token Mix ",
+        dashboard.total_token_composition(),
+        Some(format!("{} loaded days", dashboard.daily.len())),
+        theme,
+    );
+
+    let lower = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(sections[2]);
+    render_provider_flow_card(f, lower[0], dashboard, theme);
+    render_rollup_summary_card(f, lower[1], dashboard, theme);
 
     let block = Block::default()
         .title(Span::styled(
@@ -1027,15 +1098,9 @@ fn render_by_day_page(
             Style::default().fg(theme.accent).bold(),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent));
-    f.render_widget(block, sections[2]);
-
-    let inner = Rect::new(
-        sections[2].x + 1,
-        sections[2].y + 1,
-        sections[2].width.saturating_sub(2),
-        sections[2].height.saturating_sub(2),
-    );
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(sections[3]);
+    f.render_widget(block, sections[3]);
 
     let rows = dashboard
         .daily
@@ -1065,6 +1130,319 @@ fn render_by_day_page(
     f.render_widget(table, inner);
 }
 
+fn render_recent_trends_card(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    dashboard: &UsageDashboard,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Recent Trends ",
+            Style::default().fg(theme.accent_soft).bold(),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let recent = dashboard.recent_days(28);
+    if recent.is_empty() {
+        f.render_widget(
+            Paragraph::new("No recent usage data").style(Style::default().fg(theme.dim)),
+            inner,
+        );
+        return;
+    }
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    let range_text = format!(
+        "{} → {} | {} active days",
+        recent
+            .first()
+            .map(|day| day.date.format("%m-%d").to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        recent
+            .last()
+            .map(|day| day.date.format("%m-%d").to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        recent.iter().filter(|day| day.total_tokens > 0).count()
+    );
+    f.render_widget(
+        Paragraph::new(range_text).style(Style::default().fg(theme.dim)),
+        sections[0],
+    );
+
+    let token_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(8), Constraint::Min(10)])
+        .split(sections[1]);
+    f.render_widget(
+        Paragraph::new("TOKENS").style(Style::default().fg(theme.gauge_mid).bold()),
+        token_row[0],
+    );
+    let token_values = recent
+        .iter()
+        .map(|day| day.total_tokens as f64)
+        .collect::<Vec<_>>();
+    let token_max = token_values.iter().copied().fold(0.0, f64::max);
+    f.render_widget(
+        TrendSparkline::new(&token_values)
+            .color(theme.gauge_mid)
+            .empty(theme.empty_heatmap)
+            .labels("0".to_string(), format_compact(token_max.round() as i64)),
+        token_row[1],
+    );
+
+    let cost_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(8), Constraint::Min(10)])
+        .split(sections[2]);
+    f.render_widget(
+        Paragraph::new("COST").style(Style::default().fg(theme.gauge_high).bold()),
+        cost_row[0],
+    );
+    let cost_values = recent.iter().map(|day| day.cost_usd).collect::<Vec<_>>();
+    let cost_max = cost_values.iter().copied().fold(0.0, f64::max);
+    f.render_widget(
+        TrendSparkline::new(&cost_values)
+            .color(theme.gauge_high)
+            .empty(theme.empty_heatmap)
+            .labels("$0".to_string(), format!("${:.2}", cost_max)),
+        cost_row[1],
+    );
+
+    let latest = recent.last().copied();
+    let detail = latest
+        .map(|day| {
+            format!(
+                "Latest {}  {} tokens  ${:.2}  {} msgs",
+                day.date.format("%Y-%m-%d"),
+                format_compact(day.total_tokens),
+                day.cost_usd,
+                format_compact(day.messages)
+            )
+        })
+        .unwrap_or_else(|| "No recent day".to_string());
+    f.render_widget(
+        Paragraph::new(detail).style(Style::default().fg(theme.fg)),
+        sections[3],
+    );
+}
+
+fn render_token_mix_card(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    title: &str,
+    composition: TokenComposition,
+    subtitle: Option<String>,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default().fg(theme.codex).bold(),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    let rows = [
+        ("Input", composition.input, theme.claude),
+        ("Output", composition.output, theme.codex),
+        ("Cache", composition.cache, theme.gemini),
+        ("Reason", composition.reasoning, theme.opencode),
+    ];
+
+    let labels = rows
+        .iter()
+        .map(|(label, value, _)| format!("{} {}", label, format_compact(*value)))
+        .collect::<Vec<_>>();
+
+    for (idx, ((_, value, color), label)) in rows.into_iter().zip(labels.iter()).enumerate() {
+        let gauge = GradientGauge::new(label, composition.share(value))
+            .width(inner.width.saturating_sub(18) as usize)
+            .color(color);
+        f.render_widget(gauge, sections[idx]);
+    }
+
+    let footer = subtitle.unwrap_or_else(|| format!("Total {}", format_compact(composition.total)));
+    f.render_widget(
+        Paragraph::new(format!(
+            "{}  |  total {}",
+            footer,
+            format_compact(composition.total)
+        ))
+        .style(Style::default().fg(theme.dim)),
+        sections[4],
+    );
+}
+
+fn render_provider_flow_card(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    dashboard: &UsageDashboard,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Provider Flow 14d ",
+            Style::default().fg(theme.gemini).bold(),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(4), Constraint::Length(1)])
+        .split(inner);
+
+    let recent = dashboard.recent_days(14);
+    if recent.is_empty() {
+        f.render_widget(
+            Paragraph::new("No provider activity").style(Style::default().fg(theme.dim)),
+            inner,
+        );
+        return;
+    }
+
+    let chart_data = recent
+        .iter()
+        .map(|day| {
+            let mut segments = HashMap::new();
+            for (provider, stats) in &day.providers {
+                segments.insert(provider.as_str(), stats.tokens as f64);
+            }
+            (day.total_tokens as f64, segments)
+        })
+        .collect::<Vec<_>>();
+
+    let chart = StackedBarChart::new(&chart_data)
+        .color("claude", theme.claude)
+        .color("codex", theme.codex)
+        .color("opencode", theme.opencode)
+        .color("gemini", theme.gemini)
+        .color("pi", theme.pi)
+        .color("antigravity", theme.antigravity)
+        .width(sections[0].width as usize)
+        .height(sections[0].height as usize);
+    f.render_widget(chart, sections[0]);
+
+    let legend = Line::from(vec![
+        Span::styled(
+            recent
+                .first()
+                .map(|day| day.date.format("%m-%d").to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            Style::default().fg(theme.dim),
+        ),
+        Span::raw(" "),
+        Span::styled("CLA", Style::default().fg(theme.claude).bold()),
+        Span::raw(" "),
+        Span::styled("CDX", Style::default().fg(theme.codex).bold()),
+        Span::raw(" "),
+        Span::styled("OCD", Style::default().fg(theme.opencode).bold()),
+        Span::raw(" "),
+        Span::styled("GEM", Style::default().fg(theme.gemini).bold()),
+        Span::raw(" "),
+        Span::styled(
+            recent
+                .last()
+                .map(|day| day.date.format("%m-%d").to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            Style::default().fg(theme.dim),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(legend), sections[1]);
+}
+
+fn render_rollup_summary_card(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    dashboard: &UsageDashboard,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Rollups ",
+            Style::default().fg(theme.claude).bold(),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let latest_week = dashboard.weekly.last();
+    let previous_week = dashboard.weekly.iter().rev().nth(1);
+    let current_month = dashboard.monthly.last();
+    let previous_month = dashboard.monthly.iter().rev().nth(1);
+
+    let lines = vec![
+        render_rollup_summary_line("Week", latest_week, theme.codex),
+        render_rollup_summary_line("Prev W", previous_week, theme.gemini),
+        render_rollup_summary_line("Month", current_month, theme.claude),
+        render_rollup_summary_line("Prev M", previous_month, theme.opencode),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn render_rollup_summary_line(
+    label: &str,
+    rollup: Option<&UsageRollup>,
+    color: Color,
+) -> Line<'static> {
+    match rollup {
+        Some(rollup) => Line::from(vec![
+            Span::styled(format!("{:<6}", label), Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:>6}", format_compact(rollup.total_tokens)),
+                Style::default().fg(color).bold(),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("${:.2}", rollup.total_cost_usd),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("{}d", rollup.active_days),
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+        None => Line::from(vec![
+            Span::styled(format!("{:<6}", label), Style::default().fg(Color::Gray)),
+            Span::styled("No data", Style::default().fg(Color::Gray)),
+        ]),
+    }
+}
+
 fn render_by_model_page(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -1074,7 +1452,7 @@ fn render_by_model_page(
 ) {
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(12)])
+        .constraints([Constraint::Length(4), Constraint::Min(12)])
         .split(area);
 
     render_metric_row(f, split[0], summary, dashboard, theme);
@@ -1161,77 +1539,6 @@ fn render_metric_row(
     );
 }
 
-fn render_rollup_row(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    dashboard: &UsageDashboard,
-    theme: &Theme,
-) {
-    let cards = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(area);
-
-    let latest_week = dashboard.weekly.last();
-    let previous_week = dashboard.weekly.iter().rev().nth(1);
-    let current_month = dashboard.monthly.last();
-    let previous_month = dashboard.monthly.iter().rev().nth(1);
-
-    render_rollup_card(f, cards[0], "Latest Week", latest_week, theme.codex, theme);
-    render_rollup_card(
-        f,
-        cards[1],
-        "Previous Week",
-        previous_week,
-        theme.gemini,
-        theme,
-    );
-    render_rollup_card(
-        f,
-        cards[2],
-        "Current Month",
-        current_month,
-        theme.claude,
-        theme,
-    );
-    render_rollup_card(
-        f,
-        cards[3],
-        "Previous Month",
-        previous_month,
-        theme.opencode,
-        theme,
-    );
-}
-
-fn render_rollup_card(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    title: &str,
-    rollup: Option<&UsageRollup>,
-    color: Color,
-    theme: &Theme,
-) {
-    let (value, detail) = if let Some(rollup) = rollup {
-        (
-            format_compact(rollup.total_tokens),
-            format!(
-                "{} | ${:.2} | {}d",
-                rollup.label, rollup.total_cost_usd, rollup.active_days
-            ),
-        )
-    } else {
-        ("0".to_string(), "No data".to_string())
-    };
-
-    render_card(f, area, title, &value, &detail, color, theme);
-}
-
 fn render_card(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -1246,9 +1553,8 @@ fn render_card(
             format!(" {} ", title),
             Style::default().fg(color).bold(),
         ))
-        .style(Style::default().bg(theme.card))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(color));
+        .border_style(Style::default().fg(theme.border));
 
     let content = Paragraph::new(vec![
         Line::from(Span::styled(
@@ -1261,7 +1567,7 @@ fn render_card(
         )),
     ])
     .block(block)
-    .alignment(Alignment::Center)
+    .alignment(Alignment::Left)
     .wrap(ratatui::widgets::Wrap { trim: true });
 
     f.render_widget(content, area);
@@ -1281,15 +1587,9 @@ fn render_rankings_card(
             Style::default().fg(theme.claude).bold(),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.claude));
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let inner = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
 
     if rankings.is_empty() {
         f.render_widget(
@@ -1336,15 +1636,9 @@ fn render_model_table_card(
             Style::default().fg(theme.codex).bold(),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.codex));
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let inner = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
 
     let rows = models
         .iter()
@@ -1352,7 +1646,7 @@ fn render_model_table_card(
         .map(|model| {
             vec![
                 truncate(&model.source, 10),
-                truncate(&model.model, 22),
+                truncate(&model.model, 36),
                 format_compact(model.tokens),
                 format!("${:.2}", model.cost),
             ]
@@ -1360,7 +1654,7 @@ fn render_model_table_card(
         .collect::<Vec<_>>();
 
     let mut table = StyledTable::new(vec!["Source", "Model", "Tokens", "Cost"])
-        .widths(vec![12, 24, 12, 12])
+        .widths(vec![12, 38, 12, 12])
         .header_color(theme.codex);
 
     for row in rows {

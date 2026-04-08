@@ -15,7 +15,7 @@ pub async fn run(
     refresh_days: Option<String>,
     refresh_pricing: bool,
     rebuild_all: bool,
-    tui_enabled: bool,
+    use_tui: bool,
 ) -> Result<()> {
     let requested_since = since
         .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
@@ -92,7 +92,7 @@ pub async fn run(
         session_count,
     );
 
-    if tui_enabled {
+    if use_tui {
         return tui::usage::run(summary, daily_breakdown);
     }
 
@@ -160,22 +160,25 @@ fn filter_messages_to_range(
 fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
     println!("\n=== Usage Summary ===");
     println!("Total cost: ${:.2}", summary.total_cost);
-    println!("Total tokens: {}", summary.total_tokens);
-    println!("Messages: {}", summary.message_count);
-    println!("Sessions: {}", summary.session_count);
-    println!("Active days: {}", summary.active_days);
+    println!("Total tokens: {}", format_int(summary.total_tokens));
+    println!("Messages: {}", format_int(summary.message_count));
+    println!("Sessions: {}", format_int(summary.session_count));
+    println!("Active days: {}", format_int(summary.active_days));
     println!("Avg daily cost: ${:.2}", summary.avg_daily_cost);
-    println!("Avg daily tokens: {:.0}", summary.avg_daily_tokens);
+    println!(
+        "Avg daily tokens: {}",
+        format_int(summary.avg_daily_tokens.round() as i64)
+    );
 
     println!("\n=== By Provider ===");
     for provider in &summary.by_provider {
         println!(
             "{}: {} tokens | ${:.2} | {} messages | {} sessions",
             provider.provider.to_uppercase(),
-            provider.tokens,
+            format_int(provider.tokens),
             provider.cost,
-            provider.message_count,
-            provider.session_count
+            format_int(provider.message_count),
+            format_int(provider.session_count)
         );
     }
 
@@ -183,7 +186,11 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
     for model in summary.by_model.iter().take(10) {
         println!(
             "{} [{}]: {} tokens | ${:.2} | {} messages",
-            model.model, model.source, model.tokens, model.cost, model.message_count
+            model.model,
+            model.source,
+            format_int(model.tokens),
+            model.cost,
+            format_int(model.message_count)
         );
     }
 
@@ -191,7 +198,11 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
     for day in summary.daily.iter().rev().take(14).rev() {
         println!(
             "{}: {} tokens | ${:.2} | {} messages | {} sessions",
-            day.date, day.total_tokens, day.total_cost_usd, day.message_count, day.session_count
+            day.date,
+            format_int(day.total_tokens),
+            day.total_cost_usd,
+            format_int(day.message_count),
+            format_int(day.session_count)
         );
     }
 
@@ -200,10 +211,10 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
         println!(
             "{}: {} tokens | ${:.2} | {} messages | {} active days",
             week.label,
-            week.total_tokens,
+            format_int(week.total_tokens),
             week.total_cost_usd,
-            week.message_count,
-            week.active_days
+            format_int(week.message_count),
+            format_int(week.active_days)
         );
     }
 
@@ -212,16 +223,37 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
         println!(
             "{}: {} tokens | ${:.2} | {} messages | {} active days",
             month.label,
-            month.total_tokens,
+            format_int(month.total_tokens),
             month.total_cost_usd,
-            month.message_count,
-            month.active_days
+            format_int(month.message_count),
+            format_int(month.active_days)
         );
     }
 
     println!(
         "\nLoaded {} ledger messages from {} provider(s).",
-        summary.message_count,
-        summary.by_provider.len()
+        format_int(summary.message_count),
+        format_int(summary.by_provider.len())
     );
+}
+
+fn format_int<T: ToString>(value: T) -> String {
+    let raw = value.to_string();
+    let digits = raw.strip_prefix('-').unwrap_or(&raw);
+    let mut formatted_rev = String::with_capacity(raw.len() + raw.len() / 3);
+
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            formatted_rev.push(',');
+        }
+        formatted_rev.push(ch);
+    }
+
+    let formatted: String = formatted_rev.chars().rev().collect();
+
+    if raw.starts_with('-') {
+        format!("-{}", formatted)
+    } else {
+        formatted
+    }
 }

@@ -167,12 +167,15 @@ Current command shape:
 ```bash
 tokenpulse usage
 tokenpulse usage --tui
+tokenpulse usage --no-tui
 tokenpulse usage --since 2026-03-01
 tokenpulse usage -p claude,codex,opencode
 tokenpulse usage --refresh-days 2026-03-01:2026-03-07
 tokenpulse usage --refresh-pricing
 tokenpulse usage --rebuild-all
 ```
+
+`tokenpulse usage` now opens the interactive dashboard automatically when both stdin/stdout are attached to a terminal. Use `--no-tui` to force the plain-text summary for scripts, pipes, or quick dumps.
 
 Non-TUI output includes:
 

@@ -115,8 +115,9 @@ tokenpulse quota -p claude                # single provider
 tokenpulse quota --json                   # JSON output for scripting
 
 # Usage summary / dashboard
-tokenpulse usage                          # ledger-backed text summary
-tokenpulse usage --tui                    # interactive TUI dashboard
+tokenpulse usage                          # interactive TUI on a terminal, plain text when piped
+tokenpulse usage --tui                    # force the interactive TUI dashboard
+tokenpulse usage --no-tui                 # plain-text summary
 tokenpulse usage --since 2026-03-01       # filter by date
 tokenpulse usage -p claude,codex          # filter by provider
 tokenpulse usage --refresh-days 2026-03-01:2026-03-07
@@ -157,7 +158,7 @@ tokenpulse usage --rebuild-all
   Press q to quit │ r to refresh │ j/k to scroll
 ```
 
-### Usage Dashboard (`tokenpulse usage --tui`)
+### Usage Dashboard (`tokenpulse usage`)
 
 ```
 ╭─────────────────────────────────────────────────────────────────────╮

@@ -61,11 +61,17 @@ impl<'a> Widget for StackedBarChart<'a> {
             }
 
             let total: f64 = values.values().sum();
+            if total <= 0.0 {
+                continue;
+            }
             let bar_height = (total / self.max_value * chart_height as f64) as usize;
 
             let mut current_y = area.y + (chart_height - bar_height) as u16;
 
-            for (provider, value) in values {
+            let mut segments: Vec<_> = values.iter().collect();
+            segments.sort_by(|left, right| left.0.cmp(right.0));
+
+            for (provider, value) in segments {
                 let segment_height = (*value / total * bar_height as f64) as usize;
                 let color = self.colors.get(provider).copied().unwrap_or(Color::White);
 

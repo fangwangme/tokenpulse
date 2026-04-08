@@ -109,7 +109,10 @@ impl ConfigManager {
 
     pub fn load(&self) -> Result<Config> {
         if !self.config_path.exists() {
-            return Ok(Config::default());
+            let config = Config::default();
+            // Write default config so users can discover and edit it
+            let _ = self.save(&config);
+            return Ok(config);
         }
 
         let content = fs::read_to_string(&self.config_path)?;

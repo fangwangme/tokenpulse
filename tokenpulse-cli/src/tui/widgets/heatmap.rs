@@ -98,24 +98,40 @@ impl<'a> YearHeatmap<'a> {
         self
     }
 
-    fn value_to_color(&self, value: f64, max_value: f64) -> Color {
-        if value <= 0.0 || max_value <= 0.0 {
+    fn value_to_color(&self, value: f64, thresholds: &[f64; 4]) -> Color {
+        if value <= 0.0 {
             return self.empty;
         }
 
-        let ratio = (value / max_value).clamp(0.0, 1.0);
-        if ratio < 0.20 {
+        if value < thresholds[0] {
             self.palette[0]
-        } else if ratio < 0.40 {
+        } else if value < thresholds[1] {
             self.palette[1]
-        } else if ratio < 0.60 {
+        } else if value < thresholds[2] {
             self.palette[2]
-        } else if ratio < 0.80 {
+        } else if value < thresholds[3] {
             self.palette[3]
         } else {
             self.palette[4]
         }
     }
+}
+
+fn compute_quantiles(cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
+    let mut sorted: Vec<f64> = cell_values
+        .values()
+        .copied()
+        .filter(|&v| v > 0.0)
+        .collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if sorted.is_empty() {
+        return [0.0; 4];
+    }
+    let p = |pct: f64| -> f64 {
+        let idx = (pct / 100.0 * (sorted.len() - 1) as f64).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    };
+    [p(20.0), p(40.0), p(60.0), p(80.0)]
 }
 
 impl<'a> Widget for YearHeatmap<'a> {
@@ -142,10 +158,18 @@ impl<'a> Widget for YearHeatmap<'a> {
             return;
         }
 
-        let display_cols = grid_width.min(total_weeks).max(1);
+        // Adaptive cell width: double-char + gap when space allows
+        let cell_stride = if grid_width >= total_weeks * 3 {
+            3
+        } else if grid_width >= total_weeks * 2 {
+            2
+        } else {
+            1
+        };
+        let display_cols = (grid_width / cell_stride).min(total_weeks).max(1);
+
         let mut cell_values: BTreeMap<(usize, usize), f64> = BTreeMap::new();
         let mut month_labels: BTreeMap<usize, String> = BTreeMap::new();
-        let mut max_value = 0.0f64;
 
         let values: BTreeMap<NaiveDate, f64> = self.points.iter().copied().collect();
         let mut cursor = start;
@@ -162,7 +186,6 @@ impl<'a> Widget for YearHeatmap<'a> {
             let row = cursor.weekday().num_days_from_sunday() as usize;
 
             let value = values.get(&cursor).copied().unwrap_or(0.0);
-            max_value = max_value.max(value);
 
             let key = (display_col.min(display_cols.saturating_sub(1)), row);
             cell_values
@@ -182,6 +205,8 @@ impl<'a> Widget for YearHeatmap<'a> {
             day_idx += 1;
         }
 
+        let thresholds = compute_quantiles(&cell_values);
+
         let weekday_labels = ["S", "M", "T", "W", "T", "F", "S"];
         for (row, label) in weekday_labels.iter().enumerate() {
             let y = grid_y + row as u16;
@@ -190,31 +215,37 @@ impl<'a> Widget for YearHeatmap<'a> {
             }
         }
 
-        for (col, label) in month_labels {
-            let x = grid_x + col as u16;
+        for (col, label) in &month_labels {
+            let x = grid_x + (*col as u16) * (cell_stride as u16);
             if x < area.x + area.width {
                 buf.set_string(x, area.y, label, Style::default().fg(Color::Gray));
             }
         }
 
+        let (sym_filled, sym_empty, sym_selected) = if cell_stride >= 2 {
+            ("██", "··", "◆◆")
+        } else {
+            ("■", "·", "◆")
+        };
+
         for col in 0..display_cols {
             for row in 0..7 {
-                let x = grid_x + col as u16;
+                let x = grid_x + (col * cell_stride) as u16;
                 let y = grid_y + row as u16;
-                if x >= area.x + area.width || y >= area.y + area.height {
+                if x + cell_stride as u16 > area.x + area.width || y >= area.y + area.height {
                     continue;
                 }
 
                 let value = cell_values.get(&(col, row)).copied().unwrap_or(0.0);
-                let color = self.value_to_color(value, max_value);
+                let color = self.value_to_color(value, &thresholds);
                 let date = start + Duration::days((col * 7 + row) as i64);
                 let is_selected = self.selected == Some(date);
                 let symbol = if is_selected {
-                    "◆"
+                    sym_selected
                 } else if value <= 0.0 {
-                    "·"
+                    sym_empty
                 } else {
-                    "■"
+                    sym_filled
                 };
                 let style = if is_selected {
                     Style::default().fg(self.selected_color).bg(color)
@@ -225,6 +256,7 @@ impl<'a> Widget for YearHeatmap<'a> {
             }
         }
 
+        let max_value = cell_values.values().copied().fold(0.0f64, f64::max);
         let metric_text = format!(
             "{}  {} → {}  max {:.2}",
             self.metric.label(),

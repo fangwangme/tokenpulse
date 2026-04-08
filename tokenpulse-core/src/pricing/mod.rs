@@ -89,6 +89,14 @@ fn pricing_lookup_candidates(model_id: &str) -> Vec<String> {
         push_candidate(&mut candidates, &mut seen, alias.to_string());
     }
 
+    // Strip "-free" suffix (e.g. "kimi-k2.5-free" → "kimi-k2.5")
+    if let Some(base) = model_id.strip_suffix("-free") {
+        push_candidate(&mut candidates, &mut seen, base.to_string());
+        if let Some(alias) = explicit_model_alias(base) {
+            push_candidate(&mut candidates, &mut seen, alias.to_string());
+        }
+    }
+
     if !model_id.contains('/') && !model_id.contains('.') {
         push_candidate(
             &mut candidates,
@@ -122,22 +130,33 @@ fn push_candidate(candidates: &mut Vec<String>, seen: &mut HashSet<String>, cand
 
 fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
     match model_id {
-        "antigravity-gemini-3-pro" => Some("gemini-3-pro-preview"),
-        "antigravity-gemini-3-pro-high" => Some("gemini-3-pro-preview"),
-        "antigravity-gemini-3-pro-low" => Some("gemini-3-pro-preview"),
+        // Antigravity variants → canonical models
+        "antigravity-gemini-3-pro" | "antigravity-gemini-3-pro-high"
+        | "antigravity-gemini-3-pro-low" => Some("gemini-3-pro-preview"),
         "antigravity-gemini-3-flash" => Some("gemini-3-flash-preview"),
-        "antigravity-claude-opus-4-5-thinking" => Some("claude-opus-4-5"),
-        "antigravity-claude-opus-4-5-thinking-high" => Some("claude-opus-4-5"),
-        "antigravity-claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
+        "antigravity-claude-opus-4-5-thinking" | "antigravity-claude-opus-4-5-thinking-high"
+        | "antigravity-claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
         "antigravity-claude-opus-4-6-thinking" => Some("claude-opus-4-6"),
+
+        // Gemini quality tier aliases
+        "gemini-3-pro-high" | "gemini-3-pro-low" => Some("gemini-3-pro-preview"),
+
+        // Bare model names (often from -free stripping) → LiteLLM keys
+        "kimi-k2.5" => Some("moonshot/kimi-k2.5"),
+        "minimax-m2.5" => Some("minimax/MiniMax-M2.5"),
+        "minimax-m2.1" => Some("minimax/MiniMax-M2.1"),
+        "glm-4.7" => Some("zai/glm-4.7"),
+        "glm-5" => Some("zai/glm-5"),
+        "grok-code" => Some("xai/grok-code-fast-1"),
+
+        // Provider-prefixed aliases
         "moonshotai/kimi-k2.5" => Some("moonshot/kimi-k2.5"),
-        "z-ai/glm5" => Some("zai/glm-5"),
-        "z-ai/glm4.7" => Some("zai/glm-4.7"),
-        "z-ai/glm-4.7" => Some("zai/glm-4.7"),
-        "qwen/qwen3.5-397b-a17b" => Some("openrouter/qwen/qwen3.5-397b-a17b"),
-        "deepseek-ai/deepseek-v3.2" => Some("deepseek/deepseek-v3.2"),
         "minimaxai/minimax-m2.1" => Some("minimax/MiniMax-M2.1"),
         "minimaxai/minimax-m2.5" => Some("minimax/MiniMax-M2.5"),
+        "z-ai/glm5" => Some("zai/glm-5"),
+        "z-ai/glm4.7" | "z-ai/glm-4.7" => Some("zai/glm-4.7"),
+        "qwen/qwen3.5-397b-a17b" => Some("openrouter/qwen/qwen3.5-397b-a17b"),
+        "deepseek-ai/deepseek-v3.2" => Some("deepseek/deepseek-v3.2"),
         "nvidia/llama-3.3-nemotron-super-49b-v1.5" => {
             Some("deepinfra/nvidia/Llama-3.3-Nemotron-Super-49B-v1.5")
         }
@@ -447,6 +466,64 @@ mod tests {
             lookup_model_pricing("deepinfra/nvidia/llama-3.3-nemotron-super-49b-v1.5", &map);
         assert!(result.is_some());
         assert_eq!(result.unwrap().output_cost_per_token, 0.0000004);
+    }
+
+    #[test]
+    fn test_lookup_strips_free_suffix_kimi() {
+        let mut map = HashMap::new();
+        map.insert(
+            "moonshot/kimi-k2.5".to_string(),
+            make_pricing(0.0000006, 0.000003),
+        );
+
+        let result = lookup_model_pricing("kimi-k2.5-free", &map);
+        assert!(result.is_some(), "kimi-k2.5-free should resolve via -free stripping + alias");
+        assert_eq!(result.unwrap().output_cost_per_token, 0.000003);
+    }
+
+    #[test]
+    fn test_lookup_strips_free_suffix_minimax() {
+        let mut map = HashMap::new();
+        map.insert(
+            "minimax/MiniMax-M2.5".to_string(),
+            make_pricing(0.0000003, 0.0000012),
+        );
+
+        let result = lookup_model_pricing("minimax-m2.5-free", &map);
+        assert!(result.is_some(), "minimax-m2.5-free should resolve via -free stripping + alias");
+    }
+
+    #[test]
+    fn test_lookup_strips_free_suffix_glm() {
+        let mut map = HashMap::new();
+        map.insert("zai/glm-4.7".to_string(), make_pricing(0.0000005, 0.000002));
+
+        let result = lookup_model_pricing("glm-4.7-free", &map);
+        assert!(result.is_some(), "glm-4.7-free should resolve via -free stripping + alias");
+    }
+
+    #[test]
+    fn test_lookup_grok_code_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "xai/grok-code-fast-1".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+
+        let result = lookup_model_pricing("grok-code", &map);
+        assert!(result.is_some(), "grok-code should resolve via alias");
+    }
+
+    #[test]
+    fn test_lookup_gemini_quality_tier_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "gemini-3-pro-preview".to_string(),
+            make_pricing(0.000002, 0.000012),
+        );
+
+        let result = lookup_model_pricing("gemini-3-pro-high", &map);
+        assert!(result.is_some(), "gemini-3-pro-high should resolve via alias");
     }
 
     #[test]

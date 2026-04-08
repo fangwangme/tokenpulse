@@ -94,4 +94,13 @@ impl Theme {
             self.gauge_high
         }
     }
+
+    pub fn pace_color(&self, status: &str) -> Color {
+        match status {
+            "ahead" => self.gauge_low,
+            "on-track" => self.gauge_mid,
+            "behind" => self.gauge_high,
+            _ => self.dim,
+        }
+    }
 }
