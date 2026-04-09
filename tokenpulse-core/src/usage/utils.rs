@@ -39,28 +39,33 @@ pub fn normalize_model_name(model_id: &str) -> String {
 }
 
 pub fn detect_provider_from_model(model: &str) -> String {
-    let lower = model.trim().to_ascii_lowercase();
+    let normalized = normalize_model_name(model);
 
-    if lower.starts_with("codex")
-        || lower.starts_with("gpt")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
+    if normalized.starts_with("codex")
+        || normalized.starts_with("gpt")
+        || normalized.starts_with("o1")
+        || normalized.starts_with("o3")
+        || normalized.starts_with("o4")
     {
         "openai".to_string()
-    } else if lower.starts_with("claude")
-        || lower.starts_with("sonnet")
-        || lower.starts_with("opus")
-        || lower.starts_with("haiku")
+    } else if normalized.starts_with("antigravity-claude")
+        || normalized.starts_with("anti-gravity-claude")
+        || normalized.starts_with("claude")
+        || normalized.starts_with("sonnet")
+        || normalized.starts_with("opus")
+        || normalized.starts_with("haiku")
     {
         "anthropic".to_string()
-    } else if lower.starts_with("gemini") {
+    } else if normalized.starts_with("antigravity-gemini")
+        || normalized.starts_with("anti-gravity-gemini")
+        || normalized.starts_with("gemini")
+    {
         "google".to_string()
-    } else if lower.contains("nvidia")
-        || lower.contains("nemotron")
-        || lower.contains("deepseek")
-        || lower.contains("glm")
-        || lower.contains("minimax")
+    } else if normalized.contains("nvidia")
+        || normalized.contains("nemotron")
+        || normalized.contains("deepseek")
+        || normalized.contains("glm")
+        || normalized.contains("minimax")
     {
         "other".to_string()
     } else {
@@ -136,7 +141,15 @@ mod tests {
         assert_eq!(detect_provider_from_model("codex-mini-latest"), "openai");
         assert_eq!(detect_provider_from_model("gpt-4.1"), "openai");
         assert_eq!(detect_provider_from_model("claude-sonnet-4"), "anthropic");
+        assert_eq!(
+            detect_provider_from_model("anti-gravity-claude-opus-4.1"),
+            "anthropic"
+        );
         assert_eq!(detect_provider_from_model("gemini-2.5-pro"), "google");
+        assert_eq!(
+            detect_provider_from_model("antigravity-gemini-3-pro-high"),
+            "google"
+        );
         assert_eq!(detect_provider_from_model("deepseek-r1"), "other");
         assert_eq!(detect_provider_from_model("glm-4.7"), "other");
         assert_eq!(detect_provider_from_model("some-random-model"), "other");
