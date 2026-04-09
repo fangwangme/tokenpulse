@@ -211,7 +211,6 @@ fn parse_session_shutdown(value: &Value, session_id: &str) -> Option<Vec<Unified
             .map(|count| count as usize)
             .unwrap_or(0)
             .max(1);
-        let total_cost = requests.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
         let input_tokens = usage
             .get("inputTokens")
             .and_then(Value::as_i64)
@@ -237,7 +236,6 @@ fn parse_session_shutdown(value: &Value, session_id: &str) -> Option<Vec<Unified
             && output_tokens == 0
             && cache_read_tokens == 0
             && cache_write_tokens == 0
-            && total_cost <= 0.0
         {
             continue;
         }
@@ -260,7 +258,6 @@ fn parse_session_shutdown(value: &Value, session_id: &str) -> Option<Vec<Unified
                         reasoning: 0,
                     },
                 )
-                .with_cost(distribute_f64(total_cost, request_count, idx))
                 .with_parser_version(PARSER_VERSION),
             );
         }
@@ -430,17 +427,6 @@ fn distribute_i64(total: i64, parts: usize, idx: usize) -> i64 {
     let base = total / parts as i64;
     let remainder = (total % parts as i64).max(0);
     base + i64::from((idx as i64) < remainder)
-}
-
-fn distribute_f64(total: f64, parts: usize, idx: usize) -> f64 {
-    if parts == 0 {
-        return 0.0;
-    }
-    if idx + 1 == parts {
-        total - (total / parts as f64) * (parts as f64 - 1.0)
-    } else {
-        total / parts as f64
-    }
 }
 
 fn is_agent_session_file(path: &PathBuf) -> bool {
@@ -656,6 +642,7 @@ mod tests {
             messages[0].message_key,
             "copilot-session:sess-agent-1:claude-opus-4.6:0"
         );
+        assert!(messages.iter().all(|message| message.cost == 0.0));
     }
 
     #[test]
