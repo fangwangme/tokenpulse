@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use tracing::debug;
 
-const PARSER_VERSION: &str = "copilot-v2";
+const PARSER_VERSION: &str = "copilot-v3";
 const EVENT_NAME: &str = "gen_ai.client.inference.operation.details";
 
 pub struct CopilotSessionParser;
@@ -211,7 +211,7 @@ fn parse_session_shutdown(value: &Value, session_id: &str) -> Option<Vec<Unified
             .map(|count| count as usize)
             .unwrap_or(0)
             .max(1);
-        let input_tokens = usage
+        let total_input_tokens = usage
             .get("inputTokens")
             .and_then(Value::as_i64)
             .unwrap_or(0)
@@ -232,13 +232,16 @@ fn parse_session_shutdown(value: &Value, session_id: &str) -> Option<Vec<Unified
             .unwrap_or(0)
             .max(0);
 
-        if input_tokens == 0
+        if total_input_tokens == 0
             && output_tokens == 0
             && cache_read_tokens == 0
             && cache_write_tokens == 0
         {
             continue;
         }
+
+        let effective_input_tokens =
+            split_total_input_tokens(total_input_tokens, cache_read_tokens, cache_write_tokens);
 
         let provider_id = detect_provider_from_model(model_id);
         for idx in 0..request_count {
@@ -251,7 +254,7 @@ fn parse_session_shutdown(value: &Value, session_id: &str) -> Option<Vec<Unified
                     format!("copilot-session:{}:{}:{}", session_id, model_id, idx),
                     timestamp + idx as i64,
                     TokenBreakdown {
-                        input: distribute_i64(input_tokens, request_count, idx),
+                        input: distribute_i64(effective_input_tokens, request_count, idx),
                         output: distribute_i64(output_tokens, request_count, idx),
                         cache_read: distribute_i64(cache_read_tokens, request_count, idx),
                         cache_write: distribute_i64(cache_write_tokens, request_count, idx),
@@ -296,18 +299,16 @@ fn parse_otel_event(
         return None;
     }
 
-    let input_tokens = attrs
+    let total_input_tokens = attrs
         .get("gen_ai.usage.input_tokens")
         .and_then(Value::as_i64)
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .max(0);
     let output_tokens = attrs
         .get("gen_ai.usage.output_tokens")
         .and_then(Value::as_i64)
-        .unwrap_or(0);
-
-    if input_tokens == 0 && output_tokens == 0 {
-        return None;
-    }
+        .unwrap_or(0)
+        .max(0);
 
     let response_id = attrs
         .get("gen_ai.response.id")
@@ -329,22 +330,31 @@ fn parse_otel_event(
     let provider_id = detect_provider_from_model(&model_id);
 
     let cache_key = (session_id.clone(), model_id.clone());
-    let mut cache_read = 0i64;
-    let mut effective_input = input_tokens;
+    let (effective_input, cache_read, cache_write) =
+        match extract_otel_cache_tokens(attrs).map(|(read, write)| {
+            (
+                split_total_input_tokens(total_input_tokens, read, write),
+                read,
+                write,
+            )
+        }) {
+            Some(tokens) => tokens,
+            None => {
+                let (effective_input, cache_read) =
+                    estimate_cache_read(prev_input, cache_key, total_input_tokens);
+                (effective_input, cache_read, 0)
+            }
+        };
 
-    if let Some(&prev) = prev_input.get(&cache_key) {
-        if input_tokens >= prev {
-            cache_read = prev;
-            effective_input = input_tokens - prev;
-        }
+    if effective_input == 0 && output_tokens == 0 && cache_read == 0 && cache_write == 0 {
+        return None;
     }
-    prev_input.insert(cache_key, input_tokens);
 
     let tokens = TokenBreakdown {
-        input: effective_input.max(0),
-        output: output_tokens.max(0),
-        cache_read: cache_read.max(0),
-        cache_write: 0,
+        input: effective_input,
+        output: output_tokens,
+        cache_read,
+        cache_write,
         reasoning: 0,
     };
 
@@ -353,7 +363,7 @@ fn parse_otel_event(
     } else {
         format!(
             "copilot:{}:{}:{}:{}:{}",
-            session_id, timestamp, model_id, input_tokens, output_tokens
+            session_id, timestamp, model_id, total_input_tokens, output_tokens
         )
     };
 
@@ -369,6 +379,49 @@ fn parse_otel_event(
         )
         .with_parser_version(PARSER_VERSION),
     )
+}
+
+fn extract_otel_cache_tokens(attrs: &Value) -> Option<(i64, i64)> {
+    let cache_read = attrs
+        .get("gen_ai.usage.cache_read.input_tokens")
+        .and_then(Value::as_i64);
+    let cache_write = attrs
+        .get("gen_ai.usage.cache_creation.input_tokens")
+        .and_then(Value::as_i64);
+
+    match (cache_read, cache_write) {
+        (None, None) => None,
+        _ => Some((
+            cache_read.unwrap_or(0).max(0),
+            cache_write.unwrap_or(0).max(0),
+        )),
+    }
+}
+
+fn split_total_input_tokens(total_input: i64, cache_read: i64, cache_write: i64) -> i64 {
+    total_input
+        .saturating_sub(cache_read.max(0))
+        .saturating_sub(cache_write.max(0))
+        .max(0)
+}
+
+fn estimate_cache_read(
+    prev_input: &mut HashMap<(String, String), i64>,
+    cache_key: (String, String),
+    total_input_tokens: i64,
+) -> (i64, i64) {
+    let mut cache_read = 0i64;
+    let mut effective_input = total_input_tokens.max(0);
+
+    if let Some(&prev) = prev_input.get(&cache_key) {
+        if total_input_tokens >= prev {
+            cache_read = prev;
+            effective_input = total_input_tokens - prev;
+        }
+    }
+
+    prev_input.insert(cache_key, total_input_tokens);
+    (effective_input.max(0), cache_read.max(0))
 }
 
 fn parse_agent_session_event(
@@ -555,6 +608,55 @@ mod tests {
     }
 
     #[test]
+    fn parse_otel_event_uses_official_cache_fields() {
+        let parser = CopilotSessionParser::new();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("events.jsonl");
+
+        let event1 = serde_json::json!({
+            "hrTime": [1700000000, 0],
+            "resource": {
+                "_rawAttributes": [
+                    ["session.id", {"value": "sess-1"}]
+                ]
+            },
+            "attributes": {
+                "event.name": "gen_ai.client.inference.operation.details",
+                "gen_ai.response.model": "claude-sonnet-4.6",
+                "gen_ai.usage.input_tokens": 1000,
+                "gen_ai.usage.output_tokens": 100,
+                "gen_ai.response.id": "resp-1"
+            }
+        });
+        let event2 = serde_json::json!({
+            "hrTime": [1700000001, 0],
+            "resource": {
+                "_rawAttributes": [
+                    ["session.id", {"value": "sess-1"}]
+                ]
+            },
+            "attributes": {
+                "event.name": "gen_ai.client.inference.operation.details",
+                "gen_ai.response.model": "claude-sonnet-4.6",
+                "gen_ai.usage.input_tokens": 1500,
+                "gen_ai.usage.output_tokens": 200,
+                "gen_ai.usage.cache_read.input_tokens": 200,
+                "gen_ai.usage.cache_creation.input_tokens": 50,
+                "gen_ai.response.id": "resp-2"
+            }
+        });
+
+        std::fs::write(&file, format!("{}\n{}\n", event1, event2)).unwrap();
+        let messages = parser.parse_file(&file);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].tokens.input, 1250);
+        assert_eq!(messages[1].tokens.output, 200);
+        assert_eq!(messages[1].tokens.cache_read, 200);
+        assert_eq!(messages[1].tokens.cache_write, 50);
+    }
+
+    #[test]
     fn parse_agent_session_event_line() {
         let parser = CopilotSessionParser::new();
         let dir = tempfile::tempdir().unwrap();
@@ -632,7 +734,7 @@ mod tests {
         let messages = parser.parse_file(&file);
 
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 9);
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 6);
         assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 6);
         assert_eq!(messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(), 3);
         assert_eq!(messages[0].session_id, "sess-agent-1");
@@ -711,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_estimation_monotonic_input() {
+    fn cache_estimation_fallback_uses_monotonic_input_when_cache_attrs_absent() {
         let parser = CopilotSessionParser::new();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("events.jsonl");
@@ -753,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_estimation_resets_on_smaller_input() {
+    fn cache_estimation_fallback_resets_on_smaller_input() {
         let parser = CopilotSessionParser::new();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("events.jsonl");
