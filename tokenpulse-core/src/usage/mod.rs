@@ -15,6 +15,7 @@ pub use gemini::GeminiSessionParser;
 pub use opencode::OpenCodeSessionParser;
 pub use pi::PiSessionParser;
 pub use store::{DailyUsageRow, DateRange, UsageStore};
+pub use utils::{detect_provider_from_model, normalize_model_name};
 
 use crate::provider::UnifiedMessage;
 use chrono::{Datelike, Days, NaiveDate};
@@ -108,7 +109,7 @@ pub struct UsageSummary {
 
 pub fn compute_usage_summary(messages: &[UnifiedMessage]) -> UsageSummary {
     let mut provider_map: HashMap<String, Vec<&UnifiedMessage>> = HashMap::new();
-    let mut model_map: HashMap<(String, String, String), Vec<&UnifiedMessage>> = HashMap::new();
+    let mut model_map: HashMap<String, Vec<&UnifiedMessage>> = HashMap::new();
 
     for message in messages {
         provider_map
@@ -116,11 +117,7 @@ pub fn compute_usage_summary(messages: &[UnifiedMessage]) -> UsageSummary {
             .or_default()
             .push(message);
         model_map
-            .entry((
-                message.client.clone(),
-                message.provider_id.clone(),
-                message.model_id.clone(),
-            ))
+            .entry(normalize_model_name(&message.model_id))
             .or_default()
             .push(message);
     }
@@ -150,17 +147,21 @@ pub fn compute_usage_summary(messages: &[UnifiedMessage]) -> UsageSummary {
 
     let mut by_model: Vec<ModelSummary> = model_map
         .into_iter()
-        .map(|((source, provider, model), entries)| {
+        .map(|(model, entries)| {
             let mut sessions = BTreeSet::new();
+            let mut sources = BTreeSet::new();
+            let mut providers = BTreeSet::new();
             for entry in &entries {
                 sessions.insert(entry.session_id.clone());
+                sources.insert(entry.client.clone());
+                providers.insert(entry.provider_id.clone());
             }
             let cost: f64 = entries.iter().map(|entry| entry.cost).sum();
             let tokens: i64 = entries.iter().map(|entry| entry.total_tokens()).sum();
             ModelSummary {
                 model,
-                provider,
-                source,
+                provider: providers.into_iter().collect::<Vec<_>>().join(","),
+                source: sources.into_iter().collect::<Vec<_>>().join(","),
                 cost,
                 tokens,
                 message_count: entries.len(),
@@ -475,17 +476,17 @@ mod tests {
             make_message(
                 "claude",
                 "anthropic",
-                "sonnet",
+                "claude-sonnet-4-20250514",
                 "s1",
                 "m1",
                 "2026-03-01",
                 1.25,
             ),
             make_message(
-                "claude",
+                "codex",
                 "anthropic",
-                "sonnet",
-                "s1",
+                "claude-sonnet-4.0",
+                "s2",
                 "m2",
                 "2026-03-02",
                 0.75,
@@ -507,6 +508,10 @@ mod tests {
         assert_eq!(summary.weekly[0].label, "2026-03-01..2026-03-07");
         assert_eq!(summary.monthly[0].label, "2026-03");
         assert!((summary.total_cost - 4.0).abs() < 0.001);
+        assert_eq!(summary.by_model.len(), 2);
+        assert_eq!(summary.by_model[0].model, "claude-sonnet-4");
+        assert_eq!(summary.by_model[0].source, "claude,codex");
+        assert_eq!(summary.by_model[0].provider, "anthropic");
     }
 
     #[test]

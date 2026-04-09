@@ -189,7 +189,11 @@ impl QuotaFetcher for CodexQuotaFetcher {
                 ));
             }
         };
-        debug!("Quota response: {:?}", quota);
+        debug!(
+            "Codex quota parsed: plan={:?}, has_rate_limit={}",
+            quota.plan_type.as_deref(),
+            quota.rate_limit.is_some()
+        );
 
         let mut windows = Vec::new();
 
@@ -214,5 +218,42 @@ impl QuotaFetcher for CodexQuotaFetcher {
             credits: None,
             fetched_at: Utc::now(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flex_number_deserializes_numbers_and_strings() {
+        let from_number: FlexNumber = serde_json::from_str("42.5").unwrap();
+        let from_string: FlexNumber = serde_json::from_str(r#""17.25""#).unwrap();
+
+        assert!((from_number.0 - 42.5).abs() < 0.001);
+        assert!((from_string.0 - 17.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn rate_window_from_window_uses_reset_at_when_present() {
+        let fetcher = CodexQuotaFetcher::new();
+        let window = fetcher.rate_window_from_window(
+            "Session (5h)",
+            WindowInfo {
+                used_percent: FlexNumber(63.0),
+                limit_window_seconds: Some(18_000),
+                reset_after_seconds: Some(60),
+                reset_at: Some(1_744_246_400),
+            },
+            18_000,
+        );
+
+        assert_eq!(window.label, "Session (5h)");
+        assert_eq!(window.used_percent, 63.0);
+        assert_eq!(window.period_duration_ms, Some(18_000_000));
+        assert_eq!(
+            window.resets_at,
+            Utc.timestamp_opt(1_744_246_400, 0).single()
+        );
     }
 }

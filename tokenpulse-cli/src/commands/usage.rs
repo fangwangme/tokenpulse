@@ -3,9 +3,8 @@ use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use tokenpulse_core::{
     usage::{
-        build_usage_summary_from_daily, ClaudeSessionParser, CodexSessionParser,
-        CopilotSessionParser, DateRange, GeminiSessionParser, OpenCodeSessionParser,
-        PiSessionParser, UsageStore,
+        compute_usage_summary, ClaudeSessionParser, CodexSessionParser, CopilotSessionParser,
+        DateRange, GeminiSessionParser, OpenCodeSessionParser, PiSessionParser, UsageStore,
     },
     SessionParser, UnifiedMessage,
 };
@@ -67,10 +66,15 @@ pub async fn run(
         }
     }
 
-    let output_since = requested_since.or(refresh_range.map(|range| range.start));
-    let daily = store.load_dashboard_days(output_since, &provider_names)?;
+    store.repair_zero_costs(
+        output_since_hint(requested_since, refresh_range),
+        &provider_names,
+    )?;
 
-    if daily.is_empty() {
+    let output_since = output_since_hint(requested_since, refresh_range);
+    let messages = store.load_messages(output_since, &provider_names)?;
+
+    if messages.is_empty() {
         eprintln!("\nNo usage data found in the local ledger.\n");
         if !found_any_source {
             eprintln!("Checked providers:");
@@ -84,18 +88,8 @@ pub async fn run(
         return Ok(());
     }
 
-    let provider_summary = store.load_provider_summaries(output_since, &provider_names)?;
-    let model_summary = store.load_model_summaries(output_since, &provider_names)?;
     let daily_breakdown = store.load_daily_rows(output_since, &provider_names)?;
-    let message_count: usize = provider_summary.iter().map(|row| row.message_count).sum();
-    let session_count: usize = provider_summary.iter().map(|row| row.session_count).sum();
-    let summary = build_usage_summary_from_daily(
-        daily,
-        provider_summary,
-        model_summary,
-        message_count,
-        session_count,
-    );
+    let summary = compute_usage_summary(&messages);
 
     if use_tui {
         return tui::usage::run(summary, daily_breakdown);
@@ -103,6 +97,13 @@ pub async fn run(
 
     print_summary(&summary);
     Ok(())
+}
+
+fn output_since_hint(
+    requested_since: Option<NaiveDate>,
+    refresh_range: Option<DateRange>,
+) -> Option<NaiveDate> {
+    requested_since.or(refresh_range.map(|range| range.start))
 }
 
 fn parse_provider_names(provider: Option<&str>) -> Vec<String> {

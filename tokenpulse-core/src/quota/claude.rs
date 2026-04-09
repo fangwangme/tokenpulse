@@ -99,9 +99,9 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
         let status = response.status();
         let body = response.text().await?;
         debug!(
-            "Claude quota response status: {}, body: {}",
+            "Claude quota response status: {}, {} bytes",
             status,
-            &body[..body.len().min(500)]
+            body.len()
         );
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -121,8 +121,6 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
                 &body[..body.len().min(200)]
             )
         })?;
-        debug!("Quota response: {:?}", quota);
-
         let mut windows = Vec::new();
 
         if let Some(five_hour) = quota.five_hour {
@@ -196,5 +194,29 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
             credits,
             fetched_at: Utc::now(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_quota_response_deserializes_usage_windows_and_credits() {
+        let quota: ClaudeQuotaResponse = serde_json::from_str(
+            r#"{
+                "five_hour":{"utilization":42.5,"resets_at":"2026-04-10T10:00:00Z"},
+                "seven_day":{"utilization":18.0,"resets_at":"2026-04-14T00:00:00Z"},
+                "extra_usage":{"is_enabled":true,"monthly_limit":100.0,"used_credits":12.5}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(quota.five_hour.unwrap().utilization, 42.5);
+        assert_eq!(quota.seven_day.unwrap().utilization, 18.0);
+        let extra = quota.extra_usage.unwrap();
+        assert!(extra.is_enabled);
+        assert_eq!(extra.monthly_limit, Some(100.0));
+        assert_eq!(extra.used_credits, Some(12.5));
     }
 }

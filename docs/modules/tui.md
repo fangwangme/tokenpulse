@@ -98,24 +98,27 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 4 tabs switchable with ←/→:
 
 ### Tab 1: Overview
-- Top: stacked bar chart (daily tokens, last 60 days, colored by provider)
-- Bottom: top 10 models by cost with provider-colored dots
+- Top: stacked bar chart (daily tokens, last 60 days, colored by model company)
+- Bottom: scrollable top models table with visible scroll hint and wider model/agent columns
 
 ### Tab 2: Models
-- Full sortable table: #, Model, Provider, Tokens, Cost, Messages
-- Models colored by detected provider family
+- Full sortable table: #, Model, Agent, Tokens, Cost, Messages
+- Models colored by detected company family (`OpenAI`, `Google`, `Anthropic`, `Others`)
+- Numeric columns use semantic colors so `Cost`, `Tokens`, and `Msgs` stand out separately
 - Sort by cost (c), tokens (t), or date (d)
 
 ### Tab 3: Daily
 - Top: summary cards (total cost, tokens, messages, sessions)
 - Bottom: daily table with today highlighted
+- Daily numeric columns use distinct colors (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`)
 - Sorted by date (most recent first) or cost/tokens
 
 ### Tab 4: Heatmap
 - GitHub-style contribution graph (green palette)
 - 7 switchable metrics: total tokens, cost, input, output, cache, messages, sessions
 - 3 window modes: 26 weeks, 52 weeks, selected year
-- Drill-down: select any day to see provider breakdown, token composition, top models
+- Drill-down: select any day to see token summary, agent totals, and per-agent model cost breakdown
+- Selected-day panel supports scroll when the detail list is taller than the viewport
 - Streak tracking: current streak and longest streak
 
 ### Source Filter Overlay

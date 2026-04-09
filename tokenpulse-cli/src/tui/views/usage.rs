@@ -1,9 +1,14 @@
 use crate::tui::theme::Theme;
-use crate::tui::widgets::{HeatmapMetric, StackedBarChart, YearHeatmap};
+use crate::tui::widgets::{
+    date_at_position, HeatmapMetric, StackedBarChart, ValueFormat, YearHeatmap,
+};
 use anyhow::Result;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+        MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -16,7 +21,9 @@ use ratatui::{
     Terminal,
 };
 use std::collections::{BTreeSet, HashMap};
-use tokenpulse_core::usage::{DailyUsageRow, DashboardDay, ModelSummary, UsageSummary};
+use tokenpulse_core::usage::{
+    normalize_model_name, DailyUsageRow, DashboardDay, ModelSummary, UsageSummary,
+};
 
 // ---------------------------------------------------------------------------
 // Pages
@@ -107,14 +114,6 @@ struct DailyStats {
     models: HashMap<String, DayBreakdown>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct TokenComposition {
-    input: i64,
-    output: i64,
-    cache: i64,
-    reasoning: i64,
-}
-
 impl DailyStats {
     fn from_day(day: &DashboardDay) -> Option<Self> {
         Some(Self {
@@ -170,15 +169,6 @@ impl DailyStats {
         Some(filtered)
     }
 
-    fn token_composition(&self) -> TokenComposition {
-        TokenComposition {
-            input: self.input_tokens,
-            output: self.output_tokens,
-            cache: self.cache_tokens(),
-            reasoning: self.reasoning_tokens,
-        }
-    }
-
     fn metric_value(&self, metric: HeatmapMetric) -> f64 {
         match metric {
             HeatmapMetric::TotalTokens => self.total_tokens as f64,
@@ -190,42 +180,6 @@ impl DailyStats {
             HeatmapMetric::Sessions => self.sessions as f64,
         }
     }
-
-    fn provider_rows(&self) -> Vec<(String, DayBreakdown)> {
-        let mut rows: Vec<(String, DayBreakdown)> = self
-            .providers
-            .iter()
-            .map(|(n, s)| (n.clone(), s.clone()))
-            .collect();
-        rows.sort_by(|a, b| {
-            compare_breakdown(&a.1, &b.1)
-                .reverse()
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        rows
-    }
-
-    fn model_rows_sorted(&self) -> Vec<(String, DayBreakdown)> {
-        let mut rows: Vec<(String, DayBreakdown)> = self
-            .models
-            .iter()
-            .map(|(n, s)| (n.clone(), s.clone()))
-            .collect();
-        rows.sort_by(|a, b| {
-            compare_breakdown(&a.1, &b.1)
-                .reverse()
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        rows
-    }
-}
-
-fn compare_breakdown(left: &DayBreakdown, right: &DayBreakdown) -> std::cmp::Ordering {
-    left.tokens.cmp(&right.tokens).then_with(|| {
-        left.cost_usd
-            .partial_cmp(&right.cost_usd)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })
 }
 
 fn model_source(model_key: &str) -> &str {
@@ -233,6 +187,59 @@ fn model_source(model_key: &str) -> &str {
         .split_once(" / ")
         .map(|(source, _)| source)
         .unwrap_or("")
+}
+
+fn model_id_from_key(model_key: &str) -> &str {
+    model_key
+        .split_once(" / ")
+        .map(|(_, model_id)| model_id)
+        .unwrap_or(model_key)
+}
+
+fn display_source_name(source: &str) -> &'static str {
+    match source {
+        "claude" => "Claude Code",
+        "codex" => "Codex",
+        "copilot" => "Copilot CLI",
+        "opencode" => "OpenCode",
+        "gemini" => "Gemini CLI",
+        "pi" => "PI",
+        "antigravity" => "Antigravity",
+        _ => "Unknown",
+    }
+}
+
+fn format_source_list(source_csv: &str) -> String {
+    let mut labels: Vec<&str> = source_csv
+        .split(',')
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .map(display_source_name)
+        .collect();
+    labels.dedup();
+    if labels.is_empty() {
+        "Unknown".to_string()
+    } else {
+        labels.join(", ")
+    }
+}
+
+#[derive(Default)]
+struct AggregatedModelSummary {
+    providers: BTreeSet<String>,
+    sources: BTreeSet<String>,
+    cost: f64,
+    tokens: i64,
+    message_count: usize,
+    session_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AgentModelGroup {
+    source: String,
+    total_cost_usd: f64,
+    total_tokens: i64,
+    models: Vec<(String, DayBreakdown)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +251,6 @@ struct UsageDashboard {
     daily: Vec<DailyStats>,
     total_messages: usize,
     total_sessions: usize,
-    by_model: Vec<ModelSummary>,
 }
 
 impl UsageDashboard {
@@ -294,7 +300,6 @@ impl UsageDashboard {
             daily,
             total_messages: summary.message_count,
             total_sessions: summary.session_count,
-            by_model: summary.by_model.clone(),
         }
     }
 
@@ -510,12 +515,105 @@ impl UsageDashboard {
     }
 
     fn filtered_models(&self, enabled: &BTreeSet<String>) -> Vec<ModelSummary> {
-        self.by_model
-            .iter()
-            .filter(|m| enabled.contains(&m.source))
-            .cloned()
-            .collect()
+        let mut aggregated: HashMap<String, AggregatedModelSummary> = HashMap::new();
+
+        for day in &self.daily {
+            for (model_key, stats) in &day.models {
+                let source = model_source(model_key);
+                if !enabled.contains(source) {
+                    continue;
+                }
+
+                let model_id = model_id_from_key(model_key);
+                let model = normalize_model_name(model_id);
+                let entry = aggregated.entry(model.clone()).or_default();
+                if !stats.provider_id.is_empty() {
+                    entry.providers.insert(stats.provider_id.clone());
+                }
+                entry.sources.insert(source.to_string());
+                entry.cost += stats.cost_usd;
+                entry.tokens += stats.tokens;
+                entry.message_count += stats.messages.max(0) as usize;
+                entry.session_count += stats.sessions.max(0) as usize;
+            }
+        }
+
+        let total_cost = aggregated.values().map(|model| model.cost).sum::<f64>();
+        let mut models: Vec<ModelSummary> = aggregated
+            .into_iter()
+            .map(|(model, aggregated)| ModelSummary {
+                model,
+                provider: aggregated
+                    .providers
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(","),
+                source: aggregated.sources.into_iter().collect::<Vec<_>>().join(","),
+                cost: aggregated.cost,
+                tokens: aggregated.tokens,
+                message_count: aggregated.message_count,
+                session_count: aggregated.session_count,
+                percent: if total_cost > 0.0 {
+                    aggregated.cost / total_cost * 100.0
+                } else {
+                    0.0
+                },
+            })
+            .collect();
+
+        models.sort_by(|left, right| {
+            right
+                .cost
+                .partial_cmp(&left.cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.tokens.cmp(&left.tokens))
+                .then_with(|| left.model.cmp(&right.model))
+        });
+        models
     }
+}
+
+fn build_agent_model_groups(day: &DailyStats) -> Vec<AgentModelGroup> {
+    let mut grouped: HashMap<String, AgentModelGroup> = HashMap::new();
+
+    for (model_key, stats) in &day.models {
+        let source = model_source(model_key).to_string();
+        let model_name = model_id_from_key(model_key).to_string();
+        let entry = grouped
+            .entry(source.clone())
+            .or_insert_with(|| AgentModelGroup {
+                source,
+                total_cost_usd: 0.0,
+                total_tokens: 0,
+                models: Vec::new(),
+            });
+        entry.total_cost_usd += stats.cost_usd;
+        entry.total_tokens += stats.tokens;
+        entry.models.push((model_name, stats.clone()));
+    }
+
+    let mut groups: Vec<AgentModelGroup> = grouped.into_values().collect();
+    for group in &mut groups {
+        group.models.sort_by(|left, right| {
+            right
+                .1
+                .cost_usd
+                .partial_cmp(&left.1.cost_usd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.1.tokens.cmp(&left.1.tokens))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+    }
+
+    groups.sort_by(|left, right| {
+        right
+            .total_cost_usd
+            .partial_cmp(&left.total_cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.total_tokens.cmp(&left.total_tokens))
+            .then_with(|| left.source.cmp(&right.source))
+    });
+    groups
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +677,7 @@ struct UsageState {
     heatmap_metric: HeatmapMetric,
     heatmap_window: HeatmapWindow,
     selected_heatmap_date: Option<NaiveDate>,
+    heatmap_detail_scroll: usize,
     scroll_offset: usize,
     sort_field: SortField,
     sort_ascending: bool,
@@ -598,6 +697,7 @@ impl UsageState {
             heatmap_metric: HeatmapMetric::TotalTokens,
             heatmap_window: HeatmapWindow::SelectedYear,
             selected_heatmap_date: dashboard.latest_date(),
+            heatmap_detail_scroll: 0,
             scroll_offset: 0,
             sort_field: SortField::Cost,
             sort_ascending: false,
@@ -611,15 +711,18 @@ impl UsageState {
     fn next_page(&mut self) {
         self.page = self.page.next();
         self.scroll_offset = 0;
+        self.heatmap_detail_scroll = 0;
     }
 
     fn previous_page(&mut self) {
         self.page = self.page.previous();
         self.scroll_offset = 0;
+        self.heatmap_detail_scroll = 0;
     }
 
     fn next_window(&mut self) {
         self.heatmap_window = self.heatmap_window.next();
+        self.heatmap_detail_scroll = 0;
     }
 
     fn scroll_up(&mut self) {
@@ -657,6 +760,48 @@ impl UsageState {
     fn is_source_enabled(&self, source: &str) -> bool {
         self.enabled_sources.contains(source)
     }
+
+    fn set_selected_heatmap_date(&mut self, date: Option<NaiveDate>) {
+        self.selected_heatmap_date = date;
+        self.heatmap_detail_scroll = 0;
+    }
+
+    fn scroll_heatmap_detail_up(&mut self) {
+        self.heatmap_detail_scroll = self.heatmap_detail_scroll.saturating_sub(1);
+    }
+
+    fn scroll_heatmap_detail_down(&mut self, max: usize) {
+        if self.heatmap_detail_scroll < max {
+            self.heatmap_detail_scroll += 1;
+        }
+    }
+}
+
+fn scrollable_item_count(dashboard: &UsageDashboard, state: &UsageState) -> usize {
+    match state.page {
+        UsagePage::Overview | UsagePage::Models => {
+            dashboard.filtered_models(&state.enabled_sources).len()
+        }
+        UsagePage::Daily => dashboard.filtered_daily(&state.enabled_sources).len(),
+        UsagePage::Heatmap => 0,
+    }
+}
+
+fn heatmap_detail_scroll_max(
+    dashboard: &UsageDashboard,
+    state: &UsageState,
+    frame_area: Rect,
+) -> usize {
+    let body = dashboard_body_area(frame_area);
+    let detail_area = heatmap_day_panel_area(body);
+    let selected_day = dashboard.selected_day_in_window(
+        state.heatmap_window,
+        state.selected_heatmap_date,
+        &state.enabled_sources,
+    );
+    let total_lines = heatmap_day_panel_line_count(selected_day.as_ref());
+    let visible_lines = detail_area.height.saturating_sub(2) as usize;
+    total_lines.saturating_sub(visible_lines)
 }
 
 // ---------------------------------------------------------------------------
@@ -666,9 +811,10 @@ impl UsageState {
 pub fn run(summary: UsageSummary, daily_rows: Vec<DailyUsageRow>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    terminal.hide_cursor()?;
 
     let theme = Theme::default();
     let dashboard = UsageDashboard::build(&summary, &daily_rows);
@@ -684,159 +830,241 @@ pub fn run(summary: UsageSummary, daily_rows: Vec<DailyUsageRow>) -> Result<()> 
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // Source filter overlay intercepts all keys when open
-                if state.show_source_filter {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('s') => {
-                            state.show_source_filter = false;
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            state.source_filter_cursor =
-                                state.source_filter_cursor.saturating_sub(1);
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if state.source_filter_cursor + 1 < state.all_sources.len() {
-                                state.source_filter_cursor += 1;
+            match event::read()? {
+                Event::Key(key) => {
+                    if state.show_source_filter {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('s') => {
+                                state.show_source_filter = false;
                             }
-                        }
-                        KeyCode::Char(' ') | KeyCode::Enter => {
-                            state.toggle_source_at_cursor();
-                        }
-                        KeyCode::Char('a') => {
-                            // Toggle all
-                            if state.enabled_sources.len() == state.all_sources.len() {
-                                // Keep only the first source
-                                state.enabled_sources.clear();
-                                if let Some(first) = state.all_sources.first() {
-                                    state.enabled_sources.insert(first.clone());
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                state.source_filter_cursor =
+                                    state.source_filter_cursor.saturating_sub(1);
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if state.source_filter_cursor + 1 < state.all_sources.len() {
+                                    state.source_filter_cursor += 1;
                                 }
-                            } else {
-                                state.enabled_sources = state.all_sources.iter().cloned().collect();
                             }
+                            KeyCode::Char(' ') | KeyCode::Enter => {
+                                state.toggle_source_at_cursor();
+                            }
+                            KeyCode::Char('a') => {
+                                if state.enabled_sources.len() == state.all_sources.len() {
+                                    state.enabled_sources.clear();
+                                    if let Some(first) = state.all_sources.first() {
+                                        state.enabled_sources.insert(first.clone());
+                                    }
+                                } else {
+                                    state.enabled_sources =
+                                        state.all_sources.iter().cloned().collect();
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                        continue;
                     }
-                    continue;
-                }
 
-                match state.page {
-                    UsagePage::Models => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
-                        KeyCode::Right | KeyCode::Char('l') => state.next_page(),
-                        KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            let filtered_len =
-                                dashboard.filtered_models(&state.enabled_sources).len();
-                            state.scroll_down(filtered_len.saturating_sub(1));
-                        }
-                        KeyCode::Tab => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                state.previous_page();
-                            } else {
-                                state.next_page();
+                    match state.page {
+                        UsagePage::Models => match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
+                            KeyCode::Right | KeyCode::Char('l') => state.next_page(),
+                            KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                let filtered_len =
+                                    dashboard.filtered_models(&state.enabled_sources).len();
+                                state.scroll_down(filtered_len.saturating_sub(1));
                             }
-                        }
-                        KeyCode::Char('c') => state.toggle_sort(SortField::Cost),
-                        KeyCode::Char('t') => state.toggle_sort(SortField::Tokens),
-                        KeyCode::Char('d') => state.toggle_sort(SortField::Date),
-                        KeyCode::Char('s') => {
-                            state.show_source_filter = true;
-                        }
-                        _ => {}
-                    },
-                    UsagePage::Daily => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
-                        KeyCode::Right | KeyCode::Char('l') => state.next_page(),
-                        KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            state.scroll_down(dashboard.daily.len().saturating_sub(1));
-                        }
-                        KeyCode::Tab => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                state.previous_page();
-                            } else {
-                                state.next_page();
+                            KeyCode::Tab => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    state.previous_page();
+                                } else {
+                                    state.next_page();
+                                }
                             }
-                        }
-                        KeyCode::Char('c') => state.toggle_sort(SortField::Cost),
-                        KeyCode::Char('t') => state.toggle_sort(SortField::Tokens),
-                        KeyCode::Char('d') => state.toggle_sort(SortField::Date),
-                        KeyCode::Char('s') => {
-                            state.show_source_filter = true;
-                        }
-                        _ => {}
-                    },
-                    UsagePage::Heatmap => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
-                        KeyCode::Right | KeyCode::Char('l') => state.next_page(),
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            state.selected_heatmap_date =
-                                dashboard.move_selection(state.selected_heatmap_date, -1);
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            state.selected_heatmap_date =
-                                dashboard.move_selection(state.selected_heatmap_date, 1);
-                        }
-                        KeyCode::Tab => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                state.previous_page();
-                            } else {
-                                state.next_page();
+                            KeyCode::Char('c') => state.toggle_sort(SortField::Cost),
+                            KeyCode::Char('t') => state.toggle_sort(SortField::Tokens),
+                            KeyCode::Char('d') => state.toggle_sort(SortField::Date),
+                            KeyCode::Char('s') => {
+                                state.show_source_filter = true;
                             }
-                        }
-                        KeyCode::Char('w') => state.next_window(),
-                        KeyCode::Char('t') => {
-                            state.heatmap_metric = HeatmapMetric::TotalTokens;
-                        }
-                        KeyCode::Char('c') => state.heatmap_metric = HeatmapMetric::Cost,
-                        KeyCode::Char('i') => {
-                            state.heatmap_metric = HeatmapMetric::InputTokens;
-                        }
-                        KeyCode::Char('o') => {
-                            state.heatmap_metric = HeatmapMetric::OutputTokens;
-                        }
-                        KeyCode::Char('x') => {
-                            state.heatmap_metric = HeatmapMetric::CacheTokens;
-                        }
-                        KeyCode::Char('m') => {
-                            state.heatmap_metric = HeatmapMetric::Messages;
-                        }
-                        KeyCode::Char('n') => {
-                            state.heatmap_metric = HeatmapMetric::Sessions;
-                        }
-                        KeyCode::Char('s') => {
-                            state.show_source_filter = true;
-                        }
-                        _ => {}
-                    },
-                    // Overview
-                    _ => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
-                        KeyCode::Right | KeyCode::Char('l') => state.next_page(),
-                        KeyCode::Tab => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                state.previous_page();
-                            } else {
-                                state.next_page();
+                            _ => {}
+                        },
+                        UsagePage::Daily => match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
+                            KeyCode::Right | KeyCode::Char('l') => state.next_page(),
+                            KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                state.scroll_down(dashboard.daily.len().saturating_sub(1));
                             }
-                        }
-                        KeyCode::Char('s') => {
-                            state.show_source_filter = true;
-                        }
-                        _ => {}
-                    },
+                            KeyCode::Tab => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    state.previous_page();
+                                } else {
+                                    state.next_page();
+                                }
+                            }
+                            KeyCode::Char('c') => state.toggle_sort(SortField::Cost),
+                            KeyCode::Char('t') => state.toggle_sort(SortField::Tokens),
+                            KeyCode::Char('d') => state.toggle_sort(SortField::Date),
+                            KeyCode::Char('s') => {
+                                state.show_source_filter = true;
+                            }
+                            _ => {}
+                        },
+                        UsagePage::Heatmap => match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
+                            KeyCode::Right | KeyCode::Char('l') => state.next_page(),
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                state.set_selected_heatmap_date(
+                                    dashboard.move_selection(state.selected_heatmap_date, -1),
+                                );
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                state.set_selected_heatmap_date(
+                                    dashboard.move_selection(state.selected_heatmap_date, 1),
+                                );
+                            }
+                            KeyCode::Tab => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    state.previous_page();
+                                } else {
+                                    state.next_page();
+                                }
+                            }
+                            KeyCode::PageUp => state.scroll_heatmap_detail_up(),
+                            KeyCode::PageDown => {
+                                let frame = terminal.size()?;
+                                state.scroll_heatmap_detail_down(heatmap_detail_scroll_max(
+                                    &dashboard,
+                                    &state,
+                                    Rect::new(0, 0, frame.width, frame.height),
+                                ));
+                            }
+                            KeyCode::Char('w') => state.next_window(),
+                            KeyCode::Char('t') => {
+                                state.heatmap_metric = HeatmapMetric::TotalTokens;
+                                state.heatmap_detail_scroll = 0;
+                            }
+                            KeyCode::Char('c') => {
+                                state.heatmap_metric = HeatmapMetric::Cost;
+                                state.heatmap_detail_scroll = 0;
+                            }
+                            KeyCode::Char('i') => {
+                                state.heatmap_metric = HeatmapMetric::InputTokens;
+                                state.heatmap_detail_scroll = 0;
+                            }
+                            KeyCode::Char('o') => {
+                                state.heatmap_metric = HeatmapMetric::OutputTokens;
+                                state.heatmap_detail_scroll = 0;
+                            }
+                            KeyCode::Char('x') => {
+                                state.heatmap_metric = HeatmapMetric::CacheTokens;
+                                state.heatmap_detail_scroll = 0;
+                            }
+                            KeyCode::Char('m') => {
+                                state.heatmap_metric = HeatmapMetric::Messages;
+                                state.heatmap_detail_scroll = 0;
+                            }
+                            KeyCode::Char('n') => {
+                                state.heatmap_metric = HeatmapMetric::Sessions;
+                                state.heatmap_detail_scroll = 0;
+                            }
+                            KeyCode::Char('s') => {
+                                state.show_source_filter = true;
+                            }
+                            _ => {}
+                        },
+                        _ => match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
+                            KeyCode::Right | KeyCode::Char('l') => state.next_page(),
+                            KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                state.scroll_down(
+                                    scrollable_item_count(&dashboard, &state).saturating_sub(1),
+                                );
+                            }
+                            KeyCode::Tab => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    state.previous_page();
+                                } else {
+                                    state.next_page();
+                                }
+                            }
+                            KeyCode::Char('s') => {
+                                state.show_source_filter = true;
+                            }
+                            _ => {}
+                        },
+                    }
                 }
+                Event::Mouse(mouse)
+                    if !state.show_source_filter
+                        && state.page == UsagePage::Heatmap
+                        && matches!(
+                            mouse.kind,
+                            MouseEventKind::Down(MouseButton::Left)
+                                | MouseEventKind::Drag(MouseButton::Left)
+                        ) =>
+                {
+                    let frame_area = terminal.size()?;
+                    let area = Rect::new(0, 0, frame_area.width, frame_area.height);
+                    if let Some(date) =
+                        heatmap_date_at_position(area, &dashboard, &state, mouse.column, mouse.row)
+                    {
+                        state.set_selected_heatmap_date(Some(date));
+                    }
+                }
+                Event::Mouse(mouse)
+                    if !state.show_source_filter
+                        && matches!(mouse.kind, MouseEventKind::ScrollUp) =>
+                {
+                    if state.page == UsagePage::Heatmap {
+                        let frame = terminal.size()?;
+                        let frame_area = Rect::new(0, 0, frame.width, frame.height);
+                        let body = dashboard_body_area(frame_area);
+                        if rect_contains(heatmap_day_panel_area(body), mouse.column, mouse.row) {
+                            state.scroll_heatmap_detail_up();
+                        }
+                    } else {
+                        state.scroll_up();
+                    }
+                }
+                Event::Mouse(mouse)
+                    if !state.show_source_filter
+                        && matches!(mouse.kind, MouseEventKind::ScrollDown) =>
+                {
+                    if state.page == UsagePage::Heatmap {
+                        let frame = terminal.size()?;
+                        let frame_area = Rect::new(0, 0, frame.width, frame.height);
+                        let body = dashboard_body_area(frame_area);
+                        if rect_contains(heatmap_day_panel_area(body), mouse.column, mouse.row) {
+                            state.scroll_heatmap_detail_down(heatmap_detail_scroll_max(
+                                &dashboard, &state, frame_area,
+                            ));
+                        }
+                    } else {
+                        state.scroll_down(
+                            scrollable_item_count(&dashboard, &state).saturating_sub(1),
+                        );
+                    }
+                }
+                _ => {}
             }
         }
     }
 
+    terminal.show_cursor()?;
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     Ok(())
 }
 
@@ -877,6 +1105,61 @@ fn render_dashboard(
     }
 
     render_footer(f, root[3], state, theme);
+}
+
+fn dashboard_body_area(area: Rect) -> Rect {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Min(10),
+            Constraint::Length(2),
+        ])
+        .split(area)[2]
+}
+
+fn heatmap_grid_area(area: Rect) -> Rect {
+    let split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(area);
+
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(16), Constraint::Length(3)])
+        .split(split[0]);
+
+    Block::default().borders(Borders::ALL).inner(left[0])
+}
+
+fn heatmap_day_panel_area(area: Rect) -> Rect {
+    let split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(8), Constraint::Min(10)])
+        .split(split[1])[1]
+}
+
+fn heatmap_date_at_position(
+    area: Rect,
+    dashboard: &UsageDashboard,
+    state: &UsageState,
+    column: u16,
+    row: u16,
+) -> Option<NaiveDate> {
+    let body = dashboard_body_area(area);
+    let grid_area = heatmap_grid_area(body);
+    let bounds = dashboard.bounds_for_window(state.heatmap_window, state.selected_heatmap_date);
+    date_at_position(grid_area, bounds, column, row)
+}
+
+fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x && column < area.x + area.width && row >= area.y && row < area.y + area.height
 }
 
 // ---------------------------------------------------------------------------
@@ -989,7 +1272,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
         " | s filter".to_string()
     };
     let help = match state.page {
-        UsagePage::Overview => format!(" q quit | ←→ tab{}", filter_hint),
+        UsagePage::Overview => format!(" q quit | ←→ tab | ↑↓ scroll{}", filter_hint),
         UsagePage::Models => {
             let dir = if state.sort_ascending { "↑" } else { "↓" };
             let field = match state.sort_field {
@@ -1015,7 +1298,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
             )
         }
         UsagePage::Heatmap => format!(
-            " q quit | ←→ tab | ↑↓ day | w window ({}) | t/c/i/o/x/m/n metric ({}){}",
+            " q quit | ←→ tab | ↑↓ day | pgup/pgdn detail | w window ({}) | t/c/i/o/x/m/n metric ({}){}",
             state.heatmap_window.label(),
             state.heatmap_metric.short_label(),
             filter_hint
@@ -1067,7 +1350,7 @@ fn render_source_filter_overlay(
         let enabled = state.is_source_enabled(source);
         let selected = i == state.source_filter_cursor;
         let checkbox = if enabled { "[✓]" } else { "[ ]" };
-        let color = theme.model_color(source);
+        let color = theme.provider_color(source);
         let style = if selected {
             Style::default().fg(theme.bg).bg(color).bold()
         } else if enabled {
@@ -1152,26 +1435,28 @@ fn render_overview_chart(
         .map(|day| {
             let mut segments = HashMap::new();
             let mut total = 0.0;
-            for (provider, stats) in &day.providers {
-                if state.is_source_enabled(provider) {
-                    segments.insert(provider.as_str(), stats.tokens as f64);
-                    total += stats.tokens as f64;
+            for (model_key, stats) in &day.models {
+                let source = model_source(model_key);
+                if !state.is_source_enabled(source) {
+                    continue;
                 }
+                let company = theme.company_key_for(
+                    model_id_from_key(model_key),
+                    Some(stats.provider_id.as_str()),
+                );
+                *segments.entry(company).or_insert(0.0) += stats.tokens as f64;
+                total += stats.tokens as f64;
             }
             (total, segments)
         })
         .collect();
 
     let chart = StackedBarChart::new(&chart_data)
-        .color("claude", theme.claude)
-        .color("codex", theme.codex)
-        .color("opencode", theme.opencode)
-        .color("gemini", theme.gemini)
-        .color("pi", theme.pi)
-        .color("antigravity", theme.antigravity)
-        .color("copilot", theme.copilot)
-        .width(sections[0].width as usize)
-        .height(sections[0].height as usize);
+        .color("openai", theme.company_color("openai"))
+        .color("google", theme.company_color("google"))
+        .color("anthropic", theme.company_color("anthropic"))
+        .color("other", theme.company_color("other"))
+        .value_format(ValueFormat::CompactNumber);
     f.render_widget(chart, sections[0]);
 
     // Legend: only show enabled sources
@@ -1185,22 +1470,17 @@ fn render_overview_chart(
     legend_spans.push(Span::raw("  "));
 
     let provider_legend: &[(&str, &str, Color)] = &[
-        ("claude", "CLA", theme.claude),
-        ("codex", "CDX", theme.codex),
-        ("copilot", "COP", theme.copilot),
-        ("opencode", "OCD", theme.opencode),
-        ("gemini", "GEM", theme.gemini),
-        ("pi", "PI", theme.pi),
-        ("antigravity", "AG", theme.antigravity),
+        ("anthropic", "Anthropic", theme.company_color("anthropic")),
+        ("openai", "OpenAI", theme.company_color("openai")),
+        ("google", "Google", theme.company_color("google")),
+        ("other", "Others", theme.company_color("other")),
     ];
-    for (name, label, color) in provider_legend {
-        if state.is_source_enabled(name) {
-            legend_spans.push(Span::styled(
-                format!("● {}", label),
-                Style::default().fg(*color),
-            ));
-            legend_spans.push(Span::raw(" "));
-        }
+    for (_, label, color) in provider_legend {
+        legend_spans.push(Span::styled(
+            format!("● {}", label),
+            Style::default().fg(*color),
+        ));
+        legend_spans.push(Span::raw(" "));
     }
     legend_spans.push(Span::raw(" "));
     legend_spans.push(Span::styled(
@@ -1218,21 +1498,29 @@ fn render_overview_top_models(
     f: &mut ratatui::Frame,
     area: Rect,
     dashboard: &UsageDashboard,
-    summary: &UsageSummary,
+    _summary: &UsageSummary,
     state: &UsageState,
     theme: &Theme,
 ) {
+    let filtered = dashboard.filtered_models(&state.enabled_sources);
+    let total_rows = filtered.len();
     let block = Block::default()
         .title(Span::styled(
-            " Top Models by Cost ",
+            format!(
+                " Top Models ({}) {} ",
+                total_rows,
+                scroll_window_label(
+                    state.scroll_offset,
+                    inner_window_size(area.height),
+                    total_rows
+                )
+            ),
             Style::default().fg(theme.accent_soft).bold(),
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border));
     let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let filtered = dashboard.filtered_models(&state.enabled_sources);
 
     if filtered.is_empty() {
         f.render_widget(
@@ -1242,30 +1530,96 @@ fn render_overview_top_models(
         return;
     }
 
-    let max_rows = inner.height as usize;
-    let total_cost = summary.total_cost.max(0.01);
+    let visible_rows = inner.height as usize;
+    let data_rows_visible = visible_rows.saturating_sub(2);
+    let offset = state
+        .scroll_offset
+        .min(filtered.len().saturating_sub(data_rows_visible));
+    let total_cost = filtered
+        .iter()
+        .map(|model| model.cost)
+        .sum::<f64>()
+        .max(0.01);
+    let total_width = inner.width as usize;
+    let pct_width = 5usize;
+    let cost_width = 8usize;
+    let tokens_width = 9usize;
+    let fixed_width = tokens_width + cost_width + pct_width + 4;
+    let remaining = total_width.saturating_sub(fixed_width);
+    let agent_width = (remaining / 3).clamp(22, 36);
+    let model_width = total_width
+        .saturating_sub(agent_width + fixed_width)
+        .clamp(22, 40);
 
-    for (idx, model) in filtered.iter().take(max_rows.min(10)).enumerate() {
-        let y = inner.y + idx as u16;
-        if y >= inner.y + inner.height {
-            break;
-        }
+    let mut lines = Vec::with_capacity(data_rows_visible + 2);
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:<model_width$}", "Model"),
+            Style::default().fg(theme.accent_soft).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:<agent_width$}", "Agent"),
+            Style::default().fg(theme.accent).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>tokens_width$}", "Tokens"),
+            Style::default().fg(Color::Rgb(234, 179, 8)).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>cost_width$}", "Cost"),
+            Style::default().fg(Color::Rgb(34, 197, 94)).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>pct_width$}", "%"),
+            Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
+        ),
+    ]));
 
-        let color = theme.model_color(&model.model);
+    for model in filtered.iter().skip(offset).take(data_rows_visible) {
+        let provider_hint = model.provider.split(',').next();
+        let color = theme.model_color_for(&model.model, provider_hint);
         let pct = (model.cost / total_cost * 100.0).clamp(0.0, 100.0);
-
-        let line = Line::from(vec![
-            Span::styled("● ", Style::default().fg(color)),
-            Span::styled(truncate(&model.model, 30), Style::default().fg(color)),
-            Span::raw("  "),
-            Span::styled(format_compact(model.tokens), Style::default().fg(theme.fg)),
-            Span::raw("  "),
-            Span::styled(format!("${:.2}", model.cost), Style::default().fg(theme.fg)),
-            Span::raw("  "),
-            Span::styled(format!("{:.0}%", pct), Style::default().fg(theme.dim)),
-        ]);
-        f.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<model_width$}", truncate(&model.model, model_width)),
+                Style::default().fg(color),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!(
+                    "{:<agent_width$}",
+                    truncate(&format_source_list(&model.source), agent_width)
+                ),
+                Style::default().fg(theme.accent),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:>tokens_width$}", format_compact(model.tokens)),
+                Style::default().fg(Color::Rgb(234, 179, 8)),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:>cost_width$}", format!("${:.2}", model.cost)),
+                Style::default().fg(Color::Rgb(34, 197, 94)),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:>pct_width$}", format!("{:.0}%", pct)),
+                Style::default().fg(Color::Rgb(96, 165, 250)),
+            ),
+        ]));
     }
+
+    lines.push(Line::from(vec![Span::styled(
+        overview_scroll_hint(offset, data_rows_visible, total_rows),
+        Style::default().fg(theme.dim),
+    )]));
+
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 // ===========================================================================
@@ -1308,13 +1662,14 @@ fn render_models_page(
                 a.cost
                     .partial_cmp(&b.cost)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.model.cmp(&b.model))
             });
             if !state.sort_ascending {
                 models.reverse();
             }
         }
         SortField::Tokens => {
-            models.sort_by_key(|m| m.tokens);
+            models.sort_by(|a, b| a.tokens.cmp(&b.tokens).then_with(|| a.model.cmp(&b.model)));
             if !state.sort_ascending {
                 models.reverse();
             }
@@ -1325,6 +1680,7 @@ fn render_models_page(
                 a.cost
                     .partial_cmp(&b.cost)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.model.cmp(&b.model))
             });
             if !state.sort_ascending {
                 models.reverse();
@@ -1334,7 +1690,16 @@ fn render_models_page(
 
     // Header row
     let header_y = inner.y;
-    let headers = ["#", "Model", "Provider", "Tokens", "Cost", "Msgs"];
+    let total_width = inner.width as usize;
+    let rank_width = 4usize;
+    let cost_width = 8usize;
+    let msg_width = 8usize;
+    let tokens_width = 9usize;
+    let agent_width = (total_width / 4).clamp(22, 36);
+    let model_width = total_width
+        .saturating_sub(rank_width + agent_width + tokens_width + cost_width + msg_width)
+        .clamp(28, 48);
+    let headers = ["#", "Model", "Agent", "Tokens", "Cost", "Msgs"];
     let sort_indicator = |field: SortField| -> &str {
         if state.sort_field == field {
             if state.sort_ascending {
@@ -1349,28 +1714,36 @@ fn render_models_page(
 
     let header_line = Line::from(vec![
         Span::styled(
-            format!("{:<4}", headers[0]),
+            format!("{:<rank_width$}", headers[0]),
+            Style::default().fg(theme.dim).bold(),
+        ),
+        Span::styled(
+            format!("{:<model_width$}", headers[1]),
             Style::default().fg(theme.accent).bold(),
         ),
         Span::styled(
-            format!("{:<34}", headers[1]),
-            Style::default().fg(theme.accent).bold(),
+            format!("{:<agent_width$}", headers[2]),
+            Style::default().fg(theme.accent_soft).bold(),
         ),
         Span::styled(
-            format!("{:<14}", headers[2]),
-            Style::default().fg(theme.accent).bold(),
+            format!(
+                "{:<tokens_width$}{}",
+                headers[3],
+                sort_indicator(SortField::Tokens)
+            ),
+            Style::default().fg(Color::Rgb(234, 179, 8)).bold(),
         ),
         Span::styled(
-            format!("{:<12}{}", headers[3], sort_indicator(SortField::Tokens)),
-            Style::default().fg(theme.accent).bold(),
+            format!(
+                "{:<cost_width$}{}",
+                headers[4],
+                sort_indicator(SortField::Cost)
+            ),
+            Style::default().fg(Color::Rgb(34, 197, 94)).bold(),
         ),
         Span::styled(
-            format!("{:<12}{}", headers[4], sort_indicator(SortField::Cost)),
-            Style::default().fg(theme.accent).bold(),
-        ),
-        Span::styled(
-            format!("{:<10}", headers[5]),
-            Style::default().fg(theme.accent).bold(),
+            format!("{:<msg_width$}", headers[5]),
+            Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
         ),
     ]);
     f.render_widget(
@@ -1390,29 +1763,35 @@ fn render_models_page(
         }
 
         let rank = offset + i + 1;
-        let model_color = theme.model_color(&model.model);
+        let model_color = theme.model_color_for(&model.model, model.provider.split(',').next());
 
         let spans = vec![
-            Span::styled(format!("{:<4}", rank), Style::default().fg(theme.dim)),
             Span::styled(
-                format!("{:<34}", truncate(&model.model, 32)),
-                Style::default().fg(model_color),
-            ),
-            Span::styled(
-                format!("{:<14}", truncate(&model.source, 12)),
+                format!("{:<rank_width$}", rank),
                 Style::default().fg(theme.dim),
             ),
             Span::styled(
-                format!("{:<12}", format_compact(model.tokens)),
-                Style::default().fg(theme.fg),
+                format!("{:<model_width$}", truncate(&model.model, model_width)),
+                Style::default().fg(model_color),
             ),
             Span::styled(
-                format!("${:<11.2}", model.cost),
-                Style::default().fg(theme.fg),
+                format!(
+                    "{:<agent_width$}",
+                    truncate(&format_source_list(&model.source), agent_width)
+                ),
+                Style::default().fg(theme.accent_soft),
             ),
             Span::styled(
-                format!("{:<10}", format_compact(model.message_count as i64)),
-                Style::default().fg(theme.fg),
+                format!("{:<tokens_width$}", format_compact(model.tokens)),
+                Style::default().fg(Color::Rgb(234, 179, 8)),
+            ),
+            Span::styled(
+                format!("{:<cost_width$}", format!("${:.2}", model.cost)),
+                Style::default().fg(Color::Rgb(34, 197, 94)),
+            ),
+            Span::styled(
+                format!("{:<msg_width$}", format_compact(model.message_count as i64)),
+                Style::default().fg(Color::Rgb(96, 165, 250)),
             ),
         ];
 
@@ -1437,10 +1816,7 @@ fn render_daily_page(
         .constraints([Constraint::Length(3), Constraint::Min(8)])
         .split(area);
 
-    // Summary header
     render_daily_summary(f, sections[0], dashboard, state, theme);
-
-    // Table
     render_daily_table(f, sections[1], dashboard, state, theme);
 }
 
@@ -1553,31 +1929,31 @@ fn render_daily_table(
     let header_line = Line::from(vec![
         Span::styled(
             format!("{:<12}", "Date"),
-            Style::default().fg(theme.accent).bold(),
+            Style::default().fg(theme.accent_soft).bold(),
         ),
         Span::styled(
             format!("{:<10}", "Tokens"),
-            Style::default().fg(theme.accent).bold(),
+            Style::default().fg(Color::Rgb(234, 179, 8)).bold(),
         ),
         Span::styled(
             format!("{:<10}", "Cost"),
-            Style::default().fg(theme.accent).bold(),
+            Style::default().fg(Color::Rgb(34, 197, 94)).bold(),
         ),
         Span::styled(
             format!("{:<10}", "Input"),
-            Style::default().fg(theme.accent).bold(),
+            Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
         ),
         Span::styled(
             format!("{:<10}", "Output"),
-            Style::default().fg(theme.accent).bold(),
+            Style::default().fg(Color::Rgb(167, 139, 250)).bold(),
         ),
         Span::styled(
             format!("{:<10}", "Cache"),
-            Style::default().fg(theme.accent).bold(),
+            Style::default().fg(Color::Rgb(251, 146, 60)).bold(),
         ),
         Span::styled(
             format!("{:<8}", "Msgs"),
-            Style::default().fg(theme.accent).bold(),
+            Style::default().fg(Color::Rgb(244, 114, 182)).bold(),
         ),
     ]);
     f.render_widget(
@@ -1598,39 +1974,45 @@ fn render_daily_table(
 
         let is_today = day.date == today;
         let date_style = if is_today {
-            Style::default().fg(Color::Yellow).bold()
+            Style::default()
+                .fg(theme.accent_soft)
+                .bg(Color::Rgb(20, 40, 20))
+                .bold()
         } else {
-            Style::default().fg(theme.fg)
+            Style::default().fg(theme.accent_soft)
         };
-        let row_style = if is_today {
-            Style::default().fg(theme.fg).bg(Color::Rgb(20, 40, 20))
+        let row_bg = if is_today {
+            Some(Color::Rgb(20, 40, 20))
         } else {
-            Style::default().fg(theme.fg)
+            None
         };
 
         let line = Line::from(vec![
             Span::styled(format!("{:<12}", day.date.format("%Y-%m-%d")), date_style),
             Span::styled(
                 format!("{:<10}", format_compact(day.total_tokens)),
-                row_style,
+                metric_style(Color::Rgb(234, 179, 8), row_bg),
             ),
             Span::styled(
                 format!("{:<10}", format!("${:.2}", day.cost_usd)),
-                row_style,
+                metric_style(Color::Rgb(34, 197, 94), row_bg),
             ),
             Span::styled(
                 format!("{:<10}", format_compact(day.input_tokens)),
-                row_style,
+                metric_style(Color::Rgb(96, 165, 250), row_bg),
             ),
             Span::styled(
                 format!("{:<10}", format_compact(day.output_tokens)),
-                row_style,
+                metric_style(Color::Rgb(167, 139, 250), row_bg),
             ),
             Span::styled(
                 format!("{:<10}", format_compact(day.cache_tokens())),
-                row_style,
+                metric_style(Color::Rgb(251, 146, 60), row_bg),
             ),
-            Span::styled(format!("{:<8}", format_compact(day.messages)), row_style),
+            Span::styled(
+                format!("{:<8}", format_compact(day.messages)),
+                metric_style(Color::Rgb(244, 114, 182), row_bg),
+            ),
         ]);
         f.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
     }
@@ -1717,12 +2099,7 @@ fn render_heatmap_page(
     // Right panel: day detail
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(8),
-            Constraint::Length(6),
-            Constraint::Length(6),
-            Constraint::Min(6),
-        ])
+        .constraints([Constraint::Length(8), Constraint::Min(10)])
         .split(split[1]);
 
     render_heatmap_summary_card(
@@ -1740,10 +2117,9 @@ fn render_heatmap_page(
         right[1],
         selected_day.as_ref(),
         state.heatmap_metric,
+        state.heatmap_detail_scroll,
         theme,
     );
-    render_heatmap_token_breakdown(f, right[2], selected_day.as_ref(), theme);
-    render_heatmap_day_models(f, right[3], selected_day.as_ref(), theme);
 }
 
 fn render_heatmap_summary_card(
@@ -1824,6 +2200,7 @@ fn render_heatmap_day_detail(
     area: Rect,
     day: Option<&DailyStats>,
     metric: HeatmapMetric,
+    scroll_offset: usize,
     theme: &Theme,
 ) {
     let block = Block::default()
@@ -1844,7 +2221,8 @@ fn render_heatmap_day_detail(
         return;
     };
 
-    let lines = vec![
+    let groups = build_agent_model_groups(day);
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(
                 day.date.format("%Y-%m-%d").to_string(),
@@ -1860,161 +2238,155 @@ fn render_heatmap_day_detail(
             Span::styled("Cost ", Style::default().fg(theme.dim)),
             Span::styled(
                 format!("${:.2}", day.cost_usd),
-                Style::default().fg(theme.fg),
+                Style::default().fg(Color::Rgb(34, 197, 94)),
             ),
             Span::raw("  "),
             Span::styled("Tokens ", Style::default().fg(theme.dim)),
             Span::styled(
                 format_compact(day.total_tokens),
-                Style::default().fg(theme.fg),
+                Style::default().fg(Color::Rgb(234, 179, 8)),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Msgs ", Style::default().fg(theme.dim)),
-            Span::styled(format_compact(day.messages), Style::default().fg(theme.fg)),
+            Span::styled("Input ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format_compact(day.input_tokens),
+                Style::default().fg(Color::Rgb(96, 165, 250)),
+            ),
             Span::raw("  "),
-            Span::styled("Sess ", Style::default().fg(theme.dim)),
-            Span::styled(format_compact(day.sessions), Style::default().fg(theme.fg)),
+            Span::styled("Output ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format_compact(day.output_tokens),
+                Style::default().fg(Color::Rgb(167, 139, 250)),
+            ),
         ]),
     ];
-
-    f.render_widget(
-        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),
-        inner,
-    );
-}
-
-fn render_heatmap_token_breakdown(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    day: Option<&DailyStats>,
-    theme: &Theme,
-) {
-    let block = Block::default()
-        .title(Span::styled(
-            " Token Mix ",
-            Style::default().fg(theme.gemini).bold(),
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let Some(day) = day else {
-        f.render_widget(
-            Paragraph::new("No day selected").style(Style::default().fg(theme.dim)),
-            inner,
-        );
-        return;
-    };
-
-    let comp = day.token_composition();
-
-    // Inline colored text format
-    let line1 = Line::from(vec![
-        Span::styled("IN ", Style::default().fg(theme.claude).bold()),
+    lines.push(Line::from(vec![
+        Span::styled("Cache ", Style::default().fg(theme.dim)),
         Span::styled(
-            format_compact(comp.input),
-            Style::default().fg(theme.claude),
+            format_compact(day.cache_tokens()),
+            Style::default().fg(Color::Rgb(251, 146, 60)),
         ),
         Span::raw("  "),
-        Span::styled("OUT ", Style::default().fg(theme.codex).bold()),
+        Span::styled("Reason ", Style::default().fg(theme.dim)),
         Span::styled(
-            format_compact(comp.output),
-            Style::default().fg(theme.codex),
-        ),
-    ]);
-    let line2 = Line::from(vec![
-        Span::styled("CACHE ", Style::default().fg(theme.gemini).bold()),
-        Span::styled(
-            format_compact(comp.cache),
-            Style::default().fg(theme.gemini),
-        ),
-        Span::raw("  "),
-        Span::styled("REASON ", Style::default().fg(theme.opencode).bold()),
-        Span::styled(
-            format_compact(comp.reasoning),
+            format_compact(day.reasoning_tokens),
             Style::default().fg(theme.opencode),
         ),
-    ]);
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Msgs ", Style::default().fg(theme.dim)),
+        Span::styled(
+            format_compact(day.messages),
+            Style::default().fg(Color::Rgb(244, 114, 182)),
+        ),
+        Span::raw("  "),
+        Span::styled("Sess ", Style::default().fg(theme.dim)),
+        Span::styled(format_compact(day.sessions), Style::default().fg(theme.fg)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "Agent / Model Cost",
+        Style::default().fg(theme.accent_soft).bold(),
+    )]));
 
-    // Provider breakdown
-    let provider_rows = day.provider_rows();
-    let mut lines = vec![line1, line2];
-    for (provider, stats) in provider_rows.iter().take(2) {
-        let pcolor = theme.provider_color(provider);
+    let cost_width = 8usize.min(inner.width.saturating_sub(10) as usize);
+    let model_width = inner.width.saturating_sub((cost_width + 3) as u16) as usize;
+    for group in groups {
+        let agent_name = display_source_name(&group.source);
+        let agent_color = theme.provider_color(&group.source);
         lines.push(Line::from(vec![
-            Span::styled("● ", Style::default().fg(pcolor)),
             Span::styled(
-                format!(
-                    "{} {}",
-                    provider.to_uppercase(),
-                    format_compact(stats.tokens)
-                ),
-                Style::default().fg(pcolor),
+                truncate(agent_name, model_width),
+                Style::default().fg(agent_color).bold(),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:>cost_width$}", format!("${:.2}", group.total_cost_usd)),
+                Style::default().fg(Color::Rgb(34, 197, 94)).bold(),
             ),
         ]));
+
+        for (model_name, stats) in group.models {
+            let model_color = theme.model_color_for(&model_name, Some(stats.provider_id.as_str()));
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    truncate(&model_name, model_width.saturating_sub(2)),
+                    Style::default().fg(model_color),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:>cost_width$}", format!("${:.2}", stats.cost_usd)),
+                    Style::default().fg(Color::Rgb(34, 197, 94)),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("    ", Style::default()),
+                Span::styled("T ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(stats.tokens),
+                    Style::default().fg(Color::Rgb(234, 179, 8)),
+                ),
+                Span::raw(" "),
+                Span::styled("I ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(stats.input_tokens),
+                    Style::default().fg(Color::Rgb(96, 165, 250)),
+                ),
+                Span::raw(" "),
+                Span::styled("O ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(stats.output_tokens),
+                    Style::default().fg(Color::Rgb(167, 139, 250)),
+                ),
+                Span::raw(" "),
+                Span::styled("C ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(stats.cache_read_tokens + stats.cache_write_tokens),
+                    Style::default().fg(Color::Rgb(251, 146, 60)),
+                ),
+            ]));
+        }
     }
 
-    f.render_widget(
-        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),
-        inner,
-    );
+    let total_lines = lines.len();
+    let visible = inner.height as usize;
+    let offset = scroll_offset.min(total_lines.saturating_sub(visible));
+    let mut visible_lines: Vec<Line> = lines.into_iter().skip(offset).take(visible).collect();
+    if total_lines > visible && !visible_lines.is_empty() {
+        let last = visible_lines.len().saturating_sub(1);
+        visible_lines[last] = Line::from(vec![Span::styled(
+            format!(
+                "{}{} detail {}-{} / {}",
+                if offset > 0 { "↑" } else { " " },
+                if offset + visible < total_lines {
+                    "↓"
+                } else {
+                    " "
+                },
+                offset + 1,
+                (offset + visible).min(total_lines),
+                total_lines
+            ),
+            Style::default().fg(theme.dim),
+        )]);
+    }
+
+    f.render_widget(Paragraph::new(visible_lines), inner);
 }
 
-fn render_heatmap_day_models(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    day: Option<&DailyStats>,
-    theme: &Theme,
-) {
-    let block = Block::default()
-        .title(Span::styled(
-            " Top Models ",
-            Style::default().fg(theme.codex).bold(),
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
+fn heatmap_day_panel_line_count(day: Option<&DailyStats>) -> usize {
     let Some(day) = day else {
-        f.render_widget(
-            Paragraph::new("No day selected").style(Style::default().fg(theme.dim)),
-            inner,
-        );
-        return;
+        return 1;
     };
 
-    let model_rows = day.model_rows_sorted();
-    if model_rows.is_empty() {
-        f.render_widget(
-            Paragraph::new("No models").style(Style::default().fg(theme.dim)),
-            inner,
-        );
-        return;
+    let groups = build_agent_model_groups(day);
+    let mut lines = 7usize;
+    for group in groups {
+        lines += 1 + (group.models.len() * 2);
     }
-
-    let max_rows = inner.height as usize;
-    for (idx, (model_key, stats)) in model_rows.iter().take(max_rows).enumerate() {
-        let y = inner.y + idx as u16;
-        if y >= inner.y + inner.height {
-            break;
-        }
-
-        // model_key is "source / model_id", extract model_id for coloring
-        let model_name = model_key.split(" / ").nth(1).unwrap_or(model_key.as_str());
-        let color = theme.model_color(model_name);
-        let display = truncate(model_key, inner.width.saturating_sub(12) as usize);
-
-        let line = Line::from(vec![
-            Span::styled("● ", Style::default().fg(color)),
-            Span::styled(display, Style::default().fg(color)),
-            Span::raw(" "),
-            Span::styled(format_compact(stats.tokens), Style::default().fg(theme.fg)),
-        ]);
-        f.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
-    }
+    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -2074,6 +2446,44 @@ fn truncate(text: &str, width: usize) -> String {
     }
     out.push('…');
     out
+}
+
+fn metric_style(color: Color, bg: Option<Color>) -> Style {
+    let style = Style::default().fg(color);
+    if let Some(bg) = bg {
+        style.bg(bg)
+    } else {
+        style
+    }
+}
+
+fn inner_window_size(area_height: u16) -> usize {
+    area_height.saturating_sub(3) as usize
+}
+
+fn scroll_window_label(offset: usize, visible: usize, total: usize) -> String {
+    if total == 0 {
+        return String::new();
+    }
+    let start = offset + 1;
+    let end = (offset + visible).min(total).max(start);
+    format!("{}-{}", start, end)
+}
+
+fn overview_scroll_hint(offset: usize, visible: usize, total: usize) -> String {
+    if total <= visible || visible == 0 {
+        return format!("{} models", total);
+    }
+    let up = if offset > 0 { "↑" } else { " " };
+    let down = if offset + visible < total { "↓" } else { " " };
+    format!(
+        "{}{} scroll {}-{} / {}",
+        up,
+        down,
+        offset + 1,
+        (offset + visible).min(total),
+        total
+    )
 }
 
 #[cfg(test)]
@@ -2182,8 +2592,8 @@ mod tests {
         assert_eq!(days[0].output_tokens, 90);
         assert_eq!(days[0].cache_tokens(), 30);
         assert_eq!(days[0].messages, 2);
-        assert_eq!(days[0].provider_rows().len(), 1);
-        assert_eq!(days[0].model_rows_sorted().len(), 1);
+        assert_eq!(days[0].providers.len(), 1);
+        assert_eq!(days[0].models.len(), 1);
     }
 
     #[test]
@@ -2196,5 +2606,22 @@ mod tests {
 
         assert!(day.is_some());
         assert_eq!(day.unwrap().total_tokens, 200);
+    }
+
+    #[test]
+    fn agent_model_groups_roll_up_costs_per_source() {
+        let dashboard = sample_dashboard();
+        let day = dashboard
+            .day(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap())
+            .unwrap();
+
+        let groups = build_agent_model_groups(day);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].source, "codex");
+        assert_eq!(groups[0].total_cost_usd, 2.0);
+        assert_eq!(groups[0].models.len(), 1);
+        assert_eq!(groups[0].models[0].0, "gpt-5");
+        assert_eq!(groups[0].models[0].1.cost_usd, 2.0);
     }
 }

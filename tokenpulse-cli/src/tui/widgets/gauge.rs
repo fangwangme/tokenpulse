@@ -1,7 +1,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     widgets::Widget,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -9,9 +9,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 pub struct GradientGauge<'a> {
     label: &'a str,
     percent: f64,
+    expected_percent: Option<f64>,
     width: usize,
     color: Color,
     show_time: Option<&'a str>,
+    label_width: Option<usize>,
 }
 
 impl<'a> GradientGauge<'a> {
@@ -19,9 +21,11 @@ impl<'a> GradientGauge<'a> {
         Self {
             label,
             percent: percent.clamp(0.0, 100.0),
+            expected_percent: None,
             width: 30,
             color: Color::Green,
             show_time: None,
+            label_width: None,
         }
     }
 
@@ -37,6 +41,17 @@ impl<'a> GradientGauge<'a> {
 
     pub fn time(mut self, time: &'a str) -> Self {
         self.show_time = Some(time);
+        self
+    }
+
+    pub fn expected_percent(mut self, pct: Option<f64>) -> Self {
+        self.expected_percent = pct.map(|p| p.clamp(0.0, 100.0));
+        self
+    }
+
+    /// Set fixed label column width for alignment across multiple gauges
+    pub fn label_width(mut self, w: usize) -> Self {
+        self.label_width = Some(w);
         self
     }
 }
@@ -63,25 +78,47 @@ impl<'a> Widget for GradientGauge<'a> {
         }
 
         let available = total_width.saturating_sub(trailing_width);
-        let mut bar_width = self.width.min(available.saturating_sub(1));
-        let mut label_width = available.saturating_sub(bar_width + 1);
-        let min_label_width = self.label.chars().count().min(6);
 
-        if label_width < min_label_width {
-            let needed = min_label_width - label_width;
-            bar_width = bar_width.saturating_sub(needed);
-            label_width = available.saturating_sub(bar_width + 1);
-        }
+        // Use fixed label width if specified, otherwise auto-calculate
+        let (label_width, bar_width) = if let Some(fixed_lw) = self.label_width {
+            let lw = fixed_lw.min(available.saturating_sub(2));
+            let bw = available.saturating_sub(lw + 1);
+            (lw, bw)
+        } else {
+            let mut bw = self.width.min(available.saturating_sub(1));
+            let mut lw = available.saturating_sub(bw + 1);
+            let min_label_width = self.label.chars().count().min(6);
 
-        if bar_width == 0 {
-            bar_width = available.saturating_sub(1);
-            label_width = available.saturating_sub(bar_width + 1);
-        }
+            if lw < min_label_width {
+                let needed = min_label_width - lw;
+                bw = bw.saturating_sub(needed);
+                lw = available.saturating_sub(bw + 1);
+            }
+
+            if bw == 0 {
+                bw = available.saturating_sub(1);
+                lw = available.saturating_sub(bw + 1);
+            }
+            (lw, bw)
+        };
 
         let filled = (self.percent / 100.0 * bar_width as f64).round() as usize;
-        let bar: String = std::iter::repeat('█')
-            .take(filled.min(bar_width))
-            .chain(std::iter::repeat('░').take(bar_width.saturating_sub(filled.min(bar_width))))
+
+        // Build bar with optional expected-progress marker
+        let expected_pos = self
+            .expected_percent
+            .map(|ep| (ep / 100.0 * bar_width as f64).round() as usize);
+
+        let bar: String = (0..bar_width)
+            .map(|i| {
+                if Some(i) == expected_pos {
+                    '▏' // expected progress marker
+                } else if i < filled.min(bar_width) {
+                    '█'
+                } else {
+                    '░'
+                }
+            })
             .collect();
 
         let label = if label_width > 0 {
@@ -93,8 +130,30 @@ impl<'a> Widget for GradientGauge<'a> {
         let text = format!("{}{}{}", label, bar, trailing);
         let text = truncate_display_width(&text, total_width);
 
+        // Render with color. If there's an expected marker, render it char by char
+        // for different styling
+        let label_chars = label.len();
         let style = Style::default().fg(self.color);
-        buf.set_string(area.x, area.y, text, style);
+        let marker_style = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+
+        if let Some(ep) = expected_pos {
+            let mut x = area.x;
+            for (i, ch) in text.chars().enumerate() {
+                let s = if i >= label_chars && i < label_chars + bar_width && i - label_chars == ep
+                {
+                    marker_style
+                } else {
+                    style
+                };
+                let w = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+                buf.set_string(x, area.y, ch.to_string(), s);
+                x += w;
+            }
+        } else {
+            buf.set_string(area.x, area.y, text, style);
+        }
     }
 }
 

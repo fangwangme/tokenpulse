@@ -1,6 +1,6 @@
 use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
 use crate::usage::scanner;
-use crate::usage::utils::parse_timestamp_str;
+use crate::usage::utils::{detect_provider_from_model, parse_timestamp_str};
 
 use anyhow::Result;
 use chrono::NaiveDate;
@@ -242,7 +242,7 @@ fn parse_session_shutdown(value: &Value, session_id: &str) -> Option<Vec<Unified
             continue;
         }
 
-        let provider_id = detect_provider(model_id);
+        let provider_id = detect_provider_from_model(model_id);
         for idx in 0..request_count {
             messages.push(
                 UnifiedMessage::new(
@@ -329,7 +329,7 @@ fn parse_otel_event(
 
     let session_id = extract_session_id(value).unwrap_or_else(|| "unknown".to_string());
     let timestamp = extract_hr_time(value).unwrap_or(0);
-    let provider_id = detect_provider(&model_id);
+    let provider_id = detect_provider_from_model(&model_id);
 
     let cache_key = (session_id.clone(), model_id.clone());
     let mut cache_read = 0i64;
@@ -401,7 +401,7 @@ fn parse_agent_session_event(
         .get("interactionId")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let provider_id = detect_provider(model_id);
+    let provider_id = detect_provider_from_model(model_id);
 
     Some(
         UnifiedMessage::new(
@@ -450,50 +450,51 @@ fn is_agent_session_file(path: &PathBuf) -> bool {
         })
 }
 
-fn detect_provider(model: &str) -> String {
-    let lower = model.to_lowercase();
-    if lower.starts_with("gpt")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
-    {
-        "openai".to_string()
-    } else if lower.starts_with("claude") {
-        "anthropic".to_string()
-    } else if lower.starts_with("gemini") {
-        "google".to_string()
-    } else {
-        "unknown".to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn detect_provider_openai_models() {
-        assert_eq!(detect_provider("gpt-4o-mini-2024-07-18"), "openai");
-        assert_eq!(detect_provider("gpt-4o"), "openai");
-        assert_eq!(detect_provider("o1-preview"), "openai");
-        assert_eq!(detect_provider("o3-mini"), "openai");
-        assert_eq!(detect_provider("o4-mini"), "openai");
+        assert_eq!(
+            detect_provider_from_model("gpt-4o-mini-2024-07-18"),
+            "openai"
+        );
+        assert_eq!(detect_provider_from_model("gpt-4o"), "openai");
+        assert_eq!(detect_provider_from_model("codex-mini-latest"), "openai");
+        assert_eq!(detect_provider_from_model("o1-preview"), "openai");
+        assert_eq!(detect_provider_from_model("o3-mini"), "openai");
+        assert_eq!(detect_provider_from_model("o4-mini"), "openai");
     }
 
     #[test]
     fn detect_provider_anthropic_models() {
-        assert_eq!(detect_provider("claude-3.5-sonnet"), "anthropic");
-        assert_eq!(detect_provider("claude-sonnet-4-20250514"), "anthropic");
+        assert_eq!(detect_provider_from_model("claude-3.5-sonnet"), "anthropic");
+        assert_eq!(
+            detect_provider_from_model("claude-sonnet-4-20250514"),
+            "anthropic"
+        );
     }
 
     #[test]
     fn detect_provider_google_models() {
-        assert_eq!(detect_provider("gemini-2.0-flash"), "google");
+        assert_eq!(detect_provider_from_model("gemini-2.0-flash"), "google");
+    }
+
+    #[test]
+    fn detect_provider_nvidia_bucket_models() {
+        assert_eq!(detect_provider_from_model("deepseek-r1"), "other");
+        assert_eq!(detect_provider_from_model("glm-4.7"), "other");
+        assert_eq!(detect_provider_from_model("MiniMax-M2.5"), "other");
+        assert_eq!(
+            detect_provider_from_model("nvidia/llama-3.1-nemotron"),
+            "other"
+        );
     }
 
     #[test]
     fn detect_provider_unknown() {
-        assert_eq!(detect_provider("some-model"), "unknown");
+        assert_eq!(detect_provider_from_model("some-model"), "other");
     }
 
     #[test]

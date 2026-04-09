@@ -324,3 +324,50 @@ fn extract_timestamp_ms(value: &Value) -> Option<i64> {
         .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
         .map(|dt| dt.timestamp_millis())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_usage_reads_aliases_and_clamps_negative_values() {
+        let value: Value = serde_json::from_str(
+            r#"{
+                "input": 100,
+                "output_tokens": 25,
+                "cache_read_input_tokens": 150,
+                "reasoning_tokens": -10
+            }"#,
+        )
+        .unwrap();
+
+        let usage = parse_usage(&value).unwrap();
+
+        assert_eq!(usage.input, 100);
+        assert_eq!(usage.output, 25);
+        assert_eq!(usage.cached, 150);
+        assert_eq!(usage.reasoning, 0);
+    }
+
+    #[test]
+    fn parse_file_prefers_last_usage_and_clamps_cache_to_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"session_meta","payload":{"id":"session-1","model_provider":"openai","model":"gpt-5"}}
+{"type":"event_msg","timestamp":"2026-04-01T12:00:00Z","payload":{"type":"token_count","info":{"model":"gpt-5","last_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":120,"reasoning_output_tokens":5},"total_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":120,"reasoning_output_tokens":5}}}}"#,
+        )
+        .unwrap();
+
+        let messages = CodexSessionParser::new().parse_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "session-1");
+        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[0].tokens.input, 0);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.cache_read, 100);
+        assert_eq!(messages[0].tokens.reasoning, 5);
+    }
+}

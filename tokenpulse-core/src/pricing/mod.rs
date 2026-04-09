@@ -139,6 +139,11 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
         | "antigravity-claude-opus-4-5-thinking-high"
         | "antigravity-claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
         "antigravity-claude-opus-4-6-thinking" => Some("claude-opus-4-6"),
+        "claude-opus-4.6" => Some("openrouter/anthropic/claude-opus-4.6"),
+        "claude-opus-4.5" => Some("openrouter/anthropic/claude-opus-4.5"),
+        "claude-sonnet-4.6" => Some("openrouter/anthropic/claude-sonnet-4.6"),
+        "claude-sonnet-4.5" => Some("openrouter/anthropic/claude-sonnet-4.5"),
+        "claude-haiku-4.5" => Some("openrouter/anthropic/claude-haiku-4.5"),
 
         // Gemini quality tier aliases
         "gemini-3-pro-high" | "gemini-3-pro-low" => Some("gemini-3-pro-preview"),
@@ -538,6 +543,18 @@ mod tests {
             result.is_some(),
             "gemini-3-pro-high should resolve via alias"
         );
+    }
+
+    #[test]
+    fn test_lookup_claude_dot_version_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "openrouter/anthropic/claude-opus-4.6".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+
+        let result = lookup_model_pricing("claude-opus-4.6", &map);
+        assert!(result.is_some(), "claude-opus-4.6 should resolve via alias");
     }
 
     #[test]

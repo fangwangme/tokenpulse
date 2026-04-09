@@ -14,6 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Tabs},
     Terminal,
 };
+use std::cmp::Ordering;
 use tokenpulse_core::{config::QuotaDisplayMode, QuotaSnapshot, RateWindow};
 
 fn display_provider_name(provider: &str) -> &'static str {
@@ -21,6 +22,7 @@ fn display_provider_name(provider: &str) -> &'static str {
         "claude" => "CLAUDE CODE",
         "gemini" => "GEMINI CLI",
         "codex" => "CODEX",
+        "copilot" => "GITHUB COPILOT",
         "antigravity" => "ANTIGRAVITY",
         _ => "UNKNOWN",
     }
@@ -54,7 +56,7 @@ fn quota_suffix(display_mode: &QuotaDisplayMode) -> &'static str {
     }
 }
 
-fn calculate_pace(window: &RateWindow) -> Option<(&'static str, String)> {
+fn calculate_pace(window: &RateWindow) -> Option<(&'static str, String, f64)> {
     let period_ms = window.period_duration_ms?;
     let reset_time = window.resets_at?;
 
@@ -75,7 +77,7 @@ fn calculate_pace(window: &RateWindow) -> Option<(&'static str, String)> {
     let deficit = window.used_percent - expected_usage;
 
     if deficit.abs() < 5.0 {
-        Some(("on-track", "On track".to_string()))
+        Some(("on-track", "On track".to_string(), expected_usage))
     } else if deficit > 0.0 {
         let rate = window.used_percent / elapsed_ms as f64;
         let remaining_ms = (100.0 - window.used_percent) / rate;
@@ -86,9 +88,14 @@ fn calculate_pace(window: &RateWindow) -> Option<(&'static str, String)> {
                 deficit,
                 format_reset_duration(chrono::Duration::milliseconds(remaining_ms as i64))
             ),
+            expected_usage,
         ))
     } else {
-        Some(("ahead", format!("{:.0}% under pace", deficit.abs())))
+        Some((
+            "ahead",
+            format!("{:.0}% under pace", deficit.abs()),
+            expected_usage,
+        ))
     }
 }
 
@@ -152,7 +159,7 @@ pub fn run(
             if selected_tab == 0 {
                 render_overview(f, chunks[2], &snapshots, &display_mode, &theme);
             } else if let Some(snapshot) = snapshots.get(selected_tab - 1) {
-                render_snapshot_card(f, chunks[2], snapshot, &display_mode, &theme, false);
+                render_snapshot_card(f, chunks[2], snapshot, &display_mode, &theme, false, false);
             }
 
             let footer_text = format!(
@@ -291,7 +298,7 @@ fn render_overview(
     }
 
     if snapshots.len() == 1 {
-        render_snapshot_card(f, area, snapshots[0], display_mode, theme, false);
+        render_snapshot_card(f, area, snapshots[0], display_mode, theme, false, true);
         return;
     }
 
@@ -313,7 +320,15 @@ fn render_overview(
         for col_idx in 0..columns {
             let index = row_idx * columns + col_idx;
             if let Some(snapshot) = snapshots.get(index) {
-                render_snapshot_card(f, col_areas[col_idx], snapshot, display_mode, theme, true);
+                render_snapshot_card(
+                    f,
+                    col_areas[col_idx],
+                    snapshot,
+                    display_mode,
+                    theme,
+                    true,
+                    true,
+                );
             }
         }
     }
@@ -326,6 +341,7 @@ fn render_snapshot_card(
     display_mode: &QuotaDisplayMode,
     theme: &Theme,
     compact: bool,
+    overview: bool,
 ) {
     let provider_color = theme.provider_color(&snapshot.provider);
     let block = Block::default()
@@ -338,11 +354,36 @@ fn render_snapshot_card(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // In overview mode, show only the most important windows (max 3)
+    let windows: Vec<&RateWindow> = if overview && snapshot.windows.len() > 3 {
+        // Pick windows with highest usage (most critical) up to 3
+        let mut sorted: Vec<&RateWindow> = snapshot.windows.iter().collect();
+        sorted.sort_by(|a, b| {
+            b.used_percent
+                .partial_cmp(&a.used_percent)
+                .unwrap_or(Ordering::Equal)
+        });
+        sorted.into_iter().take(3).collect()
+    } else {
+        snapshot.windows.iter().collect()
+    };
+
+    // Compute max label width across all windows for alignment
+    let max_label_len = windows
+        .iter()
+        .map(|w| {
+            let label_text = format!("{} {}", w.label, quota_suffix(display_mode));
+            label_text.chars().count()
+        })
+        .max()
+        .unwrap_or(10);
+    let fixed_label_width = max_label_len.min(inner.width.saturating_sub(30) as usize);
+
     let mut constraints = Vec::new();
     if snapshot.plan.is_some() {
         constraints.push(Constraint::Length(1));
     }
-    for _ in &snapshot.windows {
+    for _ in &windows {
         constraints.push(Constraint::Length(2));
     }
     if snapshot.credits.is_some() {
@@ -365,7 +406,7 @@ fn render_snapshot_card(
         cursor += 1;
     }
 
-    for window in &snapshot.windows {
+    for window in &windows {
         let gauge_area = sections[cursor];
         cursor += 1;
         render_window_block(
@@ -376,6 +417,7 @@ fn render_snapshot_card(
             display_mode,
             theme,
             compact,
+            fixed_label_width,
         );
     }
 
@@ -421,6 +463,7 @@ fn render_window_block(
     display_mode: &QuotaDisplayMode,
     theme: &Theme,
     compact: bool,
+    fixed_label_width: usize,
 ) {
     if area.height == 0 {
         return;
@@ -445,13 +488,20 @@ fn render_window_block(
     let pace_result = calculate_pace(window);
     let gauge_color = pace_result
         .as_ref()
-        .map(|(status, _)| theme.pace_color(status))
+        .map(|(status, _, _)| theme.pace_color(status))
         .unwrap_or_else(|| theme.gauge_color(window.used_percent));
+
+    let expected_pct = pace_result.as_ref().map(|(_, _, ep)| match display_mode {
+        QuotaDisplayMode::Used => *ep,
+        QuotaDisplayMode::Remaining => (100.0 - *ep).clamp(0.0, 100.0),
+    });
 
     let gauge = GradientGauge::new(&label, shown_percent)
         .width(area.width.saturating_sub(22) as usize)
         .color(gauge_color)
-        .time(&reset_str);
+        .time(&reset_str)
+        .expected_percent(expected_pct)
+        .label_width(fixed_label_width);
     f.render_widget(gauge, split[0]);
 
     if split[1].height == 0 {
@@ -459,7 +509,7 @@ fn render_window_block(
     }
 
     let pace = pace_result
-        .map(|(status, text)| Span::styled(text, Style::default().fg(theme.pace_color(status))))
+        .map(|(status, text, _)| Span::styled(text, Style::default().fg(theme.pace_color(status))))
         .unwrap_or_else(|| Span::styled("No pace data", Style::default().fg(theme.dim)));
 
     let primary = match display_mode {

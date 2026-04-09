@@ -45,7 +45,7 @@ The usage pipeline is:
 2. parse provider-specific history into `UnifiedMessage`
 3. write messages into `usage_messages`
 4. rebuild `daily_model_usage` for affected dates
-5. derive `DashboardDay`, weekly rollups, monthly rollups, provider summaries, and model summaries from the ledger
+5. derive `DashboardDay`, weekly rollups, monthly rollups, agent summaries, and normalized model summaries from the ledger
 
 ## Core Data Model
 
@@ -161,6 +161,7 @@ Important rule:
 - source path:
   - `~/.pi/agent/sessions/**/*.jsonl`
 - retained but not a primary dashboard target
+- provider detection now follows the same model-family mapping as Copilot
 
 ### GitHub Copilot
 
@@ -170,7 +171,12 @@ Important rule:
 - event name filter: `gen_ai.client.inference.operation.details`
 - deduplication by `response_id` within each parse run
 - cache estimation: tracks input token growth within session+model pairs
-- provider detection from model name (claude→anthropic, gpt→openai, gemini→google, etc.)
+- provider detection from model name is shared across agents
+- `codex/gpt/o*` → `openai`
+- `claude*` → `anthropic`
+- `gemini*` → `google`
+- unsupported or miscellaneous model families default to `other`
+- quota reset is treated as month-start (`day 1, 00:00`) when GitHub does not return an explicit reset timestamp
 - requires VS Code setting: `"github.copilot.chat.otel.enabled": true`
 
 ## CLI Behavior
@@ -203,8 +209,8 @@ Non-TUI output includes:
 
 The usage TUI is organized into four tabs:
 
-- `Overview` - 60-day stacked bar chart + top models by cost
-- `Models` - Full sortable model table with provider-based coloring
+- `Overview` - 60-day stacked bar chart by model company + scrollable top models table
+- `Models` - Full sortable model table with company-colored model names and colored numeric columns
 - `Daily` - Daily summary table with sorting
 - `Heatmap` - GitHub-style contribution graph with drill-down
 
@@ -218,18 +224,26 @@ All tabs support runtime source filtering:
 
 ### `Overview`
 
+- chart shows the last 60 days of token usage
+- stacked bars are grouped by model company (`OpenAI`, `Google`, `Anthropic`, `Others`)
+- top models are normalized before ranking
+- top models have their own manual scroll state and visible scroll hint
+- model and agent columns are intentionally wider so long names are still legible
+
 Primary historical dashboard view:
 
-- 60-day stacked bar chart (tokens by provider)
-- Top 10 models by cost
-- Provider-colored legend
+- 60-day stacked bar chart (tokens by company)
+- Scrollable top models by cost
+- Company-colored legend
 
 ### `Models`
 
 Model attribution view:
 
 - Sortable table (cost, tokens, date)
-- Provider-colored model names
+- Company-colored model names
+- Wider agent column for multi-agent attribution strings
+- Semantic numeric colors: tokens=gold, cost=green, messages=blue
 - Filtered by enabled sources
 
 ### `Daily`
@@ -238,6 +252,7 @@ Daily operations view:
 
 - Summary cards (cost, tokens, messages, sessions)
 - Daily table with today highlighted
+- Semantic numeric colors by column
 - Sortable by date/cost/tokens
 
 ### `Heatmap`
@@ -247,9 +262,10 @@ GitHub-style contribution graph:
 - 7 switchable metrics
 - 3 window modes (26w/52w/year)
 - Day drill-down with:
-  - Provider breakdown
-  - Token composition (input/output/cache/reasoning)
-  - Top models for selected day
+  - Agent totals with per-agent cost
+  - Token summary (total/input/output/cache/reasoning/messages/sessions)
+  - Per-agent model list with per-model cost
+  - Scrollable selected-day detail panel when content exceeds the viewport
 - Streak tracking
 
 ## Known Limits
