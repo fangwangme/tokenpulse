@@ -167,10 +167,16 @@ Important rule:
 
 - source path:
   - `~/.local/share/github-copilot/events.jsonl`
+  - `~/.copilot/session-state/**/events.jsonl`
 - parses OTEL JSONL events (OpenTelemetry format)
 - event name filter: `gen_ai.client.inference.operation.details`
 - deduplication by `response_id` within each parse run
-- cache estimation: tracks input token growth within session+model pairs
+- uses official cache fields when present:
+  - `gen_ai.usage.cache_read.input_tokens`
+  - `gen_ai.usage.cache_creation.input_tokens`
+- OTEL fallback for older files: estimates cache by same-session input growth
+- Copilot CLI session-state fallback can read `session.shutdown` summaries when OTEL is unavailable
+- session-state summaries are aggregate-at-shutdown data, so cross-day daily attribution is approximate
 - provider detection from model name is shared across agents
 - `codex/gpt/o*` → `openai`
 - `claude*` → `anthropic`
