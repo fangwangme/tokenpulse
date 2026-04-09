@@ -1,10 +1,11 @@
+use crate::tui;
 use anyhow::Result;
 use crossterm::terminal;
 use tokenpulse_core::config::{ConfigManager, QuotaDisplayMode};
 use tokenpulse_core::{
     quota::{
         fetch_all, AntigravityQuotaFetcher, ClaudeQuotaFetcher, CodexQuotaFetcher,
-        GeminiQuotaFetcher, QuotaCacheStore,
+        CopilotQuotaFetcher, GeminiQuotaFetcher, QuotaCacheStore,
     },
     QuotaFetcher,
 };
@@ -21,6 +22,7 @@ fn display_provider_name(provider: &str) -> &'static str {
         "claude" => "CLAUDE CODE",
         "gemini" => "GEMINI CLI",
         "codex" => "CODEX",
+        "copilot" => "GITHUB COPILOT",
         "antigravity" => "ANTIGRAVITY",
         _ => "UNKNOWN",
     }
@@ -28,14 +30,16 @@ fn display_provider_name(provider: &str) -> &'static str {
 
 fn draw_progress_bar(
     used_percent: f64,
-    remaining_percent: f64,
     period_duration_ms: Option<i64>,
     resets_at: Option<chrono::DateTime<chrono::Utc>>,
     display_mode: &QuotaDisplayMode,
 ) -> String {
-    let used_blocks = ((used_percent / 100.0) * BAR_WIDTH as f64).round() as usize;
-    let used_blocks = used_blocks.min(BAR_WIDTH);
-    let remaining_blocks = BAR_WIDTH - used_blocks;
+    let shown_percent = match display_mode {
+        QuotaDisplayMode::Used => used_percent,
+        QuotaDisplayMode::Remaining => (100.0 - used_percent).max(0.0),
+    };
+    let shown_blocks = ((shown_percent / 100.0) * BAR_WIDTH as f64).round() as usize;
+    let shown_blocks = shown_blocks.min(BAR_WIDTH);
 
     // Calculate expected position (vertical line marker)
     let marker_pos = if let (Some(period_ms), Some(reset_time)) = (period_duration_ms, resets_at) {
@@ -44,8 +48,11 @@ fn draw_progress_bar(
         let elapsed_ms = (now - period_start).num_milliseconds();
         if elapsed_ms > 0 && period_ms > 0 {
             let elapsed_fraction = elapsed_ms as f64 / period_ms as f64;
-            let expected_used = elapsed_fraction * 100.0;
-            let expected_blocks = ((expected_used / 100.0) * BAR_WIDTH as f64).round() as usize;
+            let expected_percent = match display_mode {
+                QuotaDisplayMode::Used => elapsed_fraction * 100.0,
+                QuotaDisplayMode::Remaining => (1.0 - elapsed_fraction).max(0.0) * 100.0,
+            };
+            let expected_blocks = ((expected_percent / 100.0) * BAR_WIDTH as f64).round() as usize;
             Some(expected_blocks.min(BAR_WIDTH))
         } else {
             None
@@ -58,10 +65,7 @@ fn draw_progress_bar(
     let mut bar = String::new();
     bar.push('[');
     for i in 0..BAR_WIDTH {
-        let filled = match display_mode {
-            QuotaDisplayMode::Used => i < used_blocks,
-            QuotaDisplayMode::Remaining => i < remaining_blocks,
-        };
+        let filled = i < shown_blocks;
         if marker_pos == Some(i) {
             bar.push('│');
         } else if filled {
@@ -73,8 +77,8 @@ fn draw_progress_bar(
     bar.push(']');
 
     match display_mode {
-        QuotaDisplayMode::Used => format!("{} {:.0}% used", bar, used_percent),
-        QuotaDisplayMode::Remaining => format!("{} {:.0}% left", bar, remaining_percent),
+        QuotaDisplayMode::Used => format!("{} {:.0}% used", bar, shown_percent),
+        QuotaDisplayMode::Remaining => format!("{} {:.0}% left", bar, shown_percent),
     }
 }
 
@@ -177,12 +181,10 @@ fn format_window_block(
     window: &tokenpulse_core::RateWindow,
     display_mode: &QuotaDisplayMode,
 ) -> Vec<String> {
-    let remaining_percent = (100.0 - window.used_percent).max(0.0);
     let mut lines = vec![
         window.label.clone(),
         draw_progress_bar(
             window.used_percent,
-            remaining_percent,
             window.period_duration_ms,
             window.resets_at,
             display_mode,
@@ -320,7 +322,7 @@ fn print_provider_grid(
     }
 }
 
-pub async fn run(provider: Option<String>, refresh: bool) -> Result<()> {
+pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Result<()> {
     let config_manager = ConfigManager::new();
     let config = config_manager.load().unwrap_or_default();
     let display_mode = &config.display.quota_display_mode;
@@ -337,11 +339,12 @@ pub async fn run(provider: Option<String>, refresh: bool) -> Result<()> {
         Some(ref p) => match p.as_str() {
             "claude" => vec![Box::new(ClaudeQuotaFetcher::new())],
             "codex" => vec![Box::new(CodexQuotaFetcher::new())],
+            "copilot" => vec![Box::new(CopilotQuotaFetcher::new())],
             "gemini" => vec![Box::new(GeminiQuotaFetcher::new())],
             "antigravity" => vec![Box::new(AntigravityQuotaFetcher::new())],
             _ => {
                 eprintln!("Unknown provider: {}", p);
-                eprintln!("Supported providers: claude, codex, gemini, antigravity");
+                eprintln!("Supported providers: claude, codex, copilot, gemini, antigravity");
                 return Ok(());
             }
         },
@@ -352,6 +355,9 @@ pub async fn run(provider: Option<String>, refresh: bool) -> Result<()> {
             }
             if enabled_providers.contains(&"codex".to_string()) {
                 list.push(Box::new(CodexQuotaFetcher::new()));
+            }
+            if enabled_providers.contains(&"copilot".to_string()) {
+                list.push(Box::new(CopilotQuotaFetcher::new()));
             }
             if enabled_providers.contains(&"gemini".to_string()) {
                 list.push(Box::new(GeminiQuotaFetcher::new()));
@@ -408,10 +414,15 @@ pub async fn run(provider: Option<String>, refresh: bool) -> Result<()> {
         eprintln!("To use tokenpulse, you need to have at least one of these tools installed:");
         eprintln!(" - Claude Code: https://docs.anthropic.com/en/docs/claude-code");
         eprintln!(" - Codex: https://github.com/openai/codex");
+        eprintln!(" - GitHub Copilot: https://github.com/features/copilot");
         eprintln!(" - Gemini CLI: https://github.com/google-gemini/gemini-cli");
         eprintln!(" - Antigravity: https://antigravity.com\n");
         eprintln!("After installing, run the tool to login, then try again.");
         return Ok(());
+    }
+
+    if use_tui {
+        return tui::quota::run(results, display_mode.clone());
     }
 
     let snapshots: Vec<_> = results

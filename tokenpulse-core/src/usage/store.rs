@@ -1,7 +1,7 @@
-use crate::pricing::{calculate_cost, lookup_model_pricing, ModelPricing, PricingCache};
+use crate::pricing::{calculate_cost, lookup_model_pricing_or_warn, ModelPricing, PricingCache};
 use crate::provider::{TokenBreakdown, UnifiedMessage};
 use crate::usage::{DashboardDay, ModelSummary, ProviderSummary};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{Duration, NaiveDate, Utc};
 use rusqlite::{
     params, params_from_iter, types::Value, Connection, OptionalExtension, Transaction,
@@ -123,10 +123,7 @@ impl UsageStore {
         for message in messages {
             let snapshot =
                 ensure_pricing_snapshot(&tx, pricing.as_ref(), message, refresh_pricing)?;
-            let cost = snapshot
-                .as_ref()
-                .map(|pricing| calculate_cost(&message.tokens, pricing))
-                .unwrap_or_else(|| message.cost.max(0.0));
+            let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
 
             tx.execute(
                 r#"
@@ -248,6 +245,68 @@ impl UsageStore {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn repair_zero_costs(&self, since: Option<NaiveDate>, sources: &[String]) -> Result<usize> {
+        let pricing = PricingCache::new().get_pricing_sync()?;
+        let mut conn = self.open()?;
+        let tx = conn.transaction()?;
+
+        let mut sql = String::from(
+            r#"
+            SELECT source, message_key, model_id, date,
+                   input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens
+            FROM usage_messages
+            WHERE cost_usd <= 0 AND total_tokens > 0
+            "#,
+        );
+        let params = append_common_filters(&mut sql, since, sources);
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(params), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                TokenBreakdown {
+                    input: row.get(4)?,
+                    output: row.get(5)?,
+                    cache_read: row.get(6)?,
+                    cache_write: row.get(7)?,
+                    reasoning: row.get(8)?,
+                },
+            ))
+        })?;
+
+        let mut affected_dates = BTreeSet::new();
+        let mut repaired = 0usize;
+
+        for row in rows.flatten() {
+            let (source, message_key, model_id, date, tokens) = row;
+            let Some(pricing_row) = lookup_model_pricing_or_warn(&model_id, &pricing) else {
+                continue;
+            };
+            let cost = calculate_cost(&tokens, pricing_row);
+            if cost <= 0.0 {
+                continue;
+            }
+
+            tx.execute(
+                "UPDATE usage_messages SET cost_usd = ?1 WHERE source = ?2 AND message_key = ?3",
+                params![cost, source, message_key],
+            )?;
+            affected_dates.insert(date);
+            repaired += 1;
+        }
+        drop(stmt);
+
+        let now = Utc::now().timestamp_millis();
+        for date in &affected_dates {
+            rebuild_daily_for_date(&tx, date, now)?;
+        }
+
+        tx.commit()?;
+        Ok(repaired)
     }
 
     pub fn load_messages(
@@ -739,7 +798,7 @@ fn ensure_pricing_snapshot(
         return Ok(None);
     };
 
-    let looked_up = lookup_model_pricing(&message.model_id, pricing).cloned();
+    let looked_up = lookup_model_pricing_or_warn(&message.model_id, pricing).cloned();
     let snapshot = looked_up.unwrap_or_else(|| ModelPricing::simple(0.0, 0.0));
     let pricing_source =
         if snapshot.input_cost_per_token > 0.0 || snapshot.output_cost_per_token > 0.0 {
@@ -777,6 +836,31 @@ fn ensure_pricing_snapshot(
     }
 }
 
+fn derive_message_cost(
+    message: &UnifiedMessage,
+    snapshot: Option<&ModelPricing>,
+    pricing_available: bool,
+) -> Result<f64> {
+    if message.cost > 0.0 {
+        return Ok(message.cost);
+    }
+
+    if let Some(snapshot) = snapshot {
+        return Ok(calculate_cost(&message.tokens, snapshot));
+    }
+
+    if !pricing_available {
+        return Err(anyhow!(
+            "Pricing data unavailable for {}:{} on {}. Re-run with connectivity or use --refresh-pricing when pricing is reachable.",
+            message.client,
+            message.model_id,
+            message.date
+        ));
+    }
+
+    Ok(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,6 +888,29 @@ mod tests {
             },
         )
         .with_cost(1.0)
+    }
+
+    fn sample_derived_cost_message(date: &str, key: &str) -> UnifiedMessage {
+        UnifiedMessage::new(
+            "claude",
+            "claude-3-opus",
+            "anthropic",
+            "session-1",
+            key,
+            NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp_millis(),
+            TokenBreakdown {
+                input: 100,
+                output: 50,
+                cache_read: 10,
+                cache_write: 5,
+                reasoning: 0,
+            },
+        )
     }
 
     #[test]
@@ -849,5 +956,42 @@ mod tests {
         assert_eq!(remaining_codex.len(), 1);
         assert_eq!(remaining_codex[0].client, "codex");
         assert!(remaining_claude.is_empty());
+    }
+
+    #[test]
+    fn derive_message_cost_errors_when_pricing_fetch_failed_and_cost_is_missing() {
+        let message = sample_derived_cost_message("2024-03-10", "missing-price");
+
+        let error = derive_message_cost(&message, None, false).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Pricing data unavailable for claude:claude-3-opus"));
+    }
+
+    #[test]
+    fn derive_message_cost_uses_snapshot_when_available() {
+        let message = sample_derived_cost_message("2024-03-10", "priced");
+        let pricing = ModelPricing::simple(0.01, 0.02);
+
+        let cost = derive_message_cost(&message, Some(&pricing), true).unwrap();
+
+        assert!(cost > 0.0);
+    }
+
+    #[test]
+    fn ingest_messages_preserves_parser_supplied_cost() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+        let mut message = sample_message("2024-03-10", "m1");
+        message.model_id = "gpt-5".to_string();
+        message.provider_id = "openai".to_string();
+        message.cost = 42.5;
+
+        store.ingest_messages(&[message], false).unwrap();
+
+        let messages = store.load_messages(None, &["claude".to_string()]).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!((messages[0].cost - 42.5).abs() < f64::EPSILON);
     }
 }

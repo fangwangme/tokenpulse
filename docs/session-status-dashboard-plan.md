@@ -52,6 +52,7 @@ Status as of 2026-03-22:
 - ledger-backed usage ingestion flow
 - expanded quota support
 - a richer usage dashboard UI
+- the current branch keeps a 4-tab usage layout: `Overview`, `Models`, `Daily`, `Heatmap`
 
 ### Still missing or not settled
 
@@ -269,25 +270,34 @@ This means:
 
 ### Primary dashboard tabs
 
-The dashboard should be organized around the three core views we want:
+The current branch dashboard is organized around four views:
 
-#### 1. `GitHub`
+#### 1. `Overview`
 
 Purpose:
 
-- the primary visual dashboard
-- a GitHub-style contribution calendar for tokens or cost
+- summary-first landing page
+- quick ranking of the most expensive models
 
 Contents:
 
-- contribution heatmap
-- range selector
-- metric selector
-- token mode and cost mode
-- selected-day detail
-- summary strip
+- 60-day stacked usage chart
+- company-colored legend (`OpenAI`, `Google`, `Anthropic`, `Others`)
+- scrollable top-models table
 
-#### 2. `By Day`
+#### 2. `Models`
+
+Purpose:
+
+- answer “which agents and models are consuming usage”
+
+Contents:
+
+- sortable model ranking
+- agent attribution per model
+- cost/token/message columns with semantic colors
+
+#### 3. `Daily`
 
 Purpose:
 
@@ -296,24 +306,24 @@ Purpose:
 Contents:
 
 - daily totals table
-- daily cost trend
-- daily token trend
-- weekly and monthly rollup summaries
-- optional day drill-down later
+- per-column token/cost breakdown
+- sortable daily view
 
-#### 3. `By Model`
+#### 4. `Heatmap`
 
 Purpose:
 
-- answer “which providers and models are consuming usage”
+- a GitHub-style contribution calendar for tokens or cost
+- the drill-down view for selected days
 
 Contents:
 
-- provider ranking
-- model ranking
-- provider/model cost and token totals
-- estimated cost by provider
-- estimated cost by model
+- contribution heatmap
+- range selector
+- metric selector
+- token mode and cost mode
+- selected-day detail grouped by agent, then model, with cost totals
+- summary strip
 
 #### Optional 4. `Sessions`
 
@@ -330,14 +340,18 @@ This is useful, but secondary to the three core tabs above.
 
 ### Recommended naming
 
-Prefer user-facing names like:
+Prefer stable user-facing names that match the shipped branch:
 
-- `GitHub`
-- `By Day`
-- `By Model`
-- `Sessions`
+- `Overview`
+- `Models`
+- `Daily`
+- `Heatmap`
+- `Sessions` (if added later)
 
-If a high-level summary page remains, call it `Summary`, not `Overview`.
+Branch note:
+
+- the current TUI implementation intentionally keeps `Overview` as a separate summary tab
+- `Heatmap` is still the GitHub-style contribution view and carries the day-level drill-down
 
 ### Heatmap tab
 
@@ -449,7 +463,7 @@ Add weekly and monthly summaries to CLI JSON and TUI views.
 Deliverables:
 
 - daily, weekly, monthly JSON output
-- `By Day` and `By Model` views backed by the same aggregate layer
+- `Daily`, `Models`, and `Heatmap` views backed by the same aggregate layer
 
 ### Phase 7
 
@@ -475,7 +489,7 @@ Design Antigravity historical support around discovery and identity before token
 
 1. Add dashboard aggregate types in `tokenpulse-core`.
 2. Add scan-state persistence for Codex and Claude.
-3. Lock the core tabs as `GitHub`, `By Day`, and `By Model`.
+3. Keep the current 4-tab layout stable while continuing to treat `Heatmap` as the GitHub-style view.
 4. Route the current GitHub-style tab through stored daily aggregates.
 5. Add weekly and monthly rollups to usage commands.
 6. Add anonymized fixture tests for real-world parser inputs.
@@ -484,11 +498,11 @@ Design Antigravity historical support around discovery and identity before token
 
 ## Immediate Planning Decision
 
-Before any more UI implementation, these decisions should be treated as fixed:
+Before any more UI implementation, these decisions should be treated as fixed on this branch:
 
-1. The core usage tabs are `GitHub`, `By Day`, and `By Model`.
-2. `GitHub` is the main dashboard view.
-3. All three tabs read from the same ledger-derived daily aggregate layer.
+1. The current usage tabs are `Overview`, `Models`, `Daily`, and `Heatmap`.
+2. `Heatmap` is the GitHub-style historical activity view.
+3. All usage tabs read from the same ledger-derived daily aggregate layer.
 4. Session-level views remain diagnostic, not the main product.
 
 Once these are stable, the implementation path becomes much less likely to thrash.

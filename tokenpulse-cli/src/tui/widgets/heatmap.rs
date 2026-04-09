@@ -88,29 +88,23 @@ impl<'a> YearHeatmap<'a> {
         self
     }
 
-    pub fn range(mut self, start: NaiveDate, end: NaiveDate) -> Self {
-        self.range = Some((start, end));
-        self
-    }
-
     pub fn range_opt(mut self, range: Option<(NaiveDate, NaiveDate)>) -> Self {
         self.range = range;
         self
     }
 
-    fn value_to_color(&self, value: f64, max_value: f64) -> Color {
-        if value <= 0.0 || max_value <= 0.0 {
+    fn value_to_color(&self, value: f64, thresholds: &[f64; 4]) -> Color {
+        if value <= 0.0 {
             return self.empty;
         }
 
-        let ratio = (value / max_value).clamp(0.0, 1.0);
-        if ratio < 0.20 {
+        if value < thresholds[0] {
             self.palette[0]
-        } else if ratio < 0.40 {
+        } else if value < thresholds[1] {
             self.palette[1]
-        } else if ratio < 0.60 {
+        } else if value < thresholds[2] {
             self.palette[2]
-        } else if ratio < 0.80 {
+        } else if value < thresholds[3] {
             self.palette[3]
         } else {
             self.palette[4]
@@ -118,34 +112,132 @@ impl<'a> YearHeatmap<'a> {
     }
 }
 
+fn compute_quantiles(cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
+    let mut sorted: Vec<f64> = cell_values.values().copied().filter(|&v| v > 0.0).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if sorted.is_empty() {
+        return [0.0; 4];
+    }
+    let p = |pct: f64| -> f64 {
+        let idx = (pct / 100.0 * (sorted.len() - 1) as f64).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    };
+    [p(20.0), p(40.0), p(60.0), p(80.0)]
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HeatmapLayout {
+    start: NaiveDate,
+    end: NaiveDate,
+    total_weeks: usize,
+    display_cols: usize,
+    cell_stride: usize,
+    grid_x: u16,
+    grid_y: u16,
+}
+
+fn compute_layout(area: Rect, range: Option<(NaiveDate, NaiveDate)>) -> Option<HeatmapLayout> {
+    if area.width < 12 || area.height < 8 {
+        return None;
+    }
+
+    let (mut start, end) = range.unwrap_or_else(|| {
+        let end = Utc::now().date_naive();
+        (end - Duration::days(364), end)
+    });
+    while start.weekday() != Weekday::Sun {
+        start -= Duration::days(1);
+    }
+
+    let total_days = (end - start).num_days().max(0) as usize + 1;
+    let total_weeks = ((total_days + 6) / 7).max(1);
+    let grid_x = area.x + 4;
+    let grid_y = area.y + 1;
+    let grid_width = area.width.saturating_sub(4) as usize;
+
+    if grid_width == 0 {
+        return None;
+    }
+
+    let cell_stride = if grid_width >= total_weeks * 3 {
+        3
+    } else if grid_width >= total_weeks * 2 {
+        2
+    } else {
+        1
+    };
+    let display_cols = (grid_width / cell_stride).min(total_weeks).max(1);
+
+    Some(HeatmapLayout {
+        start,
+        end,
+        total_weeks,
+        display_cols,
+        cell_stride,
+        grid_x,
+        grid_y,
+    })
+}
+
+pub fn date_at_position(
+    area: Rect,
+    range: Option<(NaiveDate, NaiveDate)>,
+    x: u16,
+    y: u16,
+) -> Option<NaiveDate> {
+    let layout = compute_layout(area, range)?;
+    if x < layout.grid_x || y < layout.grid_y || y >= layout.grid_y + 7 {
+        return None;
+    }
+
+    let local_x = (x - layout.grid_x) as usize;
+    let col = local_x / layout.cell_stride;
+    if col >= layout.display_cols {
+        return None;
+    }
+    let row = (y - layout.grid_y) as usize;
+
+    let mut cursor = layout.start;
+    let mut day_idx = 0usize;
+    let mut selected = None;
+
+    while cursor <= layout.end {
+        let week_idx = day_idx / 7;
+        let display_col = if layout.total_weeks <= layout.display_cols {
+            week_idx
+        } else {
+            week_idx * layout.display_cols / layout.total_weeks
+        };
+
+        if display_col == col && cursor.weekday().num_days_from_sunday() as usize == row {
+            selected = Some(cursor);
+        }
+
+        cursor += Duration::days(1);
+        day_idx += 1;
+    }
+
+    selected
+}
+
 impl<'a> Widget for YearHeatmap<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.width < 12 || area.height < 8 {
+        let Some(layout) = compute_layout(area, self.range) else {
             return;
-        }
+        };
+        let HeatmapLayout {
+            start,
+            end,
+            total_weeks,
+            display_cols,
+            cell_stride,
+            grid_x,
+            grid_y,
+        } = layout;
 
-        let (mut start, end) = self.range.unwrap_or_else(|| {
-            let end = Utc::now().date_naive();
-            (end - Duration::days(364), end)
-        });
-        while start.weekday() != Weekday::Sun {
-            start -= Duration::days(1);
-        }
-
-        let total_days = (end - start).num_days().max(0) as usize + 1;
-        let total_weeks = ((total_days + 6) / 7).max(1);
-        let grid_x = area.x + 4;
-        let grid_y = area.y + 1;
-        let grid_width = area.width.saturating_sub(4) as usize;
-
-        if grid_width == 0 {
-            return;
-        }
-
-        let display_cols = grid_width.min(total_weeks).max(1);
         let mut cell_values: BTreeMap<(usize, usize), f64> = BTreeMap::new();
         let mut month_labels: BTreeMap<usize, String> = BTreeMap::new();
-        let mut max_value = 0.0f64;
+        let mut selected_cell = None;
 
         let values: BTreeMap<NaiveDate, f64> = self.points.iter().copied().collect();
         let mut cursor = start;
@@ -162,13 +254,15 @@ impl<'a> Widget for YearHeatmap<'a> {
             let row = cursor.weekday().num_days_from_sunday() as usize;
 
             let value = values.get(&cursor).copied().unwrap_or(0.0);
-            max_value = max_value.max(value);
 
             let key = (display_col.min(display_cols.saturating_sub(1)), row);
             cell_values
                 .entry(key)
                 .and_modify(|existing| *existing = existing.max(value))
                 .or_insert(value);
+            if self.selected == Some(cursor) {
+                selected_cell = Some(key);
+            }
 
             let month = cursor.month();
             if last_month != Some(month) {
@@ -182,6 +276,8 @@ impl<'a> Widget for YearHeatmap<'a> {
             day_idx += 1;
         }
 
+        let thresholds = compute_quantiles(&cell_values);
+
         let weekday_labels = ["S", "M", "T", "W", "T", "F", "S"];
         for (row, label) in weekday_labels.iter().enumerate() {
             let y = grid_y + row as u16;
@@ -190,31 +286,36 @@ impl<'a> Widget for YearHeatmap<'a> {
             }
         }
 
-        for (col, label) in month_labels {
-            let x = grid_x + col as u16;
+        for (col, label) in &month_labels {
+            let x = grid_x + (*col as u16) * (cell_stride as u16);
             if x < area.x + area.width {
                 buf.set_string(x, area.y, label, Style::default().fg(Color::Gray));
             }
         }
 
+        let (sym_filled, sym_empty, sym_selected) = if cell_stride >= 2 {
+            ("██", "··", "◆◆")
+        } else {
+            ("■", "·", "◆")
+        };
+
         for col in 0..display_cols {
             for row in 0..7 {
-                let x = grid_x + col as u16;
+                let x = grid_x + (col * cell_stride) as u16;
                 let y = grid_y + row as u16;
-                if x >= area.x + area.width || y >= area.y + area.height {
+                if x + cell_stride as u16 > area.x + area.width || y >= area.y + area.height {
                     continue;
                 }
 
                 let value = cell_values.get(&(col, row)).copied().unwrap_or(0.0);
-                let color = self.value_to_color(value, max_value);
-                let date = start + Duration::days((col * 7 + row) as i64);
-                let is_selected = self.selected == Some(date);
+                let color = self.value_to_color(value, &thresholds);
+                let is_selected = selected_cell == Some((col, row));
                 let symbol = if is_selected {
-                    "◆"
+                    sym_selected
                 } else if value <= 0.0 {
-                    "·"
+                    sym_empty
                 } else {
-                    "■"
+                    sym_filled
                 };
                 let style = if is_selected {
                     Style::default().fg(self.selected_color).bg(color)
@@ -225,6 +326,7 @@ impl<'a> Widget for YearHeatmap<'a> {
             }
         }
 
+        let max_value = cell_values.values().copied().fold(0.0f64, f64::max);
         let metric_text = format!(
             "{}  {} → {}  max {:.2}",
             self.metric.label(),
@@ -241,5 +343,43 @@ impl<'a> Widget for YearHeatmap<'a> {
                 Style::default().fg(Color::Gray),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compressed_heatmap_keeps_selected_day_highlight() {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap();
+        let end = start + Duration::days(69);
+        let selected = start + Duration::days(63);
+        let points = vec![(selected, 42.0)];
+        let area = Rect::new(0, 0, 12, 10);
+        let mut buf = Buffer::empty(area);
+
+        YearHeatmap::new(&points, HeatmapMetric::TotalTokens)
+            .selected(Some(selected))
+            .range_opt(Some((start, end)))
+            .render(area, &mut buf);
+
+        let selected_x = area.x + 4 + 7;
+        let selected_y = area.y + 1;
+        assert_eq!(buf[(selected_x, selected_y)].symbol(), "◆");
+    }
+
+    #[test]
+    fn date_at_position_matches_rendered_cell() {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap();
+        let end = start + Duration::days(34);
+        let selected = start + Duration::days(10);
+        let area = Rect::new(0, 0, 40, 10);
+        let x = area.x + 4 + 3;
+        let y = area.y + 1 + 3;
+
+        let date = date_at_position(area, Some((start, end)), x, y);
+
+        assert_eq!(date, Some(selected));
     }
 }

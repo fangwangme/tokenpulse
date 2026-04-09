@@ -1,8 +1,10 @@
-use crate::pricing::{calculate_cost, lookup_model_pricing, PricingCache};
-use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
+use crate::pricing::{calculate_cost, lookup_model_pricing_or_warn, PricingCache};
+use crate::provider::{
+    local_date_string_from_timestamp, SessionParser, TokenBreakdown, UnifiedMessage,
+};
 
 use anyhow::Result;
-use chrono::NaiveDate;
+use chrono::{Local, LocalResult, NaiveDate, TimeZone};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -147,9 +149,7 @@ impl OpenCodeSessionParser {
             })
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
         let tokens = msg_data.tokens?;
-        let date = chrono::DateTime::from_timestamp_millis(timestamp)
-            .map(|dt| dt.format("%Y-%m-%d").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let date = local_date_string_from_timestamp(timestamp);
         let message_key = message_id
             .clone()
             .unwrap_or_else(|| format!("{}:{}:{}", session_id, timestamp, model_id));
@@ -162,9 +162,13 @@ impl OpenCodeSessionParser {
             reasoning: tokens.reasoning.unwrap_or(0).max(0),
         };
 
-        let cost = lookup_model_pricing(&model_id, pricing)
-            .map(|pricing| calculate_cost(&token_breakdown, pricing))
-            .unwrap_or(source_cost);
+        let cost = if source_cost > 0.0 {
+            source_cost
+        } else {
+            lookup_model_pricing_or_warn(&model_id, pricing)
+                .map(|pricing| calculate_cost(&token_breakdown, pricing))
+                .unwrap_or(0.0)
+        };
 
         Some(
             UnifiedMessage::new(
@@ -232,8 +236,12 @@ impl SessionParser for OpenCodeSessionParser {
 }
 
 fn start_of_day_timestamp_ms(date: NaiveDate) -> Option<i64> {
-    date.and_hms_opt(0, 0, 0)
-        .map(|dt| dt.and_utc().timestamp_millis())
+    let start = date.and_hms_opt(0, 0, 0)?;
+    match Local.from_local_datetime(&start) {
+        LocalResult::Single(dt) => Some(dt.timestamp_millis()),
+        LocalResult::Ambiguous(early, _) => Some(early.timestamp_millis()),
+        LocalResult::None => None,
+    }
 }
 
 fn message_on_or_after(message: &UnifiedMessage, since: NaiveDate) -> bool {
@@ -305,6 +313,7 @@ impl OpenCodeTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::io::Write;
 
     #[test]
@@ -380,5 +389,44 @@ mod tests {
             completed: None,
         };
         assert_eq!(time.created_timestamp(), Some(1700000000000));
+    }
+
+    #[test]
+    fn parse_row_prefers_source_cost_over_lookup_price() {
+        let parser = OpenCodeSessionParser::new();
+        let json = r#"{
+            "id": "msg_source_cost",
+            "sessionID": "ses_source_cost",
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "cost": 0.05,
+            "tokens": {
+                "input": 1000,
+                "output": 500,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+
+        let pricing = HashMap::from([(
+            "claude-sonnet-4".to_string(),
+            crate::pricing::ModelPricing::simple(1.0, 1.0),
+        )]);
+
+        let msg = parser
+            .parse_row(
+                OpenCodeRow {
+                    message_id: Some("msg_source_cost".to_string()),
+                    session_id: Some("ses_source_cost".to_string()),
+                    data: json.to_string(),
+                    timestamp: None,
+                },
+                &pricing,
+            )
+            .unwrap();
+
+        assert!((msg.cost - 0.05).abs() < f64::EPSILON);
     }
 }

@@ -6,8 +6,8 @@ A Rust CLI tool with two core features:
 1. **Quota** - On-demand check of remaining usage quota for coding agents
 2. **Usage** - Ledger-backed historical usage dashboard with cost estimation
 
-**Current Usage Scope:** Claude Code, Codex, OpenCode, Gemini CLI, PI
-**Current Quota Scope:** Claude Code, Codex, Gemini CLI, Antigravity
+**Current Usage Scope:** Claude Code, Codex, OpenCode, Gemini CLI, PI, Copilot CLI
+**Current Quota Scope:** Claude Code, Codex, Gemini CLI, GitHub Copilot, Antigravity
 **Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI is provisional. Antigravity historical usage is not complete yet.
 
 **Language:** Rust
@@ -21,7 +21,7 @@ As of 2026-03-24:
 
 - usage parsing writes normalized messages into a local SQLite ledger
 - the dashboard reads daily aggregates from the ledger, not from raw files in the TUI layer
-- the usage TUI is organized around `GitHub`, `By Day`, and `By Model`
+- the usage TUI is organized around `Overview`, `Models`, `Daily`, and `Heatmap`
 - CLI usage output includes daily, weekly, and monthly summaries
 - pricing snapshots are stored per day/model so historical cost does not silently drift
 
@@ -115,8 +115,9 @@ tokenpulse quota -p claude                # single provider
 tokenpulse quota --json                   # JSON output for scripting
 
 # Usage summary / dashboard
-tokenpulse usage                          # ledger-backed text summary
-tokenpulse usage --tui                    # interactive TUI dashboard
+tokenpulse usage                          # interactive TUI on a terminal, plain text when piped
+tokenpulse usage --tui                    # force the interactive TUI dashboard
+tokenpulse usage --no-tui                 # plain-text summary
 tokenpulse usage --since 2026-03-01       # filter by date
 tokenpulse usage -p claude,codex          # filter by provider
 tokenpulse usage --refresh-days 2026-03-01:2026-03-07
@@ -130,34 +131,36 @@ tokenpulse usage --rebuild-all
 
 ### Quota View (`tokenpulse quota`)
 
+The quota TUI now has two modes:
+- **Overview tab** shows only the top 3 most-used windows per provider for a compact summary
+- **Detail tabs** (per provider) show all available rate windows
+
+Each gauge includes:
+- A gradient color progress bar
+- An expected-progress marker (`▏`) showing where theoretical usage should be at this point in time
+- Fixed-width label columns for proper alignment (especially for Gemini CLI's multiple models)
+- GitHub Copilot uses dynamic calendar-month billing period calculation
+
 ```
 ╭─────────────────────────────────────────────────────────────────────╮
 │                    ⚡ TokenPulse - Quota Overview                    │
 ╰─────────────────────────────────────────────────────────────────────╯
 
-  ╭─ Claude Code ─────────────────────────────────────────────────────╮
-  │  Plan: Pro                                                        │
-  │                                                                   │
-  │  Session (5h)   ████████████░░░░░░░░░░░░░░░░░░  42%  ⏳ 3h 12m  │
-  │  Weekly (7d)    █████░░░░░░░░░░░░░░░░░░░░░░░░░  18%  ⏳ 4d 6h   │
-  │  Sonnet         ██████████████░░░░░░░░░░░░░░░░░  48%  ⏳ 4d 6h   │
-  │  Opus           ███░░░░░░░░░░░░░░░░░░░░░░░░░░░  12%  ⏳ 4d 6h   │
-  │  Credits        $12.40 / $100.00                                  │
-  ╰───────────────────────────────────────────────────────────────────╯
+  ╭─ CLAUDE CODE ───────────────────────────────────────────────────╮
+  │  Plan: Pro                                                      │
+  │                                                                 │
+  │  Session (5h)   ████████████▏░░░░░░░░░░░░░░░░░  42%  ⏳ 3h 12m │
+  │  Weekly (7d)    █████▏░░░░░░░░░░░░░░░░░░░░░░░░  18%  ⏳ 4d 6h  │
+  ╰─────────────────────────────────────────────────────────────────╯
 
-  ╭─ Codex ───────────────────────────────────────────────────────────╮
-  │  Plan: Pro                                                        │
-  │                                                                   │
-  │  Session (5h)   ████████████████████░░░░░░░░░░░  67%  ⏳ 1h 45m  │
-  │  Weekly (7d)    █████████░░░░░░░░░░░░░░░░░░░░░░  31%  ⏳ 5d 2h   │
-  │  Credits        $45.20 (unlimited)                                │
-  ╰───────────────────────────────────────────────────────────────────╯
-
-  Last fetched: 2026-03-15 14:32:05 UTC
-  Press q to quit │ r to refresh │ j/k to scroll
+  ╭─ GITHUB COPILOT ────────────────────────────────────────────────╮
+  │  Plan: Pro                                                      │
+  │                                                                 │
+  │  Completions    ██████████████████▏░░░░░░░░░░░  67%  ⏳ 12d    │
+  ╰─────────────────────────────────────────────────────────────────╯
 ```
 
-### Usage Dashboard (`tokenpulse usage --tui`)
+### Usage Dashboard (`tokenpulse usage`)
 
 ```
 ╭─────────────────────────────────────────────────────────────────────╮
@@ -209,15 +212,24 @@ tokenpulse usage --rebuild-all
   │  other          █░░░░░░░░░░░░░░░░░░░░░░░░░   3%    $2.30         │
   ╰───────────────────────────────────────────────────────────────────╯
 
-  Tab: [GitHub] [By Day] [By Model]
-  Press q to quit │ r to refresh │ ←/→ switch tabs │ j/k scroll
+  Tab: [Overview] [Models] [Daily] [Heatmap]
+  Press q to quit │ ←/→ switch tabs │ ↑/↓ scroll or move selection
 ```
 
 Current usage TUI notes:
 
-- `GitHub` is the primary historical dashboard
-- `By Day` focuses on daily totals plus weekly/monthly rollups
-- `By Model` focuses on provider and model attribution
+- `Overview` shows a 60-day stacked token chart grouped by model company (`OpenAI`, `Google`, `Anthropic`, `Others`) plus a scrollable `Top Models` table
+- `Overview` top models use their own visible scroll hint and wider model/agent columns so long model IDs and multi-agent attribution fit better
+- `Models` shows a full sortable table with per-column semantic colors (`Model`=company color, `Tokens`=gold, `Cost`=green, `Msgs`=blue)
+- `Daily` shows daily totals as a colored table (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`)
+- `Heatmap` shows a GitHub-style contribution heatmap with mouse-clickable cells and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
+- `Heatmap` selected-day panel now includes total/input/output/cache/reasoning/message/session summary and supports detail scrolling when the agent/model list exceeds the viewport
+
+**Company vs Agent Distinction:**
+- **Company color** = model family owner (`OpenAI`, `Google`, `Anthropic`, `Others`)
+- **Agent** = client tool (`Claude Code`, `Codex`, `OpenCode`, `Gemini CLI`, `Copilot CLI`, `Pi`, `Antigravity`)
+
+The TUI uses company color for model names and chart segments, while agent/source labels remain textual attribution. In data model terms, `UnifiedMessage.client` = agent and `UnifiedMessage.provider_id` = provider/backend identifier.
 
 ---
 

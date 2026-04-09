@@ -1,5 +1,8 @@
-use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
+use crate::provider::{
+    local_date_string_from_timestamp, SessionParser, TokenBreakdown, UnifiedMessage,
+};
 use crate::usage::scanner;
+use crate::usage::utils::detect_provider_from_model;
 
 use anyhow::Result;
 use chrono::NaiveDate;
@@ -45,9 +48,7 @@ impl PiSessionParser {
                                 let timestamp = entry
                                     .timestamp
                                     .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-                                let date = chrono::DateTime::from_timestamp_millis(timestamp)
-                                    .map(|dt| dt.format("%Y-%m-%d").to_string())
-                                    .unwrap_or_else(|| "unknown".to_string());
+                                let date = local_date_string_from_timestamp(timestamp);
 
                                 let tokens = TokenBreakdown {
                                     input: usage.input_tokens.unwrap_or(0),
@@ -60,7 +61,7 @@ impl PiSessionParser {
                                 let msg = UnifiedMessage::new(
                                     "pi",
                                     model.clone(),
-                                    "anthropic",
+                                    detect_provider_from_model(model),
                                     session_id.clone(),
                                     format!("{}:{}:{}", session_id, timestamp, model),
                                     timestamp,
@@ -140,4 +141,27 @@ struct PiUsage {
     output_tokens: Option<i64>,
     cache_read: Option<i64>,
     cache_write: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pi_uses_model_based_provider_detection() {
+        let parser = PiSessionParser::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"header","session_id":"s1","model":"gpt-4.1"}
+{"type":"assistant","timestamp":1710000000000,"usage":{"input_tokens":10,"output_tokens":20}}"#,
+        )
+        .unwrap();
+
+        let messages = parser.parse_file(path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "openai");
+    }
 }

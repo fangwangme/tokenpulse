@@ -185,3 +185,51 @@ struct ClaudeUsage {
     cache_read_input_tokens: Option<i64>,
     cache_creation_input_tokens: Option<i64>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn parse_file_deduplicates_message_and_request_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","requestId":"req-1","timestamp":"2026-04-01T12:00:00Z","message":{"id":"msg-1","model":"claude-sonnet-4","usage":{"input_tokens":10,"output_tokens":5}}}
+{"type":"assistant","requestId":"req-1","timestamp":"2026-04-01T12:00:01Z","message":{"id":"msg-1","model":"claude-sonnet-4","usage":{"input_tokens":99,"output_tokens":99}}}"#,
+        )
+        .unwrap();
+
+        let mut seen = HashSet::new();
+        let messages = ClaudeSessionParser::new().parse_file(path, &mut seen);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_key, "msg-1:req-1");
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 5);
+    }
+
+    #[test]
+    fn parse_file_builds_fallback_key_and_clamps_negative_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","session_id":"session-42","timestamp":"2026-04-01T12:00:00Z","message":{"model":"claude-opus-4","usage":{"input_tokens":-10,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}}"#,
+        )
+        .unwrap();
+
+        let mut seen = HashSet::new();
+        let messages = ClaudeSessionParser::new().parse_file(path, &mut seen);
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].message_key.starts_with("session:"));
+        assert_eq!(messages[0].session_id, "session-42");
+        assert_eq!(messages[0].tokens.input, 0);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.cache_read, 5);
+        assert_eq!(messages[0].tokens.cache_write, 2);
+    }
+}

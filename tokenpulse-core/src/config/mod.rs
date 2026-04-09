@@ -54,6 +54,7 @@ impl Default for Config {
         providers.insert("codex".to_string(), ProviderConfig::default());
         providers.insert("gemini".to_string(), ProviderConfig::default());
         providers.insert("antigravity".to_string(), ProviderConfig::default());
+        providers.insert("copilot".to_string(), ProviderConfig::default());
 
         Self {
             version: 1,
@@ -109,7 +110,10 @@ impl ConfigManager {
 
     pub fn load(&self) -> Result<Config> {
         if !self.config_path.exists() {
-            return Ok(Config::default());
+            let config = Config::default();
+            // Write default config so users can discover and edit it
+            let _ = self.save(&config);
+            return Ok(config);
         }
 
         let content = fs::read_to_string(&self.config_path)?;
@@ -153,6 +157,7 @@ impl ConfigManager {
                 "codex".to_string(),
                 "gemini".to_string(),
                 "antigravity".to_string(),
+                "copilot".to_string(),
             ],
         }
     }
@@ -193,6 +198,7 @@ mod tests {
         assert!(config.providers.contains_key("codex"));
         assert!(config.providers.contains_key("gemini"));
         assert!(config.providers.contains_key("antigravity"));
+        assert!(config.providers.contains_key("copilot"));
     }
 
     #[test]
@@ -200,5 +206,62 @@ mod tests {
         let config = Config::default();
         let claude = config.providers.get("claude").unwrap();
         assert!(claude.enabled);
+    }
+
+    #[test]
+    fn test_default_has_five_providers() {
+        let config = Config::default();
+        assert_eq!(config.providers.len(), 5);
+        for (_, provider) in &config.providers {
+            assert!(provider.enabled);
+        }
+    }
+
+    #[test]
+    fn test_disabled_provider_filtered() {
+        let mut config = Config::default();
+        config.providers.get_mut("claude").unwrap().enabled = false;
+        let enabled: Vec<_> = config
+            .providers
+            .iter()
+            .filter(|(_, p)| p.enabled)
+            .map(|(k, _)| k.clone())
+            .collect();
+        assert!(!enabled.contains(&"claude".to_string()));
+        assert_eq!(enabled.len(), 4);
+    }
+
+    #[test]
+    fn test_config_toml_roundtrip() {
+        let config = Config::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.providers.len(), config.providers.len());
+        assert_eq!(parsed.version, config.version);
+    }
+
+    #[test]
+    fn test_partial_toml_fills_defaults() {
+        let toml_str = r#"
+version = 1
+
+[providers.claude]
+enabled = true
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.providers.contains_key("claude"));
+        assert!(config.providers.get("claude").unwrap().enabled);
+        // Other providers not in TOML are simply missing
+        assert!(!config.providers.contains_key("codex"));
+    }
+
+    #[test]
+    fn test_display_config_defaults() {
+        let config = Config::default();
+        assert!(!config.display.show_empty_providers);
+        assert_eq!(
+            config.display.quota_display_mode,
+            QuotaDisplayMode::Remaining
+        );
     }
 }

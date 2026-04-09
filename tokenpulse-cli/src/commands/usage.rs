@@ -3,11 +3,14 @@ use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use tokenpulse_core::{
     usage::{
-        build_usage_summary_from_daily, ClaudeSessionParser, CodexSessionParser, DateRange,
-        GeminiSessionParser, OpenCodeSessionParser, PiSessionParser, UsageStore,
+        compute_usage_summary, ClaudeSessionParser, CodexSessionParser, CopilotSessionParser,
+        DateRange, GeminiSessionParser, OpenCodeSessionParser, PiSessionParser, UsageStore,
     },
     SessionParser, UnifiedMessage,
 };
+
+const SUPPORTED_USAGE_PROVIDERS: &[&str] =
+    &["claude", "codex", "copilot", "opencode", "gemini", "pi"];
 
 pub async fn run(
     since: Option<String>,
@@ -15,7 +18,7 @@ pub async fn run(
     refresh_days: Option<String>,
     refresh_pricing: bool,
     rebuild_all: bool,
-    tui_enabled: bool,
+    use_tui: bool,
 ) -> Result<()> {
     let requested_since = since
         .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
@@ -63,15 +66,21 @@ pub async fn run(
         }
     }
 
-    let output_since = requested_since.or(refresh_range.map(|range| range.start));
-    let daily = store.load_dashboard_days(output_since, &provider_names)?;
+    store.repair_zero_costs(
+        output_since_hint(requested_since, refresh_range),
+        &provider_names,
+    )?;
 
-    if daily.is_empty() {
+    let output_since = output_since_hint(requested_since, refresh_range);
+    let messages = store.load_messages(output_since, &provider_names)?;
+
+    if messages.is_empty() {
         eprintln!("\nNo usage data found in the local ledger.\n");
         if !found_any_source {
             eprintln!("Checked providers:");
             eprintln!(" - Claude Code: ~/.claude/projects/ or ~/.claude/transcripts/");
             eprintln!(" - Codex: ~/.codex/sessions/");
+            eprintln!(" - Copilot: ~/.local/share/github-copilot/events.jsonl");
             eprintln!(" - OpenCode: ~/.local/share/opencode/");
             eprintln!(" - Gemini CLI: ~/.gemini/tmp/");
             eprintln!(" - PI: ~/.pi/agent/sessions/");
@@ -79,25 +88,22 @@ pub async fn run(
         return Ok(());
     }
 
-    let provider_summary = store.load_provider_summaries(output_since, &provider_names)?;
-    let model_summary = store.load_model_summaries(output_since, &provider_names)?;
     let daily_breakdown = store.load_daily_rows(output_since, &provider_names)?;
-    let message_count: usize = provider_summary.iter().map(|row| row.message_count).sum();
-    let session_count: usize = provider_summary.iter().map(|row| row.session_count).sum();
-    let summary = build_usage_summary_from_daily(
-        daily,
-        provider_summary,
-        model_summary,
-        message_count,
-        session_count,
-    );
+    let summary = compute_usage_summary(&messages);
 
-    if tui_enabled {
+    if use_tui {
         return tui::usage::run(summary, daily_breakdown);
     }
 
     print_summary(&summary);
     Ok(())
+}
+
+fn output_since_hint(
+    requested_since: Option<NaiveDate>,
+    refresh_range: Option<DateRange>,
+) -> Option<NaiveDate> {
+    requested_since.or(refresh_range.map(|range| range.start))
 }
 
 fn parse_provider_names(provider: Option<&str>) -> Vec<String> {
@@ -108,12 +114,10 @@ fn parse_provider_names(provider: Option<&str>) -> Vec<String> {
             .filter(|name| !name.is_empty())
             .map(ToOwned::to_owned)
             .collect(),
-        None => vec![
-            "claude".to_string(),
-            "codex".to_string(),
-            "opencode".to_string(),
-            "gemini".to_string(),
-        ],
+        None => SUPPORTED_USAGE_PROVIDERS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
     }
 }
 
@@ -123,6 +127,7 @@ fn build_parsers(provider_names: &[String]) -> Vec<Box<dyn SessionParser>> {
         .filter_map(|provider| match provider.as_str() {
             "claude" => Some(Box::new(ClaudeSessionParser::new()) as Box<dyn SessionParser>),
             "codex" => Some(Box::new(CodexSessionParser::new()) as Box<dyn SessionParser>),
+            "copilot" => Some(Box::new(CopilotSessionParser::new()) as Box<dyn SessionParser>),
             "opencode" => Some(Box::new(OpenCodeSessionParser::new()) as Box<dyn SessionParser>),
             "gemini" => Some(Box::new(GeminiSessionParser::new()) as Box<dyn SessionParser>),
             "pi" => Some(Box::new(PiSessionParser::new()) as Box<dyn SessionParser>),
@@ -160,22 +165,25 @@ fn filter_messages_to_range(
 fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
     println!("\n=== Usage Summary ===");
     println!("Total cost: ${:.2}", summary.total_cost);
-    println!("Total tokens: {}", summary.total_tokens);
-    println!("Messages: {}", summary.message_count);
-    println!("Sessions: {}", summary.session_count);
-    println!("Active days: {}", summary.active_days);
+    println!("Total tokens: {}", format_int(summary.total_tokens));
+    println!("Messages: {}", format_int(summary.message_count));
+    println!("Sessions: {}", format_int(summary.session_count));
+    println!("Active days: {}", format_int(summary.active_days));
     println!("Avg daily cost: ${:.2}", summary.avg_daily_cost);
-    println!("Avg daily tokens: {:.0}", summary.avg_daily_tokens);
+    println!(
+        "Avg daily tokens: {}",
+        format_int(summary.avg_daily_tokens.round() as i64)
+    );
 
     println!("\n=== By Provider ===");
     for provider in &summary.by_provider {
         println!(
             "{}: {} tokens | ${:.2} | {} messages | {} sessions",
             provider.provider.to_uppercase(),
-            provider.tokens,
+            format_int(provider.tokens),
             provider.cost,
-            provider.message_count,
-            provider.session_count
+            format_int(provider.message_count),
+            format_int(provider.session_count)
         );
     }
 
@@ -183,7 +191,11 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
     for model in summary.by_model.iter().take(10) {
         println!(
             "{} [{}]: {} tokens | ${:.2} | {} messages",
-            model.model, model.source, model.tokens, model.cost, model.message_count
+            model.model,
+            model.source,
+            format_int(model.tokens),
+            model.cost,
+            format_int(model.message_count)
         );
     }
 
@@ -191,7 +203,11 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
     for day in summary.daily.iter().rev().take(14).rev() {
         println!(
             "{}: {} tokens | ${:.2} | {} messages | {} sessions",
-            day.date, day.total_tokens, day.total_cost_usd, day.message_count, day.session_count
+            day.date,
+            format_int(day.total_tokens),
+            day.total_cost_usd,
+            format_int(day.message_count),
+            format_int(day.session_count)
         );
     }
 
@@ -200,10 +216,10 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
         println!(
             "{}: {} tokens | ${:.2} | {} messages | {} active days",
             week.label,
-            week.total_tokens,
+            format_int(week.total_tokens),
             week.total_cost_usd,
-            week.message_count,
-            week.active_days
+            format_int(week.message_count),
+            format_int(week.active_days)
         );
     }
 
@@ -212,16 +228,57 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
         println!(
             "{}: {} tokens | ${:.2} | {} messages | {} active days",
             month.label,
-            month.total_tokens,
+            format_int(month.total_tokens),
             month.total_cost_usd,
-            month.message_count,
-            month.active_days
+            format_int(month.message_count),
+            format_int(month.active_days)
         );
     }
 
     println!(
         "\nLoaded {} ledger messages from {} provider(s).",
-        summary.message_count,
-        summary.by_provider.len()
+        format_int(summary.message_count),
+        format_int(summary.by_provider.len())
     );
+}
+
+fn format_int<T: ToString>(value: T) -> String {
+    let raw = value.to_string();
+    let digits = raw.strip_prefix('-').unwrap_or(&raw);
+    let mut formatted_rev = String::with_capacity(raw.len() + raw.len() / 3);
+
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            formatted_rev.push(',');
+        }
+        formatted_rev.push(ch);
+    }
+
+    let formatted: String = formatted_rev.chars().rev().collect();
+
+    if raw.starts_with('-') {
+        format!("-{}", formatted)
+    } else {
+        formatted
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_provider_names;
+
+    #[test]
+    fn parse_provider_names_defaults_to_all_supported_usage_sources() {
+        assert_eq!(
+            parse_provider_names(None),
+            vec![
+                "claude".to_string(),
+                "codex".to_string(),
+                "copilot".to_string(),
+                "opencode".to_string(),
+                "gemini".to_string(),
+                "pi".to_string(),
+            ]
+        );
+    }
 }

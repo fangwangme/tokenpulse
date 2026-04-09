@@ -167,3 +167,57 @@ struct GeminiTokens {
     cached: Option<i64>,
     thoughts: Option<i64>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_file_extracts_gemini_token_breakdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-gemini.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "sessionId":"gem-session",
+                "startTime":"2026-04-01T12:00:00Z",
+                "lastUpdated":"2026-04-01T12:05:00Z",
+                "messages":[
+                    {"id":"user-1","type":"user"},
+                    {"id":"gem-1","type":"gemini","timestamp":"2026-04-01T12:01:00Z","model":"gemini-2.5-pro","tokens":{"input":120,"output":45,"cached":30,"thoughts":12}}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let messages = GeminiSessionParser::new().parse_file(path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "gem-session");
+        assert_eq!(messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 45);
+        assert_eq!(messages[0].tokens.cache_read, 30);
+        assert_eq!(messages[0].tokens.reasoning, 12);
+    }
+
+    #[test]
+    fn parse_file_skips_non_gemini_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-gemini.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "sessionId":"gem-session",
+                "messages":[
+                    {"id":"user-1","type":"user","model":"gemini-2.5-pro","tokens":{"input":1,"output":1}}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let messages = GeminiSessionParser::new().parse_file(path);
+
+        assert!(messages.is_empty());
+    }
+}

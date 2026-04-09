@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -85,9 +85,7 @@ impl UnifiedMessage {
         timestamp: i64,
         tokens: TokenBreakdown,
     ) -> Self {
-        let date = chrono::DateTime::from_timestamp_millis(timestamp)
-            .map(|dt| dt.format("%Y-%m-%d").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let date = local_date_string_from_timestamp(timestamp);
 
         Self {
             client: client.into(),
@@ -122,6 +120,12 @@ impl UnifiedMessage {
     pub fn total_tokens(&self) -> i64 {
         self.tokens.total()
     }
+}
+
+pub fn local_date_string_from_timestamp(timestamp: i64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(timestamp)
+        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[async_trait]
