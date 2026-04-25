@@ -87,6 +87,9 @@ fn calculate_pace(window: &RateWindow) -> Option<(&'static str, String, f64)> {
         Some(("on-track", "On track".to_string(), expected_usage))
     } else if deficit > 0.0 {
         let rate = window.used_percent / elapsed_ms as f64;
+        if rate <= 0.0 {
+            return None;
+        }
         let remaining_ms = (100.0 - window.used_percent) / rate;
         Some((
             "behind",
@@ -182,7 +185,7 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let theme = Theme::default();
+    let mut theme = Theme::auto();
     let mut selected_tab: usize = 0;
 
     loop {
@@ -212,7 +215,8 @@ pub fn run(
             }
 
             let footer_text = format!(
-                " q quit | r refresh | ←→ tab | mode {} | {} provider{} ",
+                " q quit | r refresh | b theme ({}) | ←→ tab | mode {} | {} provider{} ",
+                theme.mode.label(),
                 quota_suffix(&display_mode),
                 snapshots.len(),
                 if snapshots.len() == 1 { "" } else { "s" }
@@ -233,6 +237,9 @@ pub fn run(
                             results.iter().filter_map(|r| r.as_ref().ok()).collect();
                         let tab_count = quota_tab_titles(&snapshots).len();
                         selected_tab = selected_tab.min(tab_count.saturating_sub(1));
+                    }
+                    KeyCode::Char('b') => {
+                        theme = theme.toggled();
                     }
                     KeyCode::Left | KeyCode::Char('h') => {
                         if selected_tab > 0 {
@@ -346,7 +353,7 @@ fn render_tabs(
     }))
     .select(selected_tab)
     .divider(Span::raw(""))
-    .highlight_style(Style::default().fg(theme.bg).bg(theme.accent).bold())
+    .highlight_style(Style::default().fg(theme.on_accent).bg(theme.accent).bold())
     .block(
         Block::default()
             .borders(Borders::ALL)
