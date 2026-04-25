@@ -1326,12 +1326,17 @@ fn dashboard_body_area(area: Rect) -> Rect {
 }
 
 fn overview_sections(area: Rect) -> std::rc::Rc<[Rect]> {
+    let summary_height = area.height.min(5);
+    let remaining = area.height.saturating_sub(summary_height);
+    let chart_height = (remaining.saturating_mul(2) / 3).max(8).min(remaining);
+    let model_height = remaining.saturating_sub(chart_height);
+
     Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
-            Constraint::Min(8),
-            Constraint::Length(12),
+            Constraint::Length(summary_height),
+            Constraint::Length(chart_height),
+            Constraint::Length(model_height),
         ])
         .split(area)
 }
