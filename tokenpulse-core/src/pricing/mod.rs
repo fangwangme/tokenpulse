@@ -2,6 +2,7 @@ pub mod litellm;
 
 pub use litellm::PricingCache;
 
+use crate::model_id::strip_date_suffix;
 use crate::provider::TokenBreakdown;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -89,12 +90,23 @@ fn pricing_lookup_candidates(model_id: &str) -> Vec<String> {
         push_candidate(&mut candidates, &mut seen, alias.to_string());
     }
 
+    push_generalized_candidates(&mut candidates, &mut seen, model_id);
+
+    if let Some(base) = strip_quality_tier_suffix(model_id) {
+        push_candidate(&mut candidates, &mut seen, base.clone());
+        if let Some(alias) = explicit_model_alias(&base) {
+            push_candidate(&mut candidates, &mut seen, alias.to_string());
+        }
+        push_generalized_candidates(&mut candidates, &mut seen, &base);
+    }
+
     // Strip "-free" suffix (e.g. "kimi-k2.5-free" → "kimi-k2.5")
     if let Some(base) = model_id.strip_suffix("-free") {
         push_candidate(&mut candidates, &mut seen, base.to_string());
         if let Some(alias) = explicit_model_alias(base) {
             push_candidate(&mut candidates, &mut seen, alias.to_string());
         }
+        push_generalized_candidates(&mut candidates, &mut seen, base);
     }
 
     if !model_id.contains('/') && !model_id.contains('.') {
@@ -112,6 +124,7 @@ fn pricing_lookup_candidates(model_id: &str) -> Vec<String> {
         if let Some(alias) = explicit_model_alias(&stripped) {
             push_candidate(&mut candidates, &mut seen, alias.to_string());
         }
+        push_generalized_candidates(&mut candidates, &mut seen, &stripped);
     }
 
     if model_id.contains('/') {
@@ -120,6 +133,63 @@ fn pricing_lookup_candidates(model_id: &str) -> Vec<String> {
     }
 
     candidates
+}
+
+fn strip_quality_tier_suffix(model_id: &str) -> Option<String> {
+    let normalized = model_id.trim().replace('_', "-");
+    for suffix in ["-high", "-medium", "-low"] {
+        if normalized.to_ascii_lowercase().ends_with(suffix) {
+            let end = normalized.len() - suffix.len();
+            return Some(normalized[..end].to_string());
+        }
+    }
+    None
+}
+
+fn push_generalized_candidates(
+    candidates: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    model_id: &str,
+) {
+    let normalized = model_id.trim().replace('_', "-");
+    if normalized.is_empty() {
+        return;
+    }
+
+    if let Some(glm_model) = canonicalize_glm_model(&normalized) {
+        push_candidate(candidates, seen, glm_model.clone());
+        push_candidate(candidates, seen, format!("zai/{}", glm_model));
+        push_candidate(candidates, seen, format!("zai.{}", glm_model));
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    if lower.contains("z-ai/") {
+        push_candidate(candidates, seen, lower.replace("z-ai/", "zai/"));
+    }
+    if lower.contains("z.ai/") {
+        push_candidate(candidates, seen, lower.replace("z.ai/", "zai/"));
+    }
+
+    if let Some(rest) = lower
+        .strip_prefix("z-ai/")
+        .or_else(|| lower.strip_prefix("z.ai/"))
+    {
+        if let Some(glm_model) = canonicalize_glm_model(rest) {
+            push_candidate(candidates, seen, format!("zai/{}", glm_model));
+            push_candidate(candidates, seen, format!("zai.{}", glm_model));
+        }
+    }
+}
+
+fn canonicalize_glm_model(model_id: &str) -> Option<String> {
+    let lower = model_id.trim().to_ascii_lowercase().replace('_', "-");
+    let model = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    let rest = model.strip_prefix("glm")?;
+    let rest = rest.trim_start_matches(['-', '.']);
+    if rest.is_empty() {
+        return None;
+    }
+    Some(format!("glm-{}", rest))
 }
 
 fn push_candidate(candidates: &mut Vec<String>, seen: &mut HashSet<String>, candidate: String) {
@@ -152,16 +222,12 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
         "kimi-k2.5" => Some("moonshot/kimi-k2.5"),
         "minimax-m2.5" => Some("minimax/MiniMax-M2.5"),
         "minimax-m2.1" => Some("minimax/MiniMax-M2.1"),
-        "glm-4.7" => Some("zai/glm-4.7"),
-        "glm-5" => Some("zai/glm-5"),
         "grok-code" => Some("xai/grok-code-fast-1"),
 
         // Provider-prefixed aliases
         "moonshotai/kimi-k2.5" => Some("moonshot/kimi-k2.5"),
         "minimaxai/minimax-m2.1" => Some("minimax/MiniMax-M2.1"),
         "minimaxai/minimax-m2.5" => Some("minimax/MiniMax-M2.5"),
-        "z-ai/glm5" => Some("zai/glm-5"),
-        "z-ai/glm4.7" | "z-ai/glm-4.7" => Some("zai/glm-4.7"),
         "qwen/qwen3.5-397b-a17b" => Some("openrouter/qwen/qwen3.5-397b-a17b"),
         "deepseek-ai/deepseek-v3.2" => Some("deepseek/deepseek-v3.2"),
         "nvidia/llama-3.3-nemotron-super-49b-v1.5" => {
@@ -172,14 +238,6 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
         }
         _ => None,
     }
-}
-
-fn strip_date_suffix(model_id: &str) -> Option<String> {
-    let base_model = model_id
-        .trim_end_matches(|c: char| c.is_ascii_digit())
-        .trim_end_matches('-');
-
-    (base_model != model_id).then(|| base_model.to_string())
 }
 
 fn find_case_insensitive_key<'a>(
@@ -400,6 +458,18 @@ mod tests {
     }
 
     #[test]
+    fn test_lookup_model_pricing_does_not_strip_model_version_suffix() {
+        let mut map = HashMap::new();
+        map.insert(
+            "claude-opus-4".to_string(),
+            make_pricing(0.000015, 0.000075),
+        );
+
+        let result = lookup_model_pricing("claude-opus-4-5", &map);
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn test_lookup_model_pricing_uses_explicit_antigravity_alias() {
         let mut map = HashMap::new();
         map.insert(
@@ -459,6 +529,40 @@ mod tests {
         let result = lookup_model_pricing("z-ai/glm5", &map);
         assert!(result.is_some());
         assert_eq!(result.unwrap().output_cost_per_token, 0.000002);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_uses_glm_5_1_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "zai/glm-5.1".to_string(),
+            make_pricing(0.0000014, 0.0000044),
+        );
+
+        let result = lookup_model_pricing("z-ai/glm5.1", &map);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().output_cost_per_token, 0.0000044);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_strips_quality_tier_suffixes() {
+        let mut map = HashMap::new();
+        map.insert(
+            "zai/glm-5.1".to_string(),
+            make_pricing(0.0000014, 0.0000044),
+        );
+        map.insert(
+            "gemini-3-pro-preview".to_string(),
+            make_pricing(0.000002, 0.000012),
+        );
+
+        let glm = lookup_model_pricing("z-ai/glm-5.1-low", &map);
+        assert!(glm.is_some());
+        assert_eq!(glm.unwrap().output_cost_per_token, 0.0000044);
+
+        let gemini = lookup_model_pricing("gemini-3-pro-high", &map);
+        assert!(gemini.is_some());
+        assert_eq!(gemini.unwrap().output_cost_per_token, 0.000012);
     }
 
     #[test]

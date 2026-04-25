@@ -133,35 +133,6 @@ impl ConfigManager {
         Ok(())
     }
 
-    pub fn is_provider_enabled(&self, provider: &str) -> bool {
-        match self.load() {
-            Ok(config) => config
-                .providers
-                .get(provider)
-                .map(|p| p.enabled)
-                .unwrap_or(true),
-            Err(_) => true,
-        }
-    }
-
-    pub fn get_enabled_providers(&self) -> Vec<String> {
-        match self.load() {
-            Ok(config) => config
-                .providers
-                .iter()
-                .filter(|(_, p)| p.enabled)
-                .map(|(k, _)| k.clone())
-                .collect(),
-            Err(_) => vec![
-                "claude".to_string(),
-                "codex".to_string(),
-                "gemini".to_string(),
-                "antigravity".to_string(),
-                "copilot".to_string(),
-            ],
-        }
-    }
-
     pub fn enable_provider(&self, provider: &str) -> Result<()> {
         let mut config = self.load().unwrap_or_default();
         config

@@ -17,13 +17,16 @@ A Rust CLI tool with two core features:
 
 ## Current State
 
-As of 2026-03-24:
+As of 2026-04-25:
 
 - usage parsing writes normalized messages into a local SQLite ledger
 - the dashboard reads daily aggregates from the ledger, not from raw files in the TUI layer
-- the usage TUI is organized around `Overview`, `Models`, `Daily`, and `Heatmap`
+- the usage TUI is organized around `Overview`, `Models`, `Daily`, and `Activity`
 - CLI usage output includes daily, weekly, and monthly summaries
 - pricing snapshots are stored per day/model so historical cost does not silently drift
+- quota view shows top 3 windows per provider in Overview tab; all windows in per-provider detail tabs
+- each quota gauge shows an expected-progress marker (`▏`) and ETA to limit
+- activity heatmap uses block characters (`░▒▓█`) scaled to value intensity for colorblind accessibility
 
 Known gaps:
 
@@ -56,9 +59,19 @@ tokenpulse/
 │       │   ├── scanner.rs        # local discovery
 │       │   ├── claude.rs         # Claude Code parser
 │       │   ├── codex.rs          # Codex parser
+│       │   ├── copilot.rs        # GitHub Copilot OTEL parser
 │       │   ├── opencode.rs       # OpenCode parser
 │       │   ├── gemini.rs         # Gemini CLI parser
-│       │   └── pi.rs             # PI parser
+│       │   ├── pi.rs             # PI parser
+│       │   └── utils.rs          # model/provider normalization helpers
+│       ├── quota/
+│       │   ├── mod.rs
+│       │   ├── claude.rs
+│       │   ├── codex.rs
+│       │   ├── copilot.rs
+│       │   ├── gemini.rs
+│       │   ├── antigravity.rs
+│       │   └── cache.rs
 │       └── pricing/              # model pricing and cost calculation
 │
 └── tokenpulse-cli/               # binary crate
@@ -77,8 +90,7 @@ tokenpulse/
             │   ├── gauge.rs
             │   ├── heatmap.rs
             │   ├── trend.rs
-            │   ├── barchart.rs
-            │   └── table.rs
+            │   └── barchart.rs
             └── views/
                 ├── mod.rs
                 ├── quota.rs
@@ -118,6 +130,7 @@ tokenpulse quota --json                   # JSON output for scripting
 tokenpulse usage                          # interactive TUI on a terminal, plain text when piped
 tokenpulse usage --tui                    # force the interactive TUI dashboard
 tokenpulse usage --no-tui                 # plain-text summary
+tokenpulse usage --json                   # JSON summary for scripts
 tokenpulse usage --since 2026-03-01       # filter by date
 tokenpulse usage -p claude,codex          # filter by provider
 tokenpulse usage --refresh-days 2026-03-01:2026-03-07
@@ -131,13 +144,14 @@ tokenpulse usage --rebuild-all
 
 ### Quota View (`tokenpulse quota`)
 
-The quota TUI now has two modes:
+The quota TUI has two modes:
 - **Overview tab** shows only the top 3 most-used windows per provider for a compact summary
 - **Detail tabs** (per provider) show all available rate windows
 
 Each gauge includes:
 - A gradient color progress bar
 - An expected-progress marker (`▏`) showing where theoretical usage should be at this point in time
+- Pace ETA: when ahead of pace, shows estimated time to limit; when behind, shows "under pace"
 - Fixed-width label columns for proper alignment (especially for Gemini CLI's multiple models)
 - GitHub Copilot uses dynamic calendar-month billing period calculation
 
@@ -167,7 +181,7 @@ Each gauge includes:
 │                   📊 TokenPulse - Usage Dashboard                    │
 ╰─────────────────────────────────────────────────────────────────────╯
 
-  ╭─ Daily Cost (Last 14 Days) ───────────────────────────────────────╮
+  ╭─ Token Usage (60 days) ───────────────────────────────────────────╮
   │                                                                   │
   │  $12 ┤                              ╭─╮                           │
   │  $10 ┤          ╭─╮        ╭─╮      │ │                           │
@@ -212,18 +226,19 @@ Each gauge includes:
   │  other          █░░░░░░░░░░░░░░░░░░░░░░░░░   3%    $2.30         │
   ╰───────────────────────────────────────────────────────────────────╯
 
-  Tab: [Overview] [Models] [Daily] [Heatmap]
-  Press q to quit │ ←/→ switch tabs │ ↑/↓ scroll or move selection
+  Tab: [Overview] [Models] [Daily] [Activity]
+  Press q to quit │ ←/→ switch tabs │ ↑/↓ move selected row/day
 ```
 
 Current usage TUI notes:
 
-- `Overview` shows a 60-day stacked token chart grouped by model company (`OpenAI`, `Google`, `Anthropic`, `Others`) plus a scrollable `Top Models` table
+- `Overview` shows summary cards, a 60-day stacked chart switchable between token and cost views, and a scrollable `Top Models` table
 - `Overview` top models use their own visible scroll hint and wider model/agent columns so long model IDs and multi-agent attribution fit better
-- `Models` shows a full sortable table with per-column semantic colors (`Model`=company color, `Tokens`=gold, `Cost`=green, `Msgs`=blue)
-- `Daily` shows daily totals as a colored table (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`)
-- `Heatmap` shows a GitHub-style contribution heatmap with mouse-clickable cells and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
-- `Heatmap` selected-day panel now includes total/input/output/cache/reasoning/message/session summary and supports detail scrolling when the agent/model list exceeds the viewport
+- `Models` shows a searchable (`/`), sortable table with per-column semantic colors (`Model`=company color, `Tokens`=green, `Cost`=gold, `Msgs`=blue)
+- `Daily` shows daily totals as a colored table (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`) with a 7-day token trend column on wide terminals
+- `Activity` shows a GitHub-style contribution heatmap with block-character intensity (`░▒▓█`) scaled to value level for accessibility, mouse-clickable cells, and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
+- `Activity` selected-day panel includes total/input/output/cache/reasoning/message/session summary and supports detail scrolling when the agent/model list exceeds the viewport
+- Press `s` on any tab to open a source filter overlay (toggle providers on/off)
 
 **Company vs Agent Distinction:**
 - **Company color** = model family owner (`OpenAI`, `Google`, `Anthropic`, `Others`)
@@ -326,6 +341,8 @@ Token refresh:
 | Codex | `~/.codex/sessions/*.jsonl` | JSONL with model, token deltas |
 | OpenCode | `~/.local/share/opencode/opencode.db` | SQLite, messages table |
 | PI | `~/.pi/agent/sessions/**/*.jsonl` | JSONL with header + entries |
+| GitHub Copilot | `~/.local/share/github-copilot/events.jsonl` | OTEL JSONL events |
+| Gemini CLI | `~/.gemini/tmp/session-*.json` | JSON session files |
 
 ### Pricing Source
 
@@ -338,27 +355,35 @@ Cache: ~/.cache/tokenpulse/pricing.json (24h TTL)
 
 ## Implementation Phases
 
-### Phase 1 - MVP (Current Goal)
-- [ ] Cargo workspace setup
-- [ ] Claude Code: auth + quota fetching
-- [ ] Codex: auth + quota fetching
-- [ ] `tokenpulse quota` with basic TUI gauge display
-- [ ] Claude Code: session JSONL parser
-- [ ] Codex: session JSONL parser
-- [ ] Pricing module (LiteLLM fetch + cache)
-- [ ] `tokenpulse usage` with TUI dashboard (daily cost chart + provider breakdown)
+### Phase 1 - MVP
+- [x] Cargo workspace setup
+- [x] Claude Code: auth + quota fetching
+- [x] Codex: auth + quota fetching
+- [x] `tokenpulse quota` with TUI gauge display
+- [x] Claude Code: session JSONL parser
+- [x] Codex: session JSONL parser
+- [x] Pricing module (LiteLLM fetch + cache)
+- [x] `tokenpulse usage` with TUI dashboard
 
 ### Phase 2 - More Providers
-- [ ] OpenCode: SQLite session parser
-- [ ] PI: session JSONL parser
-- [ ] Gemini CLI: auth + quota + session parser
-- [ ] Antigravity: quota probe
+- [x] OpenCode: SQLite session parser
+- [x] PI: session JSONL parser
+- [x] Gemini CLI: auth + quota + provisional session parser
+- [x] GitHub Copilot: quota + usage parser
+- [x] Antigravity: quota probe
+- [ ] Antigravity: historical usage parser
 
 ### Phase 3 - Polish
-- [ ] More TUI tabs: Models, Sessions detail
-- [ ] Sparkline trends in quota view
-- [ ] Color theming / config file
-- [ ] `--json` export mode
+- [x] More TUI tabs: Overview, Models, Daily, Activity
+- [x] Color theming
+- [x] Usage `--json` export mode
+- [x] Overview summary cards and token/cost chart toggle
+- [x] Models quick filter (`/`)
+- [x] Daily token trend column
+- [x] Source filter overlay (`s`)
+- [x] Block-character heatmap intensity for accessibility
+- [x] Pace ETA and expected-progress marker on quota gauges
+- [ ] Configurable TUI theme
 - [ ] `--watch` mode (manual refresh with keyboard)
 
 ---

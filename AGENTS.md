@@ -27,12 +27,18 @@
 - **Full agent names**: Legend uses "Claude Code" instead of "CLA", etc.
 - **Per-column semantic colors**: Token=green, Cost=gold, Messages=blue throughout tables
 - **Scrollable top models**: All models shown with scroll support
-- **Heatmap mouse click**: Click on heatmap cells to select a day
-- **Day detail by agent**: Heatmap day detail groups models by agent with cost rollup
-- **30-day default chart**: Overview chart shows last 30 days cost-based
+- **Activity mouse click**: Click on activity heatmap cells to select a day
+- **Day detail by agent**: Activity day detail groups models by agent with cost rollup
+- **60-day default chart**: Overview chart shows last 60 days token usage by model company
+- **Overview summary cards**: Today/week/month/total cost cards with mini trend
+- **Overview metric toggle**: `t`/`c` switches token vs cost chart
+- **Models quick filter**: `/` filters model table rows by model/provider/agent
+- **Row selection scrolling**: Overview models, Models, and Daily move selected rows before scrolling the viewport
+- **Daily token trend**: Wide Daily table shows a 7-day token sparkline column
+- **Usage JSON output**: `tokenpulse usage --json` emits script-friendly summary JSON
 
 ### Architecture
 - **Workspace**: `tokenpulse-core` (library) + `tokenpulse-cli` (binary)
 - **TUI**: ratatui 0.29 + crossterm 0.28 (with mouse capture)
 - **Data**: SQLite via rusqlite (bundled)
-- **Tests**: 92 passing (7 new tests added for billing, agent names, truncation)
+- **Tests**: 133 passing

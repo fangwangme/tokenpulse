@@ -1,3 +1,4 @@
+use super::normalize_model_name;
 use crate::pricing::{calculate_cost, lookup_model_pricing_or_warn, ModelPricing, PricingCache};
 use crate::provider::{TokenBreakdown, UnifiedMessage};
 use crate::usage::{DashboardDay, ModelSummary, ProviderSummary};
@@ -6,8 +7,9 @@ use chrono::{Duration, NaiveDate, Utc};
 use rusqlite::{
     params, params_from_iter, types::Value, Connection, OptionalExtension, Transaction,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use tracing::warn;
 
 #[derive(Debug, Clone)]
@@ -248,8 +250,11 @@ impl UsageStore {
     }
 
     pub fn repair_zero_costs(&self, since: Option<NaiveDate>, sources: &[String]) -> Result<usize> {
-        let pricing = PricingCache::new().get_pricing_sync()?;
         let mut conn = self.open()?;
+        if !has_zero_cost_repairs_pending(&conn, since, sources)? {
+            return Ok(0);
+        }
+        let pricing = PricingCache::new().get_pricing_sync()?;
         let tx = conn.transaction()?;
 
         let mut sql = String::from(
@@ -307,6 +312,31 @@ impl UsageStore {
 
         tx.commit()?;
         Ok(repaired)
+    }
+
+    pub fn load_summary_counts(
+        &self,
+        since: Option<NaiveDate>,
+        sources: &[String],
+    ) -> Result<(usize, usize)> {
+        let conn = self.open()?;
+        let mut sql = String::from(
+            r#"
+            SELECT COUNT(*),
+                   COUNT(DISTINCT source || '::' || session_id)
+            FROM usage_messages
+            WHERE 1=1
+            "#,
+        );
+        let params = append_common_filters(&mut sql, since, sources);
+
+        conn.query_row(&sql, params_from_iter(params), |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,
+                row.get::<_, i64>(1)? as usize,
+            ))
+        })
+        .map_err(Into::into)
     }
 
     pub fn load_messages(
@@ -425,23 +455,61 @@ impl UsageStore {
             r#"
             SELECT model_id,
                    provider_id,
-                   source,
-                   SUM(cost_usd),
-                   SUM(total_tokens),
-                   COUNT(*),
-                   COUNT(DISTINCT source || '::' || session_id)
+                    source,
+                    session_id,
+                    SUM(cost_usd),
+                    SUM(total_tokens),
+                    COUNT(*)
             FROM usage_messages
             WHERE 1=1
             "#,
         );
         let params = append_common_filters(&mut sql, since, sources);
         sql.push_str(
-            " GROUP BY source, provider_id, model_id ORDER BY SUM(total_tokens) DESC, model_id ASC",
+            " GROUP BY source, provider_id, model_id, session_id ORDER BY SUM(total_tokens) DESC, model_id ASC",
         );
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(params), row_to_model_summary)?;
-        Ok(rows.flatten().collect())
+        let rows = stmt.query_map(params_from_iter(params), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?;
+
+        let mut grouped: BTreeMap<String, AggregatedModelSummary> = BTreeMap::new();
+        for row in rows.flatten() {
+            let (model_id, provider_id, source, session_id, cost, tokens, message_count) = row;
+            let normalized = normalize_model_name(&model_id);
+            let entry = grouped.entry(normalized).or_default();
+            entry.providers.insert(provider_id);
+            entry.sources.insert(source);
+            entry.sessions.insert(session_id);
+            entry.cost += cost;
+            entry.tokens += tokens;
+            entry.message_count += message_count as usize;
+        }
+
+        let mut summaries: Vec<ModelSummary> = grouped
+            .into_iter()
+            .map(|(model, summary)| ModelSummary {
+                model,
+                provider: summary.providers.into_iter().collect::<Vec<_>>().join(","),
+                source: summary.sources.into_iter().collect::<Vec<_>>().join(","),
+                cost: summary.cost,
+                tokens: summary.tokens,
+                message_count: summary.message_count,
+                session_count: summary.sessions.len(),
+                percent: 0.0,
+            })
+            .collect();
+        summaries.sort_by(|left, right| right.tokens.cmp(&left.tokens));
+        Ok(summaries)
     }
 
     fn open(&self) -> Result<Connection> {
@@ -449,65 +517,8 @@ impl UsageStore {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(&self.path)?;
-        conn.execute_batch(
-            r#"
-            PRAGMA journal_mode = WAL;
-            CREATE TABLE IF NOT EXISTS usage_messages (
-                source TEXT NOT NULL,
-                provider_id TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                message_key TEXT NOT NULL,
-                timestamp_ms INTEGER NOT NULL,
-                date TEXT NOT NULL,
-                input_tokens INTEGER NOT NULL,
-                output_tokens INTEGER NOT NULL,
-                cache_read_tokens INTEGER NOT NULL,
-                cache_write_tokens INTEGER NOT NULL,
-                reasoning_tokens INTEGER NOT NULL,
-                total_tokens INTEGER NOT NULL,
-                cost_usd REAL NOT NULL,
-                pricing_day TEXT NOT NULL,
-                parser_version TEXT NOT NULL,
-                PRIMARY KEY (source, message_key)
-            );
-            CREATE INDEX IF NOT EXISTS idx_usage_messages_date ON usage_messages(date);
-            CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date ON usage_messages(source, date);
-
-            CREATE TABLE IF NOT EXISTS daily_model_usage (
-                date TEXT NOT NULL,
-                source TEXT NOT NULL,
-                provider_id TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                input_tokens INTEGER NOT NULL,
-                output_tokens INTEGER NOT NULL,
-                cache_read_tokens INTEGER NOT NULL,
-                cache_write_tokens INTEGER NOT NULL,
-                reasoning_tokens INTEGER NOT NULL,
-                total_tokens INTEGER NOT NULL,
-                cost_usd REAL NOT NULL,
-                message_count INTEGER NOT NULL,
-                session_count INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY (date, source, provider_id, model_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_daily_model_usage_date ON daily_model_usage(date);
-
-            CREATE TABLE IF NOT EXISTS daily_pricing_snapshots (
-                date TEXT NOT NULL,
-                provider_id TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                input_cost_per_token REAL NOT NULL,
-                output_cost_per_token REAL NOT NULL,
-                cache_read_input_token_cost REAL,
-                cache_creation_input_token_cost REAL,
-                captured_at INTEGER NOT NULL,
-                pricing_source TEXT NOT NULL,
-                pricing_version TEXT NOT NULL,
-                PRIMARY KEY (date, provider_id, model_id)
-            );
-            "#,
-        )?;
+        conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+        ensure_schema_initialized(&self.path, &conn)?;
         Ok(conn)
     }
 
@@ -708,19 +719,6 @@ fn row_to_provider_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Provider
     })
 }
 
-fn row_to_model_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModelSummary> {
-    Ok(ModelSummary {
-        model: row.get(0)?,
-        provider: row.get(1)?,
-        source: row.get(2)?,
-        cost: row.get(3)?,
-        tokens: row.get(4)?,
-        message_count: row.get::<_, i64>(5)? as usize,
-        session_count: row.get::<_, i64>(6)? as usize,
-        percent: 0.0,
-    })
-}
-
 fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<()> {
     tx.execute(
         "DELETE FROM daily_model_usage WHERE date = ?1",
@@ -861,6 +859,120 @@ fn derive_message_cost(
     Ok(0.0)
 }
 
+#[derive(Default)]
+struct AggregatedModelSummary {
+    providers: BTreeSet<String>,
+    sources: BTreeSet<String>,
+    sessions: BTreeSet<String>,
+    cost: f64,
+    tokens: i64,
+    message_count: usize,
+}
+
+fn ensure_schema_initialized(path: &PathBuf, conn: &Connection) -> Result<()> {
+    if initialized_paths()
+        .lock()
+        .map_err(|_| anyhow!("Usage store schema mutex poisoned"))?
+        .contains(path)
+    {
+        return Ok(());
+    }
+
+    conn.execute_batch(USAGE_SCHEMA_SQL)?;
+
+    initialized_paths()
+        .lock()
+        .map_err(|_| anyhow!("Usage store schema mutex poisoned"))?
+        .insert(path.clone());
+    Ok(())
+}
+
+fn initialized_paths() -> &'static Mutex<HashSet<PathBuf>> {
+    static PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    PATHS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn has_zero_cost_repairs_pending(
+    conn: &Connection,
+    since: Option<NaiveDate>,
+    sources: &[String],
+) -> Result<bool> {
+    let mut sql = String::from(
+        r#"
+        SELECT 1
+        FROM usage_messages
+        WHERE cost_usd <= 0 AND total_tokens > 0
+        "#,
+    );
+    let params = append_common_filters(&mut sql, since, sources);
+    sql.push_str(" LIMIT 1");
+
+    Ok(conn
+        .query_row(&sql, params_from_iter(params), |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
+const USAGE_SCHEMA_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS usage_messages (
+    source TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    message_key TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    reasoning_tokens INTEGER NOT NULL,
+    total_tokens INTEGER NOT NULL,
+    cost_usd REAL NOT NULL,
+    pricing_day TEXT NOT NULL,
+    parser_version TEXT NOT NULL,
+    PRIMARY KEY (source, message_key)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_messages_date ON usage_messages(date);
+CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date ON usage_messages(source, date);
+CREATE INDEX IF NOT EXISTS idx_usage_messages_zero_cost
+    ON usage_messages(date, source)
+    WHERE cost_usd <= 0 AND total_tokens > 0;
+
+CREATE TABLE IF NOT EXISTS daily_model_usage (
+    date TEXT NOT NULL,
+    source TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    reasoning_tokens INTEGER NOT NULL,
+    total_tokens INTEGER NOT NULL,
+    cost_usd REAL NOT NULL,
+    message_count INTEGER NOT NULL,
+    session_count INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (date, source, provider_id, model_id)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_model_usage_date ON daily_model_usage(date);
+
+CREATE TABLE IF NOT EXISTS daily_pricing_snapshots (
+    date TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    input_cost_per_token REAL NOT NULL,
+    output_cost_per_token REAL NOT NULL,
+    cache_read_input_token_cost REAL,
+    cache_creation_input_token_cost REAL,
+    captured_at INTEGER NOT NULL,
+    pricing_source TEXT NOT NULL,
+    pricing_version TEXT NOT NULL,
+    PRIMARY KEY (date, provider_id, model_id)
+);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -993,5 +1105,50 @@ mod tests {
         let messages = store.load_messages(None, &["claude".to_string()]).unwrap();
         assert_eq!(messages.len(), 1);
         assert!((messages[0].cost - 42.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn load_model_summaries_normalizes_and_merges_variants() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        let mut first = sample_message("2024-03-10", "m1");
+        first.model_id = "antigravity-claude-opus-4-5-thinking-high".to_string();
+        first.session_id = "shared-session".to_string();
+        first.cost = 2.0;
+
+        let mut second = sample_message("2024-03-10", "m2");
+        second.client = "codex".to_string();
+        second.model_id = "claude-opus-4.5".to_string();
+        second.session_id = "shared-session".to_string();
+        second.cost = 3.0;
+
+        store.ingest_messages(&[first, second], false).unwrap();
+
+        let summaries = store.load_model_summaries(None, &[]).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].model, "claude-opus-4-5");
+        assert_eq!(summaries[0].source, "claude,codex");
+        assert_eq!(summaries[0].provider, "anthropic");
+        assert_eq!(summaries[0].session_count, 1);
+        assert_eq!(summaries[0].message_count, 2);
+        assert!((summaries[0].cost - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn load_summary_counts_returns_message_and_session_totals() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        let mut first = sample_message("2024-03-10", "m1");
+        first.session_id = "session-a".to_string();
+        let mut second = sample_message("2024-03-10", "m2");
+        second.session_id = "session-b".to_string();
+
+        store.ingest_messages(&[first, second], false).unwrap();
+
+        let (message_count, session_count) = store.load_summary_counts(None, &[]).unwrap();
+        assert_eq!(message_count, 2);
+        assert_eq!(session_count, 2);
     }
 }

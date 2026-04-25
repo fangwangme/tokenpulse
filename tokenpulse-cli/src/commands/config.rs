@@ -40,6 +40,53 @@ pub fn run(action: ConfigAction) -> Result<()> {
             manager.disable_provider(&provider)?;
             println!("Provider '{provider}' disabled");
         }
+        ConfigAction::Set { setting } => {
+            let (key, value) = setting.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("Expected KEY=VALUE format (e.g. quota_display_mode=used)")
+            })?;
+
+            let key = key.trim();
+            let value = value.trim();
+
+            let mut config = manager.load().unwrap_or_default();
+
+            match key {
+                "quota_display_mode" => {
+                    config.display.quota_display_mode = match value {
+                        "used" => QuotaDisplayMode::Used,
+                        "remaining" => QuotaDisplayMode::Remaining,
+                        _ => {
+                            anyhow::bail!(
+                                "Invalid value '{}' for quota_display_mode. Expected: used, remaining",
+                                value
+                            );
+                        }
+                    };
+                    manager.save(&config)?;
+                    println!("quota_display_mode = {value}");
+                }
+                "show_empty_providers" => {
+                    config.display.show_empty_providers = match value {
+                        "true" | "1" | "yes" => true,
+                        "false" | "0" | "no" => false,
+                        _ => {
+                            anyhow::bail!(
+                                "Invalid value '{}' for show_empty_providers. Expected: true, false",
+                                value
+                            );
+                        }
+                    };
+                    manager.save(&config)?;
+                    println!("show_empty_providers = {value}");
+                }
+                _ => {
+                    anyhow::bail!(
+                        "Unknown setting '{}'. Available settings:\n  quota_display_mode  (used | remaining)\n  show_empty_providers  (true | false)",
+                        key
+                    );
+                }
+            }
+        }
     }
 
     Ok(())

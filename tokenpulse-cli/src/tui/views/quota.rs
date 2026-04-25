@@ -1,3 +1,4 @@
+use crate::commands::quota::{build_quota_fetchers, quota_display_name, quota_provider_info_list};
 use crate::tui::theme::Theme;
 use crate::tui::widgets::GradientGauge;
 use anyhow::Result;
@@ -15,18 +16,11 @@ use ratatui::{
     Terminal,
 };
 use std::cmp::Ordering;
-use tokenpulse_core::{config::QuotaDisplayMode, QuotaSnapshot, RateWindow};
-
-fn display_provider_name(provider: &str) -> &'static str {
-    match provider {
-        "claude" => "CLAUDE CODE",
-        "gemini" => "GEMINI CLI",
-        "codex" => "CODEX",
-        "copilot" => "GITHUB COPILOT",
-        "antigravity" => "ANTIGRAVITY",
-        _ => "UNKNOWN",
-    }
-}
+use tokenpulse_core::{
+    config::{Config, ConfigManager, QuotaDisplayMode},
+    quota::{fetch_all, QuotaCacheStore},
+    QuotaSnapshot, RateWindow,
+};
 
 fn format_reset_duration(diff: chrono::Duration) -> String {
     let total_minutes = diff.num_minutes().max(0);
@@ -80,6 +74,9 @@ fn calculate_pace(window: &RateWindow) -> Option<(&'static str, String, f64)> {
         Some(("on-track", "On track".to_string(), expected_usage))
     } else if deficit > 0.0 {
         let rate = window.used_percent / elapsed_ms as f64;
+        if rate <= 0.0 {
+            return None;
+        }
         let remaining_ms = (100.0 - window.used_percent) / rate;
         Some((
             "behind",
@@ -116,9 +113,31 @@ fn truncate(text: &str, width: usize) -> String {
     out
 }
 
+fn refresh_quota_results(
+    provider: Option<&str>,
+    enabled_providers: &[String],
+) -> Result<Vec<anyhow::Result<QuotaSnapshot>>> {
+    let fetchers = build_quota_fetchers(provider, enabled_providers);
+    let observed_at = chrono::Utc::now();
+    let cache_store = QuotaCacheStore::new();
+    let results = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(fetch_all(fetchers))
+    });
+
+    for result in &results {
+        if let Ok(snapshot) = result {
+            cache_store.save(&snapshot.provider, observed_at, snapshot)?;
+        }
+    }
+
+    Ok(results)
+}
+
 pub fn run(
-    results: Vec<anyhow::Result<QuotaSnapshot>>,
-    display_mode: QuotaDisplayMode,
+    mut results: Vec<anyhow::Result<QuotaSnapshot>>,
+    initial_display_mode: QuotaDisplayMode,
+    provider: Option<String>,
+    initial_enabled_providers: Vec<String>,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -126,23 +145,21 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let theme = Theme::default();
-    let snapshots: Vec<&QuotaSnapshot> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
-
+    let mut theme = Theme::auto();
     let mut selected_tab: usize = 0;
-    let tab_titles: Vec<&str> = if snapshots.is_empty() {
-        vec!["Overview"]
-    } else {
-        let mut tabs = vec!["Overview"];
-        for s in &snapshots {
-            tabs.push(s.provider.as_str());
-        }
-        tabs
-    };
+    let mut settings_row: usize = 0;
+    let config_manager = ConfigManager::new();
+    let mut config = config_manager.load().unwrap_or_default();
+    let mut display_mode = initial_display_mode;
+    let mut enabled_providers = initial_enabled_providers;
 
     loop {
         terminal.draw(|f| {
+            let snapshots: Vec<&QuotaSnapshot> =
+                results.iter().filter_map(|r| r.as_ref().ok()).collect();
+            let tab_titles = quota_tab_titles(&snapshots);
             let size = f.area();
+            f.render_widget(Block::default().style(Style::default().bg(theme.bg)), size);
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -156,15 +173,28 @@ pub fn run(
             render_header(f, chunks[0], &snapshots, &display_mode, &theme);
             render_tabs(f, chunks[1], &tab_titles, selected_tab, &theme);
 
+            let settings_tab = tab_titles.len().saturating_sub(1);
+
             if selected_tab == 0 {
                 render_overview(f, chunks[2], &snapshots, &display_mode, &theme);
+            } else if selected_tab == settings_tab {
+                render_settings(
+                    f,
+                    chunks[2],
+                    &config,
+                    &display_mode,
+                    settings_row,
+                    &config_manager,
+                    &snapshots,
+                    &theme,
+                );
             } else if let Some(snapshot) = snapshots.get(selected_tab - 1) {
                 render_snapshot_card(f, chunks[2], snapshot, &display_mode, &theme, false, false);
             }
 
             let footer_text = format!(
-                " q quit | ←→ tab | mode {} | {} provider{} ",
-                quota_suffix(&display_mode),
+                " q quit | r refresh | b theme ({}) | m mode | e empty | space toggle | ←→ tab | {} provider{} ",
+                theme.mode.label(),
                 snapshots.len(),
                 if snapshots.len() == 1 { "" } else { "s" }
             );
@@ -178,17 +208,74 @@ pub fn run(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('r') => {
+                        results = refresh_quota_results(provider.as_deref(), &enabled_providers)?;
+                        let snapshots: Vec<&QuotaSnapshot> =
+                            results.iter().filter_map(|r| r.as_ref().ok()).collect();
+                        let tab_count = quota_tab_titles(&snapshots).len();
+                        selected_tab = selected_tab.min(tab_count.saturating_sub(1));
+                    }
+                    KeyCode::Char('b') => {
+                        theme = theme.toggled();
+                    }
+                    KeyCode::Char('m') => {
+                        display_mode = toggle_display_mode(&display_mode);
+                        config.display.quota_display_mode = display_mode.clone();
+                        config_manager.save(&config)?;
+                    }
+                    KeyCode::Char('e') => {
+                        config.display.show_empty_providers = !config.display.show_empty_providers;
+                        config_manager.save(&config)?;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        let snapshots: Vec<&QuotaSnapshot> =
+                            results.iter().filter_map(|r| r.as_ref().ok()).collect();
+                        let tab_titles = quota_tab_titles(&snapshots);
+                        if selected_tab == tab_titles.len().saturating_sub(1) && settings_row > 0 {
+                            settings_row -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        let snapshots: Vec<&QuotaSnapshot> =
+                            results.iter().filter_map(|r| r.as_ref().ok()).collect();
+                        let tab_titles = quota_tab_titles(&snapshots);
+                        if selected_tab == tab_titles.len().saturating_sub(1) {
+                            settings_row =
+                                (settings_row + 1).min(settings_row_count().saturating_sub(1));
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        let snapshots: Vec<&QuotaSnapshot> =
+                            results.iter().filter_map(|r| r.as_ref().ok()).collect();
+                        let tab_titles = quota_tab_titles(&snapshots);
+                        if selected_tab == tab_titles.len().saturating_sub(1) {
+                            if let Some(provider_id) = settings_provider_id(settings_row) {
+                                let next_enabled = !is_provider_enabled(&config, provider_id);
+                                let provider_config =
+                                    config.providers.entry(provider_id.to_string()).or_default();
+                                provider_config.enabled = next_enabled;
+                                config_manager.save(&config)?;
+                                enabled_providers = enabled_provider_ids(&config);
+                            }
+                        }
+                    }
                     KeyCode::Left | KeyCode::Char('h') => {
                         if selected_tab > 0 {
                             selected_tab -= 1;
                         }
                     }
                     KeyCode::Right | KeyCode::Char('l') => {
+                        let snapshots: Vec<&QuotaSnapshot> =
+                            results.iter().filter_map(|r| r.as_ref().ok()).collect();
+                        let tab_titles = quota_tab_titles(&snapshots);
                         if selected_tab + 1 < tab_titles.len() {
                             selected_tab += 1;
                         }
                     }
                     KeyCode::Tab => {
+                        let snapshots: Vec<&QuotaSnapshot> =
+                            results.iter().filter_map(|r| r.as_ref().ok()).collect();
+                        let tab_titles = quota_tab_titles(&snapshots);
                         if key.modifiers.contains(KeyModifiers::SHIFT) {
                             if selected_tab > 0 {
                                 selected_tab -= 1;
@@ -207,6 +294,53 @@ pub fn run(
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
     Ok(())
+}
+
+fn enabled_provider_ids(config: &Config) -> Vec<String> {
+    config
+        .providers
+        .iter()
+        .filter(|(_, provider)| provider.enabled)
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+fn toggle_display_mode(display_mode: &QuotaDisplayMode) -> QuotaDisplayMode {
+    match display_mode {
+        QuotaDisplayMode::Used => QuotaDisplayMode::Remaining,
+        QuotaDisplayMode::Remaining => QuotaDisplayMode::Used,
+    }
+}
+
+fn settings_row_count() -> usize {
+    2 + quota_provider_info_list().len()
+}
+
+fn settings_provider_id(row: usize) -> Option<&'static str> {
+    row.checked_sub(2)
+        .and_then(|idx| quota_provider_info_list().get(idx).map(|info| info.id))
+}
+
+fn is_provider_enabled(config: &Config, provider: &str) -> bool {
+    config
+        .providers
+        .get(provider)
+        .map(|p| p.enabled)
+        .unwrap_or(false)
+}
+
+fn quota_tab_titles(snapshots: &[&QuotaSnapshot]) -> Vec<String> {
+    let mut tabs = vec!["Overview".to_string()];
+    if snapshots.is_empty() {
+        tabs.push("Settings".to_string());
+        return tabs;
+    }
+
+    for snapshot in snapshots {
+        tabs.push(snapshot.provider.clone());
+    }
+    tabs.push("Settings".to_string());
+    tabs
 }
 
 fn render_header(
@@ -260,7 +394,7 @@ fn render_header(
 fn render_tabs(
     f: &mut ratatui::Frame,
     area: Rect,
-    titles: &[&str],
+    titles: &[String],
     selected_tab: usize,
     theme: &Theme,
 ) {
@@ -272,7 +406,7 @@ fn render_tabs(
     }))
     .select(selected_tab)
     .divider(Span::raw(""))
-    .highlight_style(Style::default().fg(theme.bg).bg(theme.accent).bold())
+    .highlight_style(Style::default().fg(theme.on_accent).bg(theme.accent).bold())
     .block(
         Block::default()
             .borders(Borders::ALL)
@@ -304,7 +438,7 @@ fn render_overview(
 
     let columns = if area.width >= 110 { 2 } else { 1 };
     let rows = snapshots.len().div_ceil(columns);
-    let row_constraints = vec![Constraint::Ratio(1, rows as u32); rows];
+    let row_constraints = vec![Constraint::Min(6); rows];
     let row_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(row_constraints)
@@ -346,7 +480,7 @@ fn render_snapshot_card(
     let provider_color = theme.provider_color(&snapshot.provider);
     let block = Block::default()
         .title(Span::styled(
-            format!(" {} ", display_provider_name(&snapshot.provider)),
+            format!(" {} ", quota_display_name(&snapshot.provider)),
             Style::default().fg(provider_color).bold(),
         ))
         .borders(Borders::ALL)
@@ -545,4 +679,130 @@ fn render_window_block(
 
     let paragraph = Paragraph::new(detail).style(Style::default().fg(theme.dim));
     f.render_widget(paragraph, split[1]);
+}
+
+fn render_settings(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    config: &Config,
+    display_mode: &QuotaDisplayMode,
+    selected_row: usize,
+    config_manager: &ConfigManager,
+    snapshots: &[&QuotaSnapshot],
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Settings ",
+            Style::default().fg(theme.accent).bold(),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let fetched_provider_ids: std::collections::HashSet<&str> = snapshots
+        .iter()
+        .map(|snapshot| snapshot.provider.as_str())
+        .collect();
+    let mode = match display_mode {
+        QuotaDisplayMode::Used => "used",
+        QuotaDisplayMode::Remaining => "remaining",
+    };
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("Config file ", Style::default().fg(theme.dim)),
+        Span::styled(
+            config_manager.config_path().display().to_string(),
+            Style::default().fg(theme.fg),
+        ),
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(settings_line(
+        selected_row == 0,
+        "quota_display_mode",
+        mode,
+        "m",
+        theme,
+        theme.codex,
+    ));
+    lines.push(settings_line(
+        selected_row == 1,
+        "show_empty_providers",
+        if config.display.show_empty_providers {
+            "true"
+        } else {
+            "false"
+        },
+        "e",
+        theme,
+        theme.gemini,
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "Providers",
+        Style::default().fg(theme.fg).bold(),
+    )));
+
+    for (idx, info) in quota_provider_info_list().iter().enumerate() {
+        let row = idx + 2;
+        let enabled = is_provider_enabled(config, info.id);
+        let fetched = fetched_provider_ids.contains(info.id);
+        let marker = if selected_row == row { ">" } else { " " };
+        let status = if enabled { "enabled" } else { "disabled" };
+        let fetched_text = if fetched { "fetched" } else { "not fetched" };
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(theme.accent)),
+            Span::raw(" "),
+            Span::styled(
+                if enabled { "[x]" } else { "[ ]" },
+                Style::default().fg(if enabled { theme.gauge_low } else { theme.dim }),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                info.display_name,
+                Style::default().fg(theme.provider_color(info.id)).bold(),
+            ),
+            Span::raw("  "),
+            Span::styled(status, Style::default().fg(theme.dim)),
+            Span::raw("  "),
+            Span::styled(fetched_text, Style::default().fg(theme.dim)),
+            Span::raw("  "),
+            Span::styled(info.url, Style::default().fg(theme.dim)),
+        ]));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("space", Style::default().fg(theme.accent_soft).bold()),
+        Span::raw(" toggle provider  "),
+        Span::styled("r", Style::default().fg(theme.accent_soft).bold()),
+        Span::raw(" refresh quotas with saved settings"),
+    ]));
+
+    let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true });
+    f.render_widget(paragraph, inner);
+}
+
+fn settings_line(
+    selected: bool,
+    key: &'static str,
+    value: &'static str,
+    shortcut: &'static str,
+    theme: &Theme,
+    value_color: ratatui::style::Color,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            if selected { ">" } else { " " },
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" "),
+        Span::styled(key, Style::default().fg(theme.fg).bold()),
+        Span::raw(" = "),
+        Span::styled(value, Style::default().fg(value_color)),
+        Span::raw("  "),
+        Span::styled(shortcut, Style::default().fg(theme.accent_soft).bold()),
+    ])
 }

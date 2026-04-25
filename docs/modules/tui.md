@@ -13,10 +13,9 @@ tui/
 ├── widgets/
 │   ├── mod.rs
 │   ├── gauge.rs        # gradient progress bars with percentage + labels
-│   ├── sparkline.rs    # mini trend charts (daily cost over time)
 │   ├── barchart.rs     # stacked bar charts (provider breakdown)
 │   ├── heatmap.rs      # GitHub-style contribution heatmap
-│   └── table.rs        # styled tables with alternating rows
+│   └── trend.rs        # compact sparklines
 └── views/
     ├── mod.rs
     ├── quota.rs        # quota dashboard layout
@@ -35,21 +34,21 @@ pub struct Theme {
     pub border: Color,          // Box borders
     pub accent: Color,          // Highlights
 
-    // Provider colors
-    pub claude: Color,          // #D97706 (amber)
-    pub codex: Color,           // #10B981 (emerald)
-    pub opencode: Color,        // #6366F1 (indigo)
-    pub gemini: Color,          // #3B82F6 (blue)
-    pub pi: Color,              // #EC4899 (pink)
-    pub antigravity: Color,     // #F59E0B (yellow)
-    pub copilot: Color,         // #8B5CF6 (purple)
+    // Agent colors
+    pub claude: Color,          // #FB923C (orange)
+    pub codex: Color,           // #34D399 (emerald)
+    pub opencode: Color,        // #818CF8 (indigo)
+    pub gemini: Color,          // #60A5FA (blue)
+    pub pi: Color,              // #F472B6 (pink)
+    pub antigravity: Color,     // #C084FC (purple)
+    pub copilot: Color,         // #A3E635 (lime)
 
     // Gauge gradient (low → high usage)
     pub gauge_low: Color,       // Green
     pub gauge_mid: Color,       // Yellow
     pub gauge_high: Color,      // Red
 
-    // Heatmap palettes (GitHub-style green)
+    // Heatmap palettes by metric family
     pub token_heatmap: [Color; 5],
     pub cost_heatmap: [Color; 5],
     pub count_heatmap: [Color; 5],
@@ -62,9 +61,9 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 
 | Pattern                     | Provider  | Color          |
 | --------------------------- | --------- | -------------- |
-| claude, sonnet, opus, haiku | Anthropic | Coral #DA7756  |
-| gpt, o1, o3, o4             | OpenAI    | Green #10B981  |
-| gemini                      | Google    | Blue #3B82F6   |
+| claude, sonnet, opus, haiku | Anthropic | Orange #FB923C |
+| gpt, o1, o3, o4             | OpenAI    | Green #34D399  |
+| gemini                      | Google    | Blue #60A5FA   |
 | deepseek                    | DeepSeek  | Cyan #06B6D4   |
 | grok                        | xAI       | Yellow #EAB308 |
 | llama, meta                 | Meta      | Indigo #6366F1 |
@@ -98,11 +97,13 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 4 tabs switchable with ←/→:
 
 ### Tab 1: Overview
-- Top: stacked bar chart (daily tokens, last 60 days, colored by model company)
-- Bottom: scrollable top models table with visible scroll hint and wider model/agent columns
+- Top: summary cards for today, recent week, current month, and total cost
+- Middle: stacked bar chart switchable between daily tokens and daily cost, last 60 days, colored by model company
+- Bottom: row-selectable top models table with visible scroll hint and wider model/agent columns
 
 ### Tab 2: Models
 - Full sortable table: #, Model, Agent, Tokens, Cost, Messages
+- Quick text filter with `/`
 - Models colored by detected company family (`OpenAI`, `Google`, `Anthropic`, `Others`)
 - Numeric columns use semantic colors so `Cost`, `Tokens`, and `Msgs` stand out separately
 - Sort by cost (c), tokens (t), or date (d)
@@ -111,12 +112,15 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 - Top: summary cards (total cost, tokens, messages, sessions)
 - Bottom: daily table with today highlighted
 - Daily numeric columns use distinct colors (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`)
+- Wide terminals include a 7-day token trend column
 - Sorted by date (most recent first) or cost/tokens
 
-### Tab 4: Heatmap
-- GitHub-style contribution graph (green palette)
+### Tab 4: Activity
+- GitHub-style contribution graph with metric-specific palettes
+- Block-character intensity (`░░` / `▒▒` / `▓▓` / `██`) scaled to value level — readable without color (color-blind accessible)
 - 7 switchable metrics: total tokens, cost, input, output, cache, messages, sessions
-- 3 window modes: 26 weeks, 52 weeks, selected year
+- 3 window modes: past 26 weeks, past 52 weeks, past 365 days
+- Mouse-clickable cells — click any day to select it and see drill-down
 - Drill-down: select any day to see token summary, agent totals, and per-agent model cost breakdown
 - Selected-day panel supports scroll when the detail list is taller than the viewport
 - Streak tracking: current streak and longest streak
@@ -135,15 +139,16 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 | `q` / `Esc`           | Quit (close overlay if open)             |
 | `←` / `→` / `h` / `l` | Switch tabs                              |
 | `Tab` / `Shift+Tab`   | Next/previous tab                        |
-| `j` / `↓`             | Scroll down / next day (heatmap)         |
-| `k` / `↑`             | Scroll up / previous day (heatmap)       |
-| `c`                   | Sort by cost / set cost metric           |
-| `t`                   | Sort by tokens / set total tokens metric |
+| `j` / `↓`             | Move selected row down / next day        |
+| `k` / `↑`             | Move selected row up / previous day      |
+| `c`                   | Cost sort/metric, or overview cost chart |
+| `t`                   | Token sort/metric, or overview token chart |
 | `d`                   | Sort by date                             |
+| `/`                   | Open Models quick filter                 |
 | `s`                   | Open/close source filter overlay         |
-| `w`                   | Cycle heatmap window (26w/52w/year)      |
-| `i` / `o` / `x`       | Input/output/cache metrics (heatmap)     |
-| `m` / `n`             | Messages/sessions metrics (heatmap)      |
+| `w`                   | Cycle activity window (26w/52w/365d)     |
+| `i` / `o` / `x`       | Input/output/cache metrics (activity)    |
+| `m` / `n`             | Messages/sessions metrics (activity)     |
 | `a`                   | Toggle all sources (in filter overlay)   |
 | `Space` / `Enter`     | Toggle source (in filter overlay)        |
 

@@ -106,18 +106,12 @@ impl<'a> Widget for StackedBarChart<'a> {
             let mut segments: Vec<_> = values.iter().collect();
             segments.sort_by(|left, right| left.0.cmp(right.0));
 
+            let segment_units = allocate_segment_units(&segments, total, height_eighths);
             let mut allocated = 0usize;
             let mut segment_ranges = Vec::new();
-            for (idx, (name, value)) in segments.iter().enumerate() {
-                let segment_units = if idx + 1 == segments.len() {
-                    height_eighths.saturating_sub(allocated)
-                } else if total <= 0.0 {
-                    0
-                } else {
-                    ((*value / total) * height_eighths as f64).round() as usize
-                };
+            for ((name, _), units) in segments.iter().zip(segment_units) {
                 let start = allocated;
-                allocated += segment_units.min(height_eighths.saturating_sub(allocated));
+                allocated += units.min(height_eighths.saturating_sub(allocated));
                 let end = allocated;
                 let color = self.colors.get(*name).copied().unwrap_or(Color::White);
                 segment_ranges.push((start, end, color));
@@ -152,6 +146,45 @@ impl<'a> Widget for StackedBarChart<'a> {
             }
         }
     }
+}
+
+fn allocate_segment_units(
+    segments: &[(&&str, &f64)],
+    total: f64,
+    height_eighths: usize,
+) -> Vec<usize> {
+    if total <= 0.0 || height_eighths == 0 || segments.is_empty() {
+        return vec![0; segments.len()];
+    }
+
+    let mut allocated = Vec::with_capacity(segments.len());
+    let mut remainder_rank = Vec::with_capacity(segments.len());
+    let mut used = 0usize;
+
+    for (idx, (_, value)) in segments.iter().enumerate() {
+        let exact = (**value / total) * height_eighths as f64;
+        let whole = exact.floor().max(0.0) as usize;
+        allocated.push(whole);
+        used += whole;
+        remainder_rank.push((idx, exact - whole as f64));
+    }
+
+    remainder_rank.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    for (idx, _) in remainder_rank
+        .into_iter()
+        .take(height_eighths.saturating_sub(used))
+    {
+        allocated[idx] += 1;
+    }
+
+    allocated
 }
 
 fn aggregated_bars<'a>(
@@ -196,63 +229,24 @@ fn render_band(
     start: usize,
     end: usize,
 ) {
-    let mut cursor = bar_x;
-    for (width, color) in band_segments(ranges, start, end, bar_width) {
-        if width == 0 {
-            continue;
-        }
-
-        let band: String = std::iter::repeat(fill_char).take(width).collect();
-        buf.set_string(cursor, y, &band, Style::default().fg(color));
-        cursor += width as u16;
-    }
+    let color = dominant_band_color(ranges, start, end).unwrap_or(Color::White);
+    let band: String = std::iter::repeat(fill_char).take(bar_width).collect();
+    buf.set_string(bar_x, y, &band, Style::default().fg(color));
 }
 
-fn band_segments(
+fn dominant_band_color(
     ranges: &[(usize, usize, Color)],
     start: usize,
     end: usize,
-    bar_width: usize,
-) -> Vec<(usize, Color)> {
-    let band_units = end.saturating_sub(start).max(1);
-    let overlaps: Vec<(usize, Color)> = ranges
+) -> Option<Color> {
+    ranges
         .iter()
         .filter_map(|(seg_start, seg_end, color)| {
             let overlap = overlap_len(start, end, *seg_start, *seg_end);
             (overlap > 0).then_some((overlap, *color))
         })
-        .collect();
-
-    if overlaps.is_empty() {
-        return vec![(bar_width, Color::White)];
-    }
-
-    let mut allocated = 0usize;
-    let mut segments = Vec::with_capacity(overlaps.len());
-
-    for (idx, (overlap, color)) in overlaps.iter().enumerate() {
-        let width = if idx + 1 == overlaps.len() {
-            bar_width.saturating_sub(allocated)
-        } else {
-            ((*overlap as f64 / band_units as f64) * bar_width as f64).round() as usize
-        }
-        .min(bar_width.saturating_sub(allocated));
-
-        if width > 0 {
-            allocated += width;
-            segments.push((width, *color));
-        }
-    }
-
-    if allocated == 0 {
-        segments.push((bar_width, overlaps[0].1));
-    } else if allocated < bar_width {
-        if let Some((width, _)) = segments.last_mut() {
-            *width += bar_width - allocated;
-        }
-    }
-
-    segments
+        .max_by_key(|(overlap, _)| *overlap)
+        .map(|(_, color)| color)
 }
 
 fn overlap_len(start: usize, end: usize, seg_start: usize, seg_end: usize) -> usize {
@@ -288,5 +282,32 @@ fn format_compact(value: i64) -> String {
         format!("{:.1}K", value as f64 / 1_000.0)
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segment_units_preserve_large_token_ratios() {
+        let openai = 27_885_943.0;
+        let anthropic = 7_092_425.0;
+        let google = 2_611_670.0;
+        let other = 2_013_138.0;
+        let segments = vec![
+            (&"anthropic", &anthropic),
+            (&"google", &google),
+            (&"openai", &openai),
+            (&"other", &other),
+        ];
+
+        let units = allocate_segment_units(&segments, openai + anthropic + google + other, 80);
+
+        assert_eq!(units.iter().sum::<usize>(), 80);
+        assert_eq!(units[0], 14);
+        let rendered_ratio = units[2] as f64 / units[0] as f64;
+        let actual_ratio = openai / anthropic;
+        assert!((rendered_ratio - actual_ratio).abs() < 0.15);
     }
 }

@@ -1,11 +1,12 @@
 use super::{calculate_cost, lookup_model_pricing_or_warn, ModelPricing};
 use crate::provider::UnifiedMessage;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use tracing::{debug, info, warn};
 
 const LITELLM_PRICING_URL: &str =
@@ -35,8 +36,15 @@ impl PricingCache {
     }
 
     pub fn get_pricing_sync(&self) -> Result<HashMap<String, ModelPricing>> {
-        if let Some(cached) = self.load_cached()? {
+        if let Some(mut cached) = self.load_memory_cached()? {
+            debug!("Using in-memory pricing data");
+            apply_builtin_pricing(&mut cached);
+            return Ok(cached);
+        }
+
+        if let Some(mut cached) = self.load_cached()? {
             debug!("Using cached pricing data");
+            apply_builtin_pricing(&mut cached);
             return Ok(cached);
         }
 
@@ -55,8 +63,8 @@ impl PricingCache {
         let content = fs::read_to_string(&self.cache_path)?;
         let cached: CachedPricing = serde_json::from_str(&content)?;
 
-        let now = Utc::now();
-        if cached.fetched_at + Duration::hours(CACHE_TTL_HOURS) > now {
+        if cache_is_fresh(&cached) {
+            self.store_memory_cache(&cached)?;
             Ok(Some(cached.pricing))
         } else {
             debug!("Cache expired");
@@ -81,7 +89,7 @@ impl PricingCache {
 
         let litellm_data: HashMap<String, LiteLLMPricing> = response.into_json()?;
 
-        let pricing: HashMap<String, ModelPricing> = litellm_data
+        let mut pricing: HashMap<String, ModelPricing> = litellm_data
             .into_iter()
             .filter_map(|(k, v)| {
                 let input = v.input_cost_per_token?;
@@ -97,6 +105,7 @@ impl PricingCache {
                 ))
             })
             .collect();
+        apply_builtin_pricing(&mut pricing);
 
         let cached = CachedPricing {
             pricing: pricing.clone(),
@@ -107,8 +116,55 @@ impl PricingCache {
             fs::create_dir_all(parent)?;
         }
         fs::write(&self.cache_path, serde_json::to_string_pretty(&cached)?)?;
+        self.store_memory_cache(&cached)?;
 
         Ok(pricing)
+    }
+
+    fn load_memory_cached(&self) -> Result<Option<HashMap<String, ModelPricing>>> {
+        let mut cache = memory_cache()
+            .lock()
+            .map_err(|_| anyhow!("Pricing cache mutex poisoned"))?;
+
+        if let Some(cached) = cache.get(&self.cache_path) {
+            if cache_is_fresh(cached) {
+                return Ok(Some(cached.pricing.clone()));
+            }
+        }
+
+        cache.remove(&self.cache_path);
+        Ok(None)
+    }
+
+    fn store_memory_cache(&self, cached: &CachedPricing) -> Result<()> {
+        memory_cache()
+            .lock()
+            .map_err(|_| anyhow!("Pricing cache mutex poisoned"))?
+            .insert(self.cache_path.clone(), cached.clone());
+        Ok(())
+    }
+}
+
+fn apply_builtin_pricing(pricing: &mut HashMap<String, ModelPricing>) {
+    let glm_5_1 = ModelPricing {
+        input_cost_per_token: 0.0000014,
+        output_cost_per_token: 0.0000044,
+        cache_read_input_token_cost: Some(0.00000026),
+        cache_creation_input_token_cost: None,
+    };
+
+    for key in [
+        "glm-5.1",
+        "glm5.1",
+        "zai/glm-5.1",
+        "zai/glm5.1",
+        "z-ai/glm-5.1",
+        "z-ai/glm5.1",
+        "openrouter/z-ai/glm-5.1",
+    ] {
+        pricing
+            .entry(key.to_string())
+            .or_insert_with(|| glm_5_1.clone());
     }
 }
 
@@ -118,10 +174,19 @@ impl Default for PricingCache {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedPricing {
     pricing: HashMap<String, ModelPricing>,
     fetched_at: DateTime<Utc>,
+}
+
+fn memory_cache() -> &'static Mutex<HashMap<PathBuf, CachedPricing>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedPricing>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_is_fresh(cached: &CachedPricing) -> bool {
+    cached.fetched_at + Duration::hours(CACHE_TTL_HOURS) > Utc::now()
 }
 
 pub fn calculate_message_cost(

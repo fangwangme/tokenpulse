@@ -12,6 +12,8 @@ quota/
 ├── claude.rs       # Claude Code quota fetcher
 ├── codex.rs        # Codex quota fetcher
 ├── copilot.rs      # GitHub Copilot quota fetcher
+├── gemini.rs       # Gemini CLI quota fetcher
+├── antigravity.rs  # Antigravity quota fetcher
 └── cache.rs        # Quota response caching
 ```
 
@@ -126,7 +128,40 @@ Note: Uses `token` auth scheme, NOT `Bearer`.
 | Paid | `used_percent = (100 - percent_remaining).clamp(0, 100)`           |
 | Free | `used_percent = ((total - remaining) / total * 100).clamp(0, 100)` |
 
-## Concurrent Fetching
+## Gemini CLI
+
+### Credential Flow
+1. Locate the Gemini CLI binary (searches `PATH` + standard npm/homebrew install paths)
+2. Resolve the OAuth credentials file relative to the binary: `../gemini-cli-core/build/src/code_assist/oauth2/oauth_client.json` (and fallback paths)
+3. If token is expired, refresh via the Gemini OAuth2 endpoint
+4. Fallback: `gh auth token` or environment variable
+
+### Quota API
+```
+GET https://cloudcode-pa.googleapis.com/v1internal:fetchModels  (or similar Cloud Code endpoint)
+Authorization: Bearer <access_token>
+```
+
+Quota buckets are mapped from the response's `quotaBuckets` field into `RateWindow` entries labeled by model name.
+
+---
+
+## Antigravity
+
+### Credential Flow
+No external auth. Antigravity credentials are read from the running language server process or Cloud Code API using Google OAuth (stored by the Antigravity desktop app).
+
+### Quota Probe
+1. Discover the running `language_server_macos` process
+2. Send a Connect-RPC probe to the local language server socket
+3. Fallback: POST to the Cloud Code API with Google OAuth token
+
+### Response Mapping
+Quota windows are labeled per Antigravity model pool. Each pool maps to a `RateWindow` with a period duration inferred from the reset time or pool type.
+
+---
+
+
 
 All providers fetched in parallel via `tokio::join!`:
 
