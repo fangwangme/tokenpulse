@@ -53,6 +53,10 @@ enum Commands {
         #[clap(long)]
         rebuild_all: bool,
 
+        /// Emit JSON output instead of text or the interactive dashboard.
+        #[clap(long, conflicts_with = "tui")]
+        json: bool,
+
         /// Force the interactive usage dashboard even if auto-detection would stay in text mode.
         #[clap(long, conflicts_with = "no_tui")]
         tui: bool,
@@ -102,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
             refresh_days,
             refresh_pricing,
             rebuild_all,
+            json,
             tui,
             no_tui,
         } => {
@@ -112,7 +117,12 @@ async fn main() -> anyhow::Result<()> {
                 refresh_days,
                 refresh_pricing,
                 rebuild_all,
-                resolve_tui_mode("usage", tui, no_tui)?,
+                if json {
+                    false
+                } else {
+                    resolve_tui_mode("usage", tui, no_tui)?
+                },
+                json,
             )
             .await?;
         }

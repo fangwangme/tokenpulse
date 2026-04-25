@@ -35,8 +35,9 @@ impl PricingCache {
     }
 
     pub fn get_pricing_sync(&self) -> Result<HashMap<String, ModelPricing>> {
-        if let Some(cached) = self.load_cached()? {
+        if let Some(mut cached) = self.load_cached()? {
             debug!("Using cached pricing data");
+            apply_builtin_pricing(&mut cached);
             return Ok(cached);
         }
 
@@ -81,7 +82,7 @@ impl PricingCache {
 
         let litellm_data: HashMap<String, LiteLLMPricing> = response.into_json()?;
 
-        let pricing: HashMap<String, ModelPricing> = litellm_data
+        let mut pricing: HashMap<String, ModelPricing> = litellm_data
             .into_iter()
             .filter_map(|(k, v)| {
                 let input = v.input_cost_per_token?;
@@ -97,6 +98,7 @@ impl PricingCache {
                 ))
             })
             .collect();
+        apply_builtin_pricing(&mut pricing);
 
         let cached = CachedPricing {
             pricing: pricing.clone(),
@@ -109,6 +111,29 @@ impl PricingCache {
         fs::write(&self.cache_path, serde_json::to_string_pretty(&cached)?)?;
 
         Ok(pricing)
+    }
+}
+
+fn apply_builtin_pricing(pricing: &mut HashMap<String, ModelPricing>) {
+    let glm_5_1 = ModelPricing {
+        input_cost_per_token: 0.0000014,
+        output_cost_per_token: 0.0000044,
+        cache_read_input_token_cost: Some(0.00000026),
+        cache_creation_input_token_cost: None,
+    };
+
+    for key in [
+        "glm-5.1",
+        "glm5.1",
+        "zai/glm-5.1",
+        "zai/glm5.1",
+        "z-ai/glm-5.1",
+        "z-ai/glm5.1",
+        "openrouter/z-ai/glm-5.1",
+    ] {
+        pricing
+            .entry(key.to_string())
+            .or_insert_with(|| glm_5_1.clone());
     }
 }
 

@@ -215,10 +215,10 @@ Non-TUI output includes:
 
 The usage TUI is organized into four tabs:
 
-- `Overview` - 60-day stacked bar chart by model company + scrollable top models table
-- `Models` - Full sortable model table with company-colored model names and colored numeric columns
-- `Daily` - Daily summary table with sorting
-- `Heatmap` - GitHub-style contribution graph with drill-down
+- `Overview` - summary cards + 60-day stacked bar chart by model company + scrollable top models table
+- `Models` - Full searchable/sortable model table with company-colored model names and colored numeric columns
+- `Daily` - Daily summary table with sorting and 7-day token trends on wide terminals
+- `Activity` - GitHub-style contribution graph with drill-down
 
 ### Source Filtering
 
@@ -231,9 +231,10 @@ All tabs support runtime source filtering:
 ### `Overview`
 
 - chart shows the last 60 days of token usage
+- press `t` or `c` to switch the chart between tokens and cost
 - stacked bars are grouped by model company (`OpenAI`, `Google`, `Anthropic`, `Others`)
 - top models are normalized before ranking
-- top models have their own manual scroll state and visible scroll hint
+- top models use row selection; the visible window only moves when the selected row reaches an edge
 - model and agent columns are intentionally wider so long names are still legible
 
 Primary historical dashboard view:
@@ -247,9 +248,10 @@ Primary historical dashboard view:
 Model attribution view:
 
 - Sortable table (cost, tokens, date)
+- Quick filter with `/`
 - Company-colored model names
 - Wider agent column for multi-agent attribution strings
-- Semantic numeric colors: tokens=gold, cost=green, messages=blue
+- Semantic numeric colors: tokens=green, cost=gold, messages=blue
 - Filtered by enabled sources
 
 ### `Daily`
@@ -258,15 +260,16 @@ Daily operations view:
 
 - Summary cards (cost, tokens, messages, sessions)
 - Daily table with today highlighted
+- 7-day token sparkline on wide terminals
 - Semantic numeric colors by column
 - Sortable by date/cost/tokens
 
-### `Heatmap`
+### `Activity`
 
 GitHub-style contribution graph:
 
 - 7 switchable metrics
-- 3 window modes (26w/52w/year)
+- 3 window modes (past 26 weeks, past 52 weeks, past 365 days)
 - Day drill-down with:
   - Agent totals with per-agent cost
   - Token summary (total/input/output/cache/reasoning/messages/sessions)

@@ -101,7 +101,16 @@ impl CopilotSessionParser {
 
             if let Some((session_id, model_id)) = extract_agent_session_start(&value) {
                 current_session_id = session_id;
-                current_model = model_id;
+                if !is_unknown_model(&model_id) {
+                    current_model = model_id;
+                }
+                continue;
+            }
+
+            if let Some(model_id) = extract_agent_model_change(&value) {
+                if !is_unknown_model(&model_id) {
+                    current_model = model_id;
+                }
                 continue;
             }
 
@@ -184,12 +193,29 @@ fn extract_agent_session_start(value: &Value) -> Option<(String, String)> {
     }
     let data = value.get("data")?;
     let session_id = data.get("sessionId")?.as_str()?.to_string();
-    let model_id = data
-        .get("selectedModel")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
+    let model_id = extract_model_id(data).unwrap_or_else(|| "unknown".to_string());
     Some((session_id, model_id))
+}
+
+fn extract_agent_model_change(value: &Value) -> Option<String> {
+    if value.get("type")?.as_str()? != "session.model_change" {
+        return None;
+    }
+    extract_model_id(value.get("data")?)
+}
+
+fn extract_model_id(data: &Value) -> Option<String> {
+    data.get("model")
+        .or_else(|| data.get("selectedModel"))
+        .or_else(|| data.get("newModel"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn is_unknown_model(model_id: &str) -> bool {
+    model_id.trim().is_empty() || model_id.trim().eq_ignore_ascii_case("unknown")
 }
 
 fn parse_session_shutdown(value: &Value, session_id: &str) -> Option<Vec<UnifiedMessage>> {
@@ -443,6 +469,11 @@ fn parse_agent_session_event(
     }
 
     let timestamp = parse_timestamp_str(value.get("timestamp")?.as_str()?)?;
+    let event_model = extract_model_id(data);
+    let model_id = event_model.as_deref().unwrap_or(model_id);
+    if is_unknown_model(model_id) {
+        return None;
+    }
     let message_id = data
         .get("messageId")
         .and_then(Value::as_str)
@@ -694,6 +725,85 @@ mod tests {
         assert_eq!(msg.tokens.input, 0);
         assert_eq!(msg.tokens.output, 482);
         assert_eq!(msg.message_key, "copilot-agent:interaction-1:msg-1");
+    }
+
+    #[test]
+    fn parse_agent_session_event_uses_model_change_when_start_has_no_model() {
+        let parser = CopilotSessionParser::new();
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("session-state").join("sess-agent-2");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let file = session_dir.join("events.jsonl");
+
+        let session_start = serde_json::json!({
+            "type": "session.start",
+            "data": {
+                "sessionId": "sess-agent-2"
+            },
+            "timestamp": "2026-04-08T18:12:06.646Z"
+        });
+        let model_change = serde_json::json!({
+            "type": "session.model_change",
+            "data": {
+                "newModel": "claude-sonnet-4.6"
+            },
+            "timestamp": "2026-04-08T18:12:08.000Z"
+        });
+        let assistant_message = serde_json::json!({
+            "type": "assistant.message",
+            "data": {
+                "messageId": "msg-2",
+                "interactionId": "interaction-2",
+                "outputTokens": 321
+            },
+            "timestamp": "2026-04-08T18:12:19.679Z"
+        });
+
+        std::fs::write(
+            &file,
+            format!(
+                "{}\n{}\n{}\n",
+                session_start, model_change, assistant_message
+            ),
+        )
+        .unwrap();
+        let messages = parser.parse_file(&file);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4.6");
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].tokens.output, 321);
+    }
+
+    #[test]
+    fn parse_agent_session_event_skips_unknown_model_fallback() {
+        let parser = CopilotSessionParser::new();
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("session-state").join("sess-agent-unknown");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let file = session_dir.join("events.jsonl");
+
+        let session_start = serde_json::json!({
+            "type": "session.start",
+            "data": {
+                "sessionId": "sess-agent-unknown"
+            },
+            "timestamp": "2026-04-08T18:12:06.646Z"
+        });
+        let assistant_message = serde_json::json!({
+            "type": "assistant.message",
+            "data": {
+                "messageId": "msg-unknown",
+                "interactionId": "interaction-unknown",
+                "outputTokens": 123
+            },
+            "timestamp": "2026-04-08T18:12:19.679Z"
+        });
+
+        std::fs::write(&file, format!("{}\n{}\n", session_start, assistant_message)).unwrap();
+        let messages = parser.parse_file(&file);
+
+        assert!(messages.is_empty());
     }
 
     #[test]

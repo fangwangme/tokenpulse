@@ -15,7 +15,14 @@ use ratatui::{
     Terminal,
 };
 use std::cmp::Ordering;
-use tokenpulse_core::{config::QuotaDisplayMode, QuotaSnapshot, RateWindow};
+use tokenpulse_core::{
+    config::QuotaDisplayMode,
+    quota::{
+        fetch_all, AntigravityQuotaFetcher, ClaudeQuotaFetcher, CodexQuotaFetcher,
+        CopilotQuotaFetcher, GeminiQuotaFetcher, QuotaCacheStore,
+    },
+    QuotaFetcher, QuotaSnapshot, RateWindow,
+};
 
 fn display_provider_name(provider: &str) -> &'static str {
     match provider {
@@ -116,9 +123,58 @@ fn truncate(text: &str, width: usize) -> String {
     out
 }
 
+fn build_fetchers(
+    provider: Option<&str>,
+    enabled_providers: &[String],
+) -> Vec<Box<dyn QuotaFetcher>> {
+    let is_enabled = |name: &str| {
+        provider == Some(name)
+            || (provider.is_none() && enabled_providers.contains(&name.to_string()))
+    };
+    let mut fetchers: Vec<Box<dyn QuotaFetcher>> = Vec::new();
+    if is_enabled("claude") {
+        fetchers.push(Box::new(ClaudeQuotaFetcher::new()));
+    }
+    if is_enabled("codex") {
+        fetchers.push(Box::new(CodexQuotaFetcher::new()));
+    }
+    if is_enabled("copilot") {
+        fetchers.push(Box::new(CopilotQuotaFetcher::new()));
+    }
+    if is_enabled("gemini") {
+        fetchers.push(Box::new(GeminiQuotaFetcher::new()));
+    }
+    if is_enabled("antigravity") {
+        fetchers.push(Box::new(AntigravityQuotaFetcher::new()));
+    }
+    fetchers
+}
+
+fn refresh_quota_results(
+    provider: Option<&str>,
+    enabled_providers: &[String],
+) -> Result<Vec<anyhow::Result<QuotaSnapshot>>> {
+    let fetchers = build_fetchers(provider, enabled_providers);
+    let observed_at = chrono::Utc::now();
+    let cache_store = QuotaCacheStore::new();
+    let results = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(fetch_all(fetchers))
+    });
+
+    for result in &results {
+        if let Ok(snapshot) = result {
+            cache_store.save(&snapshot.provider, observed_at, snapshot)?;
+        }
+    }
+
+    Ok(results)
+}
+
 pub fn run(
-    results: Vec<anyhow::Result<QuotaSnapshot>>,
+    mut results: Vec<anyhow::Result<QuotaSnapshot>>,
     display_mode: QuotaDisplayMode,
+    provider: Option<String>,
+    enabled_providers: Vec<String>,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -127,22 +183,15 @@ pub fn run(
     let mut terminal = Terminal::new(backend)?;
 
     let theme = Theme::default();
-    let snapshots: Vec<&QuotaSnapshot> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
-
     let mut selected_tab: usize = 0;
-    let tab_titles: Vec<&str> = if snapshots.is_empty() {
-        vec!["Overview"]
-    } else {
-        let mut tabs = vec!["Overview"];
-        for s in &snapshots {
-            tabs.push(s.provider.as_str());
-        }
-        tabs
-    };
 
     loop {
         terminal.draw(|f| {
+            let snapshots: Vec<&QuotaSnapshot> =
+                results.iter().filter_map(|r| r.as_ref().ok()).collect();
+            let tab_titles = quota_tab_titles(&snapshots);
             let size = f.area();
+            f.render_widget(Block::default().style(Style::default().bg(theme.bg)), size);
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -163,7 +212,7 @@ pub fn run(
             }
 
             let footer_text = format!(
-                " q quit | ←→ tab | mode {} | {} provider{} ",
+                " q quit | r refresh | ←→ tab | mode {} | {} provider{} ",
                 quota_suffix(&display_mode),
                 snapshots.len(),
                 if snapshots.len() == 1 { "" } else { "s" }
@@ -178,17 +227,30 @@ pub fn run(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('r') => {
+                        results = refresh_quota_results(provider.as_deref(), &enabled_providers)?;
+                        let snapshots: Vec<&QuotaSnapshot> =
+                            results.iter().filter_map(|r| r.as_ref().ok()).collect();
+                        let tab_count = quota_tab_titles(&snapshots).len();
+                        selected_tab = selected_tab.min(tab_count.saturating_sub(1));
+                    }
                     KeyCode::Left | KeyCode::Char('h') => {
                         if selected_tab > 0 {
                             selected_tab -= 1;
                         }
                     }
                     KeyCode::Right | KeyCode::Char('l') => {
+                        let snapshots: Vec<&QuotaSnapshot> =
+                            results.iter().filter_map(|r| r.as_ref().ok()).collect();
+                        let tab_titles = quota_tab_titles(&snapshots);
                         if selected_tab + 1 < tab_titles.len() {
                             selected_tab += 1;
                         }
                     }
                     KeyCode::Tab => {
+                        let snapshots: Vec<&QuotaSnapshot> =
+                            results.iter().filter_map(|r| r.as_ref().ok()).collect();
+                        let tab_titles = quota_tab_titles(&snapshots);
                         if key.modifiers.contains(KeyModifiers::SHIFT) {
                             if selected_tab > 0 {
                                 selected_tab -= 1;
@@ -207,6 +269,18 @@ pub fn run(
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
     Ok(())
+}
+
+fn quota_tab_titles<'a>(snapshots: &'a [&'a QuotaSnapshot]) -> Vec<&'a str> {
+    if snapshots.is_empty() {
+        vec!["Overview"]
+    } else {
+        let mut tabs = vec!["Overview"];
+        for snapshot in snapshots {
+            tabs.push(snapshot.provider.as_str());
+        }
+        tabs
+    }
 }
 
 fn render_header(
@@ -304,7 +378,7 @@ fn render_overview(
 
     let columns = if area.width >= 110 { 2 } else { 1 };
     let rows = snapshots.len().div_ceil(columns);
-    let row_constraints = vec![Constraint::Ratio(1, rows as u32); rows];
+    let row_constraints = vec![Constraint::Min(6); rows];
     let row_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(row_constraints)

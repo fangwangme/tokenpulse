@@ -110,6 +110,13 @@ impl<'a> YearHeatmap<'a> {
             self.palette[4]
         }
     }
+
+    fn thresholds(&self, cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
+        match self.metric {
+            HeatmapMetric::Cost => [0.10, 0.50, 2.00, 10.00],
+            _ => compute_quantiles(cell_values),
+        }
+    }
 }
 
 fn compute_quantiles(cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
@@ -137,7 +144,7 @@ struct HeatmapLayout {
 }
 
 fn compute_layout(area: Rect, range: Option<(NaiveDate, NaiveDate)>) -> Option<HeatmapLayout> {
-    if area.width < 12 || area.height < 8 {
+    if area.width < 30 || area.height < 8 {
         return None;
     }
 
@@ -238,6 +245,8 @@ impl<'a> Widget for YearHeatmap<'a> {
         let mut cell_values: BTreeMap<(usize, usize), f64> = BTreeMap::new();
         let mut month_labels: BTreeMap<usize, String> = BTreeMap::new();
         let mut selected_cell = None;
+        let mut today_cell = None;
+        let today = Utc::now().date_naive();
 
         let values: BTreeMap<NaiveDate, f64> = self.points.iter().copied().collect();
         let mut cursor = start;
@@ -263,6 +272,9 @@ impl<'a> Widget for YearHeatmap<'a> {
             if self.selected == Some(cursor) {
                 selected_cell = Some(key);
             }
+            if cursor == today {
+                today_cell = Some(key);
+            }
 
             let month = cursor.month();
             if last_month != Some(month) {
@@ -276,7 +288,7 @@ impl<'a> Widget for YearHeatmap<'a> {
             day_idx += 1;
         }
 
-        let thresholds = compute_quantiles(&cell_values);
+        let thresholds = self.thresholds(&cell_values);
 
         let weekday_labels = ["S", "M", "T", "W", "T", "F", "S"];
         for (row, label) in weekday_labels.iter().enumerate() {
@@ -286,17 +298,20 @@ impl<'a> Widget for YearHeatmap<'a> {
             }
         }
 
+        let mut next_label_x = area.x;
         for (col, label) in &month_labels {
             let x = grid_x + (*col as u16) * (cell_stride as u16);
-            if x < area.x + area.width {
+            let label_width = label.chars().count() as u16;
+            if x >= next_label_x && x + label_width <= area.x + area.width {
                 buf.set_string(x, area.y, label, Style::default().fg(Color::Gray));
+                next_label_x = x + label_width + 1;
             }
         }
 
-        let (sym_filled, sym_empty, sym_selected) = if cell_stride >= 2 {
-            ("██", "··", "◆◆")
+        let (sym_filled, sym_empty, sym_selected, sym_today) = if cell_stride >= 2 {
+            ("██", "··", "◆◆", "▣▣")
         } else {
-            ("■", "·", "◆")
+            ("■", "·", "◆", "▣")
         };
 
         for col in 0..display_cols {
@@ -310,8 +325,11 @@ impl<'a> Widget for YearHeatmap<'a> {
                 let value = cell_values.get(&(col, row)).copied().unwrap_or(0.0);
                 let color = self.value_to_color(value, &thresholds);
                 let is_selected = selected_cell == Some((col, row));
+                let is_today = today_cell == Some((col, row));
                 let symbol = if is_selected {
                     sym_selected
+                } else if is_today {
+                    sym_today
                 } else if value <= 0.0 {
                     sym_empty
                 } else {
@@ -319,6 +337,8 @@ impl<'a> Widget for YearHeatmap<'a> {
                 };
                 let style = if is_selected {
                     Style::default().fg(self.selected_color).bg(color)
+                } else if is_today {
+                    Style::default().fg(Color::White).bg(color)
                 } else {
                     Style::default().fg(color)
                 };
@@ -356,6 +376,25 @@ mod tests {
         let end = start + Duration::days(69);
         let selected = start + Duration::days(63);
         let points = vec![(selected, 42.0)];
+        let area = Rect::new(0, 0, 30, 10);
+        let mut buf = Buffer::empty(area);
+
+        YearHeatmap::new(&points, HeatmapMetric::TotalTokens)
+            .selected(Some(selected))
+            .range_opt(Some((start, end)))
+            .render(area, &mut buf);
+
+        let selected_x = area.x + 4 + 18;
+        let selected_y = area.y + 1;
+        assert_eq!(buf[(selected_x, selected_y)].symbol(), "◆");
+    }
+
+    #[test]
+    fn narrow_heatmap_returns_no_layout() {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap();
+        let end = start + Duration::days(69);
+        let selected = start + Duration::days(63);
+        let points = vec![(selected, 42.0)];
         let area = Rect::new(0, 0, 12, 10);
         let mut buf = Buffer::empty(area);
 
@@ -364,9 +403,7 @@ mod tests {
             .range_opt(Some((start, end)))
             .render(area, &mut buf);
 
-        let selected_x = area.x + 4 + 7;
-        let selected_y = area.y + 1;
-        assert_eq!(buf[(selected_x, selected_y)].symbol(), "◆");
+        assert_eq!(buf[(area.x + 4, area.y + 1)].symbol(), " ");
     }
 
     #[test]

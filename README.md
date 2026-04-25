@@ -37,9 +37,10 @@ Notes:
 - ledger-backed usage history stored in local SQLite
 - per-day pricing snapshots so historical cost does not silently drift
 - quota overview plus per-provider detail tabs
-- usage dashboard with `Overview`, `Models`, `Daily`, and `Heatmap`
+- usage dashboard with `Overview`, `Models`, `Daily`, and `Activity`
+- usage `--json` output for scripts
 - company-aware model coloring and agent/provider separation
-- mouse-selectable heatmap drill-down
+- mouse-selectable activity heatmap drill-down
 - plain-text mode for scripting and remote shells
 
 ## Install
@@ -83,6 +84,7 @@ Inspect usage:
 tokenpulse usage
 tokenpulse usage --tui
 tokenpulse usage --no-tui
+tokenpulse usage --json
 tokenpulse usage --since 2026-04-01
 tokenpulse usage -p claude,codex,copilot
 tokenpulse usage --refresh-days 2026-04-01:2026-04-09

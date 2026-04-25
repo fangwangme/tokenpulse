@@ -19,6 +19,7 @@ pub async fn run(
     refresh_pricing: bool,
     rebuild_all: bool,
     use_tui: bool,
+    json: bool,
 ) -> Result<()> {
     let requested_since = since
         .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
@@ -75,6 +76,11 @@ pub async fn run(
     let messages = store.load_messages(output_since, &provider_names)?;
 
     if messages.is_empty() {
+        if json {
+            print_json_summary(&compute_usage_summary(&messages))?;
+            return Ok(());
+        }
+
         eprintln!("\nNo usage data found in the local ledger.\n");
         if !found_any_source {
             eprintln!("Checked providers:");
@@ -91,11 +97,14 @@ pub async fn run(
     let daily_breakdown = store.load_daily_rows(output_since, &provider_names)?;
     let summary = compute_usage_summary(&messages);
 
-    if use_tui {
+    if json {
+        print_json_summary(&summary)?;
+    } else if use_tui {
         return tui::usage::run(summary, daily_breakdown);
+    } else {
+        print_summary(&summary);
     }
 
-    print_summary(&summary);
     Ok(())
 }
 
@@ -240,6 +249,12 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
         format_int(summary.message_count),
         format_int(summary.by_provider.len())
     );
+}
+
+fn print_json_summary(summary: &tokenpulse_core::usage::UsageSummary) -> Result<()> {
+    serde_json::to_writer_pretty(std::io::stdout(), summary)?;
+    println!();
+    Ok(())
 }
 
 fn format_int<T: ToString>(value: T) -> String {

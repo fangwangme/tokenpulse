@@ -422,7 +422,7 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
     }
 
     if use_tui {
-        return tui::quota::run(results, display_mode.clone());
+        return tui::quota::run(results, display_mode.clone(), provider, enabled_providers);
     }
 
     let snapshots: Vec<_> = results

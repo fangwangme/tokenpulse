@@ -30,12 +30,22 @@ pub fn normalize_model_name(model_id: &str) -> String {
 
     normalized = normalized.replace(['.', '_', ' '], "-");
     normalized = collapse_repeated_hyphens(&normalized);
+    normalized = strip_tier_suffix(&normalized);
 
     if let Some(stripped) = normalized.strip_suffix("-0") {
         normalized = stripped.to_string();
     }
 
     normalized.trim_matches('-').to_string()
+}
+
+fn strip_tier_suffix(model_id: &str) -> String {
+    for suffix in ["-high", "-medium", "-low"] {
+        if let Some(stripped) = model_id.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    model_id.to_string()
 }
 
 pub fn detect_provider_from_model(model: &str) -> String {
@@ -134,6 +144,12 @@ mod tests {
             "kimi-k2-5"
         );
         assert_eq!(normalize_model_name("claude-opus-4.6"), "claude-opus-4-6");
+        assert_eq!(
+            normalize_model_name("antigravity-claude-opus-4-5-thinking-high"),
+            "antigravity-claude-opus-4-5-thinking"
+        );
+        assert_eq!(normalize_model_name("z-ai/glm-5.1-low"), "glm-5-1");
+        assert_eq!(normalize_model_name("gemini-3-pro-medium"), "gemini-3-pro");
     }
 
     #[test]

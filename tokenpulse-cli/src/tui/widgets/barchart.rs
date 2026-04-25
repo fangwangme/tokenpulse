@@ -196,63 +196,24 @@ fn render_band(
     start: usize,
     end: usize,
 ) {
-    let mut cursor = bar_x;
-    for (width, color) in band_segments(ranges, start, end, bar_width) {
-        if width == 0 {
-            continue;
-        }
-
-        let band: String = std::iter::repeat(fill_char).take(width).collect();
-        buf.set_string(cursor, y, &band, Style::default().fg(color));
-        cursor += width as u16;
-    }
+    let color = dominant_band_color(ranges, start, end).unwrap_or(Color::White);
+    let band: String = std::iter::repeat(fill_char).take(bar_width).collect();
+    buf.set_string(bar_x, y, &band, Style::default().fg(color));
 }
 
-fn band_segments(
+fn dominant_band_color(
     ranges: &[(usize, usize, Color)],
     start: usize,
     end: usize,
-    bar_width: usize,
-) -> Vec<(usize, Color)> {
-    let band_units = end.saturating_sub(start).max(1);
-    let overlaps: Vec<(usize, Color)> = ranges
+) -> Option<Color> {
+    ranges
         .iter()
         .filter_map(|(seg_start, seg_end, color)| {
             let overlap = overlap_len(start, end, *seg_start, *seg_end);
             (overlap > 0).then_some((overlap, *color))
         })
-        .collect();
-
-    if overlaps.is_empty() {
-        return vec![(bar_width, Color::White)];
-    }
-
-    let mut allocated = 0usize;
-    let mut segments = Vec::with_capacity(overlaps.len());
-
-    for (idx, (overlap, color)) in overlaps.iter().enumerate() {
-        let width = if idx + 1 == overlaps.len() {
-            bar_width.saturating_sub(allocated)
-        } else {
-            ((*overlap as f64 / band_units as f64) * bar_width as f64).round() as usize
-        }
-        .min(bar_width.saturating_sub(allocated));
-
-        if width > 0 {
-            allocated += width;
-            segments.push((width, *color));
-        }
-    }
-
-    if allocated == 0 {
-        segments.push((bar_width, overlaps[0].1));
-    } else if allocated < bar_width {
-        if let Some((width, _)) = segments.last_mut() {
-            *width += bar_width - allocated;
-        }
-    }
-
-    segments
+        .max_by_key(|(overlap, _)| *overlap)
+        .map(|(_, color)| color)
 }
 
 fn overlap_len(start: usize, end: usize, seg_start: usize, seg_end: usize) -> usize {

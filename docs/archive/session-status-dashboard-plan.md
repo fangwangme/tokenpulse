@@ -1,4 +1,8 @@
-# TokenPulse Session Status And Dashboard Plan
+# Archived: TokenPulse Session Status And Dashboard Plan
+
+This was a planning document for the usage dashboard work completed after 2026-03-22.
+It is retained for historical context; current behavior is documented in `docs/DESIGN.md`
+and `docs/modules/usage.md`.
 
 ## Goal
 
