@@ -17,13 +17,16 @@ A Rust CLI tool with two core features:
 
 ## Current State
 
-As of 2026-03-24:
+As of 2026-04-25:
 
 - usage parsing writes normalized messages into a local SQLite ledger
 - the dashboard reads daily aggregates from the ledger, not from raw files in the TUI layer
 - the usage TUI is organized around `Overview`, `Models`, `Daily`, and `Activity`
 - CLI usage output includes daily, weekly, and monthly summaries
 - pricing snapshots are stored per day/model so historical cost does not silently drift
+- quota view shows top 3 windows per provider in Overview tab; all windows in per-provider detail tabs
+- each quota gauge shows an expected-progress marker (`▏`) and ETA to limit
+- activity heatmap uses block characters (`░▒▓█`) scaled to value intensity for colorblind accessibility
 
 Known gaps:
 
@@ -141,13 +144,14 @@ tokenpulse usage --rebuild-all
 
 ### Quota View (`tokenpulse quota`)
 
-The quota TUI now has two modes:
+The quota TUI has two modes:
 - **Overview tab** shows only the top 3 most-used windows per provider for a compact summary
 - **Detail tabs** (per provider) show all available rate windows
 
 Each gauge includes:
 - A gradient color progress bar
 - An expected-progress marker (`▏`) showing where theoretical usage should be at this point in time
+- Pace ETA: when ahead of pace, shows estimated time to limit; when behind, shows "under pace"
 - Fixed-width label columns for proper alignment (especially for Gemini CLI's multiple models)
 - GitHub Copilot uses dynamic calendar-month billing period calculation
 
@@ -230,10 +234,11 @@ Current usage TUI notes:
 
 - `Overview` shows summary cards, a 60-day stacked chart switchable between token and cost views, and a scrollable `Top Models` table
 - `Overview` top models use their own visible scroll hint and wider model/agent columns so long model IDs and multi-agent attribution fit better
-- `Models` shows a searchable, sortable table with per-column semantic colors (`Model`=company color, `Tokens`=green, `Cost`=gold, `Msgs`=blue)
+- `Models` shows a searchable (`/`), sortable table with per-column semantic colors (`Model`=company color, `Tokens`=green, `Cost`=gold, `Msgs`=blue)
 - `Daily` shows daily totals as a colored table (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`) with a 7-day token trend column on wide terminals
-- `Activity` shows a GitHub-style contribution heatmap with mouse-clickable cells and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
-- `Activity` selected-day panel now includes total/input/output/cache/reasoning/message/session summary and supports detail scrolling when the agent/model list exceeds the viewport
+- `Activity` shows a GitHub-style contribution heatmap with block-character intensity (`░▒▓█`) scaled to value level for accessibility, mouse-clickable cells, and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
+- `Activity` selected-day panel includes total/input/output/cache/reasoning/message/session summary and supports detail scrolling when the agent/model list exceeds the viewport
+- Press `s` on any tab to open a source filter overlay (toggle providers on/off)
 
 **Company vs Agent Distinction:**
 - **Company color** = model family owner (`OpenAI`, `Google`, `Anthropic`, `Others`)
@@ -336,6 +341,8 @@ Token refresh:
 | Codex | `~/.codex/sessions/*.jsonl` | JSONL with model, token deltas |
 | OpenCode | `~/.local/share/opencode/opencode.db` | SQLite, messages table |
 | PI | `~/.pi/agent/sessions/**/*.jsonl` | JSONL with header + entries |
+| GitHub Copilot | `~/.local/share/github-copilot/events.jsonl` | OTEL JSONL events |
+| Gemini CLI | `~/.gemini/tmp/session-*.json` | JSON session files |
 
 ### Pricing Source
 
@@ -371,8 +378,11 @@ Cache: ~/.cache/tokenpulse/pricing.json (24h TTL)
 - [x] Color theming
 - [x] Usage `--json` export mode
 - [x] Overview summary cards and token/cost chart toggle
-- [x] Models quick filter
+- [x] Models quick filter (`/`)
 - [x] Daily token trend column
+- [x] Source filter overlay (`s`)
+- [x] Block-character heatmap intensity for accessibility
+- [x] Pace ETA and expected-progress marker on quota gauges
 - [ ] Configurable TUI theme
 - [ ] `--watch` mode (manual refresh with keyboard)
 

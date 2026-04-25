@@ -117,8 +117,10 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 
 ### Tab 4: Activity
 - GitHub-style contribution graph with metric-specific palettes
+- Block-character intensity (`░░` / `▒▒` / `▓▓` / `██`) scaled to value level — readable without color (color-blind accessible)
 - 7 switchable metrics: total tokens, cost, input, output, cache, messages, sessions
 - 3 window modes: past 26 weeks, past 52 weeks, past 365 days
+- Mouse-clickable cells — click any day to select it and see drill-down
 - Drill-down: select any day to see token summary, agent totals, and per-agent model cost breakdown
 - Selected-day panel supports scroll when the detail list is taller than the viewport
 - Streak tracking: current streak and longest streak

@@ -32,15 +32,32 @@ Notes:
 - Gemini usage is still provisional
 - Antigravity historical usage is not complete yet
 
+## Screenshots
+
+| Overview | Quota |
+|---|---|
+| ![Overview](docs/images/overview.png) | ![Quota](docs/images/quota.png) |
+
+| Models | Daily |
+|---|---|
+| ![Models](docs/images/models.png) | ![Daily](docs/images/daily.png) |
+
+| Activity |
+|---|
+| ![Activity](docs/images/activity.png) |
+
 ## Features
 
 - ledger-backed usage history stored in local SQLite
 - per-day pricing snapshots so historical cost does not silently drift
-- quota overview plus per-provider detail tabs
-- usage dashboard with `Overview`, `Models`, `Daily`, and `Activity`
+- quota overview (top 3 windows) plus per-provider detail tabs with pace ETA and expected-progress marker
+- usage dashboard with `Overview`, `Models`, `Daily`, and `Activity` tabs
+- 60-day stacked bar chart switchable between token and cost views
+- block-character heatmap intensity (`░▒▓█`) for value levels — accessible without color
+- mouse-selectable activity heatmap with agent/model drill-down
 - usage `--json` output for scripts
 - company-aware model coloring and agent/provider separation
-- mouse-selectable activity heatmap drill-down
+- quick filter (`/`) in models table; source filter overlay (`s`)
 - plain-text mode for scripting and remote shells
 
 ## Install
@@ -127,3 +144,13 @@ cargo test --workspace
 ```
 
 Primary design notes live in [docs/DESIGN.md](docs/DESIGN.md).
+
+## Acknowledgments
+
+TokenPulse was inspired by and builds on ideas from these projects:
+
+- **[CodexBar](https://github.com/steipete/CodexBar)** by [@steipete](https://github.com/steipete) — macOS menu bar app for real-time quota visibility across many coding agent providers. The auth flows and quota API patterns for Codex, Copilot, Gemini, and Antigravity were informed by its open-source implementation.
+
+- **[tokscale](https://github.com/junhoyeo/tokscale)** by [@junhoyeo](https://github.com/junhoyeo) — Rust CLI + TUI for tracking token usage and costs across multiple AI coding agents. Inspired the multi-tab dashboard layout (Overview / Models / Daily / Activity) and multi-agent attribution design.
+
+- **[openusage](https://github.com/robinebers/openusage)** by [@robinebers](https://github.com/robinebers) — macOS menu bar for AI subscription usage tracking. Inspired the breadth of provider coverage and the plugin-based approach to adding new quota sources.
