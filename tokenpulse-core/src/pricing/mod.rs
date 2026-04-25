@@ -2,6 +2,7 @@ pub mod litellm;
 
 pub use litellm::PricingCache;
 
+use crate::model_id::strip_date_suffix;
 use crate::provider::TokenBreakdown;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -239,14 +240,6 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
     }
 }
 
-fn strip_date_suffix(model_id: &str) -> Option<String> {
-    let base_model = model_id
-        .trim_end_matches(|c: char| c.is_ascii_digit())
-        .trim_end_matches('-');
-
-    (base_model != model_id).then(|| base_model.to_string())
-}
-
 fn find_case_insensitive_key<'a>(
     candidate: &str,
     pricing_map: &'a HashMap<String, ModelPricing>,
@@ -462,6 +455,18 @@ mod tests {
 
         let result = lookup_model_pricing("claude-3-opus-20240229", &map);
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_does_not_strip_model_version_suffix() {
+        let mut map = HashMap::new();
+        map.insert(
+            "claude-opus-4".to_string(),
+            make_pricing(0.000015, 0.000075),
+        );
+
+        let result = lookup_model_pricing("claude-opus-4-5", &map);
+        assert!(result.is_none());
     }
 
     #[test]

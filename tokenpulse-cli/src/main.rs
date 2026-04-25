@@ -74,8 +74,17 @@ enum Commands {
 #[derive(Subcommand)]
 enum ConfigAction {
     Show,
-    Enable { provider: String },
-    Disable { provider: String },
+    Enable {
+        provider: String,
+    },
+    Disable {
+        provider: String,
+    },
+    /// Set a config value (e.g. quota_display_mode=used)
+    Set {
+        /// Key=value pair
+        setting: String,
+    },
 }
 
 #[tokio::main]

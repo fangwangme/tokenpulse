@@ -1,3 +1,5 @@
+use crate::model_id::strip_date_suffix;
+
 pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
         return Some(dt.timestamp_millis());
@@ -30,7 +32,9 @@ pub fn normalize_model_name(model_id: &str) -> String {
 
     normalized = normalized.replace(['.', '_', ' '], "-");
     normalized = collapse_repeated_hyphens(&normalized);
+    normalized = strip_known_prefix(&normalized);
     normalized = strip_tier_suffix(&normalized);
+    normalized = strip_reasoning_suffix(&normalized);
 
     if let Some(stripped) = normalized.strip_suffix("-0") {
         normalized = stripped.to_string();
@@ -46,6 +50,22 @@ fn strip_tier_suffix(model_id: &str) -> String {
         }
     }
     model_id.to_string()
+}
+
+fn strip_known_prefix(model_id: &str) -> String {
+    for prefix in ["antigravity-", "anti-gravity-"] {
+        if let Some(stripped) = model_id.strip_prefix(prefix) {
+            return stripped.to_string();
+        }
+    }
+    model_id.to_string()
+}
+
+fn strip_reasoning_suffix(model_id: &str) -> String {
+    model_id
+        .strip_suffix("-thinking")
+        .unwrap_or(model_id)
+        .to_string()
 }
 
 pub fn detect_provider_from_model(model: &str) -> String {
@@ -81,33 +101,6 @@ pub fn detect_provider_from_model(model: &str) -> String {
     } else {
         "other".to_string()
     }
-}
-
-fn strip_date_suffix(model_id: &str) -> Option<String> {
-    if model_id.len() > 9 {
-        let suffix = &model_id[model_id.len() - 8..];
-        if suffix.chars().all(|ch| ch.is_ascii_digit())
-            && model_id.as_bytes()[model_id.len() - 9] == b'-'
-        {
-            return Some(model_id[..model_id.len() - 9].to_string());
-        }
-    }
-
-    if model_id.len() > 11 {
-        let suffix = &model_id[model_id.len() - 10..];
-        let bytes = suffix.as_bytes();
-        let is_dash_date = bytes[4] == b'-'
-            && bytes[7] == b'-'
-            && suffix
-                .chars()
-                .enumerate()
-                .all(|(idx, ch)| idx == 4 || idx == 7 || ch.is_ascii_digit());
-        if is_dash_date && model_id.as_bytes()[model_id.len() - 11] == b'-' {
-            return Some(model_id[..model_id.len() - 11].to_string());
-        }
-    }
-
-    None
 }
 
 fn collapse_repeated_hyphens(value: &str) -> String {
@@ -146,7 +139,11 @@ mod tests {
         assert_eq!(normalize_model_name("claude-opus-4.6"), "claude-opus-4-6");
         assert_eq!(
             normalize_model_name("antigravity-claude-opus-4-5-thinking-high"),
-            "antigravity-claude-opus-4-5-thinking"
+            "claude-opus-4-5"
+        );
+        assert_eq!(
+            normalize_model_name("anti-gravity-claude-opus-4-6-thinking"),
+            "claude-opus-4-6"
         );
         assert_eq!(normalize_model_name("z-ai/glm-5.1-low"), "glm-5-1");
         assert_eq!(normalize_model_name("gemini-3-pro-medium"), "gemini-3-pro");

@@ -17,17 +17,6 @@ const MIN_CARD_WIDTH: usize = 42;
 const MAX_CARD_WIDTH: usize = 56;
 const TWO_COLUMN_MIN_WIDTH: usize = MIN_CARD_WIDTH * 2 + GRID_GAP;
 
-fn display_provider_name(provider: &str) -> &'static str {
-    match provider {
-        "claude" => "CLAUDE CODE",
-        "gemini" => "GEMINI CLI",
-        "codex" => "CODEX",
-        "copilot" => "GITHUB COPILOT",
-        "antigravity" => "ANTIGRAVITY",
-        _ => "UNKNOWN",
-    }
-}
-
 fn draw_progress_bar(
     used_percent: f64,
     period_duration_ms: Option<i64>,
@@ -223,7 +212,7 @@ fn format_provider_content(
     snapshot: &tokenpulse_core::QuotaSnapshot,
     display_mode: &QuotaDisplayMode,
 ) -> Vec<String> {
-    let mut lines = vec![display_provider_name(&snapshot.provider).to_string()];
+    let mut lines = vec![quota_display_name(&snapshot.provider).to_string()];
 
     for window in &snapshot.windows {
         lines.push(String::new());
@@ -251,7 +240,7 @@ fn format_provider_card(
     let inner_width = width.saturating_sub(2).max(1);
     let content = format_provider_content(snapshot, display_mode);
     let title = pad_line(
-        &format!(" {} ", display_provider_name(&snapshot.provider)),
+        &format!(" {} ", quota_display_name(&snapshot.provider)),
         inner_width,
     );
     let mut lines = vec![format!("┌{}┐", title)];
@@ -335,39 +324,24 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
         .map(|(k, _)| k.clone())
         .collect::<Vec<_>>();
 
-    let providers: Vec<Box<dyn QuotaFetcher>> = match provider {
-        Some(ref p) => match p.as_str() {
-            "claude" => vec![Box::new(ClaudeQuotaFetcher::new())],
-            "codex" => vec![Box::new(CodexQuotaFetcher::new())],
-            "copilot" => vec![Box::new(CopilotQuotaFetcher::new())],
-            "gemini" => vec![Box::new(GeminiQuotaFetcher::new())],
-            "antigravity" => vec![Box::new(AntigravityQuotaFetcher::new())],
-            _ => {
+    let providers = build_quota_fetchers(provider.as_deref(), &enabled_providers);
+
+    if providers.is_empty() {
+        if let Some(ref p) = provider {
+            if !QUOTA_PROVIDERS.iter().any(|entry| entry.id == p.as_str()) {
                 eprintln!("Unknown provider: {}", p);
-                eprintln!("Supported providers: claude, codex, copilot, gemini, antigravity");
+                eprintln!(
+                    "Supported providers: {}",
+                    QUOTA_PROVIDERS
+                        .iter()
+                        .map(|e| e.id)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
                 return Ok(());
             }
-        },
-        None => {
-            let mut list: Vec<Box<dyn QuotaFetcher>> = Vec::new();
-            if enabled_providers.contains(&"claude".to_string()) {
-                list.push(Box::new(ClaudeQuotaFetcher::new()));
-            }
-            if enabled_providers.contains(&"codex".to_string()) {
-                list.push(Box::new(CodexQuotaFetcher::new()));
-            }
-            if enabled_providers.contains(&"copilot".to_string()) {
-                list.push(Box::new(CopilotQuotaFetcher::new()));
-            }
-            if enabled_providers.contains(&"gemini".to_string()) {
-                list.push(Box::new(GeminiQuotaFetcher::new()));
-            }
-            if enabled_providers.contains(&"antigravity".to_string()) {
-                list.push(Box::new(AntigravityQuotaFetcher::new()));
-            }
-            list
         }
-    };
+    }
 
     let mut results: Vec<Option<Result<tokenpulse_core::QuotaSnapshot>>> =
         (0..providers.len()).map(|_| None).collect();
@@ -412,12 +386,10 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
 
         eprintln!("\nNo providers configured.\n");
         eprintln!("To use tokenpulse, you need to have at least one of these tools installed:");
-        eprintln!(" - Claude Code: https://docs.anthropic.com/en/docs/claude-code");
-        eprintln!(" - Codex: https://github.com/openai/codex");
-        eprintln!(" - GitHub Copilot: https://github.com/features/copilot");
-        eprintln!(" - Gemini CLI: https://github.com/google-gemini/gemini-cli");
-        eprintln!(" - Antigravity: https://antigravity.com\n");
-        eprintln!("After installing, run the tool to login, then try again.");
+        for entry in QUOTA_PROVIDERS {
+            eprintln!(" - {}: {}", entry.display_name, entry.url);
+        }
+        eprintln!("\nAfter installing, run the tool to login, then try again.");
         return Ok(());
     }
 
@@ -446,4 +418,106 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Quota Provider Registry
+//
+// All supported quota providers are registered here. To add a new provider:
+// 1. Add a QuotaProviderEntry below
+// 2. Implement QuotaFetcher in tokenpulse-core/src/quota/
+// ---------------------------------------------------------------------------
+
+struct QuotaProviderEntry {
+    /// Internal identifier used in config, CLI flags, and cache keys.
+    id: &'static str,
+    /// Human-readable name shown in UI headers and error messages.
+    display_name: &'static str,
+    /// Project URL shown in the "no providers" help message.
+    url: &'static str,
+    /// Factory function to create the fetcher.
+    make_fetcher: fn() -> Box<dyn QuotaFetcher>,
+}
+
+const QUOTA_PROVIDERS: &[QuotaProviderEntry] = &[
+    QuotaProviderEntry {
+        id: "claude",
+        display_name: "CLAUDE CODE",
+        url: "https://docs.anthropic.com/en/docs/claude-code",
+        make_fetcher: || Box::new(ClaudeQuotaFetcher::new()),
+    },
+    QuotaProviderEntry {
+        id: "codex",
+        display_name: "CODEX",
+        url: "https://github.com/openai/codex",
+        make_fetcher: || Box::new(CodexQuotaFetcher::new()),
+    },
+    QuotaProviderEntry {
+        id: "copilot",
+        display_name: "GITHUB COPILOT",
+        url: "https://github.com/features/copilot",
+        make_fetcher: || Box::new(CopilotQuotaFetcher::new()),
+    },
+    QuotaProviderEntry {
+        id: "gemini",
+        display_name: "GEMINI CLI",
+        url: "https://github.com/google-gemini/gemini-cli",
+        make_fetcher: || Box::new(GeminiQuotaFetcher::new()),
+    },
+    QuotaProviderEntry {
+        id: "antigravity",
+        display_name: "ANTIGRAVITY",
+        url: "https://antigravity.com",
+        make_fetcher: || Box::new(AntigravityQuotaFetcher::new()),
+    },
+];
+
+/// Look up the display name for a quota provider.
+pub fn quota_display_name(provider_id: &str) -> &'static str {
+    QUOTA_PROVIDERS
+        .iter()
+        .find(|e| e.id == provider_id)
+        .map(|e| e.display_name)
+        .unwrap_or("UNKNOWN")
+}
+
+/// Provider metadata exposed for the TUI settings tab.
+pub struct QuotaProviderInfo {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub url: &'static str,
+}
+
+/// Return metadata for all supported quota providers (for TUI rendering).
+pub fn quota_provider_info_list() -> Vec<QuotaProviderInfo> {
+    QUOTA_PROVIDERS
+        .iter()
+        .map(|e| QuotaProviderInfo {
+            id: e.id,
+            display_name: e.display_name,
+            url: e.url,
+        })
+        .collect()
+}
+
+/// Build QuotaFetcher instances for the requested providers.
+///
+/// When `provider` is Some, only that single provider is built (if known).
+/// When `provider` is None, all enabled providers are built.
+pub fn build_quota_fetchers(
+    provider: Option<&str>,
+    enabled_providers: &[String],
+) -> Vec<Box<dyn QuotaFetcher>> {
+    match provider {
+        Some(name) => QUOTA_PROVIDERS
+            .iter()
+            .filter(|e| e.id == name)
+            .map(|e| (e.make_fetcher)())
+            .collect(),
+        None => QUOTA_PROVIDERS
+            .iter()
+            .filter(|e| enabled_providers.contains(&e.id.to_string()))
+            .map(|e| (e.make_fetcher)())
+            .collect(),
+    }
 }

@@ -1344,35 +1344,39 @@ fn daily_sections(area: Rect) -> std::rc::Rc<[Rect]> {
 }
 
 fn heatmap_grid_area(area: Rect) -> Rect {
-    let split = heatmap_columns(area);
+    let sections = heatmap_sections(area);
 
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(16), Constraint::Length(3)])
-        .split(split[0]);
-
-    Block::default().borders(Borders::ALL).inner(left[0])
+    Block::default().borders(Borders::ALL).inner(sections[0])
 }
 
 fn heatmap_day_panel_area(area: Rect) -> Rect {
-    let split = heatmap_columns(area);
+    let sections = heatmap_sections(area);
+    let info = heatmap_info_sections(sections[2]);
 
-    Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(10), Constraint::Min(10)])
-        .split(split[1])[1]
+    info[1]
 }
 
-fn heatmap_columns(area: Rect) -> std::rc::Rc<[Rect]> {
-    if area.width >= 110 {
+fn heatmap_sections(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(12),
+            Constraint::Length(3),
+            Constraint::Min(10),
+        ])
+        .split(area)
+}
+
+fn heatmap_info_sections(area: Rect) -> std::rc::Rc<[Rect]> {
+    if area.width >= 100 && area.height >= 10 {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(68), Constraint::Length(40)])
+            .constraints([Constraint::Length(40), Constraint::Min(40)])
             .split(area)
     } else {
         Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(66), Constraint::Percentage(34)])
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(8), Constraint::Min(6)])
             .split(area)
     }
 }
@@ -1904,10 +1908,10 @@ fn render_overview_top_models(
     let tokens_width = 9usize;
     let fixed_width = tokens_width + cost_width + pct_width + 4;
     let remaining = total_width.saturating_sub(fixed_width);
-    let agent_width = (remaining / 3).clamp(22, 36);
+    let agent_width = (remaining * 2 / 5).clamp(26, 40);
     let model_width = total_width
         .saturating_sub(agent_width + fixed_width)
-        .clamp(22, 40);
+        .clamp(18, 36);
 
     let mut lines = Vec::with_capacity(data_rows_visible + 2);
     lines.push(Line::from(vec![
@@ -2087,12 +2091,12 @@ fn render_models_page(
     let tokens_width = 9usize;
     let show_last = total_width >= 86;
     let last_width = if show_last { 11usize } else { 0usize };
-    let agent_width = (total_width / 5).clamp(18, 32);
+    let agent_width = (total_width / 4).clamp(22, 36);
     let model_width = total_width
         .saturating_sub(
             rank_width + agent_width + tokens_width + cost_width + msg_width + last_width,
         )
-        .clamp(16, 48);
+        .clamp(14, 40);
     let headers = ["#", "Model", "Agent", "Tokens", "Cost", "Msgs", "Last"];
     let sort_indicator = |field: SortField| -> &str {
         if state.sort_field == field {
@@ -2508,12 +2512,7 @@ fn render_heatmap_page(
     );
     let bounds = dashboard.bounds_for_window(state.heatmap_window, state.selected_heatmap_date);
 
-    let split = heatmap_columns(area);
-
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(16), Constraint::Length(3)])
-        .split(split[0]);
+    let sections = heatmap_sections(area);
 
     // Heatmap grid
     let heat_title = format!(
@@ -2528,8 +2527,8 @@ fn render_heatmap_page(
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border));
-    let heat_inner = heat_block.inner(left[0]);
-    f.render_widget(heat_block, left[0]);
+    let heat_inner = heat_block.inner(sections[0]);
+    f.render_widget(heat_block, sections[0]);
 
     let palette = heatmap_palette(theme, state.heatmap_metric);
     let points = dashboard.points_in_window(
@@ -2573,17 +2572,14 @@ fn render_heatmap_page(
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.border)),
     );
-    f.render_widget(legend, left[1]);
+    f.render_widget(legend, sections[1]);
 
-    // Right panel: day detail
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(10), Constraint::Min(10)])
-        .split(split[1]);
+    // Bottom panels: range summary and selected day detail
+    let info = heatmap_info_sections(sections[2]);
 
     render_heatmap_summary_card(
         f,
-        right[0],
+        info[0],
         dashboard,
         state.heatmap_window,
         state.heatmap_metric,
@@ -2593,7 +2589,7 @@ fn render_heatmap_page(
     );
     render_heatmap_day_detail(
         f,
-        right[1],
+        info[1],
         selected_day.as_ref(),
         state.heatmap_metric,
         state.heatmap_detail_scroll,
@@ -2702,77 +2698,163 @@ fn render_heatmap_day_detail(
         return;
     };
 
+    let sections = selected_day_sections(inner);
+    render_selected_day_overview(f, sections[0], day, metric, theme);
+    render_selected_day_agent_detail(f, sections[1], day, scroll_offset, theme);
+}
+
+fn selected_day_sections(area: Rect) -> std::rc::Rc<[Rect]> {
+    if area.width >= 76 && area.height >= 6 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(34), Constraint::Min(32)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(2), Constraint::Min(4)])
+            .split(area)
+    }
+}
+
+fn render_selected_day_overview(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    day: &DailyStats,
+    metric: HeatmapMetric,
+    theme: &Theme,
+) {
+    if area.height == 0 {
+        return;
+    }
+
+    let lines = if area.width >= 34 && area.height >= 4 {
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    day.date.format("%Y-%m-%d").to_string(),
+                    Style::default().fg(theme.opencode).bold(),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format_metric(metric, day.metric_value(metric)),
+                    Style::default().fg(theme.fg).bold(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Cost ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format!("${:.2}", day.cost_usd),
+                    Style::default().fg(Color::Rgb(250, 204, 21)),
+                ),
+                Span::raw("  "),
+                Span::styled("Tokens ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.total_tokens),
+                    Style::default().fg(Color::Rgb(52, 211, 153)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("I ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.input_tokens),
+                    Style::default().fg(Color::Rgb(96, 165, 250)),
+                ),
+                Span::raw("  "),
+                Span::styled("O ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.output_tokens),
+                    Style::default().fg(Color::Rgb(167, 139, 250)),
+                ),
+                Span::raw("  "),
+                Span::styled("C ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.cache_tokens()),
+                    Style::default().fg(Color::Rgb(251, 146, 60)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Reason ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.reasoning_tokens),
+                    Style::default().fg(theme.opencode),
+                ),
+                Span::raw("  "),
+                Span::styled("Msgs ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.messages),
+                    Style::default().fg(Color::Rgb(96, 165, 250)),
+                ),
+                Span::raw("  "),
+                Span::styled("Sess ", Style::default().fg(theme.dim)),
+                Span::styled(format_compact(day.sessions), Style::default().fg(theme.fg)),
+            ]),
+        ]
+    } else {
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    day.date.format("%Y-%m-%d").to_string(),
+                    Style::default().fg(theme.opencode).bold(),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format_metric(metric, day.metric_value(metric)),
+                    Style::default().fg(theme.fg).bold(),
+                ),
+                Span::raw("  "),
+                Span::styled("Cost ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format!("${:.2}", day.cost_usd),
+                    Style::default().fg(Color::Rgb(250, 204, 21)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("T ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.total_tokens),
+                    Style::default().fg(Color::Rgb(52, 211, 153)),
+                ),
+                Span::raw("  "),
+                Span::styled("I ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.input_tokens),
+                    Style::default().fg(Color::Rgb(96, 165, 250)),
+                ),
+                Span::raw("  "),
+                Span::styled("O ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.output_tokens),
+                    Style::default().fg(Color::Rgb(167, 139, 250)),
+                ),
+                Span::raw("  "),
+                Span::styled("C ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.cache_tokens()),
+                    Style::default().fg(Color::Rgb(251, 146, 60)),
+                ),
+            ]),
+        ]
+    };
+
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_selected_day_agent_detail(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    day: &DailyStats,
+    scroll_offset: usize,
+    theme: &Theme,
+) {
     let groups = build_agent_model_groups(day);
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                day.date.format("%Y-%m-%d").to_string(),
-                Style::default().fg(theme.opencode).bold(),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format_metric(metric, day.metric_value(metric)),
-                Style::default().fg(theme.fg).bold(),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Cost ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format!("${:.2}", day.cost_usd),
-                Style::default().fg(Color::Rgb(250, 204, 21)),
-            ),
-            Span::raw("  "),
-            Span::styled("Tokens ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format_compact(day.total_tokens),
-                Style::default().fg(Color::Rgb(52, 211, 153)),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Input ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format_compact(day.input_tokens),
-                Style::default().fg(Color::Rgb(96, 165, 250)),
-            ),
-            Span::raw("  "),
-            Span::styled("Output ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format_compact(day.output_tokens),
-                Style::default().fg(Color::Rgb(167, 139, 250)),
-            ),
-        ]),
-    ];
-    lines.push(Line::from(vec![
-        Span::styled("Cache ", Style::default().fg(theme.dim)),
-        Span::styled(
-            format_compact(day.cache_tokens()),
-            Style::default().fg(Color::Rgb(251, 146, 60)),
-        ),
-        Span::raw("  "),
-        Span::styled("Reason ", Style::default().fg(theme.dim)),
-        Span::styled(
-            format_compact(day.reasoning_tokens),
-            Style::default().fg(theme.opencode),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Msgs ", Style::default().fg(theme.dim)),
-        Span::styled(
-            format_compact(day.messages),
-            Style::default().fg(Color::Rgb(96, 165, 250)),
-        ),
-        Span::raw("  "),
-        Span::styled("Sess ", Style::default().fg(theme.dim)),
-        Span::styled(format_compact(day.sessions), Style::default().fg(theme.fg)),
-    ]));
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(
+    let mut lines = vec![Line::from(vec![Span::styled(
         "Agent / Model Cost",
         Style::default().fg(theme.accent_soft).bold(),
-    )]));
+    )])];
 
-    let cost_width = 8usize.min(inner.width.saturating_sub(10) as usize);
-    let model_width = inner.width.saturating_sub((cost_width + 3) as u16) as usize;
+    let cost_width = 8usize.min(area.width.saturating_sub(10) as usize);
+    let model_width = area.width.saturating_sub((cost_width + 3) as u16) as usize;
     for group in groups {
         let agent_name = display_source_name(&group.source);
         let agent_color = theme.provider_color(&group.source);
@@ -2832,7 +2914,7 @@ fn render_heatmap_day_detail(
     }
 
     let total_lines = lines.len();
-    let visible = inner.height as usize;
+    let visible = area.height as usize;
     let offset = scroll_offset.min(total_lines.saturating_sub(visible));
     let mut visible_lines: Vec<Line> = lines.into_iter().skip(offset).take(visible).collect();
     if total_lines > visible && !visible_lines.is_empty() {
@@ -2854,7 +2936,7 @@ fn render_heatmap_day_detail(
         )]);
     }
 
-    f.render_widget(Paragraph::new(visible_lines), inner);
+    f.render_widget(Paragraph::new(visible_lines), area);
 }
 
 fn heatmap_day_panel_line_count(day: Option<&DailyStats>) -> usize {
@@ -2863,7 +2945,7 @@ fn heatmap_day_panel_line_count(day: Option<&DailyStats>) -> usize {
     };
 
     let groups = build_agent_model_groups(day);
-    let mut lines = 7usize;
+    let mut lines = 1usize;
     for group in groups {
         lines += 1 + (group.models.len() * 2);
     }

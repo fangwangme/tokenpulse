@@ -190,9 +190,9 @@ impl Theme {
                 Color::Rgb(134, 95, 43),
                 Color::Rgb(87, 60, 35),
             ],
-            heatmap_bg: Color::Rgb(248, 250, 252),
+            heatmap_bg: Color::Rgb(20, 28, 40),
             heatmap_border: Color::Rgb(71, 85, 105),
-            empty_heatmap: Color::Rgb(226, 232, 240),
+            empty_heatmap: Color::Rgb(24, 31, 42),
             selected_bg: Color::Rgb(28, 44, 61),
         }
     }
@@ -411,6 +411,13 @@ mod tests {
         assert_eq!(t.gauge_color(10.0), t.gauge_low);
         assert_eq!(t.gauge_color(60.0), t.gauge_mid);
         assert_eq!(t.gauge_color(90.0), t.gauge_high);
+    }
+
+    #[test]
+    fn dark_theme_uses_dark_heatmap_surfaces() {
+        let t = Theme::new(ThemeMode::Dark);
+        assert_eq!(t.heatmap_bg, Color::Rgb(20, 28, 40));
+        assert_eq!(t.empty_heatmap, Color::Rgb(24, 31, 42));
     }
 }
 
