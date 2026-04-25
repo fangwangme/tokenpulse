@@ -929,7 +929,7 @@ pub fn run(summary: UsageSummary, daily_rows: Vec<DailyUsageRow>) -> Result<()> 
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
 
-    let theme = Theme::default();
+    let mut theme = Theme::auto();
     let dashboard = UsageDashboard::build(&summary, &daily_rows);
     let mut state = UsageState::new(&dashboard);
 
@@ -1002,6 +1002,13 @@ pub fn run(summary: UsageSummary, daily_rows: Vec<DailyUsageRow>) -> Result<()> 
                             }
                             _ => {}
                         }
+                        continue;
+                    }
+
+                    if matches!(key.code, KeyCode::Char('b'))
+                        && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        theme = theme.toggled();
                         continue;
                     }
 
@@ -1461,7 +1468,7 @@ fn render_tabs(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: &T
         Span::styled(
             format!(" {} ", page.title()),
             if *page == state.page {
-                Style::default().fg(theme.bg).bg(theme.accent).bold()
+                Style::default().fg(theme.on_accent).bg(theme.accent).bold()
             } else {
                 Style::default().fg(theme.dim)
             },
@@ -1498,7 +1505,8 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
     };
     let help = match state.page {
         UsagePage::Overview => format!(
-            " q quit | ←→ tab | ↑↓ select | t/c metric ({}){}",
+            " q quit | b theme ({}) | ←→ tab | ↑↓ select | t/c metric ({}){}",
+            theme.mode.label(),
             match state.overview_metric {
                 OverviewMetric::Tokens => "tokens",
                 OverviewMetric::Cost => "cost",
@@ -1518,8 +1526,8 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
                 format!(" | / filter ({})", state.model_filter)
             };
             format!(
-                " q quit | ←→ tab | ↑↓ select | / filter | ctrl+l clear | c/t/d sort ({} {}){}{}",
-                field, dir, filter, filter_hint
+                " q quit | b theme ({}) | ←→ tab | ↑↓ select | / filter | ctrl+l clear | c/t/d sort ({} {}){}{}",
+                theme.mode.label(), field, dir, filter, filter_hint
             )
         }
         UsagePage::Daily => {
@@ -1530,12 +1538,13 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
                 SortField::Date => "date",
             };
             format!(
-                " q quit | ←→ tab | ↑↓ select | c/t/d sort ({} {}){}",
-                field, dir, filter_hint
+                " q quit | b theme ({}) | ←→ tab | ↑↓ select | c/t/d sort ({} {}){}",
+                theme.mode.label(), field, dir, filter_hint
             )
         }
         UsagePage::Heatmap => format!(
-            " q quit | ←→ tab | ↑↓ day | pgup/pgdn detail | w window ({}) | t/c/i/o/x/m/n metric ({}){}",
+            " q quit | b theme ({}) | ←→ tab | ↑↓ day | pgup/pgdn detail | w window ({}) | t/c/i/o/x/m/n metric ({}){}",
+            theme.mode.label(),
             state.heatmap_window.label(),
             state.heatmap_metric.short_label(),
             filter_hint
@@ -1589,7 +1598,7 @@ fn render_source_filter_overlay(
         let checkbox = if enabled { "[✓]" } else { "[ ]" };
         let color = theme.provider_color(source);
         let style = if selected {
-            Style::default().fg(theme.bg).bg(color).bold()
+            Style::default().fg(theme.on_accent).bg(color).bold()
         } else if enabled {
             Style::default().fg(color)
         } else {
@@ -1941,7 +1950,7 @@ fn render_overview_top_models(
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<model_width$}", truncate(&model.model, model_width)),
-                selected_row_style(Style::default().fg(color), selected),
+                selected_row_style(Style::default().fg(color), selected, theme),
             ),
             Span::raw(" "),
             Span::styled(
@@ -1949,22 +1958,34 @@ fn render_overview_top_models(
                     "{:<agent_width$}",
                     truncate(&format_source_list(&model.source), agent_width)
                 ),
-                selected_row_style(Style::default().fg(theme.accent), selected),
+                selected_row_style(Style::default().fg(theme.accent), selected, theme),
             ),
             Span::raw(" "),
             Span::styled(
                 format!("{:>tokens_width$}", format_compact(model.tokens)),
-                selected_row_style(Style::default().fg(Color::Rgb(52, 211, 153)), selected),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(52, 211, 153)),
+                    selected,
+                    theme,
+                ),
             ),
             Span::raw(" "),
             Span::styled(
                 format!("{:>cost_width$}", format!("${:.2}", model.cost)),
-                selected_row_style(Style::default().fg(Color::Rgb(250, 204, 21)), selected),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(250, 204, 21)),
+                    selected,
+                    theme,
+                ),
             ),
             Span::raw(" "),
             Span::styled(
                 format!("{:>pct_width$}", format!("{:.2}%", pct)),
-                selected_row_style(Style::default().fg(Color::Rgb(96, 165, 250)), selected),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(96, 165, 250)),
+                    selected,
+                    theme,
+                ),
             ),
         ]));
     }
@@ -2158,30 +2179,42 @@ fn render_models_page(
         let mut spans = vec![
             Span::styled(
                 format!("{:<rank_width$}", rank),
-                selected_row_style(Style::default().fg(theme.dim), selected),
+                selected_row_style(Style::default().fg(theme.dim), selected, theme),
             ),
             Span::styled(
                 format!("{:<model_width$}", truncate(&model.model, model_width)),
-                selected_row_style(Style::default().fg(model_color), selected),
+                selected_row_style(Style::default().fg(model_color), selected, theme),
             ),
             Span::styled(
                 format!(
                     "{:<agent_width$}",
                     truncate(&format_source_list(&model.source), agent_width)
                 ),
-                selected_row_style(Style::default().fg(theme.accent_soft), selected),
+                selected_row_style(Style::default().fg(theme.accent_soft), selected, theme),
             ),
             Span::styled(
                 format!("{:<tokens_width$}", format_compact(model.tokens)),
-                selected_row_style(Style::default().fg(Color::Rgb(52, 211, 153)), selected),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(52, 211, 153)),
+                    selected,
+                    theme,
+                ),
             ),
             Span::styled(
                 format!("{:<cost_width$}", format!("${:.2}", model.cost)),
-                selected_row_style(Style::default().fg(Color::Rgb(250, 204, 21)), selected),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(250, 204, 21)),
+                    selected,
+                    theme,
+                ),
             ),
             Span::styled(
                 format!("{:<msg_width$}", format_compact(model.message_count as i64)),
-                selected_row_style(Style::default().fg(Color::Rgb(96, 165, 250)), selected),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(96, 165, 250)),
+                    selected,
+                    theme,
+                ),
             ),
         ];
         if show_last {
@@ -2191,7 +2224,7 @@ fn render_models_page(
                 .unwrap_or_else(|| "n/a".to_string());
             spans.push(Span::styled(
                 format!("{:<last_width$}", last),
-                selected_row_style(Style::default().fg(theme.dim), selected),
+                selected_row_style(Style::default().fg(theme.dim), selected, theme),
             ));
         }
 
@@ -2399,31 +2432,55 @@ fn render_daily_table(
         let spans = vec![
             Span::styled(
                 format!("{:<date_width$}", date_text),
-                selected_row_style(date_style, selected),
+                selected_row_style(date_style, selected, theme),
             ),
             Span::styled(
                 format!("{:<10}", format_compact(day.total_tokens)),
-                selected_row_style(metric_style(Color::Rgb(52, 211, 153), row_bg), selected),
+                selected_row_style(
+                    metric_style(Color::Rgb(52, 211, 153), row_bg),
+                    selected,
+                    theme,
+                ),
             ),
             Span::styled(
                 format!("{:<10}", format!("${:.2}", day.cost_usd)),
-                selected_row_style(metric_style(Color::Rgb(250, 204, 21), row_bg), selected),
+                selected_row_style(
+                    metric_style(Color::Rgb(250, 204, 21), row_bg),
+                    selected,
+                    theme,
+                ),
             ),
             Span::styled(
                 format!("{:<10}", format_compact(day.input_tokens)),
-                selected_row_style(metric_style(Color::Rgb(96, 165, 250), row_bg), selected),
+                selected_row_style(
+                    metric_style(Color::Rgb(96, 165, 250), row_bg),
+                    selected,
+                    theme,
+                ),
             ),
             Span::styled(
                 format!("{:<10}", format_compact(day.output_tokens)),
-                selected_row_style(metric_style(Color::Rgb(167, 139, 250), row_bg), selected),
+                selected_row_style(
+                    metric_style(Color::Rgb(167, 139, 250), row_bg),
+                    selected,
+                    theme,
+                ),
             ),
             Span::styled(
                 format!("{:<10}", format_compact(day.cache_tokens())),
-                selected_row_style(metric_style(Color::Rgb(251, 146, 60), row_bg), selected),
+                selected_row_style(
+                    metric_style(Color::Rgb(251, 146, 60), row_bg),
+                    selected,
+                    theme,
+                ),
             ),
             Span::styled(
                 format!("{:<8}", format_compact(day.messages)),
-                selected_row_style(metric_style(Color::Rgb(96, 165, 250), row_bg), selected),
+                selected_row_style(
+                    metric_style(Color::Rgb(96, 165, 250), row_bg),
+                    selected,
+                    theme,
+                ),
             ),
         ];
         f.render_widget(
@@ -2491,6 +2548,8 @@ fn render_heatmap_page(
         let heatmap = YearHeatmap::new(&points, state.heatmap_metric)
             .palette(palette)
             .empty(theme.empty_heatmap)
+            .background(theme.heatmap_bg)
+            .border(Some(theme.heatmap_border))
             .selected(selected_day.as_ref().map(|day| day.date))
             .range_opt(bounds);
         f.render_widget(heatmap, heat_inner);
@@ -2820,13 +2879,7 @@ fn heatmap_palette(theme: &Theme, metric: HeatmapMetric) -> [Color; 5] {
         PaletteMode::Tokens => theme.token_heatmap,
         PaletteMode::Cost => theme.cost_heatmap,
         PaletteMode::Input | PaletteMode::Output | PaletteMode::Count => theme.count_heatmap,
-        PaletteMode::Cache => [
-            Color::Rgb(72, 53, 33),
-            Color::Rgb(88, 67, 41),
-            Color::Rgb(110, 83, 48),
-            Color::Rgb(144, 110, 57),
-            Color::Rgb(192, 155, 83),
-        ],
+        PaletteMode::Cache => theme.cache_heatmap,
     }
 }
 
@@ -2938,9 +2991,9 @@ fn normalized_scroll_offset(offset: usize, selected: usize, visible: usize, tota
     normalized.min(total.saturating_sub(visible))
 }
 
-fn selected_row_style(style: Style, selected: bool) -> Style {
+fn selected_row_style(style: Style, selected: bool, theme: &Theme) -> Style {
     if selected {
-        style.bg(Color::Rgb(28, 44, 61)).bold()
+        style.bg(theme.selected_bg).bold()
     } else {
         style
     }
