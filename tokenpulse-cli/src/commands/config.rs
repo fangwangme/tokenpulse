@@ -33,7 +33,8 @@ pub fn run(action: ConfigAction) -> Result<()> {
             println!("  quota_display_mode: {}", mode_str);
             let refresh_str = match config.display.quota_auto_refresh_secs {
                 0 => "disabled".to_string(),
-                s => format!("{} min", s / 60),
+                s if s % 60 == 0 => format!("{} min", s / 60),
+                s => format!("{}s", s),
             };
             println!("  quota_auto_refresh_interval: {}", refresh_str);
         }

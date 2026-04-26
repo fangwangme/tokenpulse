@@ -205,15 +205,7 @@ pub fn run(
 
             let auto_hint = match refresh_countdown {
                 None => "off".to_string(),
-                Some(remaining) => {
-                    let m = remaining / 60;
-                    let s = remaining % 60;
-                    if m > 0 {
-                        format!("{m}m {s:02}s")
-                    } else {
-                        format!("{s}s")
-                    }
-                }
+                Some(remaining) => format_countdown(remaining),
             };
             let footer_text = format!(
                 " q quit | r refresh | a auto ({}) | b theme ({}) | m mode | e empty | space toggle | ←→ tab | {} provider{} ",
@@ -243,6 +235,8 @@ pub fn run(
                             results.iter().filter_map(|r| r.as_ref().ok()).collect();
                         let tab_count = quota_tab_titles(&snapshots).len();
                         selected_tab = selected_tab.min(tab_count.saturating_sub(1));
+                        settings_row =
+                            settings_row.min(settings_row_count().saturating_sub(1));
                     }
                     KeyCode::Char('a') => {
                         config.display.quota_auto_refresh_secs =
@@ -763,14 +757,7 @@ fn render_settings(
         let base = auto_refresh_label(config.display.quota_auto_refresh_secs).to_string();
         match refresh_countdown {
             Some(remaining) if config.display.quota_auto_refresh_secs > 0 => {
-                let m = remaining / 60;
-                let s = remaining % 60;
-                let countdown = if m > 0 {
-                    format!("{m}m {s:02}s")
-                } else {
-                    format!("{s}s")
-                };
-                format!("{base} (next {countdown})")
+                format!("{base} (next {})", format_countdown(remaining))
             }
             _ => base,
         }
@@ -884,11 +871,26 @@ fn settings_line(
 const AUTO_REFRESH_INTERVALS: &[u32] = &[0, 60, 120, 300, 600, 900];
 
 fn next_auto_refresh_interval(current: u32) -> u32 {
-    let idx = AUTO_REFRESH_INTERVALS
-        .iter()
-        .position(|&v| v == current)
-        .unwrap_or(0);
-    AUTO_REFRESH_INTERVALS[(idx + 1) % AUTO_REFRESH_INTERVALS.len()]
+    match AUTO_REFRESH_INTERVALS.iter().position(|&v| v == current) {
+        Some(idx) => AUTO_REFRESH_INTERVALS[(idx + 1) % AUTO_REFRESH_INTERVALS.len()],
+        // Custom interval: advance to next standard interval strictly greater than current,
+        // or wrap to 0 (disabled) if already above all standard values.
+        None => AUTO_REFRESH_INTERVALS
+            .iter()
+            .copied()
+            .find(|&v| v > current)
+            .unwrap_or(0),
+    }
+}
+
+fn format_countdown(remaining: u64) -> String {
+    let m = remaining / 60;
+    let s = remaining % 60;
+    if m > 0 {
+        format!("{m}m {s:02}s")
+    } else {
+        format!("{s}s")
+    }
 }
 
 fn auto_refresh_label(secs: u32) -> &'static str {

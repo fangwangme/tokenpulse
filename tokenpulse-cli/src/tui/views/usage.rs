@@ -1,6 +1,6 @@
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{
-    date_at_position, HeatmapMetric, StackedBarChart, TrendSparkline, ValueFormat, YearHeatmap,
+    date_at_position, HeatmapMetric, StackedBarChart, ValueFormat, YearHeatmap,
 };
 use anyhow::Result;
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -1364,15 +1364,12 @@ fn dashboard_body_area(area: Rect) -> Rect {
 }
 
 fn overview_sections(area: Rect) -> std::rc::Rc<[Rect]> {
-    let summary_height = area.height.min(5);
-    let remaining = area.height.saturating_sub(summary_height);
-    let chart_height = (remaining.saturating_mul(2) / 3).max(8).min(remaining);
-    let model_height = remaining.saturating_sub(chart_height);
+    let chart_height = (area.height.saturating_mul(2) / 3).max(8).min(area.height);
+    let model_height = area.height.saturating_sub(chart_height);
 
     Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(summary_height),
             Constraint::Length(chart_height),
             Constraint::Length(model_height),
         ])
@@ -1382,7 +1379,7 @@ fn overview_sections(area: Rect) -> std::rc::Rc<[Rect]> {
 fn daily_sections(area: Rect) -> std::rc::Rc<[Rect]> {
     Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(8)])
+        .constraints([Constraint::Length(4), Constraint::Min(8)])
         .split(area)
 }
 
@@ -1552,7 +1549,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
     };
     let help = match state.page {
         UsagePage::Overview => format!(
-            " q quit | b theme ({}) | ←→ tab | ↑↓ select | t/c metric ({}){}",
+            " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ select | t/c metric ({}){}",
             theme.mode.label(),
             match state.overview_metric {
                 OverviewMetric::Tokens => "tokens",
@@ -1573,7 +1570,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
                 format!(" | / filter ({})", state.model_filter)
             };
             format!(
-                " q quit | b theme ({}) | ←→ tab | ↑↓ select | / filter | ctrl+l clear | c/t/d sort ({} {}){}{}",
+                " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ select | / filter | ctrl+l clear | c/t/d sort ({} {}){}{}",
                 theme.mode.label(), field, dir, filter, filter_hint
             )
         }
@@ -1585,12 +1582,12 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
                 SortField::Date => "date",
             };
             format!(
-                " q quit | b theme ({}) | ←→ tab | ↑↓ select | c/t/d sort ({} {}){}",
+                " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ select | c/t/d sort ({} {}){}",
                 theme.mode.label(), field, dir, filter_hint
             )
         }
         UsagePage::Heatmap => format!(
-            " q quit | b theme ({}) | ←→ tab | ↑↓ day | pgup/pgdn detail | w window ({}) | t/c/i/o/x/m/n metric ({}){}",
+            " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ day | pgup/pgdn detail | w window ({}) | t/c/i/o/x/m/n metric ({}){}",
             theme.mode.label(),
             state.heatmap_window.label(),
             state.heatmap_metric.short_label(),
@@ -1685,105 +1682,8 @@ fn render_overview_page(
 ) {
     let sections = overview_sections(area);
 
-    render_overview_summary_cards(f, sections[0], dashboard, state, theme);
-    render_overview_chart(f, sections[1], dashboard, state, theme);
-    render_overview_top_models(f, sections[2], dashboard, summary, state, theme);
-}
-
-fn render_overview_summary_cards(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    dashboard: &UsageDashboard,
-    state: &UsageState,
-    theme: &Theme,
-) {
-    let cards = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(area);
-
-    let days = dashboard.filtered_daily(&state.enabled_sources);
-    let today = Local::now().date_naive();
-    let week_start = today - Duration::days(6);
-    let today_cost = days
-        .iter()
-        .find(|day| day.date == today)
-        .map(|day| day.cost_usd)
-        .unwrap_or(0.0);
-    let week_cost: f64 = days
-        .iter()
-        .filter(|day| day.date >= week_start && day.date <= today)
-        .map(|day| day.cost_usd)
-        .sum();
-    let month_cost: f64 = days
-        .iter()
-        .filter(|day| day.date.year() == today.year() && day.date.month() == today.month())
-        .map(|day| day.cost_usd)
-        .sum();
-    let total_cost: f64 = days.iter().map(|day| day.cost_usd).sum();
-    let trend: Vec<f64> = days
-        .iter()
-        .rev()
-        .take(14)
-        .map(|day| day.cost_usd)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    let values = [
-        ("Today", today_cost),
-        ("This Week", week_cost),
-        ("This Month", month_cost),
-        ("Total", total_cost),
-    ];
-    for (idx, (label, value)) in values.into_iter().enumerate() {
-        render_overview_summary_card(f, cards[idx], label, value, &trend, theme);
-    }
-}
-
-fn render_overview_summary_card(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    label: &str,
-    value: f64,
-    trend: &[f64],
-    theme: &Theme,
-) {
-    let block = Block::default()
-        .title(Span::styled(
-            format!(" {} ", label),
-            Style::default().fg(theme.dim),
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if inner.height == 0 {
-        return;
-    }
-
-    let value_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    f.render_widget(
-        Paragraph::new(format!("${:.2}", value)).style(Style::default().fg(theme.accent).bold()),
-        value_area,
-    );
-
-    if inner.height > 1 {
-        let trend_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
-        f.render_widget(
-            TrendSparkline::new(trend)
-                .color(theme.accent_soft)
-                .empty(theme.dim),
-            trend_area,
-        );
-    }
+    render_overview_chart(f, sections[0], dashboard, state, theme);
+    render_overview_top_models(f, sections[1], dashboard, summary, state, theme);
 }
 
 fn render_overview_chart(
@@ -2130,10 +2030,10 @@ fn render_models_page(
     let total_width = inner.width as usize;
     let rank_width = 4usize;
     let cost_width = 8usize;
-    let cost_msg_gap = 2usize;
+    let pct_width = 7usize;
     let msg_width = 8usize;
     let tokens_width = 9usize;
-    let show_last = total_width >= 86;
+    let show_last = total_width >= 92;
     let last_width = if show_last { 11usize } else { 0usize };
     let agent_width = (total_width / 4).clamp(22, 36);
     let model_width = total_width
@@ -2142,12 +2042,19 @@ fn render_models_page(
                 + agent_width
                 + tokens_width
                 + cost_width
-                + cost_msg_gap
+                + 1
+                + pct_width
+                + 1
                 + msg_width
                 + last_width,
         )
-        .clamp(14, 40);
-    let headers = ["#", "Model", "Agent", "Tokens", "Cost", "Msgs", "Last"];
+        .clamp(12, 40);
+    let total_cost = models
+        .iter()
+        .map(|m| m.summary.cost)
+        .sum::<f64>()
+        .max(0.01);
+    let headers = ["#", "Model", "Agent", "Tokens", "Cost", "%", "Msgs", "Last"];
     let sort_indicator = |field: SortField| -> &str {
         if state.sort_field == field {
             if state.sort_ascending {
@@ -2187,9 +2094,14 @@ fn render_models_page(
             ),
             Style::default().fg(Color::Rgb(250, 204, 21)).bold(),
         ),
-        Span::raw(" ".repeat(cost_msg_gap)),
+        Span::raw(" "),
         Span::styled(
-            format!("{:<msg_width$}", headers[5]),
+            format!("{:<pct_width$}", headers[5]),
+            Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:<msg_width$}", headers[6]),
             Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
         ),
     ];
@@ -2197,7 +2109,7 @@ fn render_models_page(
         header_spans.push(Span::styled(
             format!(
                 "{:<last_width$}",
-                format!("{}{}", headers[6], sort_indicator(SortField::Date))
+                format!("{}{}", headers[7], sort_indicator(SortField::Date))
             ),
             Style::default().fg(theme.dim).bold(),
         ));
@@ -2227,6 +2139,7 @@ fn render_models_page(
         let selected = rank - 1 == selected_row;
         let model = &row.summary;
         let model_color = theme.model_color_for(&model.model, model.provider.split(',').next());
+        let pct = (model.cost / total_cost * 100.0).clamp(0.0, 100.0);
 
         let mut spans = vec![
             Span::styled(
@@ -2260,7 +2173,16 @@ fn render_models_page(
                     theme,
                 ),
             ),
-            Span::raw(" ".repeat(cost_msg_gap)),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<pct_width$}", format!("{:.1}%", pct)),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(96, 165, 250)),
+                    selected,
+                    theme,
+                ),
+            ),
+            Span::raw(" "),
             Span::styled(
                 format!("{:<msg_width$}", format_compact(model.message_count as i64)),
                 selected_row_style(
@@ -2297,10 +2219,7 @@ fn render_daily_page(
     state: &UsageState,
     theme: &Theme,
 ) {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(8)])
-        .split(area);
+    let sections = daily_sections(area);
 
     render_daily_summary(f, sections[0], dashboard, state, theme);
     render_daily_table(f, sections[1], dashboard, state, theme);
@@ -2329,31 +2248,74 @@ fn render_daily_summary(
     let max_daily_cost = days.iter().map(|day| day.cost_usd).fold(0.0, f64::max);
     let active_days = days.iter().filter(|day| day.total_tokens > 0).count();
 
-    let line = Line::from(vec![
-        Span::styled("Period Total ", Style::default().fg(theme.dim)),
-        Span::styled(
-            format!("${:.2}", total_cost),
-            Style::default().fg(theme.gauge_high).bold(),
-        ),
-        Span::raw("    "),
-        Span::styled("Avg Daily ", Style::default().fg(theme.dim)),
-        Span::styled(
-            format!("${:.2}", avg_daily_cost),
-            Style::default().fg(theme.fg),
-        ),
-        Span::raw("    "),
-        Span::styled("Max Daily ", Style::default().fg(theme.dim)),
-        Span::styled(
-            format!("${:.2}", max_daily_cost),
-            Style::default().fg(theme.fg),
-        ),
-        Span::raw("    "),
-        Span::styled(
-            format!("{} active days", active_days),
-            Style::default().fg(theme.dim),
-        ),
-    ]);
-    f.render_widget(Paragraph::new(line), inner);
+    let today = Local::now().date_naive();
+    let week_start = today - Duration::days(6);
+    let today_cost = days
+        .iter()
+        .find(|day| day.date == today)
+        .map(|day| day.cost_usd)
+        .unwrap_or(0.0);
+    let week_cost: f64 = days
+        .iter()
+        .filter(|day| day.date >= week_start && day.date <= today)
+        .map(|day| day.cost_usd)
+        .sum();
+    let month_cost: f64 = days
+        .iter()
+        .filter(|day| day.date.year() == today.year() && day.date.month() == today.month())
+        .map(|day| day.cost_usd)
+        .sum();
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Period Total ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("${:.2}", total_cost),
+                Style::default().fg(theme.gauge_high).bold(),
+            ),
+            Span::raw("    "),
+            Span::styled("Avg Daily ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("${:.2}", avg_daily_cost),
+                Style::default().fg(theme.fg),
+            ),
+            Span::raw("    "),
+            Span::styled("Max Daily ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("${:.2}", max_daily_cost),
+                Style::default().fg(theme.fg),
+            ),
+            Span::raw("    "),
+            Span::styled(
+                format!("{} active days", active_days),
+                Style::default().fg(theme.dim),
+            ),
+        ]),
+    ];
+
+    if inner.height >= 2 {
+        lines.push(Line::from(vec![
+            Span::styled("Today ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("${:.2}", today_cost),
+                Style::default().fg(theme.accent).bold(),
+            ),
+            Span::raw("    "),
+            Span::styled("This Week ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("${:.2}", week_cost),
+                Style::default().fg(theme.fg),
+            ),
+            Span::raw("    "),
+            Span::styled("This Month ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("${:.2}", month_cost),
+                Style::default().fg(theme.fg),
+            ),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_daily_table(
@@ -2678,7 +2640,28 @@ fn render_heatmap_summary_card(
     let current_streak = dashboard.current_streak_in_window(metric, window, selected, enabled);
     let longest_streak = dashboard.longest_streak_in_window(metric, window, selected, enabled);
 
-    let lines = vec![
+    // Global cost stats for the cost overview rows
+    let all_days = dashboard.filtered_daily(enabled);
+    let today = Local::now().date_naive();
+    let week_start = today - Duration::days(6);
+    let today_cost = all_days
+        .iter()
+        .find(|day| day.date == today)
+        .map(|day| day.cost_usd)
+        .unwrap_or(0.0);
+    let week_cost: f64 = all_days
+        .iter()
+        .filter(|day| day.date >= week_start && day.date <= today)
+        .map(|day| day.cost_usd)
+        .sum();
+    let month_cost: f64 = all_days
+        .iter()
+        .filter(|day| day.date.year() == today.year() && day.date.month() == today.month())
+        .map(|day| day.cost_usd)
+        .sum();
+    let all_time_cost: f64 = all_days.iter().map(|day| day.cost_usd).sum();
+
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("Total  ", Style::default().fg(theme.dim)),
             Span::styled(
@@ -2713,7 +2696,34 @@ fn render_heatmap_summary_card(
             ),
             Span::styled(" cur/best", Style::default().fg(theme.dim)),
         ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Today  ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("${:.2}", today_cost),
+                Style::default().fg(theme.accent).bold(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Week   ", Style::default().fg(theme.dim)),
+            Span::styled(format!("${:.2}", week_cost), Style::default().fg(theme.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled("Month  ", Style::default().fg(theme.dim)),
+            Span::styled(format!("${:.2}", month_cost), Style::default().fg(theme.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled("All    ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("${:.2}", all_time_cost),
+                Style::default().fg(theme.fg),
+            ),
+        ]),
     ];
+
+    // Trim trailing lines that don't fit
+    let max_lines = inner.height as usize;
+    lines.truncate(max_lines);
 
     f.render_widget(
         Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),

@@ -145,10 +145,11 @@ fn compute_quantiles(cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
     };
     let thresholds = [p(25.0), p(50.0), p(75.0), p(100.0)];
 
-    // Fallback when values are uniform: spread thresholds across 4 virtual buckets
+    // Fallback when values are uniform: use fractional thresholds so cells
+    // actually land in level 5 (>= v*0.95 < v) rather than all mapping to the same bucket.
     if thresholds[0] == thresholds[3] {
         let v = thresholds[0];
-        return [v * 0.25, v * 0.50, v * 0.75, v];
+        return [v * 0.80, v * 0.90, v * 0.95, v];
     }
 
     thresholds
