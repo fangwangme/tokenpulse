@@ -143,7 +143,15 @@ fn compute_quantiles(cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
         let idx = (pct / 100.0 * (sorted.len() - 1) as f64).round() as usize;
         sorted[idx.min(sorted.len() - 1)]
     };
-    [p(20.0), p(40.0), p(60.0), p(80.0)]
+    let thresholds = [p(25.0), p(50.0), p(75.0), p(100.0)];
+
+    // Fallback when values are uniform: spread thresholds across 4 virtual buckets
+    if thresholds[0] == thresholds[3] {
+        let v = thresholds[0];
+        return [v * 0.25, v * 0.50, v * 0.75, v];
+    }
+
+    thresholds
 }
 
 #[derive(Debug, Clone, Copy)]

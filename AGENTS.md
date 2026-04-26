@@ -36,9 +36,13 @@
 - **Row selection scrolling**: Overview models, Models, and Daily move selected rows before scrolling the viewport
 - **Daily token trend**: Wide Daily table shows a 7-day token sparkline column
 - **Usage JSON output**: `tokenpulse usage --json` emits script-friendly summary JSON
+- **Auto-refresh in quota TUI**: configurable intervals (1/2/5/10/15 min, default 5 min); `a` key cycles live; countdown shown in footer
+- **`r` key to refresh**: both quota and usage TUI support manual refresh without restarting
+- **Models table polish**: 2-char gap between Cost and Msgs columns; sort arrow embedded inside column header width
+- **GitHub-style heatmap quartiles**: equal-count quartile thresholds for natural activity distribution
 
 ### Architecture
 - **Workspace**: `tokenpulse-core` (library) + `tokenpulse-cli` (binary)
 - **TUI**: ratatui 0.29 + crossterm 0.28 (with mouse capture)
 - **Data**: SQLite via rusqlite (bundled)
-- **Tests**: 133 passing
+- **Tests**: 145 passing

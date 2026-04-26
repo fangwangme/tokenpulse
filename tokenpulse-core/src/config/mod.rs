@@ -32,6 +32,10 @@ pub struct DisplayConfig {
     pub show_empty_providers: bool,
     #[serde(default)]
     pub quota_display_mode: QuotaDisplayMode,
+    /// Auto-refresh interval for quota TUI in seconds. 0 = disabled.
+    /// Supported values: 0, 60, 120, 300, 600, 900.
+    #[serde(default = "default_quota_auto_refresh_secs")]
+    pub quota_auto_refresh_secs: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,12 +82,17 @@ impl Default for DisplayConfig {
         Self {
             show_empty_providers: false,
             quota_display_mode: QuotaDisplayMode::default(),
+            quota_auto_refresh_secs: default_quota_auto_refresh_secs(),
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_quota_auto_refresh_secs() -> u32 {
+    300
 }
 
 pub struct ConfigManager {
@@ -234,5 +243,26 @@ enabled = true
             config.display.quota_display_mode,
             QuotaDisplayMode::Remaining
         );
+        assert_eq!(config.display.quota_auto_refresh_secs, 300);
+    }
+
+    #[test]
+    fn test_auto_refresh_secs_deserializes_from_toml() {
+        let toml_str = r#"
+version = 1
+[display]
+quota_auto_refresh_secs = 60
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.display.quota_auto_refresh_secs, 60);
+    }
+
+    #[test]
+    fn test_auto_refresh_secs_defaults_when_absent() {
+        let toml_str = r#"
+version = 1
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.display.quota_auto_refresh_secs, 300);
     }
 }

@@ -921,7 +921,10 @@ fn heatmap_detail_scroll_max(
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(summary: UsageSummary, daily_rows: Vec<DailyUsageRow>) -> Result<()> {
+pub fn run<F>(mut summary: UsageSummary, daily_rows: Vec<DailyUsageRow>, mut reload: F) -> Result<()>
+where
+    F: FnMut() -> Result<(UsageSummary, Vec<DailyUsageRow>)>,
+{
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -930,7 +933,7 @@ pub fn run(summary: UsageSummary, daily_rows: Vec<DailyUsageRow>) -> Result<()> 
     terminal.hide_cursor()?;
 
     let mut theme = Theme::auto();
-    let dashboard = UsageDashboard::build(&summary, &daily_rows);
+    let mut dashboard = UsageDashboard::build(&summary, &daily_rows);
     let mut state = UsageState::new(&dashboard);
 
     loop {
@@ -1009,6 +1012,41 @@ pub fn run(summary: UsageSummary, daily_rows: Vec<DailyUsageRow>) -> Result<()> 
                         && !key.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         theme = theme.toggled();
+                        continue;
+                    }
+
+                    if matches!(key.code, KeyCode::Char('r'))
+                        && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        if let Ok((new_summary, new_daily_rows)) = reload() {
+                            let new_dashboard =
+                                UsageDashboard::build(&new_summary, &new_daily_rows);
+                            let saved_page = state.page;
+                            let saved_sort_field = state.sort_field;
+                            let saved_sort_ascending = state.sort_ascending;
+                            let saved_model_filter =
+                                std::mem::take(&mut state.model_filter);
+                            let saved_sources = state.enabled_sources.clone();
+                            let saved_heatmap_date = state.selected_heatmap_date;
+                            let saved_selected_row = state.selected_row;
+                            summary = new_summary;
+                            dashboard = new_dashboard;
+                            state = UsageState::new(&dashboard);
+                            state.page = saved_page;
+                            state.sort_field = saved_sort_field;
+                            state.sort_ascending = saved_sort_ascending;
+                            state.model_filter = saved_model_filter;
+                            let new_all: BTreeSet<String> =
+                                state.all_sources.iter().cloned().collect();
+                            let filtered: BTreeSet<String> = saved_sources
+                                .into_iter()
+                                .filter(|s| new_all.contains(s))
+                                .collect();
+                            state.enabled_sources =
+                                if filtered.is_empty() { new_all } else { filtered };
+                            state.selected_heatmap_date = saved_heatmap_date;
+                            state.selected_row = saved_selected_row;
+                        }
                         continue;
                     }
 
@@ -2092,6 +2130,7 @@ fn render_models_page(
     let total_width = inner.width as usize;
     let rank_width = 4usize;
     let cost_width = 8usize;
+    let cost_msg_gap = 2usize;
     let msg_width = 8usize;
     let tokens_width = 9usize;
     let show_last = total_width >= 86;
@@ -2099,7 +2138,13 @@ fn render_models_page(
     let agent_width = (total_width / 4).clamp(22, 36);
     let model_width = total_width
         .saturating_sub(
-            rank_width + agent_width + tokens_width + cost_width + msg_width + last_width,
+            rank_width
+                + agent_width
+                + tokens_width
+                + cost_width
+                + cost_msg_gap
+                + msg_width
+                + last_width,
         )
         .clamp(14, 40);
     let headers = ["#", "Model", "Agent", "Tokens", "Cost", "Msgs", "Last"];
@@ -2130,20 +2175,19 @@ fn render_models_page(
         ),
         Span::styled(
             format!(
-                "{:<tokens_width$}{}",
-                headers[3],
-                sort_indicator(SortField::Tokens)
+                "{:<tokens_width$}",
+                format!("{}{}", headers[3], sort_indicator(SortField::Tokens))
             ),
             Style::default().fg(Color::Rgb(52, 211, 153)).bold(),
         ),
         Span::styled(
             format!(
-                "{:<cost_width$}{}",
-                headers[4],
-                sort_indicator(SortField::Cost)
+                "{:<cost_width$}",
+                format!("{}{}", headers[4], sort_indicator(SortField::Cost))
             ),
             Style::default().fg(Color::Rgb(250, 204, 21)).bold(),
         ),
+        Span::raw(" ".repeat(cost_msg_gap)),
         Span::styled(
             format!("{:<msg_width$}", headers[5]),
             Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
@@ -2152,9 +2196,8 @@ fn render_models_page(
     if show_last {
         header_spans.push(Span::styled(
             format!(
-                "{:<last_width$}{}",
-                headers[6],
-                sort_indicator(SortField::Date)
+                "{:<last_width$}",
+                format!("{}{}", headers[6], sort_indicator(SortField::Date))
             ),
             Style::default().fg(theme.dim).bold(),
         ));
@@ -2217,6 +2260,7 @@ fn render_models_page(
                     theme,
                 ),
             ),
+            Span::raw(" ".repeat(cost_msg_gap)),
             Span::styled(
                 format!("{:<msg_width$}", format_compact(model.message_count as i64)),
                 selected_row_style(
