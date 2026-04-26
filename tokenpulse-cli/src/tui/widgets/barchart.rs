@@ -273,7 +273,7 @@ fn format_y_label(value: f64, value_format: ValueFormat) -> String {
     match value_format {
         ValueFormat::Currency => {
             if value >= 100.0 {
-                format!("${:.0}", value)
+                format!("${}", format_int_commas(value.round() as i64))
             } else if value >= 10.0 {
                 format!("${:.1}", value)
             } else if value >= 0.01 {
@@ -283,6 +283,26 @@ fn format_y_label(value: f64, value_format: ValueFormat) -> String {
             }
         }
         ValueFormat::CompactNumber => format_compact(value.round() as i64),
+    }
+}
+
+fn format_int_commas(value: i64) -> String {
+    let raw = value.to_string();
+    let digits = raw.strip_prefix('-').unwrap_or(&raw);
+    let mut formatted_rev = String::with_capacity(raw.len() + raw.len() / 3);
+
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            formatted_rev.push(',');
+        }
+        formatted_rev.push(ch);
+    }
+
+    let formatted: String = formatted_rev.chars().rev().collect();
+    if raw.starts_with('-') {
+        format!("-{}", formatted)
+    } else {
+        formatted
     }
 }
 
@@ -323,5 +343,10 @@ mod tests {
         let rendered_ratio = units[2] as f64 / units[0] as f64;
         let actual_ratio = openai / anthropic;
         assert!((rendered_ratio - actual_ratio).abs() < 0.15);
+    }
+
+    #[test]
+    fn currency_y_labels_use_thousands_separators() {
+        assert_eq!(format_y_label(3_000.0, ValueFormat::Currency), "$3,000");
     }
 }
