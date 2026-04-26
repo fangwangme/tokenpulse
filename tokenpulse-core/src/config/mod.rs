@@ -36,6 +36,9 @@ pub struct DisplayConfig {
     /// Supported values: 0, 60, 120, 300, 600, 900.
     #[serde(default = "default_quota_auto_refresh_secs")]
     pub quota_auto_refresh_secs: u32,
+    /// Optional monthly budget in USD. When set, Usage TUI shows a budget gauge.
+    #[serde(default)]
+    pub monthly_budget_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,6 +86,7 @@ impl Default for DisplayConfig {
             show_empty_providers: false,
             quota_display_mode: QuotaDisplayMode::default(),
             quota_auto_refresh_secs: default_quota_auto_refresh_secs(),
+            monthly_budget_usd: None,
         }
     }
 }

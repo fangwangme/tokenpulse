@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs},
+    widgets::{Block, Borders, Clear, Paragraph, Tabs},
     Terminal,
 };
 use std::cmp::Ordering;
@@ -149,6 +149,7 @@ pub fn run(
     let mut theme = Theme::auto();
     let mut selected_tab: usize = 0;
     let mut settings_row: usize = 0;
+    let mut show_help = false;
     let config_manager = ConfigManager::new();
     let mut config = config_manager.load().unwrap_or_default();
     let mut display_mode = initial_display_mode;
@@ -208,7 +209,7 @@ pub fn run(
                 Some(remaining) => format_countdown(remaining),
             };
             let footer_text = format!(
-                " q quit | r refresh | a auto ({}) | b theme ({}) | m mode | e empty | space toggle | ←→ tab | {} provider{} ",
+                " q quit | r refresh | a auto ({}) | b theme ({}) | m mode | e empty | space toggle | ←→ tab | {} provider{} | ? help",
                 auto_hint,
                 theme.mode.label(),
                 snapshots.len(),
@@ -218,11 +219,22 @@ pub fn run(
                 .style(Style::default().fg(theme.dim))
                 .block(Block::default().borders(Borders::TOP));
             f.render_widget(footer, chunks[3]);
+
+            if show_help {
+                render_quota_help_overlay(f, size, &theme);
+            }
         })?;
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                if show_help {
+                    show_help = false;
+                    continue;
+                }
                 match key.code {
+                    KeyCode::Char('?') => {
+                        show_help = true;
+                    }
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('r') => {
                         if let Ok(new_results) =
@@ -901,4 +913,53 @@ fn auto_refresh_label(secs: u32) -> &'static str {
         900 => "15m",
         _ => "custom",
     }
+}
+
+fn render_quota_help_overlay(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
+    let keybindings: &[(&str, &str)] = &[
+        ("←→ / Tab", "switch tab"),
+        ("↑↓ / j k", "navigate settings"),
+        ("Space", "toggle provider"),
+        ("r", "refresh quota"),
+        ("a", "cycle auto-refresh interval"),
+        ("m", "toggle used/remaining mode"),
+        ("e", "show/hide empty providers"),
+        ("b", "toggle light/dark theme"),
+        ("q / Esc", "quit"),
+    ];
+
+    let key_col_width = keybindings.iter().map(|(k, _)| k.len()).max().unwrap_or(10) as u16 + 2;
+    let desc_col_width = keybindings.iter().map(|(_, d)| d.len()).max().unwrap_or(20) as u16 + 2;
+    let width = (key_col_width + desc_col_width + 4).min(area.width.saturating_sub(4));
+    let height = (keybindings.len() as u16 + 4).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Keybindings — Quota ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (key, desc) in keybindings {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:width$}", key, width = key_col_width as usize),
+                Style::default().fg(theme.accent),
+            ),
+            Span::styled(*desc, Style::default().fg(theme.fg)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        " any key to close",
+        Style::default().fg(theme.dim),
+    )]));
+
+    f.render_widget(Paragraph::new(lines).style(Style::default().fg(theme.fg)), inner);
 }

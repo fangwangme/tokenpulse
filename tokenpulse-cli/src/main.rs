@@ -53,6 +53,10 @@ enum Commands {
         #[clap(long)]
         rebuild_all: bool,
 
+        /// Emit CSV output (daily or models). Example: --csv daily
+        #[clap(long, value_name = "TYPE", conflicts_with = "json", conflicts_with = "tui")]
+        csv: Option<String>,
+
         /// Emit JSON output instead of text or the interactive dashboard.
         #[clap(long, conflicts_with = "tui")]
         json: bool,
@@ -115,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
             refresh_days,
             refresh_pricing,
             rebuild_all,
+            csv,
             json,
             tui,
             no_tui,
@@ -126,12 +131,13 @@ async fn main() -> anyhow::Result<()> {
                 refresh_days,
                 refresh_pricing,
                 rebuild_all,
-                if json {
+                if json || csv.is_some() {
                     false
                 } else {
                     resolve_tui_mode("usage", tui, no_tui)?
                 },
                 json,
+                csv,
             )
             .await?;
         }
