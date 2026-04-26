@@ -121,6 +121,7 @@ pub fn run(use_defaults: bool) -> Result<()> {
         display: DisplayConfig {
             show_empty_providers: false,
             quota_display_mode: display_mode,
+            quota_auto_refresh_secs: DisplayConfig::default().quota_auto_refresh_secs,
         },
     };
 

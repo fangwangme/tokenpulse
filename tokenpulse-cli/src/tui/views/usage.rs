@@ -1,6 +1,6 @@
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{
-    date_at_position, HeatmapMetric, StackedBarChart, TrendSparkline, ValueFormat, YearHeatmap,
+    date_at_position, HeatmapMetric, StackedBarChart, ValueFormat, YearHeatmap,
 };
 use anyhow::Result;
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -872,7 +872,7 @@ fn visible_rows_for_page(page: UsagePage, frame_area: Rect) -> usize {
     match page {
         UsagePage::Overview => {
             let sections = overview_sections(body);
-            table_data_rows(sections[2], 2)
+            table_data_rows(sections[1], 2)
         }
         UsagePage::Models => table_data_rows(body, 1),
         UsagePage::Daily => {
@@ -921,7 +921,14 @@ fn heatmap_detail_scroll_max(
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(summary: UsageSummary, daily_rows: Vec<DailyUsageRow>) -> Result<()> {
+pub fn run<F>(
+    mut summary: UsageSummary,
+    daily_rows: Vec<DailyUsageRow>,
+    mut reload: F,
+) -> Result<()>
+where
+    F: FnMut() -> Result<(UsageSummary, Vec<DailyUsageRow>)>,
+{
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -930,7 +937,7 @@ pub fn run(summary: UsageSummary, daily_rows: Vec<DailyUsageRow>) -> Result<()> 
     terminal.hide_cursor()?;
 
     let mut theme = Theme::auto();
-    let dashboard = UsageDashboard::build(&summary, &daily_rows);
+    let mut dashboard = UsageDashboard::build(&summary, &daily_rows);
     let mut state = UsageState::new(&dashboard);
 
     loop {
@@ -1009,6 +1016,43 @@ pub fn run(summary: UsageSummary, daily_rows: Vec<DailyUsageRow>) -> Result<()> 
                         && !key.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         theme = theme.toggled();
+                        continue;
+                    }
+
+                    if matches!(key.code, KeyCode::Char('r'))
+                        && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        if let Ok((new_summary, new_daily_rows)) = reload() {
+                            let new_dashboard =
+                                UsageDashboard::build(&new_summary, &new_daily_rows);
+                            let saved_page = state.page;
+                            let saved_sort_field = state.sort_field;
+                            let saved_sort_ascending = state.sort_ascending;
+                            let saved_model_filter = std::mem::take(&mut state.model_filter);
+                            let saved_sources = state.enabled_sources.clone();
+                            let saved_heatmap_date = state.selected_heatmap_date;
+                            let saved_selected_row = state.selected_row;
+                            summary = new_summary;
+                            dashboard = new_dashboard;
+                            state = UsageState::new(&dashboard);
+                            state.page = saved_page;
+                            state.sort_field = saved_sort_field;
+                            state.sort_ascending = saved_sort_ascending;
+                            state.model_filter = saved_model_filter;
+                            let new_all: BTreeSet<String> =
+                                state.all_sources.iter().cloned().collect();
+                            let filtered: BTreeSet<String> = saved_sources
+                                .into_iter()
+                                .filter(|s| new_all.contains(s))
+                                .collect();
+                            state.enabled_sources = if filtered.is_empty() {
+                                new_all
+                            } else {
+                                filtered
+                            };
+                            state.selected_heatmap_date = saved_heatmap_date;
+                            state.selected_row = saved_selected_row;
+                        }
                         continue;
                     }
 
@@ -1326,15 +1370,12 @@ fn dashboard_body_area(area: Rect) -> Rect {
 }
 
 fn overview_sections(area: Rect) -> std::rc::Rc<[Rect]> {
-    let summary_height = area.height.min(5);
-    let remaining = area.height.saturating_sub(summary_height);
-    let chart_height = (remaining.saturating_mul(2) / 3).max(8).min(remaining);
-    let model_height = remaining.saturating_sub(chart_height);
+    let chart_height = (area.height.saturating_mul(2) / 3).max(8).min(area.height);
+    let model_height = area.height.saturating_sub(chart_height);
 
     Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(summary_height),
             Constraint::Length(chart_height),
             Constraint::Length(model_height),
         ])
@@ -1344,7 +1385,7 @@ fn overview_sections(area: Rect) -> std::rc::Rc<[Rect]> {
 fn daily_sections(area: Rect) -> std::rc::Rc<[Rect]> {
     Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(8)])
+        .constraints([Constraint::Length(4), Constraint::Min(8)])
         .split(area)
 }
 
@@ -1514,7 +1555,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
     };
     let help = match state.page {
         UsagePage::Overview => format!(
-            " q quit | b theme ({}) | ←→ tab | ↑↓ select | t/c metric ({}){}",
+            " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ select | t/c metric ({}){}",
             theme.mode.label(),
             match state.overview_metric {
                 OverviewMetric::Tokens => "tokens",
@@ -1535,7 +1576,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
                 format!(" | / filter ({})", state.model_filter)
             };
             format!(
-                " q quit | b theme ({}) | ←→ tab | ↑↓ select | / filter | ctrl+l clear | c/t/d sort ({} {}){}{}",
+                " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ select | / filter | ctrl+l clear | c/t/d sort ({} {}){}{}",
                 theme.mode.label(), field, dir, filter, filter_hint
             )
         }
@@ -1547,12 +1588,12 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
                 SortField::Date => "date",
             };
             format!(
-                " q quit | b theme ({}) | ←→ tab | ↑↓ select | c/t/d sort ({} {}){}",
+                " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ select | c/t/d sort ({} {}){}",
                 theme.mode.label(), field, dir, filter_hint
             )
         }
         UsagePage::Heatmap => format!(
-            " q quit | b theme ({}) | ←→ tab | ↑↓ day | pgup/pgdn detail | w window ({}) | t/c/i/o/x/m/n metric ({}){}",
+            " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ day | pgup/pgdn detail | w window ({}) | t/c/i/o/x/m/n metric ({}){}",
             theme.mode.label(),
             state.heatmap_window.label(),
             state.heatmap_metric.short_label(),
@@ -1647,105 +1688,8 @@ fn render_overview_page(
 ) {
     let sections = overview_sections(area);
 
-    render_overview_summary_cards(f, sections[0], dashboard, state, theme);
-    render_overview_chart(f, sections[1], dashboard, state, theme);
-    render_overview_top_models(f, sections[2], dashboard, summary, state, theme);
-}
-
-fn render_overview_summary_cards(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    dashboard: &UsageDashboard,
-    state: &UsageState,
-    theme: &Theme,
-) {
-    let cards = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(area);
-
-    let days = dashboard.filtered_daily(&state.enabled_sources);
-    let today = Local::now().date_naive();
-    let week_start = today - Duration::days(6);
-    let today_cost = days
-        .iter()
-        .find(|day| day.date == today)
-        .map(|day| day.cost_usd)
-        .unwrap_or(0.0);
-    let week_cost: f64 = days
-        .iter()
-        .filter(|day| day.date >= week_start && day.date <= today)
-        .map(|day| day.cost_usd)
-        .sum();
-    let month_cost: f64 = days
-        .iter()
-        .filter(|day| day.date.year() == today.year() && day.date.month() == today.month())
-        .map(|day| day.cost_usd)
-        .sum();
-    let total_cost: f64 = days.iter().map(|day| day.cost_usd).sum();
-    let trend: Vec<f64> = days
-        .iter()
-        .rev()
-        .take(14)
-        .map(|day| day.cost_usd)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    let values = [
-        ("Today", today_cost),
-        ("This Week", week_cost),
-        ("This Month", month_cost),
-        ("Total", total_cost),
-    ];
-    for (idx, (label, value)) in values.into_iter().enumerate() {
-        render_overview_summary_card(f, cards[idx], label, value, &trend, theme);
-    }
-}
-
-fn render_overview_summary_card(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    label: &str,
-    value: f64,
-    trend: &[f64],
-    theme: &Theme,
-) {
-    let block = Block::default()
-        .title(Span::styled(
-            format!(" {} ", label),
-            Style::default().fg(theme.dim),
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if inner.height == 0 {
-        return;
-    }
-
-    let value_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    f.render_widget(
-        Paragraph::new(format!("${:.2}", value)).style(Style::default().fg(theme.accent).bold()),
-        value_area,
-    );
-
-    if inner.height > 1 {
-        let trend_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
-        f.render_widget(
-            TrendSparkline::new(trend)
-                .color(theme.accent_soft)
-                .empty(theme.dim),
-            trend_area,
-        );
-    }
+    render_overview_chart(f, sections[0], dashboard, state, theme);
+    render_overview_top_models(f, sections[1], dashboard, summary, state, theme);
 }
 
 fn render_overview_chart(
@@ -1902,11 +1846,7 @@ fn render_overview_top_models(
         data_rows_visible,
         filtered.len(),
     );
-    let total_cost = filtered
-        .iter()
-        .map(|model| model.cost)
-        .sum::<f64>()
-        .max(0.01);
+    let total_cost = filtered.iter().map(|model| model.cost).sum::<f64>();
     let total_width = inner.width as usize;
     let pct_width = 7usize;
     let cost_width = 8usize;
@@ -1954,7 +1894,7 @@ fn render_overview_top_models(
     {
         let provider_hint = model.provider.split(',').next();
         let color = theme.model_color_for(&model.model, provider_hint);
-        let pct = (model.cost / total_cost * 100.0).clamp(0.0, 100.0);
+        let pct = cost_share_percent(model.cost, total_cost);
         let selected = row_idx == selected_row;
         lines.push(Line::from(vec![
             Span::styled(
@@ -2092,17 +2032,27 @@ fn render_models_page(
     let total_width = inner.width as usize;
     let rank_width = 4usize;
     let cost_width = 8usize;
+    let pct_width = 7usize;
     let msg_width = 8usize;
     let tokens_width = 9usize;
-    let show_last = total_width >= 86;
+    let show_last = total_width >= 92;
     let last_width = if show_last { 11usize } else { 0usize };
     let agent_width = (total_width / 4).clamp(22, 36);
     let model_width = total_width
         .saturating_sub(
-            rank_width + agent_width + tokens_width + cost_width + msg_width + last_width,
+            rank_width
+                + agent_width
+                + tokens_width
+                + cost_width
+                + 1
+                + pct_width
+                + 1
+                + msg_width
+                + last_width,
         )
-        .clamp(14, 40);
-    let headers = ["#", "Model", "Agent", "Tokens", "Cost", "Msgs", "Last"];
+        .clamp(12, 40);
+    let total_cost = models.iter().map(|m| m.summary.cost).sum::<f64>();
+    let headers = ["#", "Model", "Agent", "Tokens", "Cost", "%", "Msgs", "Last"];
     let sort_indicator = |field: SortField| -> &str {
         if state.sort_field == field {
             if state.sort_ascending {
@@ -2130,31 +2080,34 @@ fn render_models_page(
         ),
         Span::styled(
             format!(
-                "{:<tokens_width$}{}",
-                headers[3],
-                sort_indicator(SortField::Tokens)
+                "{:<tokens_width$}",
+                format!("{}{}", headers[3], sort_indicator(SortField::Tokens))
             ),
             Style::default().fg(Color::Rgb(52, 211, 153)).bold(),
         ),
         Span::styled(
             format!(
-                "{:<cost_width$}{}",
-                headers[4],
-                sort_indicator(SortField::Cost)
+                "{:<cost_width$}",
+                format!("{}{}", headers[4], sort_indicator(SortField::Cost))
             ),
             Style::default().fg(Color::Rgb(250, 204, 21)).bold(),
         ),
+        Span::raw(" "),
         Span::styled(
-            format!("{:<msg_width$}", headers[5]),
+            format!("{:<pct_width$}", headers[5]),
+            Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:<msg_width$}", headers[6]),
             Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
         ),
     ];
     if show_last {
         header_spans.push(Span::styled(
             format!(
-                "{:<last_width$}{}",
-                headers[6],
-                sort_indicator(SortField::Date)
+                "{:<last_width$}",
+                format!("{}{}", headers[7], sort_indicator(SortField::Date))
             ),
             Style::default().fg(theme.dim).bold(),
         ));
@@ -2184,6 +2137,7 @@ fn render_models_page(
         let selected = rank - 1 == selected_row;
         let model = &row.summary;
         let model_color = theme.model_color_for(&model.model, model.provider.split(',').next());
+        let pct = cost_share_percent(model.cost, total_cost);
 
         let mut spans = vec![
             Span::styled(
@@ -2217,6 +2171,16 @@ fn render_models_page(
                     theme,
                 ),
             ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<pct_width$}", format!("{:.1}%", pct)),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(96, 165, 250)),
+                    selected,
+                    theme,
+                ),
+            ),
+            Span::raw(" "),
             Span::styled(
                 format!("{:<msg_width$}", format_compact(model.message_count as i64)),
                 selected_row_style(
@@ -2253,10 +2217,7 @@ fn render_daily_page(
     state: &UsageState,
     theme: &Theme,
 ) {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(8)])
-        .split(area);
+    let sections = daily_sections(area);
 
     render_daily_summary(f, sections[0], dashboard, state, theme);
     render_daily_table(f, sections[1], dashboard, state, theme);
@@ -2285,7 +2246,25 @@ fn render_daily_summary(
     let max_daily_cost = days.iter().map(|day| day.cost_usd).fold(0.0, f64::max);
     let active_days = days.iter().filter(|day| day.total_tokens > 0).count();
 
-    let line = Line::from(vec![
+    let today = Local::now().date_naive();
+    let week_start = today - Duration::days(6);
+    let today_cost = days
+        .iter()
+        .find(|day| day.date == today)
+        .map(|day| day.cost_usd)
+        .unwrap_or(0.0);
+    let week_cost: f64 = days
+        .iter()
+        .filter(|day| day.date >= week_start && day.date <= today)
+        .map(|day| day.cost_usd)
+        .sum();
+    let month_cost: f64 = days
+        .iter()
+        .filter(|day| day.date.year() == today.year() && day.date.month() == today.month())
+        .map(|day| day.cost_usd)
+        .sum();
+
+    let mut lines = vec![Line::from(vec![
         Span::styled("Period Total ", Style::default().fg(theme.dim)),
         Span::styled(
             format!("${:.2}", total_cost),
@@ -2308,8 +2287,25 @@ fn render_daily_summary(
             format!("{} active days", active_days),
             Style::default().fg(theme.dim),
         ),
-    ]);
-    f.render_widget(Paragraph::new(line), inner);
+    ])];
+
+    if inner.height >= 2 {
+        lines.push(Line::from(vec![
+            Span::styled("Today ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("${:.2}", today_cost),
+                Style::default().fg(theme.accent).bold(),
+            ),
+            Span::raw("    "),
+            Span::styled("This Week ", Style::default().fg(theme.dim)),
+            Span::styled(format!("${:.2}", week_cost), Style::default().fg(theme.fg)),
+            Span::raw("    "),
+            Span::styled("This Month ", Style::default().fg(theme.dim)),
+            Span::styled(format!("${:.2}", month_cost), Style::default().fg(theme.fg)),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_daily_table(
@@ -2634,7 +2630,28 @@ fn render_heatmap_summary_card(
     let current_streak = dashboard.current_streak_in_window(metric, window, selected, enabled);
     let longest_streak = dashboard.longest_streak_in_window(metric, window, selected, enabled);
 
-    let lines = vec![
+    // Global cost stats for the cost overview rows
+    let all_days = dashboard.filtered_daily(enabled);
+    let today = Local::now().date_naive();
+    let week_start = today - Duration::days(6);
+    let today_cost = all_days
+        .iter()
+        .find(|day| day.date == today)
+        .map(|day| day.cost_usd)
+        .unwrap_or(0.0);
+    let week_cost: f64 = all_days
+        .iter()
+        .filter(|day| day.date >= week_start && day.date <= today)
+        .map(|day| day.cost_usd)
+        .sum();
+    let month_cost: f64 = all_days
+        .iter()
+        .filter(|day| day.date.year() == today.year() && day.date.month() == today.month())
+        .map(|day| day.cost_usd)
+        .sum();
+    let all_time_cost: f64 = all_days.iter().map(|day| day.cost_usd).sum();
+
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("Total  ", Style::default().fg(theme.dim)),
             Span::styled(
@@ -2669,7 +2686,34 @@ fn render_heatmap_summary_card(
             ),
             Span::styled(" cur/best", Style::default().fg(theme.dim)),
         ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Today  ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("${:.2}", today_cost),
+                Style::default().fg(theme.accent).bold(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Week   ", Style::default().fg(theme.dim)),
+            Span::styled(format!("${:.2}", week_cost), Style::default().fg(theme.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled("Month  ", Style::default().fg(theme.dim)),
+            Span::styled(format!("${:.2}", month_cost), Style::default().fg(theme.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled("All    ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("${:.2}", all_time_cost),
+                Style::default().fg(theme.fg),
+            ),
+        ]),
     ];
+
+    // Trim trailing lines that don't fit
+    let max_lines = inner.height as usize;
+    lines.truncate(max_lines);
 
     f.render_widget(
         Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),
@@ -3064,6 +3108,14 @@ fn overview_model_visible_rows(area_height: u16) -> usize {
     area_height.saturating_sub(3) as usize
 }
 
+fn cost_share_percent(cost: f64, total_cost: f64) -> f64 {
+    if total_cost <= 0.0 {
+        return 0.0;
+    }
+
+    (cost / total_cost * 100.0).clamp(0.0, 100.0)
+}
+
 fn normalized_scroll_offset(offset: usize, selected: usize, visible: usize, total: usize) -> usize {
     if total == 0 || visible == 0 {
         return 0;
@@ -3260,5 +3312,18 @@ mod tests {
         assert_eq!(groups[0].models.len(), 1);
         assert_eq!(groups[0].models[0].0, "gpt-5");
         assert_eq!(groups[0].models[0].1.cost_usd, 2.0);
+    }
+
+    #[test]
+    fn overview_visible_rows_uses_model_table_section() {
+        let rows = visible_rows_for_page(UsagePage::Overview, Rect::new(0, 0, 120, 40));
+
+        assert!(rows > 0);
+    }
+
+    #[test]
+    fn cost_share_percent_uses_actual_small_nonzero_total() {
+        assert_eq!(cost_share_percent(0.005, 0.005), 100.0);
+        assert_eq!(cost_share_percent(0.005, 0.0), 0.0);
     }
 }

@@ -114,7 +114,8 @@ pub async fn run(
         print_json_summary(&summary)?;
     } else if use_tui {
         let daily_breakdown = store.load_daily_rows(output_since, &provider_names)?;
-        return tui::usage::run(summary, daily_breakdown);
+        let reload_fn = build_reload_fn(provider_names, output_since);
+        return tui::usage::run(summary, daily_breakdown, reload_fn);
     } else {
         print_summary(&summary);
     }
@@ -127,6 +128,47 @@ fn output_since_hint(
     refresh_range: Option<DateRange>,
 ) -> Option<NaiveDate> {
     requested_since.or(refresh_range.map(|range| range.start))
+}
+
+fn build_reload_fn(
+    provider_names: Vec<String>,
+    output_since: Option<NaiveDate>,
+) -> impl FnMut() -> Result<(
+    tokenpulse_core::usage::UsageSummary,
+    Vec<tokenpulse_core::usage::DailyUsageRow>,
+)> {
+    move || {
+        let store = UsageStore::new();
+        let parsers = build_parsers(&provider_names);
+
+        for parser in &parsers {
+            let since = store.default_since(parser.provider_name(), output_since)?;
+            match parser.parse_sessions(since) {
+                Ok(messages) => {
+                    if !messages.is_empty() {
+                        store.ingest_messages(&messages, false)?;
+                    }
+                }
+                Err(_) => {} // tolerate per-provider errors during reload
+            }
+        }
+
+        store.repair_zero_costs(output_since, &provider_names)?;
+
+        let (message_count, session_count) =
+            store.load_summary_counts(output_since, &provider_names)?;
+
+        let summary = build_usage_summary_from_daily(
+            store.load_dashboard_days(output_since, &provider_names)?,
+            store.load_provider_summaries(output_since, &provider_names)?,
+            store.load_model_summaries(output_since, &provider_names)?,
+            message_count,
+            session_count,
+        );
+
+        let daily_rows = store.load_daily_rows(output_since, &provider_names)?;
+        Ok((summary, daily_rows))
+    }
 }
 
 fn parse_provider_names(provider: Option<&str>) -> Vec<String> {

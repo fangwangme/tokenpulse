@@ -215,10 +215,10 @@ Non-TUI output includes:
 
 The usage TUI is organized into four tabs:
 
-- `Overview` - summary cards + 60-day stacked bar chart by model company + scrollable top models table
-- `Models` - Full searchable/sortable model table with company-colored model names and colored numeric columns
-- `Daily` - Daily summary table with sorting and 7-day token trends on wide terminals
-- `Activity` - GitHub-style contribution graph with drill-down
+- `Overview` - 60-day stacked bar chart by model company + scrollable top models table
+- `Models` - Full searchable/sortable model table with company-colored model names, cost percentage, and colored numeric columns
+- `Daily` - Daily summary bar and table with sorting and 7-day token trends on wide terminals
+- `Activity` - GitHub-style contribution graph with range stats and selected-day drill-down
 
 ### Source Filtering
 
@@ -236,6 +236,7 @@ All tabs support runtime source filtering:
 - top models are normalized before ranking
 - top models use row selection; the visible window only moves when the selected row reaches an edge
 - model and agent columns are intentionally wider so long names are still legible
+- each row shows model cost percentage using the actual filtered total cost
 
 Primary historical dashboard view:
 
@@ -251,6 +252,7 @@ Model attribution view:
 - Quick filter with `/`
 - Company-colored model names
 - Wider agent column for multi-agent attribution strings
+- Cost percentage column based on the filtered model total
 - Semantic numeric colors: tokens=green, cost=gold, messages=blue
 - Filtered by enabled sources
 
@@ -258,7 +260,7 @@ Model attribution view:
 
 Daily operations view:
 
-- Summary cards (cost, tokens, messages, sessions)
+- Summary bar with Today, This Week, This Month, period cost, tokens, messages, and sessions
 - Daily table with today highlighted
 - 7-day token sparkline on wide terminals
 - Semantic numeric colors by column
@@ -270,6 +272,7 @@ GitHub-style contribution graph:
 
 - 7 switchable metrics
 - 3 window modes (past 26 weeks, past 52 weeks, past 365 days)
+- Range overview includes Today, This Week, This Month, and all-time cost
 - Day drill-down with:
   - Agent totals with per-agent cost
   - Token summary (total/input/output/cache/reasoning/messages/sessions)

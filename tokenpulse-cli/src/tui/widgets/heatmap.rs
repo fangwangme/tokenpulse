@@ -143,7 +143,16 @@ fn compute_quantiles(cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
         let idx = (pct / 100.0 * (sorted.len() - 1) as f64).round() as usize;
         sorted[idx.min(sorted.len() - 1)]
     };
-    [p(20.0), p(40.0), p(60.0), p(80.0)]
+    let thresholds = [p(20.0), p(40.0), p(60.0), p(80.0)];
+
+    // Fallback when values are uniform: use fractional thresholds so cells
+    // actually land in level 5 (>= v*0.95 < v) rather than all mapping to the same bucket.
+    if thresholds[0] == thresholds[3] {
+        let v = thresholds[0];
+        return [v * 0.80, v * 0.90, v * 0.95, v];
+    }
+
+    thresholds
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -589,5 +598,29 @@ mod tests {
         assert_eq!(positions[2].1, "Jun");
         assert!(positions[1].0 >= positions[0].0 + 7);
         assert!(positions[2].0 >= positions[1].0 + 7);
+    }
+
+    #[test]
+    fn quantile_thresholds_keep_top_bucket_below_absolute_max() {
+        let cell_values = (0..10)
+            .map(|i| ((i, 0), (i + 1) as f64))
+            .collect::<BTreeMap<_, _>>();
+
+        let thresholds = compute_quantiles(&cell_values);
+        let palette = [
+            Color::Black,
+            Color::Red,
+            Color::Yellow,
+            Color::Blue,
+            Color::Green,
+        ];
+
+        assert!(thresholds[3] < 10.0);
+        assert_eq!(
+            YearHeatmap::new(&[], HeatmapMetric::TotalTokens)
+                .palette(palette)
+                .value_to_color(9.0, &thresholds),
+            palette[4]
+        );
     }
 }

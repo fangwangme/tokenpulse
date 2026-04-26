@@ -16,6 +16,7 @@ use ratatui::{
     Terminal,
 };
 use std::cmp::Ordering;
+use std::time::{Duration, Instant};
 use tokenpulse_core::{
     config::{Config, ConfigManager, QuotaDisplayMode},
     quota::{fetch_all, QuotaCacheStore},
@@ -152,8 +153,17 @@ pub fn run(
     let mut config = config_manager.load().unwrap_or_default();
     let mut display_mode = initial_display_mode;
     let mut enabled_providers = initial_enabled_providers;
+    let mut last_refresh = Instant::now();
 
     loop {
+        let auto_secs = config.display.quota_auto_refresh_secs;
+        let refresh_countdown: Option<u64> = if auto_secs > 0 {
+            let elapsed = last_refresh.elapsed().as_secs();
+            Some((auto_secs as u64).saturating_sub(elapsed))
+        } else {
+            None
+        };
+
         terminal.draw(|f| {
             let snapshots: Vec<&QuotaSnapshot> =
                 results.iter().filter_map(|r| r.as_ref().ok()).collect();
@@ -186,14 +196,20 @@ pub fn run(
                     settings_row,
                     &config_manager,
                     &snapshots,
+                    refresh_countdown,
                     &theme,
                 );
             } else if let Some(snapshot) = snapshots.get(selected_tab - 1) {
                 render_snapshot_card(f, chunks[2], snapshot, &display_mode, &theme, false, false);
             }
 
+            let auto_hint = match refresh_countdown {
+                None => "off".to_string(),
+                Some(remaining) => format_countdown(remaining),
+            };
             let footer_text = format!(
-                " q quit | r refresh | b theme ({}) | m mode | e empty | space toggle | ←→ tab | {} provider{} ",
+                " q quit | r refresh | a auto ({}) | b theme ({}) | m mode | e empty | space toggle | ←→ tab | {} provider{} ",
+                auto_hint,
                 theme.mode.label(),
                 snapshots.len(),
                 if snapshots.len() == 1 { "" } else { "s" }
@@ -204,16 +220,28 @@ pub fn run(
             f.render_widget(footer, chunks[3]);
         })?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('r') => {
-                        results = refresh_quota_results(provider.as_deref(), &enabled_providers)?;
+                        if let Ok(new_results) =
+                            refresh_quota_results(provider.as_deref(), &enabled_providers)
+                        {
+                            results = new_results;
+                            last_refresh = Instant::now();
+                        }
                         let snapshots: Vec<&QuotaSnapshot> =
                             results.iter().filter_map(|r| r.as_ref().ok()).collect();
                         let tab_count = quota_tab_titles(&snapshots).len();
                         selected_tab = selected_tab.min(tab_count.saturating_sub(1));
+                        settings_row = settings_row.min(settings_row_count().saturating_sub(1));
+                    }
+                    KeyCode::Char('a') => {
+                        config.display.quota_auto_refresh_secs =
+                            next_auto_refresh_interval(config.display.quota_auto_refresh_secs);
+                        let _ = config_manager.save(&config);
+                        last_refresh = Instant::now();
                     }
                     KeyCode::Char('b') => {
                         theme = theme.toggled();
@@ -288,6 +316,18 @@ pub fn run(
                 }
             }
         }
+
+        // Auto-refresh check
+        if auto_secs > 0 && last_refresh.elapsed().as_secs() >= auto_secs as u64 {
+            if let Ok(new_results) = refresh_quota_results(provider.as_deref(), &enabled_providers)
+            {
+                results = new_results;
+                last_refresh = Instant::now();
+            } else {
+                // Reset timer even on error to avoid tight retry loop
+                last_refresh = Instant::now();
+            }
+        }
     }
 
     disable_raw_mode()?;
@@ -313,11 +353,11 @@ fn toggle_display_mode(display_mode: &QuotaDisplayMode) -> QuotaDisplayMode {
 }
 
 fn settings_row_count() -> usize {
-    2 + quota_provider_info_list().len()
+    3 + quota_provider_info_list().len()
 }
 
 fn settings_provider_id(row: usize) -> Option<&'static str> {
-    row.checked_sub(2)
+    row.checked_sub(3)
         .and_then(|idx| quota_provider_info_list().get(idx).map(|info| info.id))
 }
 
@@ -689,6 +729,7 @@ fn render_settings(
     selected_row: usize,
     config_manager: &ConfigManager,
     snapshots: &[&QuotaSnapshot],
+    refresh_countdown: Option<u64>,
     theme: &Theme,
 ) {
     let block = Block::default()
@@ -710,6 +751,16 @@ fn render_settings(
         QuotaDisplayMode::Remaining => "remaining",
     };
 
+    let auto_value = {
+        let base = auto_refresh_label(config.display.quota_auto_refresh_secs).to_string();
+        match refresh_countdown {
+            Some(remaining) if config.display.quota_auto_refresh_secs > 0 => {
+                format!("{base} (next {})", format_countdown(remaining))
+            }
+            _ => base,
+        }
+    };
+
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("Config file ", Style::default().fg(theme.dim)),
@@ -722,7 +773,7 @@ fn render_settings(
     lines.push(settings_line(
         selected_row == 0,
         "quota_display_mode",
-        mode,
+        mode.to_string(),
         "m",
         theme,
         theme.codex,
@@ -731,13 +782,21 @@ fn render_settings(
         selected_row == 1,
         "show_empty_providers",
         if config.display.show_empty_providers {
-            "true"
+            "true".to_string()
         } else {
-            "false"
+            "false".to_string()
         },
         "e",
         theme,
         theme.gemini,
+    ));
+    lines.push(settings_line(
+        selected_row == 2,
+        "quota_auto_refresh_interval",
+        auto_value,
+        "a",
+        theme,
+        theme.accent_soft,
     ));
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
@@ -746,7 +805,7 @@ fn render_settings(
     )));
 
     for (idx, info) in quota_provider_info_list().iter().enumerate() {
-        let row = idx + 2;
+        let row = idx + 3;
         let enabled = is_provider_enabled(config, info.id);
         let fetched = fetched_provider_ids.contains(info.id);
         let marker = if selected_row == row { ">" } else { " " };
@@ -788,7 +847,7 @@ fn render_settings(
 fn settings_line(
     selected: bool,
     key: &'static str,
-    value: &'static str,
+    value: String,
     shortcut: &'static str,
     theme: &Theme,
     value_color: ratatui::style::Color,
@@ -805,4 +864,41 @@ fn settings_line(
         Span::raw("  "),
         Span::styled(shortcut, Style::default().fg(theme.accent_soft).bold()),
     ])
+}
+
+const AUTO_REFRESH_INTERVALS: &[u32] = &[0, 60, 120, 300, 600, 900];
+
+fn next_auto_refresh_interval(current: u32) -> u32 {
+    match AUTO_REFRESH_INTERVALS.iter().position(|&v| v == current) {
+        Some(idx) => AUTO_REFRESH_INTERVALS[(idx + 1) % AUTO_REFRESH_INTERVALS.len()],
+        // Custom interval: advance to next standard interval strictly greater than current,
+        // or wrap to 0 (disabled) if already above all standard values.
+        None => AUTO_REFRESH_INTERVALS
+            .iter()
+            .copied()
+            .find(|&v| v > current)
+            .unwrap_or(0),
+    }
+}
+
+fn format_countdown(remaining: u64) -> String {
+    let m = remaining / 60;
+    let s = remaining % 60;
+    if m > 0 {
+        format!("{m}m {s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+fn auto_refresh_label(secs: u32) -> &'static str {
+    match secs {
+        0 => "off",
+        60 => "1m",
+        120 => "2m",
+        300 => "5m",
+        600 => "10m",
+        900 => "15m",
+        _ => "custom",
+    }
 }
