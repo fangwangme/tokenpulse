@@ -1333,7 +1333,8 @@ where
                     }
                 }
                 Event::Mouse(mouse)
-                    if !state.show_source_filter
+                    if !state.show_help
+                        && !state.show_source_filter
                         && state.page == UsagePage::Heatmap
                         && matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) =>
                 {
@@ -1346,7 +1347,8 @@ where
                     }
                 }
                 Event::Mouse(mouse)
-                    if !state.show_source_filter
+                    if !state.show_help
+                        && !state.show_source_filter
                         && matches!(mouse.kind, MouseEventKind::ScrollUp) =>
                 {
                     if state.page == UsagePage::Heatmap {
@@ -1367,7 +1369,8 @@ where
                     }
                 }
                 Event::Mouse(mouse)
-                    if !state.show_source_filter
+                    if !state.show_help
+                        && !state.show_source_filter
                         && matches!(mouse.kind, MouseEventKind::ScrollDown) =>
                 {
                     if state.page == UsagePage::Heatmap {

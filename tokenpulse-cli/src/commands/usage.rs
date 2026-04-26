@@ -90,7 +90,11 @@ pub async fn run(
             return Ok(());
         }
 
-        if csv.is_some() {
+        if let Some(csv_type) = csv {
+            match csv_type.as_str() {
+                "models" => println!("model,provider,source,tokens,cost_usd,messages,sessions,percent"),
+                _ => println!("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_tokens,messages,sessions"),
+            }
             return Ok(());
         }
 
