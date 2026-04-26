@@ -872,7 +872,7 @@ fn visible_rows_for_page(page: UsagePage, frame_area: Rect) -> usize {
     match page {
         UsagePage::Overview => {
             let sections = overview_sections(body);
-            table_data_rows(sections[2], 2)
+            table_data_rows(sections[1], 2)
         }
         UsagePage::Models => table_data_rows(body, 1),
         UsagePage::Daily => {
@@ -921,7 +921,11 @@ fn heatmap_detail_scroll_max(
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn run<F>(mut summary: UsageSummary, daily_rows: Vec<DailyUsageRow>, mut reload: F) -> Result<()>
+pub fn run<F>(
+    mut summary: UsageSummary,
+    daily_rows: Vec<DailyUsageRow>,
+    mut reload: F,
+) -> Result<()>
 where
     F: FnMut() -> Result<(UsageSummary, Vec<DailyUsageRow>)>,
 {
@@ -1024,8 +1028,7 @@ where
                             let saved_page = state.page;
                             let saved_sort_field = state.sort_field;
                             let saved_sort_ascending = state.sort_ascending;
-                            let saved_model_filter =
-                                std::mem::take(&mut state.model_filter);
+                            let saved_model_filter = std::mem::take(&mut state.model_filter);
                             let saved_sources = state.enabled_sources.clone();
                             let saved_heatmap_date = state.selected_heatmap_date;
                             let saved_selected_row = state.selected_row;
@@ -1042,8 +1045,11 @@ where
                                 .into_iter()
                                 .filter(|s| new_all.contains(s))
                                 .collect();
-                            state.enabled_sources =
-                                if filtered.is_empty() { new_all } else { filtered };
+                            state.enabled_sources = if filtered.is_empty() {
+                                new_all
+                            } else {
+                                filtered
+                            };
                             state.selected_heatmap_date = saved_heatmap_date;
                             state.selected_row = saved_selected_row;
                         }
@@ -1840,11 +1846,7 @@ fn render_overview_top_models(
         data_rows_visible,
         filtered.len(),
     );
-    let total_cost = filtered
-        .iter()
-        .map(|model| model.cost)
-        .sum::<f64>()
-        .max(0.01);
+    let total_cost = filtered.iter().map(|model| model.cost).sum::<f64>();
     let total_width = inner.width as usize;
     let pct_width = 7usize;
     let cost_width = 8usize;
@@ -1892,7 +1894,7 @@ fn render_overview_top_models(
     {
         let provider_hint = model.provider.split(',').next();
         let color = theme.model_color_for(&model.model, provider_hint);
-        let pct = (model.cost / total_cost * 100.0).clamp(0.0, 100.0);
+        let pct = cost_share_percent(model.cost, total_cost);
         let selected = row_idx == selected_row;
         lines.push(Line::from(vec![
             Span::styled(
@@ -2049,11 +2051,7 @@ fn render_models_page(
                 + last_width,
         )
         .clamp(12, 40);
-    let total_cost = models
-        .iter()
-        .map(|m| m.summary.cost)
-        .sum::<f64>()
-        .max(0.01);
+    let total_cost = models.iter().map(|m| m.summary.cost).sum::<f64>();
     let headers = ["#", "Model", "Agent", "Tokens", "Cost", "%", "Msgs", "Last"];
     let sort_indicator = |field: SortField| -> &str {
         if state.sort_field == field {
@@ -2139,7 +2137,7 @@ fn render_models_page(
         let selected = rank - 1 == selected_row;
         let model = &row.summary;
         let model_color = theme.model_color_for(&model.model, model.provider.split(',').next());
-        let pct = (model.cost / total_cost * 100.0).clamp(0.0, 100.0);
+        let pct = cost_share_percent(model.cost, total_cost);
 
         let mut spans = vec![
             Span::styled(
@@ -2266,32 +2264,30 @@ fn render_daily_summary(
         .map(|day| day.cost_usd)
         .sum();
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("Period Total ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format!("${:.2}", total_cost),
-                Style::default().fg(theme.gauge_high).bold(),
-            ),
-            Span::raw("    "),
-            Span::styled("Avg Daily ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format!("${:.2}", avg_daily_cost),
-                Style::default().fg(theme.fg),
-            ),
-            Span::raw("    "),
-            Span::styled("Max Daily ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format!("${:.2}", max_daily_cost),
-                Style::default().fg(theme.fg),
-            ),
-            Span::raw("    "),
-            Span::styled(
-                format!("{} active days", active_days),
-                Style::default().fg(theme.dim),
-            ),
-        ]),
-    ];
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Period Total ", Style::default().fg(theme.dim)),
+        Span::styled(
+            format!("${:.2}", total_cost),
+            Style::default().fg(theme.gauge_high).bold(),
+        ),
+        Span::raw("    "),
+        Span::styled("Avg Daily ", Style::default().fg(theme.dim)),
+        Span::styled(
+            format!("${:.2}", avg_daily_cost),
+            Style::default().fg(theme.fg),
+        ),
+        Span::raw("    "),
+        Span::styled("Max Daily ", Style::default().fg(theme.dim)),
+        Span::styled(
+            format!("${:.2}", max_daily_cost),
+            Style::default().fg(theme.fg),
+        ),
+        Span::raw("    "),
+        Span::styled(
+            format!("{} active days", active_days),
+            Style::default().fg(theme.dim),
+        ),
+    ])];
 
     if inner.height >= 2 {
         lines.push(Line::from(vec![
@@ -2302,16 +2298,10 @@ fn render_daily_summary(
             ),
             Span::raw("    "),
             Span::styled("This Week ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format!("${:.2}", week_cost),
-                Style::default().fg(theme.fg),
-            ),
+            Span::styled(format!("${:.2}", week_cost), Style::default().fg(theme.fg)),
             Span::raw("    "),
             Span::styled("This Month ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format!("${:.2}", month_cost),
-                Style::default().fg(theme.fg),
-            ),
+            Span::styled(format!("${:.2}", month_cost), Style::default().fg(theme.fg)),
         ]));
     }
 
@@ -3118,6 +3108,14 @@ fn overview_model_visible_rows(area_height: u16) -> usize {
     area_height.saturating_sub(3) as usize
 }
 
+fn cost_share_percent(cost: f64, total_cost: f64) -> f64 {
+    if total_cost <= 0.0 {
+        return 0.0;
+    }
+
+    (cost / total_cost * 100.0).clamp(0.0, 100.0)
+}
+
 fn normalized_scroll_offset(offset: usize, selected: usize, visible: usize, total: usize) -> usize {
     if total == 0 || visible == 0 {
         return 0;
@@ -3314,5 +3312,18 @@ mod tests {
         assert_eq!(groups[0].models.len(), 1);
         assert_eq!(groups[0].models[0].0, "gpt-5");
         assert_eq!(groups[0].models[0].1.cost_usd, 2.0);
+    }
+
+    #[test]
+    fn overview_visible_rows_uses_model_table_section() {
+        let rows = visible_rows_for_page(UsagePage::Overview, Rect::new(0, 0, 120, 40));
+
+        assert!(rows > 0);
+    }
+
+    #[test]
+    fn cost_share_percent_uses_actual_small_nonzero_total() {
+        assert_eq!(cost_share_percent(0.005, 0.005), 100.0);
+        assert_eq!(cost_share_percent(0.005, 0.0), 0.0);
     }
 }

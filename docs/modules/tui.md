@@ -97,19 +97,18 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 4 tabs switchable with ←/→:
 
 ### Tab 1: Overview
-- Top: summary cards for today, recent week, current month, and total cost
-- Middle: stacked bar chart switchable between daily tokens and daily cost, last 60 days, colored by model company
-- Bottom: row-selectable top models table with visible scroll hint and wider model/agent columns
+- Top: stacked bar chart switchable between daily tokens and daily cost, last 60 days, colored by model company
+- Bottom: row-selectable top models table with visible scroll hint, cost percentage, and wider model/agent columns
 
 ### Tab 2: Models
-- Full sortable table: #, Model, Agent, Tokens, Cost, Messages
+- Full sortable table: #, Model, Agent, Tokens, Cost, %, Messages
 - Quick text filter with `/`
 - Models colored by detected company family (`OpenAI`, `Google`, `Anthropic`, `Others`)
 - Numeric columns use semantic colors so `Cost`, `Tokens`, and `Msgs` stand out separately
 - Sort by cost (c), tokens (t), or date (d)
 
 ### Tab 3: Daily
-- Top: summary cards (total cost, tokens, messages, sessions)
+- Top: summary bar with Today, This Week, This Month, period cost, tokens, messages, and sessions
 - Bottom: daily table with today highlighted
 - Daily numeric columns use distinct colors (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`)
 - Wide terminals include a 7-day token trend column
