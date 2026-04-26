@@ -116,6 +116,7 @@ pub struct Theme {
     pub heatmap_border: Color,
     pub empty_heatmap: Color,
     pub selected_bg: Color,
+    pub today_bg: Color,
 }
 
 impl Default for Theme {
@@ -193,7 +194,8 @@ impl Theme {
             heatmap_bg: Color::Rgb(20, 28, 40),
             heatmap_border: Color::Rgb(71, 85, 105),
             empty_heatmap: Color::Rgb(24, 31, 42),
-            selected_bg: Color::Rgb(28, 44, 61),
+            selected_bg: Color::Rgb(51, 65, 85),
+            today_bg: Color::Rgb(22, 78, 99),
         }
     }
 
@@ -251,6 +253,7 @@ impl Theme {
             heatmap_border: Color::Rgb(15, 23, 42),
             empty_heatmap: Color::Rgb(226, 232, 240),
             selected_bg: Color::Rgb(203, 213, 225),
+            today_bg: Color::Rgb(220, 252, 231),
         }
     }
 
@@ -281,7 +284,7 @@ impl Theme {
             "openai" => Color::Rgb(52, 211, 153),
             "google" => Color::Rgb(96, 165, 250),
             "anthropic" => Color::Rgb(251, 146, 60),
-            _ => Color::Rgb(203, 213, 225),
+            _ => Color::Rgb(168, 85, 247),
         }
     }
 
@@ -355,7 +358,7 @@ mod tests {
         let t = Theme::default();
         assert_eq!(
             t.model_color_for("deepseek-v3-0324", None),
-            Color::Rgb(203, 213, 225)
+            Color::Rgb(168, 85, 247)
         );
     }
 
@@ -364,7 +367,7 @@ mod tests {
         let t = Theme::default();
         assert_eq!(
             t.model_color_for("nvidia/nemotron-70b", None),
-            Color::Rgb(203, 213, 225)
+            Color::Rgb(168, 85, 247)
         );
     }
 
@@ -373,7 +376,7 @@ mod tests {
         let t = Theme::default();
         assert_eq!(
             t.model_color_for("some-unknown-model", None),
-            Color::Rgb(203, 213, 225)
+            Color::Rgb(168, 85, 247)
         );
     }
 
@@ -392,7 +395,7 @@ mod tests {
         let t = Theme::default();
         assert_eq!(t.company_color("openai"), Color::Rgb(52, 211, 153));
         assert_eq!(t.company_color("anthropic"), Color::Rgb(251, 146, 60));
-        assert_eq!(t.company_color("other"), Color::Rgb(203, 213, 225));
+        assert_eq!(t.company_color("other"), Color::Rgb(168, 85, 247));
     }
 
     #[test]

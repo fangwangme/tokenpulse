@@ -1,7 +1,7 @@
 mod commands;
 mod tui;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 use tokenpulse_core::config::ConfigManager;
 
@@ -12,6 +12,12 @@ use tokenpulse_core::config::ConfigManager;
 struct Cli {
     #[clap(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum CsvFormat {
+    Daily,
+    Models,
 }
 
 #[derive(Subcommand)]
@@ -54,8 +60,8 @@ enum Commands {
         rebuild_all: bool,
 
         /// Emit CSV output (daily or models). Example: --csv daily
-        #[clap(long, value_name = "TYPE", conflicts_with = "json", conflicts_with = "tui")]
-        csv: Option<String>,
+        #[clap(long, value_enum, conflicts_with = "json", conflicts_with = "tui")]
+        csv: Option<CsvFormat>,
 
         /// Emit JSON output instead of text or the interactive dashboard.
         #[clap(long, conflicts_with = "tui")]
@@ -137,7 +143,10 @@ async fn main() -> anyhow::Result<()> {
                     resolve_tui_mode("usage", tui, no_tui)?
                 },
                 json,
-                csv,
+                csv.map(|format| match format {
+                    CsvFormat::Daily => "daily".to_string(),
+                    CsvFormat::Models => "models".to_string(),
+                }),
             )
             .await?;
         }

@@ -961,5 +961,8 @@ fn render_quota_help_overlay(f: &mut ratatui::Frame, area: Rect, theme: &Theme) 
         Style::default().fg(theme.dim),
     )]));
 
-    f.render_widget(Paragraph::new(lines).style(Style::default().fg(theme.fg)), inner);
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(theme.fg)),
+        inner,
+    );
 }

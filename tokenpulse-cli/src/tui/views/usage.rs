@@ -1,6 +1,6 @@
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{
-    date_at_position, GradientGauge, HeatmapMetric, StackedBarChart, ValueFormat, YearHeatmap,
+    date_at_position, HeatmapMetric, StackedBarChart, ValueFormat, YearHeatmap,
 };
 use anyhow::Result;
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -748,12 +748,10 @@ struct UsageState {
     // Refresh tracking
     last_refreshed: Option<chrono::DateTime<Local>>,
     data_date_range: Option<(NaiveDate, NaiveDate)>,
-    // Budget
-    monthly_budget_usd: Option<f64>,
 }
 
 impl UsageState {
-    fn new(dashboard: &UsageDashboard, monthly_budget_usd: Option<f64>) -> Self {
+    fn new(dashboard: &UsageDashboard) -> Self {
         let all_sources = dashboard.all_sources();
         let enabled_sources: BTreeSet<String> = all_sources.iter().cloned().collect();
         Self {
@@ -776,7 +774,6 @@ impl UsageState {
             show_help: false,
             last_refreshed: Some(Local::now()),
             data_date_range: compute_data_date_range(dashboard),
-            monthly_budget_usd,
         }
     }
 
@@ -941,7 +938,6 @@ fn heatmap_detail_scroll_max(
 pub fn run<F>(
     mut summary: UsageSummary,
     daily_rows: Vec<DailyUsageRow>,
-    monthly_budget_usd: Option<f64>,
     mut reload: F,
 ) -> Result<()>
 where
@@ -956,7 +952,7 @@ where
 
     let mut theme = Theme::auto();
     let mut dashboard = UsageDashboard::build(&summary, &daily_rows);
-    let mut state = UsageState::new(&dashboard, monthly_budget_usd);
+    let mut state = UsageState::new(&dashboard);
 
     loop {
         terminal.draw(|f| {
@@ -1066,7 +1062,7 @@ where
                             let saved_selected_row = state.selected_row;
                             summary = new_summary;
                             dashboard = new_dashboard;
-                            state = UsageState::new(&dashboard, state.monthly_budget_usd);
+                            state = UsageState::new(&dashboard);
                             state.page = saved_page;
                             state.sort_field = saved_sort_field;
                             state.sort_ascending = saved_sort_ascending;
@@ -1304,34 +1300,42 @@ where
                 Event::Mouse(mouse)
                     if !state.show_help
                         && !state.show_source_filter
-                        && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                        && mouse.row >= 4
-                        && mouse.row <= 6 =>
+                        && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) =>
                 {
-                    // Tab bar click — header=4 rows, tab bar=3 rows (rows 4-6)
-                    let pages = UsagePage::all();
-                    let mut x = 1u16; // skip left border
-                    for page in pages.iter() {
-                        let title = format!(" {} ", page.title());
-                        let end_x = x + title.len() as u16;
-                        if mouse.column >= x && mouse.column < end_x {
-                            if state.page != *page {
-                                state.page = *page;
-                                state.reset_scroll();
+                    let frame = terminal.size()?;
+                    let area = Rect::new(0, 0, frame.width, frame.height);
+                    let tab_area = dashboard_tab_area(area);
+                    if rect_contains(tab_area, mouse.column, mouse.row) {
+                        let pages = UsagePage::all();
+                        let mut x = tab_area.x + 1; // skip left border
+                        for page in pages.iter() {
+                            let title = format!(" {} ", page.title());
+                            let end_x = x + title.len() as u16;
+                            if mouse.column >= x && mouse.column < end_x {
+                                if state.page != *page {
+                                    state.page = *page;
+                                    state.reset_scroll();
+                                }
+                                break;
                             }
-                            break;
+                            x = end_x;
                         }
-                        x = end_x;
+                    } else if state.page == UsagePage::Heatmap {
+                        if let Some(date) = heatmap_date_at_position(
+                            area,
+                            &dashboard,
+                            &state,
+                            mouse.column,
+                            mouse.row,
+                        ) {
+                            state.set_selected_heatmap_date(Some(date));
+                        }
                     }
                 }
                 Event::Mouse(mouse)
                     if !state.show_source_filter
                         && state.page == UsagePage::Heatmap
-                        && matches!(
-                            mouse.kind,
-                            MouseEventKind::Down(MouseButton::Left)
-                                | MouseEventKind::Drag(MouseButton::Left)
-                        ) =>
+                        && matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) =>
                 {
                     let frame_area = terminal.size()?;
                     let area = Rect::new(0, 0, frame_area.width, frame_area.height);
@@ -1414,15 +1418,7 @@ fn render_dashboard(
 ) {
     f.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
 
-    let root = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Length(3),
-            Constraint::Min(10),
-            Constraint::Length(3),
-        ])
-        .split(area);
+    let root = dashboard_root_sections(area);
 
     render_header(f, root[0], dashboard, summary, state, theme);
     render_tabs(f, root[1], state, theme);
@@ -1442,6 +1438,14 @@ fn render_dashboard(
 }
 
 fn dashboard_body_area(area: Rect) -> Rect {
+    dashboard_root_sections(area)[2]
+}
+
+fn dashboard_tab_area(area: Rect) -> Rect {
+    dashboard_root_sections(area)[1]
+}
+
+fn dashboard_root_sections(area: Rect) -> std::rc::Rc<[Rect]> {
     Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1450,11 +1454,11 @@ fn dashboard_body_area(area: Rect) -> Rect {
             Constraint::Min(10),
             Constraint::Length(3),
         ])
-        .split(area)[2]
+        .split(area)
 }
 
 fn overview_sections(area: Rect) -> std::rc::Rc<[Rect]> {
-    let chart_height = (area.height.saturating_mul(2) / 3).max(8).min(area.height);
+    let chart_height = (area.height.saturating_mul(3) / 5).max(8).min(area.height);
     let model_height = area.height.saturating_sub(chart_height);
 
     Layout::default()
@@ -1464,31 +1468,6 @@ fn overview_sections(area: Rect) -> std::rc::Rc<[Rect]> {
             Constraint::Length(model_height),
         ])
         .split(area)
-}
-
-fn overview_sections_with_budget(area: Rect, budget_height: u16) -> std::rc::Rc<[Rect]> {
-    let remaining = area.height.saturating_sub(budget_height);
-    let chart_height = (remaining.saturating_mul(2) / 3).max(8).min(remaining);
-    let model_height = remaining.saturating_sub(chart_height);
-
-    if budget_height > 0 {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(chart_height),
-                Constraint::Length(budget_height),
-                Constraint::Length(model_height),
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(chart_height),
-                Constraint::Length(model_height),
-            ])
-            .split(area)
-    }
 }
 
 fn daily_sections(area: Rect) -> std::rc::Rc<[Rect]> {
@@ -1813,12 +1792,7 @@ fn render_source_filter_overlay(
 // Help overlay
 // ---------------------------------------------------------------------------
 
-fn render_help_overlay(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    state: &UsageState,
-    theme: &Theme,
-) {
+fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: &Theme) {
     let keybindings: &[(&str, &str)] = match state.page {
         UsagePage::Overview => &[
             ("←→", "switch tab"),
@@ -1911,18 +1885,13 @@ fn render_overview_page(
     f: &mut ratatui::Frame,
     area: Rect,
     dashboard: &UsageDashboard,
-    summary: &UsageSummary,
+    _summary: &UsageSummary,
     state: &UsageState,
     theme: &Theme,
 ) {
-    let budget_height = if state.monthly_budget_usd.is_some() { 3u16 } else { 0u16 };
-    let sections = overview_sections_with_budget(area, budget_height);
-
+    let sections = overview_sections(area);
     render_overview_chart(f, sections[0], dashboard, state, theme);
-    if budget_height > 0 {
-        render_budget_gauge(f, sections[1], summary, state, theme);
-    }
-    render_overview_top_models(f, sections[if budget_height > 0 { 2 } else { 1 }], dashboard, summary, state, theme);
+    render_overview_top_models(f, sections[1], dashboard, _summary, state, theme);
 }
 
 fn render_overview_chart(
@@ -2031,77 +2000,6 @@ fn render_overview_chart(
     ));
 
     f.render_widget(Paragraph::new(Line::from(legend_spans)), sections[1]);
-}
-
-fn render_budget_gauge(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    summary: &UsageSummary,
-    state: &UsageState,
-    theme: &Theme,
-) {
-    let budget = match state.monthly_budget_usd {
-        Some(b) if b > 0.0 => b,
-        _ => return,
-    };
-
-    let now = Local::now().date_naive();
-    let month_start = NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap_or(now);
-    let days_elapsed = (now - month_start).num_days().max(1) as f64;
-    let days_in_month = {
-        let next = if now.month() == 12 {
-            NaiveDate::from_ymd_opt(now.year() + 1, 1, 1)
-        } else {
-            NaiveDate::from_ymd_opt(now.year(), now.month() + 1, 1)
-        };
-        next.map(|d| (d - month_start).num_days() as f64)
-            .unwrap_or(30.0)
-    };
-
-    let month_cost = summary.total_cost;
-    let avg_daily = month_cost / days_elapsed;
-    let projected = avg_daily * days_in_month;
-    let pct = (month_cost / budget * 100.0).min(200.0);
-
-    let color = if pct >= 100.0 {
-        theme.gauge_high
-    } else if pct >= 80.0 {
-        theme.gauge_mid
-    } else {
-        theme.gauge_low
-    };
-
-    let projected_str = if projected > budget {
-        format!(
-            " | Projected: {} (+{} over)",
-            format_cost_compact(projected),
-            format_cost_compact(projected - budget)
-        )
-    } else {
-        format!(
-            " | Projected: {} ({} left)",
-            format_cost_compact(projected),
-            format_cost_compact(budget - projected)
-        )
-    };
-
-    let label = format!(
-        "Monthly Budget  {} / {}{}",
-        format_cost_compact(month_cost),
-        format_cost_compact(budget),
-        projected_str
-    );
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let gauge = GradientGauge::new(&label, pct.min(100.0))
-        .width(inner.width.saturating_sub(2) as usize)
-        .color(color);
-    f.render_widget(gauge, inner);
 }
 
 fn render_overview_top_models(
@@ -2366,7 +2264,9 @@ fn render_models_page(
     let total_cost = models.iter().map(|m| m.summary.cost).sum::<f64>();
 
     // Build per-model 7-day token sparkline data
-    let today = Local::now().date_naive();
+    let today = dashboard
+        .latest_date()
+        .unwrap_or_else(|| Local::now().date_naive());
     let model_sparklines: HashMap<String, Vec<u64>> = if show_sparkline {
         let last_7: Vec<NaiveDate> = (0..7).map(|i| today - Duration::days(6 - i)).collect();
         let mut map: HashMap<String, Vec<u64>> = HashMap::new();
@@ -2374,6 +2274,9 @@ fn render_models_page(
             let day_idx = last_7.iter().position(|&d| d == day_stat.date);
             let Some(idx) = day_idx else { continue };
             for (model_key, breakdown) in &day_stat.models {
+                if !state.is_source_enabled(model_source(model_key)) {
+                    continue;
+                }
                 let norm = normalize_model_name(model_id_from_key(model_key));
                 let entry = map.entry(norm).or_insert_with(|| vec![0u64; 7]);
                 entry[idx] += breakdown.tokens.max(0) as u64;
@@ -2384,7 +2287,9 @@ fn render_models_page(
         HashMap::new()
     };
 
-    let headers = ["#", "Model", "Agent", "Tokens", "Cost", "%", "Msgs", "Last", "Trend", "$/Msg", "T/Msg"];
+    let headers = [
+        "#", "Model", "Agent", "Tokens", "Cost", "%", "Msgs", "Last", "Trend", "$/Msg", "T/Msg",
+    ];
     let sort_indicator = |field: SortField| -> &str {
         if state.sort_field == field {
             if state.sort_ascending {
@@ -2549,8 +2454,9 @@ fn render_models_page(
             ));
         }
         if show_sparkline {
+            let trend_key = normalize_model_name(&model.model);
             let trend = model_sparklines
-                .get(&model.model)
+                .get(&trend_key)
                 .map(|vals| sparkline_text(vals))
                 .unwrap_or_else(|| "▁".repeat(7));
             spans.push(Span::styled(
@@ -2688,10 +2594,16 @@ fn render_daily_summary(
             ),
             Span::raw("    "),
             Span::styled("This Week ", Style::default().fg(theme.dim)),
-            Span::styled(format_cost_compact(week_cost), Style::default().fg(theme.fg)),
+            Span::styled(
+                format_cost_compact(week_cost),
+                Style::default().fg(theme.fg),
+            ),
             Span::raw("    "),
             Span::styled("This Month ", Style::default().fg(theme.dim)),
-            Span::styled(format_cost_compact(month_cost), Style::default().fg(theme.fg)),
+            Span::styled(
+                format_cost_compact(month_cost),
+                Style::default().fg(theme.fg),
+            ),
         ]));
     }
 
@@ -2755,10 +2667,8 @@ fn render_daily_table(
     let show_detail_cols = inner.width >= 80;
 
     // Build cost-by-date map for WoW calculation
-    let cost_by_date: std::collections::HashMap<NaiveDate, f64> = days
-        .iter()
-        .map(|d| (d.date, d.cost_usd))
-        .collect();
+    let cost_by_date: std::collections::HashMap<NaiveDate, f64> =
+        days.iter().map(|d| (d.date, d.cost_usd)).collect();
 
     // Header
     let header_y = inner.y;
@@ -2799,7 +2709,7 @@ fn render_daily_table(
     ));
     if show_wow {
         header_spans.push(Span::styled(
-            format!("{:<9}", "WoW"),
+            format!("{:<9}", "7d Δ"),
             Style::default().fg(theme.dim).bold(),
         ));
     }
@@ -2825,16 +2735,12 @@ fn render_daily_table(
         let date_style = if is_today {
             Style::default()
                 .fg(theme.accent_soft)
-                .bg(Color::Rgb(20, 40, 20))
+                .bg(theme.today_bg)
                 .bold()
         } else {
             Style::default().fg(theme.accent_soft)
         };
-        let row_bg = if is_today {
-            Some(Color::Rgb(20, 40, 20))
-        } else {
-            None
-        };
+        let row_bg = if is_today { Some(theme.today_bg) } else { None };
         let date_text =
             if state.sort_field == SortField::Date && day.date.weekday() == chrono::Weekday::Mon {
                 format!("┄ {}", day.date.format("%Y-%m-%d"))
@@ -3131,11 +3037,17 @@ fn render_heatmap_summary_card(
         ]),
         Line::from(vec![
             Span::styled("Week   ", Style::default().fg(theme.dim)),
-            Span::styled(format_cost_compact(week_cost), Style::default().fg(theme.fg)),
+            Span::styled(
+                format_cost_compact(week_cost),
+                Style::default().fg(theme.fg),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Month  ", Style::default().fg(theme.dim)),
-            Span::styled(format_cost_compact(month_cost), Style::default().fg(theme.fg)),
+            Span::styled(
+                format_cost_compact(month_cost),
+                Style::default().fg(theme.fg),
+            ),
         ]),
         Line::from(vec![
             Span::styled("All    ", Style::default().fg(theme.dim)),
@@ -3522,12 +3434,14 @@ fn format_compact(value: i64) -> String {
 
 /// Format a USD cost value compactly: $0.42, $1.2K, $3.4M.
 fn format_cost_compact(value: f64) -> String {
-    if value >= 1_000_000.0 {
-        format!("${:.1}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("${:.1}K", value / 1_000.0)
+    let sign = if value < 0.0 { "-" } else { "" };
+    let abs = value.abs();
+    if abs >= 1_000_000.0 {
+        format!("{}${:.1}M", sign, abs / 1_000_000.0)
+    } else if abs >= 1_000.0 {
+        format!("{}${:.1}K", sign, abs / 1_000.0)
     } else {
-        format!("${:.2}", value)
+        format!("{}${:.2}", sign, abs)
     }
 }
 
@@ -3541,7 +3455,7 @@ fn sparkline_text(values: &[u64]) -> String {
     values
         .iter()
         .map(|&v| {
-            let idx = ((v as f64 / max as f64) * 7.0) as usize;
+            let idx = ((v as f64 / max as f64) * 7.0).round() as usize;
             CHARS[idx.min(7)]
         })
         .collect()
@@ -3792,5 +3706,17 @@ mod tests {
     fn cost_share_percent_uses_actual_small_nonzero_total() {
         assert_eq!(cost_share_percent(0.005, 0.005), 100.0);
         assert_eq!(cost_share_percent(0.005, 0.0), 0.0);
+    }
+
+    #[test]
+    fn format_cost_compact_places_sign_before_currency() {
+        assert_eq!(format_cost_compact(-1.5), "-$1.50");
+        assert_eq!(format_cost_compact(-1_500.0), "-$1.5K");
+    }
+
+    #[test]
+    fn sparkline_text_preserves_close_values() {
+        assert_eq!(sparkline_text(&[40_000_000, 39_500_000]), "██");
+        assert_eq!(sparkline_text(&[20_000_000, 40_000_000]), "▅█");
     }
 }

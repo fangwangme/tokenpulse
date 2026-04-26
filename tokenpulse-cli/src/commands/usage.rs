@@ -2,7 +2,6 @@ use crate::tui;
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use tokenpulse_core::{
-    config::ConfigManager,
     usage::{
         build_usage_summary_from_daily, ClaudeSessionParser, CodexSessionParser,
         CopilotSessionParser, DateRange, GeminiSessionParser, OpenCodeSessionParser,
@@ -127,11 +126,7 @@ pub async fn run(
     } else if use_tui {
         let daily_breakdown = store.load_daily_rows(output_since, &provider_names)?;
         let reload_fn = build_reload_fn(provider_names, output_since);
-        let monthly_budget_usd = ConfigManager::new()
-            .load()
-            .ok()
-            .and_then(|c| c.display.monthly_budget_usd);
-        return tui::usage::run(summary, daily_breakdown, monthly_budget_usd, reload_fn);
+        return tui::usage::run(summary, daily_breakdown, reload_fn);
     } else {
         print_summary(&summary);
     }
