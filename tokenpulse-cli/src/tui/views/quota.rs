@@ -235,8 +235,7 @@ pub fn run(
                             results.iter().filter_map(|r| r.as_ref().ok()).collect();
                         let tab_count = quota_tab_titles(&snapshots).len();
                         selected_tab = selected_tab.min(tab_count.saturating_sub(1));
-                        settings_row =
-                            settings_row.min(settings_row_count().saturating_sub(1));
+                        settings_row = settings_row.min(settings_row_count().saturating_sub(1));
                     }
                     KeyCode::Char('a') => {
                         config.display.quota_auto_refresh_secs =
@@ -320,8 +319,7 @@ pub fn run(
 
         // Auto-refresh check
         if auto_secs > 0 && last_refresh.elapsed().as_secs() >= auto_secs as u64 {
-            if let Ok(new_results) =
-                refresh_quota_results(provider.as_deref(), &enabled_providers)
+            if let Ok(new_results) = refresh_quota_results(provider.as_deref(), &enabled_providers)
             {
                 results = new_results;
                 last_refresh = Instant::now();
