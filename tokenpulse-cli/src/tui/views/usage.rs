@@ -2712,7 +2712,7 @@ fn render_daily_table(
     ));
     if show_wow {
         header_spans.push(Span::styled(
-            format!("{:<9}", "7d Δ"),
+            format!("{:<9}", "Cost vs7d"),
             Style::default().fg(theme.dim).bold(),
         ));
     }
