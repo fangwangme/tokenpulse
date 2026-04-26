@@ -3435,16 +3435,34 @@ fn format_compact(value: i64) -> String {
     }
 }
 
-/// Format a USD cost value compactly: $0.42, $1.2K, $3.4M.
+/// Format a USD cost value without compact suffixes: $0.42, $1,500, $3,400,000.
 fn format_cost_compact(value: f64) -> String {
     let sign = if value < 0.0 { "-" } else { "" };
     let abs = value.abs();
-    if abs >= 1_000_000.0 {
-        format!("{}${:.1}M", sign, abs / 1_000_000.0)
-    } else if abs >= 1_000.0 {
-        format!("{}${:.1}K", sign, abs / 1_000.0)
+    if abs >= 1_000.0 {
+        format!("{}${}", sign, format_int_commas(abs.round() as i64))
     } else {
         format!("{}${:.2}", sign, abs)
+    }
+}
+
+fn format_int_commas(value: i64) -> String {
+    let raw = value.to_string();
+    let digits = raw.strip_prefix('-').unwrap_or(&raw);
+    let mut formatted_rev = String::with_capacity(raw.len() + raw.len() / 3);
+
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            formatted_rev.push(',');
+        }
+        formatted_rev.push(ch);
+    }
+
+    let formatted: String = formatted_rev.chars().rev().collect();
+    if raw.starts_with('-') {
+        format!("-{}", formatted)
+    } else {
+        formatted
     }
 }
 
@@ -3714,7 +3732,8 @@ mod tests {
     #[test]
     fn format_cost_compact_places_sign_before_currency() {
         assert_eq!(format_cost_compact(-1.5), "-$1.50");
-        assert_eq!(format_cost_compact(-1_500.0), "-$1.5K");
+        assert_eq!(format_cost_compact(-1_500.0), "-$1,500");
+        assert_eq!(format_cost_compact(3_000_000.0), "$3,000,000");
     }
 
     #[test]
