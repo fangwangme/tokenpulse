@@ -21,6 +21,7 @@ pub async fn run(
     rebuild_all: bool,
     use_tui: bool,
     json: bool,
+    csv: Option<String>,
 ) -> Result<()> {
     let requested_since = since
         .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
@@ -89,6 +90,14 @@ pub async fn run(
             return Ok(());
         }
 
+        if let Some(csv_type) = csv {
+            match csv_type.as_str() {
+                "models" => println!("model,provider,source,tokens,cost_usd,messages,sessions,percent"),
+                _ => println!("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_tokens,messages,sessions"),
+            }
+            return Ok(());
+        }
+
         eprintln!("\nNo usage data found in the local ledger.\n");
         if !found_any_source {
             eprintln!("Checked providers:");
@@ -112,6 +121,12 @@ pub async fn run(
 
     if json {
         print_json_summary(&summary)?;
+    } else if let Some(csv_type) = csv {
+        let daily_breakdown = store.load_daily_rows(output_since, &provider_names)?;
+        match csv_type.as_str() {
+            "models" => print_models_csv(&summary),
+            _ => print_daily_csv(&daily_breakdown),
+        }
     } else if use_tui {
         let daily_breakdown = store.load_daily_rows(output_since, &provider_names)?;
         let reload_fn = build_reload_fn(provider_names, output_since);
@@ -331,6 +346,42 @@ fn format_int<T: ToString>(value: T) -> String {
         format!("-{}", formatted)
     } else {
         formatted
+    }
+}
+
+fn print_daily_csv(rows: &[tokenpulse_core::usage::DailyUsageRow]) {
+    println!("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_tokens,messages,sessions");
+    for row in rows {
+        let cache = row.cache_read_tokens + row.cache_write_tokens;
+        println!(
+            "{},{},{},{:.6},{},{},{},{},{}",
+            row.date,
+            row.source,
+            row.total_tokens,
+            row.cost_usd,
+            row.input_tokens,
+            row.output_tokens,
+            cache,
+            row.message_count,
+            row.session_count,
+        );
+    }
+}
+
+fn print_models_csv(summary: &tokenpulse_core::usage::UsageSummary) {
+    println!("model,provider,source,tokens,cost_usd,messages,sessions,percent");
+    for model in &summary.by_model {
+        println!(
+            "{},{},{},{},{:.6},{},{},{:.2}",
+            model.model,
+            model.provider,
+            model.source,
+            model.tokens,
+            model.cost,
+            model.message_count,
+            model.session_count,
+            model.percent,
+        );
     }
 }
 
