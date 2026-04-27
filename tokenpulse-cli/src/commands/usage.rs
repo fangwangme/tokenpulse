@@ -42,7 +42,6 @@ pub async fn run(
                 stale_sources.insert(parser.provider_name().to_string());
             }
         }
-
     }
 
     if rebuild_all {
@@ -415,7 +414,10 @@ fn print_models_csv(summary: &tokenpulse_core::usage::UsageSummary) {
 mod tests {
     use super::parse_provider_names;
     use chrono::NaiveDate;
-    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
     use tokenpulse_core::{
         provider::{SessionParser, TokenBreakdown, UnifiedMessage},
         usage::UsageStore,
@@ -523,7 +525,10 @@ mod tests {
         let _ = fs::remove_file(&path);
         let store = UsageStore::with_path(path.clone());
         store
-            .ingest_messages(&[sample_message("gemini", "gemini-v2", "2024-03-10", "old")], false)
+            .ingest_messages(
+                &[sample_message("gemini", "gemini-v2", "2024-03-10", "old")],
+                false,
+            )
             .unwrap();
 
         let parser = StubParser {

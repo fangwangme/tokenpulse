@@ -747,9 +747,8 @@ fn load_pricing_snapshot_keys(
 }
 
 fn load_source_dates(tx: &Transaction<'_>, source: &str) -> Result<Vec<String>> {
-    let mut stmt = tx.prepare(
-        "SELECT DISTINCT date FROM usage_messages WHERE source = ?1 ORDER BY date ASC",
-    )?;
+    let mut stmt =
+        tx.prepare("SELECT DISTINCT date FROM usage_messages WHERE source = ?1 ORDER BY date ASC")?;
     let rows = stmt.query_map(params![source], |row| row.get::<_, String>(0))?;
     Ok(rows.flatten().collect())
 }
@@ -1243,9 +1242,7 @@ mod tests {
         message.parser_version = "gemini-v2".to_string();
 
         store.ingest_messages(&[message], false).unwrap();
-        store
-            .replace_source_messages("gemini", &[], false)
-            .unwrap();
+        store.replace_source_messages("gemini", &[], false).unwrap();
 
         let remaining = store.load_messages(None, &["gemini".to_string()]).unwrap();
         assert_eq!(remaining.len(), 1);
