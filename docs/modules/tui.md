@@ -106,6 +106,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 - Models colored by detected company family (`OpenAI`, `Google`, `Anthropic`, `Others`)
 - Numeric columns use semantic colors so `Cost`, `Tokens`, and `Msgs` stand out separately
 - Sort by cost (c), tokens (t), or date (d)
+- `%` follows the active sort basis: cost share for cost/date sort, token share for token sort
 
 ### Tab 3: Daily
 - Top: summary bar with Today, This Week, This Month, period cost, tokens, messages, and sessions
@@ -121,7 +122,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 - 3 window modes: past 26 weeks, past 52 weeks, past 365 days
 - Mouse-clickable cells — click any day to select it and see drill-down
 - Drill-down: select any day to see token summary, agent totals, and per-agent model cost breakdown
-- Selected-day panel supports scroll when the detail list is taller than the viewport
+- Selected-day panel supports scroll when the detail list is taller than the viewport, with a dedicated bottom-row scroll hint so the final token-detail line is not overwritten
 - Streak tracking: current streak and longest streak
 
 ### Source Filter Overlay
@@ -144,12 +145,17 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 | `t`                   | Token sort/metric, or overview token chart |
 | `d`                   | Sort by date                             |
 | `/`                   | Open Models quick filter                 |
+| `Ctrl+L`              | Clear Models quick filter                |
 | `s`                   | Open/close source filter overlay         |
 | `w`                   | Cycle activity window (26w/52w/365d)     |
 | `i` / `o` / `x`       | Input/output/cache metrics (activity)    |
 | `m` / `n`             | Messages/sessions metrics (activity)     |
+| `T`                   | Jump to today (Daily/Activity)           |
+| `PgUp` / `PgDn`       | Scroll selected-day detail (Activity)    |
 | `a`                   | Toggle all sources (in filter overlay)   |
 | `Space` / `Enter`     | Toggle source (in filter overlay)        |
+| `b`                   | Toggle light/dark theme                  |
+| `?`                   | Open page help overlay                   |
 
 ## Event Loop
 
@@ -177,4 +183,4 @@ loop {
 }
 ```
 
-Non-blocking event loop. Data is fetched once at startup.
+Non-blocking event loop. Data is fetched at startup and can be reloaded in place with `r`, with transient footer feedback for refresh progress and errors.

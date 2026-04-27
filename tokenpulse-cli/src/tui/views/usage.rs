@@ -964,7 +964,11 @@ fn heatmap_detail_scroll_max(
     frame_area: Rect,
 ) -> usize {
     let body = dashboard_body_area(frame_area);
-    let detail_area = selected_day_detail_area(heatmap_day_panel_area(body));
+    let panel_outer = heatmap_day_panel_area(body);
+    // Mirror the exact layout path used in render_heatmap_day_detail
+    let inner = Block::default().borders(Borders::ALL).inner(panel_outer);
+    let sections = selected_day_sections(inner);
+    let detail_area = sections[1];
     let selected_day = dashboard.selected_day_in_window(
         state.heatmap_window,
         state.selected_heatmap_date,
@@ -1562,29 +1566,28 @@ fn heatmap_day_panel_area(area: Rect) -> Rect {
     info[1]
 }
 
-fn selected_day_detail_area(area: Rect) -> Rect {
-    if area.height == 0 {
-        return area;
-    }
-
-    Rect::new(
-        area.x,
-        area.y,
-        area.width,
-        area.height.saturating_sub(1).max(1),
-    )
+fn selected_day_detail_body_visible_rows(area: Rect, total_lines: usize) -> usize {
+    selected_day_detail_content_area(area, total_lines).height as usize
 }
 
-fn selected_day_detail_body_visible_rows(area: Rect, total_lines: usize) -> usize {
-    if area.height == 0 {
-        return 0;
-    }
-
-    let body_rows = area.height as usize;
-    if total_lines > body_rows {
-        body_rows.saturating_sub(1)
+fn selected_day_detail_content_area(area: Rect, total_lines: usize) -> Rect {
+    if area.height > 0 && total_lines > area.height as usize {
+        Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
     } else {
-        body_rows
+        area
+    }
+}
+
+fn selected_day_detail_hint_area(area: Rect, total_lines: usize) -> Option<Rect> {
+    if area.height > 0 && total_lines > area.height as usize {
+        Some(Rect::new(
+            area.x,
+            area.y + area.height.saturating_sub(1),
+            area.width,
+            1,
+        ))
+    } else {
+        None
     }
 }
 
@@ -3227,13 +3230,7 @@ fn render_heatmap_day_detail(
 
     let sections = selected_day_sections(inner);
     render_selected_day_overview(f, sections[0], day, metric, theme);
-    render_selected_day_agent_detail(
-        f,
-        selected_day_detail_area(sections[1]),
-        day,
-        scroll_offset,
-        theme,
-    );
+    render_selected_day_agent_detail(f, sections[1], day, scroll_offset, theme);
 }
 
 fn selected_day_sections(area: Rect) -> std::rc::Rc<[Rect]> {
@@ -3449,10 +3446,14 @@ fn render_selected_day_agent_detail(
     let total_lines = lines.len();
     let visible = selected_day_detail_body_visible_rows(area, total_lines);
     let offset = scroll_offset.min(total_lines.saturating_sub(visible));
-    let mut visible_lines: Vec<Line> = lines.into_iter().skip(offset).take(visible).collect();
-    if total_lines > visible && !visible_lines.is_empty() {
-        let last = visible_lines.len().saturating_sub(1);
-        visible_lines[last] = Line::from(vec![Span::styled(
+    let visible_lines: Vec<Line> = lines.into_iter().skip(offset).take(visible).collect();
+    let content_area = selected_day_detail_content_area(area, total_lines);
+    let hint_area = selected_day_detail_hint_area(area, total_lines);
+
+    f.render_widget(Paragraph::new(visible_lines), content_area);
+
+    if let Some(hint_area) = hint_area {
+        let hint = Line::from(vec![Span::styled(
             format!(
                 "{}{} detail {}-{} / {}",
                 if offset > 0 { "↑" } else { " " },
@@ -3467,9 +3468,8 @@ fn render_selected_day_agent_detail(
             ),
             Style::default().fg(theme.dim),
         )]);
+        f.render_widget(Paragraph::new(hint).alignment(Alignment::Right), hint_area);
     }
-
-    f.render_widget(Paragraph::new(visible_lines), area);
 }
 
 fn heatmap_day_panel_line_count(day: Option<&DailyStats>) -> usize {
@@ -3928,6 +3928,25 @@ mod tests {
 
         assert_eq!(model_share_percent(&model, 400.0, SortField::Tokens), 50.0);
         assert_eq!(model_share_percent(&model, 4.0, SortField::Cost), 25.0);
+    }
+
+    #[test]
+    fn selected_day_detail_reserves_bottom_row_for_scroll_hint() {
+        let area = Rect::new(0, 0, 40, 4);
+
+        assert_eq!(selected_day_detail_body_visible_rows(area, 5), 3);
+        assert_eq!(
+            selected_day_detail_content_area(area, 5),
+            Rect::new(0, 0, 40, 3)
+        );
+        assert_eq!(
+            selected_day_detail_hint_area(area, 5),
+            Some(Rect::new(0, 3, 40, 1))
+        );
+        assert_eq!(
+            selected_day_detail_body_visible_rows(Rect::new(0, 0, 40, 4), 4),
+            4
+        );
     }
 
     #[test]
