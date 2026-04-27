@@ -1,6 +1,7 @@
 use crate::tui;
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
+use std::collections::HashSet;
 use tokenpulse_core::{
     usage::{
         build_usage_summary_from_daily, ClaudeSessionParser, CodexSessionParser,
@@ -31,6 +32,22 @@ pub async fn run(
     let provider_names = parse_provider_names(provider.as_deref());
     let parsers = build_parsers(&provider_names);
     let store = UsageStore::new();
+    let mut stale_sources = HashSet::new();
+
+    if !rebuild_all && refresh_range.is_none() {
+        for parser in &parsers {
+            if store
+                .source_has_stale_parser_version(parser.provider_name(), parser.parser_version())?
+            {
+                stale_sources.insert(parser.provider_name().to_string());
+            }
+        }
+
+        if !stale_sources.is_empty() {
+            let stale_sources_list = stale_sources.iter().cloned().collect::<Vec<_>>();
+            store.clear_sources(&stale_sources_list, refresh_pricing)?;
+        }
+    }
 
     if rebuild_all {
         store.clear_sources(&provider_names, refresh_pricing)?;
@@ -41,7 +58,10 @@ pub async fn run(
     let mut found_any_source = false;
 
     for parser in &parsers {
-        let effective_since = if rebuild_all || refresh_range.is_some() {
+        let effective_since = if rebuild_all
+            || refresh_range.is_some()
+            || stale_sources.contains(parser.provider_name())
+        {
             None
         } else {
             store.default_since(parser.provider_name(), requested_since)?
@@ -107,6 +127,7 @@ pub async fn run(
             eprintln!(" - OpenCode: ~/.local/share/opencode/");
             eprintln!(" - Gemini CLI: ~/.gemini/tmp/");
             eprintln!(" - PI: ~/.pi/agent/sessions/");
+            eprintln!("\nIf Gemini totals look stale after this fix, run: tokenpulse usage -p gemini --rebuild-all");
         }
         return Ok(());
     }
@@ -388,6 +409,14 @@ fn print_models_csv(summary: &tokenpulse_core::usage::UsageSummary) {
 #[cfg(test)]
 mod tests {
     use super::parse_provider_names;
+
+    #[test]
+    fn parse_provider_names_preserves_requested_subset_order() {
+        assert_eq!(
+            parse_provider_names(Some("gemini,codex")),
+            vec!["gemini".to_string(), "codex".to_string()]
+        );
+    }
 
     #[test]
     fn parse_provider_names_defaults_to_all_supported_usage_sources() {

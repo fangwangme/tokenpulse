@@ -78,6 +78,27 @@ impl UsageStore {
         Ok(value.and_then(|date| NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()))
     }
 
+    pub fn source_has_stale_parser_version(
+        &self,
+        source: &str,
+        parser_version: &str,
+    ) -> Result<bool> {
+        let conn = self.open()?;
+        Ok(conn
+            .query_row(
+                r#"
+                SELECT 1
+                FROM usage_messages
+                WHERE source = ?1 AND parser_version != ?2
+                LIMIT 1
+                "#,
+                params![source, parser_version],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn default_since(
         &self,
         source: &str,
@@ -1034,6 +1055,28 @@ mod tests {
             .unwrap();
         let since = store.default_since("claude", None).unwrap().unwrap();
         assert_eq!(since, NaiveDate::from_ymd_opt(2024, 3, 9).unwrap());
+    }
+
+    #[test]
+    fn source_has_stale_parser_version_detects_mismatches() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+        let mut message = sample_message("2024-03-10", "m1");
+        message.client = "gemini".to_string();
+        message.provider_id = "google".to_string();
+        message.parser_version = "gemini-v2".to_string();
+
+        store.ingest_messages(&[message], false).unwrap();
+
+        assert!(store
+            .source_has_stale_parser_version("gemini", "gemini-v3")
+            .unwrap());
+        assert!(!store
+            .source_has_stale_parser_version("gemini", "gemini-v2")
+            .unwrap());
+        assert!(!store
+            .source_has_stale_parser_version("claude", "claude-v2")
+            .unwrap());
     }
 
     #[test]

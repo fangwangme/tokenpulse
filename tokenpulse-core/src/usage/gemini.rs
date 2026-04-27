@@ -5,10 +5,11 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::debug;
 
-const PARSER_VERSION: &str = "gemini-v2";
+const PARSER_VERSION: &str = "gemini-v3";
 
 pub struct GeminiSessionParser;
 
@@ -103,6 +104,7 @@ impl GeminiSessionParser {
             .to_string();
         let mut fallback_timestamp = 0i64;
         let mut messages = Vec::new();
+        let mut message_positions = HashMap::new();
 
         for (index, line) in content.lines().enumerate() {
             let line = line.trim();
@@ -159,18 +161,23 @@ impl GeminiSessionParser {
                     )
                 });
 
-            messages.push(
-                UnifiedMessage::new(
-                    "gemini",
-                    model_id.to_string(),
-                    "google",
-                    session_id.clone(),
-                    message_key,
-                    timestamp,
-                    tokens.into_breakdown(),
-                )
-                .with_parser_version(PARSER_VERSION),
-            );
+            let message = UnifiedMessage::new(
+                "gemini",
+                model_id.to_string(),
+                "google",
+                session_id.clone(),
+                message_key.clone(),
+                timestamp,
+                tokens.into_breakdown(),
+            )
+            .with_parser_version(PARSER_VERSION);
+
+            if let Some(position) = message_positions.get(&message_key).copied() {
+                messages[position] = message;
+            } else {
+                message_positions.insert(message_key, messages.len());
+                messages.push(message);
+            }
         }
 
         messages
@@ -279,8 +286,10 @@ impl GeminiTokens {
         let cache_read = self.cached.unwrap_or(0).max(0);
         let reasoning = self.thoughts.unwrap_or(0).max(0);
         let tool = self.tool.unwrap_or(0).max(0);
+        let total = self.total.unwrap_or(0).max(0);
+        let input = normalize_gemini_input(input, output, cache_read, reasoning, tool, total);
         let known = input + output + cache_read + reasoning + tool;
-        let remaining = self.total.unwrap_or(0).saturating_sub(known).max(0);
+        let remaining = total.saturating_sub(known).max(0);
 
         TokenBreakdown {
             input: input + tool + remaining,
@@ -292,12 +301,82 @@ impl GeminiTokens {
     }
 }
 
+fn normalize_gemini_input(
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    reasoning: i64,
+    tool: i64,
+    total: i64,
+) -> i64 {
+    let cache_inclusive_total = input + output + reasoning + tool;
+    if total > 0 && total == cache_inclusive_total {
+        input.saturating_sub(cache_read)
+    } else {
+        input
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parse_file_extracts_gemini_token_breakdown() {
+    fn gemini_tokens_subtract_cached_overlap_when_total_is_cache_inclusive() {
+        let breakdown = GeminiTokens {
+            input: Some(120),
+            output: Some(45),
+            cached: Some(30),
+            thoughts: Some(12),
+            tool: Some(0),
+            total: Some(177),
+        }
+        .into_breakdown();
+
+        assert_eq!(breakdown.input, 90);
+        assert_eq!(breakdown.output, 45);
+        assert_eq!(breakdown.cache_read, 30);
+        assert_eq!(breakdown.reasoning, 12);
+    }
+
+    #[test]
+    fn gemini_tokens_preserve_input_when_total_hint_is_missing() {
+        let breakdown = GeminiTokens {
+            input: Some(120),
+            output: Some(45),
+            cached: Some(30),
+            thoughts: Some(12),
+            tool: Some(0),
+            total: None,
+        }
+        .into_breakdown();
+
+        assert_eq!(breakdown.input, 120);
+        assert_eq!(breakdown.output, 45);
+        assert_eq!(breakdown.cache_read, 30);
+        assert_eq!(breakdown.reasoning, 12);
+    }
+
+    #[test]
+    fn gemini_tokens_preserve_input_when_total_already_counts_cache_separately() {
+        let breakdown = GeminiTokens {
+            input: Some(120),
+            output: Some(45),
+            cached: Some(30),
+            thoughts: Some(12),
+            tool: Some(0),
+            total: Some(207),
+        }
+        .into_breakdown();
+
+        assert_eq!(breakdown.input, 120);
+        assert_eq!(breakdown.output, 45);
+        assert_eq!(breakdown.cache_read, 30);
+        assert_eq!(breakdown.reasoning, 12);
+    }
+
+    #[test]
+    fn parse_file_normalizes_cache_inclusive_input_tokens() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session-gemini.json");
         std::fs::write(
@@ -308,7 +387,7 @@ mod tests {
                 "lastUpdated":"2026-04-01T12:05:00Z",
                 "messages":[
                     {"id":"user-1","type":"user"},
-                    {"id":"gem-1","type":"gemini","timestamp":"2026-04-01T12:01:00Z","model":"gemini-2.5-pro","tokens":{"input":120,"output":45,"cached":30,"thoughts":12}}
+                    {"id":"gem-1","type":"gemini","timestamp":"2026-04-01T12:01:00Z","model":"gemini-2.5-pro","tokens":{"input":120,"output":45,"cached":30,"thoughts":12,"total":177}}
                 ]
             }"#,
         )
@@ -319,7 +398,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session_id, "gem-session");
         assert_eq!(messages[0].model_id, "gemini-2.5-pro");
-        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.input, 90);
         assert_eq!(messages[0].tokens.output, 45);
         assert_eq!(messages[0].tokens.cache_read, 30);
         assert_eq!(messages[0].tokens.reasoning, 12);
@@ -368,5 +447,29 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 20);
         assert_eq!(messages[0].tokens.cache_read, 30);
         assert_eq!(messages[0].tokens.reasoning, 5);
+    }
+
+    #[test]
+    fn parse_jsonl_file_deduplicates_streamed_records_by_message_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-2026-04-25T03-39-86409e07.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"sessionId":"jsonl-session","startTime":"2026-04-25T03:39:00.000Z","lastUpdated":"2026-04-25T03:39:00.000Z","kind":"main"}
+{"id":"gem-1","timestamp":"2026-04-25T03:39:01.000Z","type":"gemini","content":"","tokens":{"input":100,"output":10,"cached":40,"thoughts":5,"tool":0,"total":115},"model":"gemini-3.1-pro-preview"}
+{"id":"gem-1","timestamp":"2026-04-25T03:39:02.000Z","type":"gemini","content":"","tokens":{"input":130,"output":20,"cached":50,"thoughts":7,"tool":0,"total":157},"model":"gemini-3.1-pro-preview"}
+{"$set":{"lastUpdated":"2026-04-25T03:39:02.000Z"}}"#,
+        )
+        .unwrap();
+
+        let messages = GeminiSessionParser::new().parse_file(path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_key, "gem-1");
+        assert_eq!(messages[0].timestamp, 1_777_088_342_000);
+        assert_eq!(messages[0].tokens.input, 80);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.cache_read, 50);
+        assert_eq!(messages[0].tokens.reasoning, 7);
     }
 }
