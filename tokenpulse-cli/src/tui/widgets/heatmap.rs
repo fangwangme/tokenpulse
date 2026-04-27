@@ -1,4 +1,4 @@
-use chrono::{Datelike, Duration, NaiveDate, Utc, Weekday};
+use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -173,7 +173,7 @@ fn compute_layout(area: Rect, range: Option<(NaiveDate, NaiveDate)>) -> Option<H
     }
 
     let (mut start, end) = range.unwrap_or_else(|| {
-        let end = Utc::now().date_naive();
+        let end = Local::now().date_naive();
         (end - Duration::days(364), end)
     });
     while start.weekday() != Weekday::Sun {
@@ -354,8 +354,6 @@ impl<'a> Widget for YearHeatmap<'a> {
         let mut cell_values: BTreeMap<(usize, usize), f64> = BTreeMap::new();
         let mut month_labels: Vec<(usize, String)> = Vec::new();
         let mut selected_cell = None;
-        let mut today_cell = None;
-        let today = Utc::now().date_naive();
 
         let values: BTreeMap<NaiveDate, f64> = self.points.iter().copied().collect();
         let mut cursor = start;
@@ -380,9 +378,6 @@ impl<'a> Widget for YearHeatmap<'a> {
                 .or_insert(value);
             if self.selected == Some(cursor) {
                 selected_cell = Some(key);
-            }
-            if cursor == today {
-                today_cell = Some(key);
             }
 
             let month = cursor.month();
@@ -414,10 +409,10 @@ impl<'a> Widget for YearHeatmap<'a> {
             }
         }
 
-        let (sym_empty, sym_selected, sym_today) = if cell_width >= 2 {
-            ("··", "◆◆", "▣▣")
+        let (sym_empty, sym_selected) = if cell_width >= 2 {
+            ("··", "◆◆")
         } else {
-            ("·", "◆", "▣")
+            ("·", "◆")
         };
 
         for col in 0..display_cols {
@@ -433,7 +428,6 @@ impl<'a> Widget for YearHeatmap<'a> {
                 let value = cell_values.get(&(col, row)).copied().unwrap_or(0.0);
                 let color = self.value_to_color(value, &thresholds);
                 let is_selected = selected_cell == Some((col, row));
-                let is_today = today_cell == Some((col, row));
                 let level = if value <= 0.0 {
                     0usize
                 } else if value < thresholds[0] {
@@ -449,8 +443,6 @@ impl<'a> Widget for YearHeatmap<'a> {
                 };
                 let symbol = if is_selected {
                     sym_selected
-                } else if is_today {
-                    sym_today
                 } else if value <= 0.0 {
                     sym_empty
                 } else if cell_width >= 2 {
@@ -470,8 +462,6 @@ impl<'a> Widget for YearHeatmap<'a> {
                 };
                 let style = if is_selected {
                     Style::default().fg(self.selected_color).bg(color)
-                } else if is_today {
-                    Style::default().fg(Color::White).bg(color)
                 } else {
                     Style::default().fg(color).bg(self.background)
                 };
