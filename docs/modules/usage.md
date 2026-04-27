@@ -216,7 +216,7 @@ Non-TUI output includes:
 The usage TUI is organized into four tabs:
 
 - `Overview` - 60-day stacked bar chart by model company + scrollable top models table
-- `Models` - Full searchable/sortable model table with company-colored model names, cost percentage, and colored numeric columns
+- `Models` - Full searchable/sortable model table with company-colored model names, sort-aware share percentage, and colored numeric columns
 - `Daily` - Daily summary bar and table with sorting and 7-day token trends on wide terminals
 - `Activity` - GitHub-style contribution graph with range stats and selected-day drill-down
 
@@ -236,7 +236,7 @@ All tabs support runtime source filtering:
 - top models are normalized before ranking
 - top models use row selection; the visible window only moves when the selected row reaches an edge
 - model and agent columns are intentionally wider so long names are still legible
-- each row shows model cost percentage using the actual filtered total cost
+- each row shows cost share using the actual filtered total cost
 
 Primary historical dashboard view:
 
@@ -252,7 +252,7 @@ Model attribution view:
 - Quick filter with `/`
 - Company-colored model names
 - Wider agent column for multi-agent attribution strings
-- Cost percentage column based on the filtered model total
+- `%` column reflects the active sort basis for the filtered model total: cost share for cost/date sort, token share for token sort
 - Semantic numeric colors: tokens=green, cost=gold, messages=blue
 - Filtered by enabled sources
 
@@ -277,7 +277,7 @@ GitHub-style contribution graph:
   - Agent totals with per-agent cost
   - Token summary (total/input/output/cache/reasoning/messages/sessions)
   - Per-agent model list with per-model cost
-  - Scrollable selected-day detail panel when content exceeds the viewport
+  - Scrollable selected-day detail panel when content exceeds the viewport, with the scroll hint rendered separately so the last model token line stays visible
 - Streak tracking
 
 ## Known Limits

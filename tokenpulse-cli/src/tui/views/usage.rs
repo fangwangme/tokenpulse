@@ -21,6 +21,7 @@ use ratatui::{
     Terminal,
 };
 use std::collections::{BTreeSet, HashMap};
+use std::time::{Duration as StdDuration, Instant};
 use tokenpulse_core::usage::{
     normalize_model_name, DailyUsageRow, DashboardDay, ModelSummary, UsageSummary,
 };
@@ -624,6 +625,9 @@ fn build_agent_model_groups(day: &DailyStats) -> Vec<AgentModelGroup> {
     let mut grouped: HashMap<String, AgentModelGroup> = HashMap::new();
 
     for (model_key, stats) in &day.models {
+        if stats.tokens <= 0 {
+            continue;
+        }
         let source = model_source(model_key).to_string();
         let model_name = model_id_from_key(model_key).to_string();
         let entry = grouped
@@ -640,6 +644,7 @@ fn build_agent_model_groups(day: &DailyStats) -> Vec<AgentModelGroup> {
     }
 
     let mut groups: Vec<AgentModelGroup> = grouped.into_values().collect();
+    groups.retain(|group| !group.models.is_empty());
     for group in &mut groups {
         group.models.sort_by(|left, right| {
             right
@@ -747,19 +752,39 @@ struct UsageState {
     show_help: bool,
     // Refresh tracking
     last_refreshed: Option<chrono::DateTime<Local>>,
+    refresh_status: Option<RefreshStatus>,
     data_date_range: Option<(NaiveDate, NaiveDate)>,
+}
+
+#[derive(Debug, Clone)]
+struct RefreshStatus {
+    message: String,
+    level: RefreshStatusLevel,
+    until: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshStatusLevel {
+    Info,
+    Success,
+    Error,
 }
 
 impl UsageState {
     fn new(dashboard: &UsageDashboard) -> Self {
         let all_sources = dashboard.all_sources();
         let enabled_sources: BTreeSet<String> = all_sources.iter().cloned().collect();
+        let today = Local::now().date_naive();
+        let selected_heatmap_date = dashboard
+            .day(today)
+            .map(|day| day.date)
+            .or_else(|| dashboard.latest_date());
         Self {
             page: UsagePage::Overview,
             overview_metric: OverviewMetric::Tokens,
             heatmap_metric: HeatmapMetric::TotalTokens,
             heatmap_window: HeatmapWindow::Past365Days,
-            selected_heatmap_date: dashboard.latest_date(),
+            selected_heatmap_date,
             heatmap_detail_scroll: 0,
             scroll_offset: 0,
             selected_row: 0,
@@ -773,6 +798,7 @@ impl UsageState {
             enabled_sources,
             show_help: false,
             last_refreshed: Some(Local::now()),
+            refresh_status: None,
             data_date_range: compute_data_date_range(dashboard),
         }
     }
@@ -870,13 +896,31 @@ impl UsageState {
             self.heatmap_detail_scroll += 1;
         }
     }
+
+    fn set_refresh_status(&mut self, message: impl Into<String>, level: RefreshStatusLevel) {
+        self.refresh_status = Some(RefreshStatus {
+            message: message.into(),
+            level,
+            until: Instant::now() + StdDuration::from_secs(2),
+        });
+    }
+
+    fn clear_expired_refresh_status(&mut self) {
+        if self
+            .refresh_status
+            .as_ref()
+            .is_some_and(|status| Instant::now() >= status.until)
+        {
+            self.refresh_status = None;
+        }
+    }
 }
 
 fn scrollable_item_count(dashboard: &UsageDashboard, state: &UsageState) -> usize {
     match state.page {
         UsagePage::Overview => dashboard.filtered_models(&state.enabled_sources).len(),
         UsagePage::Models => filtered_models_for_state(dashboard, state).len(),
-        UsagePage::Daily => dashboard.filtered_daily(&state.enabled_sources).len(),
+        UsagePage::Daily => visible_daily_rows(dashboard, &state.enabled_sources).len(),
         UsagePage::Heatmap => 0,
     }
 }
@@ -920,14 +964,18 @@ fn heatmap_detail_scroll_max(
     frame_area: Rect,
 ) -> usize {
     let body = dashboard_body_area(frame_area);
-    let detail_area = heatmap_day_panel_area(body);
+    let panel_outer = heatmap_day_panel_area(body);
+    // Mirror the exact layout path used in render_heatmap_day_detail
+    let inner = Block::default().borders(Borders::ALL).inner(panel_outer);
+    let sections = selected_day_sections(inner);
+    let detail_area = sections[1];
     let selected_day = dashboard.selected_day_in_window(
         state.heatmap_window,
         state.selected_heatmap_date,
         &state.enabled_sources,
     );
     let total_lines = heatmap_day_panel_line_count(selected_day.as_ref());
-    let visible_lines = detail_area.height.saturating_sub(2) as usize;
+    let visible_lines = selected_day_detail_body_visible_rows(detail_area, total_lines);
     total_lines.saturating_sub(visible_lines)
 }
 
@@ -955,6 +1003,7 @@ where
     let mut state = UsageState::new(&dashboard);
 
     loop {
+        state.clear_expired_refresh_status();
         terminal.draw(|f| {
             let size = f.area();
             render_dashboard(f, size, &dashboard, &summary, &state, &theme);
@@ -1050,37 +1099,61 @@ where
                     if matches!(key.code, KeyCode::Char('r'))
                         && !key.modifiers.contains(KeyModifiers::CONTROL)
                     {
-                        if let Ok((new_summary, new_daily_rows)) = reload() {
-                            let new_dashboard =
-                                UsageDashboard::build(&new_summary, &new_daily_rows);
-                            let saved_page = state.page;
-                            let saved_sort_field = state.sort_field;
-                            let saved_sort_ascending = state.sort_ascending;
-                            let saved_model_filter = std::mem::take(&mut state.model_filter);
-                            let saved_sources = state.enabled_sources.clone();
-                            let saved_heatmap_date = state.selected_heatmap_date;
-                            let saved_selected_row = state.selected_row;
-                            summary = new_summary;
-                            dashboard = new_dashboard;
-                            state = UsageState::new(&dashboard);
-                            state.page = saved_page;
-                            state.sort_field = saved_sort_field;
-                            state.sort_ascending = saved_sort_ascending;
-                            state.model_filter = saved_model_filter;
-                            let new_all: BTreeSet<String> =
-                                state.all_sources.iter().cloned().collect();
-                            let filtered: BTreeSet<String> = saved_sources
-                                .into_iter()
-                                .filter(|s| new_all.contains(s))
-                                .collect();
-                            state.enabled_sources = if filtered.is_empty() {
-                                new_all
-                            } else {
-                                filtered
-                            };
-                            state.selected_heatmap_date = saved_heatmap_date;
-                            state.selected_row = saved_selected_row;
-                            state.last_refreshed = Some(Local::now());
+                        state.set_refresh_status("Refreshing data...", RefreshStatusLevel::Info);
+                        terminal.draw(|f| {
+                            let size = f.area();
+                            render_dashboard(f, size, &dashboard, &summary, &state, &theme);
+                            if state.show_source_filter {
+                                render_source_filter_overlay(f, size, &state, &theme);
+                            }
+                            if state.show_help {
+                                render_help_overlay(f, size, &state, &theme);
+                            }
+                        })?;
+
+                        match reload() {
+                            Ok((new_summary, new_daily_rows)) => {
+                                let new_dashboard =
+                                    UsageDashboard::build(&new_summary, &new_daily_rows);
+                                let saved_page = state.page;
+                                let saved_sort_field = state.sort_field;
+                                let saved_sort_ascending = state.sort_ascending;
+                                let saved_model_filter = std::mem::take(&mut state.model_filter);
+                                let saved_sources = state.enabled_sources.clone();
+                                let saved_heatmap_date = state.selected_heatmap_date;
+                                let saved_selected_row = state.selected_row;
+                                summary = new_summary;
+                                dashboard = new_dashboard;
+                                state = UsageState::new(&dashboard);
+                                state.page = saved_page;
+                                state.sort_field = saved_sort_field;
+                                state.sort_ascending = saved_sort_ascending;
+                                state.model_filter = saved_model_filter;
+                                let new_all: BTreeSet<String> =
+                                    state.all_sources.iter().cloned().collect();
+                                let filtered: BTreeSet<String> = saved_sources
+                                    .into_iter()
+                                    .filter(|s| new_all.contains(s))
+                                    .collect();
+                                state.enabled_sources = if filtered.is_empty() {
+                                    new_all
+                                } else {
+                                    filtered
+                                };
+                                state.selected_heatmap_date = saved_heatmap_date;
+                                state.selected_row = saved_selected_row;
+                                state.last_refreshed = Some(Local::now());
+                                state.set_refresh_status(
+                                    "Refresh complete",
+                                    RefreshStatusLevel::Success,
+                                );
+                            }
+                            Err(err) => {
+                                state.set_refresh_status(
+                                    format!("Refresh failed: {}", err),
+                                    RefreshStatusLevel::Error,
+                                );
+                            }
                         }
                         continue;
                     }
@@ -1493,6 +1566,31 @@ fn heatmap_day_panel_area(area: Rect) -> Rect {
     info[1]
 }
 
+fn selected_day_detail_body_visible_rows(area: Rect, total_lines: usize) -> usize {
+    selected_day_detail_content_area(area, total_lines).height as usize
+}
+
+fn selected_day_detail_content_area(area: Rect, total_lines: usize) -> Rect {
+    if area.height > 0 && total_lines > area.height as usize {
+        Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
+    } else {
+        area
+    }
+}
+
+fn selected_day_detail_hint_area(area: Rect, total_lines: usize) -> Option<Rect> {
+    if area.height > 0 && total_lines > area.height as usize {
+        Some(Rect::new(
+            area.x,
+            area.y + area.height.saturating_sub(1),
+            area.width,
+            1,
+        ))
+    } else {
+        None
+    }
+}
+
 fn heatmap_sections(area: Rect) -> std::rc::Rc<[Rect]> {
     Layout::default()
         .direction(Direction::Vertical)
@@ -1702,12 +1800,36 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
             Some(t) => format!("Refreshed: {}", t.format("%H:%M:%S")),
             None => String::new(),
         };
-        if refresh_str.is_empty() {
+        let status_text = state
+            .refresh_status
+            .as_ref()
+            .map(|status| status.message.as_str())
+            .unwrap_or("");
+        let reserved = if status_text.is_empty() {
+            0
+        } else {
+            status_text.chars().count() + 3
+        };
+        let available = area.width.saturating_sub(reserved as u16) as usize;
+        let base = if refresh_str.is_empty() {
             format!(" {}", range_str)
         } else {
             format!(" {}  |  {}", range_str, refresh_str)
-        }
+        };
+        truncate(&base, available.max(1))
     };
+
+    let refresh_feedback = state.refresh_status.as_ref().map(|status| {
+        let color = match status.level {
+            RefreshStatusLevel::Info => theme.accent,
+            RefreshStatusLevel::Success => Color::Rgb(52, 211, 153),
+            RefreshStatusLevel::Error => Color::Rgb(248, 113, 113),
+        };
+        Line::from(vec![Span::styled(
+            format!(" {}", status.message),
+            Style::default().fg(color).bold(),
+        )])
+    });
 
     let footer_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1721,6 +1843,15 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
 
     let footer2 = Paragraph::new(info_line).style(Style::default().fg(theme.dim));
     f.render_widget(footer2, footer_chunks[1]);
+
+    if let Some(line) = refresh_feedback {
+        let width = (line.width() as u16).min(footer_chunks[1].width);
+        let x = footer_chunks[1].x + footer_chunks[1].width.saturating_sub(width);
+        f.render_widget(
+            Paragraph::new(line).alignment(Alignment::Right),
+            Rect::new(x, footer_chunks[1].y, width, 1),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2051,8 +2182,8 @@ fn render_overview_top_models(
         data_rows_visible,
         filtered.len(),
     );
-    let total_cost = filtered.iter().map(|model| model.cost).sum::<f64>();
     let total_width = inner.width as usize;
+    let total_cost = filtered.iter().map(|entry| entry.cost).sum::<f64>();
     let pct_width = 7usize;
     let cost_width = 8usize;
     let tokens_width = 9usize;
@@ -2099,7 +2230,7 @@ fn render_overview_top_models(
     {
         let provider_hint = model.provider.split(',').next();
         let color = theme.model_color_for(&model.model, provider_hint);
-        let pct = cost_share_percent(model.cost, total_cost);
+        let pct = share_percent(model.cost, total_cost);
         let selected = row_idx == selected_row;
         lines.push(Line::from(vec![
             Span::styled(
@@ -2264,7 +2395,7 @@ fn render_models_page(
                 + tok_per_msg_width,
         )
         .clamp(12, 40);
-    let total_cost = models.iter().map(|m| m.summary.cost).sum::<f64>();
+    let share_total = model_table_share_total(models.iter().copied(), state.sort_field);
 
     // Build per-model 7-day token sparkline data
     let today = dashboard
@@ -2393,7 +2524,7 @@ fn render_models_page(
         let selected = rank - 1 == selected_row;
         let model = &row.summary;
         let model_color = theme.model_color_for(&model.model, model.provider.split(',').next());
-        let pct = cost_share_percent(model.cost, total_cost);
+        let pct = model_share_percent(model, share_total, state.sort_field);
 
         let mut spans = vec![
             Span::styled(
@@ -2630,7 +2761,7 @@ fn render_daily_table(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut days = dashboard.filtered_daily(&state.enabled_sources);
+    let mut days = visible_daily_rows(dashboard, &state.enabled_sources);
     if days.is_empty() {
         f.render_widget(
             Paragraph::new(empty_data_message(state, "No daily data"))
@@ -3313,12 +3444,16 @@ fn render_selected_day_agent_detail(
     }
 
     let total_lines = lines.len();
-    let visible = area.height as usize;
+    let visible = selected_day_detail_body_visible_rows(area, total_lines);
     let offset = scroll_offset.min(total_lines.saturating_sub(visible));
-    let mut visible_lines: Vec<Line> = lines.into_iter().skip(offset).take(visible).collect();
-    if total_lines > visible && !visible_lines.is_empty() {
-        let last = visible_lines.len().saturating_sub(1);
-        visible_lines[last] = Line::from(vec![Span::styled(
+    let visible_lines: Vec<Line> = lines.into_iter().skip(offset).take(visible).collect();
+    let content_area = selected_day_detail_content_area(area, total_lines);
+    let hint_area = selected_day_detail_hint_area(area, total_lines);
+
+    f.render_widget(Paragraph::new(visible_lines), content_area);
+
+    if let Some(hint_area) = hint_area {
+        let hint = Line::from(vec![Span::styled(
             format!(
                 "{}{} detail {}-{} / {}",
                 if offset > 0 { "↑" } else { " " },
@@ -3333,9 +3468,8 @@ fn render_selected_day_agent_detail(
             ),
             Style::default().fg(theme.dim),
         )]);
+        f.render_widget(Paragraph::new(hint).alignment(Alignment::Right), hint_area);
     }
-
-    f.render_widget(Paragraph::new(visible_lines), area);
 }
 
 fn heatmap_day_panel_line_count(day: Option<&DailyStats>) -> usize {
@@ -3384,6 +3518,14 @@ fn filtered_models_for_state(dashboard: &UsageDashboard, state: &UsageState) -> 
         .collect()
 }
 
+fn visible_daily_rows(dashboard: &UsageDashboard, enabled: &BTreeSet<String>) -> Vec<DailyStats> {
+    dashboard
+        .filtered_daily(enabled)
+        .into_iter()
+        .filter(|day| day.total_tokens > 0)
+        .collect()
+}
+
 fn filtered_model_rows_for_state(
     dashboard: &UsageDashboard,
     state: &UsageState,
@@ -3420,6 +3562,24 @@ fn format_metric(metric: HeatmapMetric, value: f64) -> String {
         | HeatmapMetric::Messages
         | HeatmapMetric::Sessions => format_compact(value.round() as i64),
     }
+}
+
+fn model_table_share_total<'a>(
+    rows: impl IntoIterator<Item = &'a ModelTableRow>,
+    sort_field: SortField,
+) -> f64 {
+    match sort_field {
+        SortField::Tokens => rows.into_iter().map(|row| row.summary.tokens as f64).sum(),
+        SortField::Cost | SortField::Date => rows.into_iter().map(|row| row.summary.cost).sum(),
+    }
+}
+
+fn model_share_percent(model: &ModelSummary, total: f64, sort_field: SortField) -> f64 {
+    let value = match sort_field {
+        SortField::Tokens => model.tokens as f64,
+        SortField::Cost | SortField::Date => model.cost,
+    };
+    share_percent(value, total)
 }
 
 fn format_compact(value: i64) -> String {
@@ -3510,12 +3670,12 @@ fn overview_model_visible_rows(area_height: u16) -> usize {
     area_height.saturating_sub(3) as usize
 }
 
-fn cost_share_percent(cost: f64, total_cost: f64) -> f64 {
-    if total_cost <= 0.0 {
+fn share_percent(value: f64, total: f64) -> f64 {
+    if total <= 0.0 {
         return 0.0;
     }
 
-    (cost / total_cost * 100.0).clamp(0.0, 100.0)
+    (value / total * 100.0).clamp(0.0, 100.0)
 }
 
 fn normalized_scroll_offset(offset: usize, selected: usize, visible: usize, total: usize) -> usize {
@@ -3717,6 +3877,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_model_groups_hide_zero_token_models() {
+        let dashboard = sample_dashboard();
+        let mut day = dashboard
+            .day(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap())
+            .unwrap()
+            .clone();
+        day.models.insert(
+            "codex / idle-model".to_string(),
+            DayBreakdown {
+                provider_id: "openai".to_string(),
+                tokens: 0,
+                cost_usd: 1.0,
+                ..DayBreakdown::default()
+            },
+        );
+
+        let groups = build_agent_model_groups(&day);
+
+        assert!(groups
+            .iter()
+            .all(|group| { group.models.iter().all(|(model, _)| model != "idle-model") }));
+    }
+
+    #[test]
     fn overview_visible_rows_uses_model_table_section() {
         let rows = visible_rows_for_page(UsagePage::Overview, Rect::new(0, 0, 120, 40));
 
@@ -3724,9 +3908,45 @@ mod tests {
     }
 
     #[test]
-    fn cost_share_percent_uses_actual_small_nonzero_total() {
-        assert_eq!(cost_share_percent(0.005, 0.005), 100.0);
-        assert_eq!(cost_share_percent(0.005, 0.0), 0.0);
+    fn share_percent_uses_actual_small_nonzero_total() {
+        assert_eq!(share_percent(0.005, 0.005), 100.0);
+        assert_eq!(share_percent(0.005, 0.0), 0.0);
+    }
+
+    #[test]
+    fn model_share_percent_uses_tokens_when_sorted_by_tokens() {
+        let model = ModelSummary {
+            model: "gpt-5".to_string(),
+            provider: "openai".to_string(),
+            source: "codex".to_string(),
+            cost: 1.0,
+            tokens: 200,
+            message_count: 1,
+            session_count: 1,
+            percent: 0.0,
+        };
+
+        assert_eq!(model_share_percent(&model, 400.0, SortField::Tokens), 50.0);
+        assert_eq!(model_share_percent(&model, 4.0, SortField::Cost), 25.0);
+    }
+
+    #[test]
+    fn selected_day_detail_reserves_bottom_row_for_scroll_hint() {
+        let area = Rect::new(0, 0, 40, 4);
+
+        assert_eq!(selected_day_detail_body_visible_rows(area, 5), 3);
+        assert_eq!(
+            selected_day_detail_content_area(area, 5),
+            Rect::new(0, 0, 40, 3)
+        );
+        assert_eq!(
+            selected_day_detail_hint_area(area, 5),
+            Some(Rect::new(0, 3, 40, 1))
+        );
+        assert_eq!(
+            selected_day_detail_body_visible_rows(Rect::new(0, 0, 40, 4), 4),
+            4
+        );
     }
 
     #[test]
