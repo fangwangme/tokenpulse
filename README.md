@@ -29,7 +29,7 @@ Quota fetching currently supports:
 Notes:
 
 - usage coverage is strongest today for Claude Code, Codex, OpenCode, and Copilot
-- Gemini usage is still provisional
+- Gemini usage now handles streamed JSONL deduplication and cache-inclusive input tokens, but still has less sample coverage than Claude/Codex/OpenCode/Copilot
 - Antigravity historical usage is not complete yet
 
 ## Screenshots
@@ -122,6 +122,8 @@ tokenpulse usage --refresh-days 2026-04-01:2026-04-09
 tokenpulse usage --refresh-pricing
 tokenpulse usage --rebuild-all
 ```
+
+If you previously ingested Gemini usage before the parser fix, the next `tokenpulse usage` run will automatically rebuild stored Gemini rows when it sees an older parser version. You can also force a one-shot refresh with `tokenpulse usage -p gemini --rebuild-all`.
 
 ## Data Model
 

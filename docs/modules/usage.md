@@ -152,9 +152,13 @@ Important rule:
 ### Gemini CLI
 
 - source path:
-  - `~/.gemini/tmp/session-*.json`
-- current parser is provisional
-- timestamp fallback behavior still needs validation against real samples
+  - `~/.gemini/tmp/**/session-*.json`
+  - `~/.gemini/tmp/**/session-*.jsonl`
+- current parser is still lower-confidence than Claude/Codex/OpenCode/Copilot, but now handles two Gemini-specific quirks:
+  - streamed JSONL records are deduplicated by message `id`, keeping the last chunk per response
+  - cache-inclusive `input` values are normalized when `total` indicates that `cached` tokens are already included in the prompt count
+- timestamp fallback behavior still needs broader validation against real samples
+- parser version changes can invalidate previously ingested Gemini rows; `tokenpulse usage` will automatically clear and rebuild stale Gemini ledger entries on the next run
 
 ### PI
 

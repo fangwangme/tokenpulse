@@ -8,7 +8,7 @@ A Rust CLI tool with two core features:
 
 **Current Usage Scope:** Claude Code, Codex, OpenCode, Gemini CLI, PI, Copilot CLI
 **Current Quota Scope:** Claude Code, Codex, Gemini CLI, GitHub Copilot, Antigravity
-**Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI is provisional. Antigravity historical usage is not complete yet.
+**Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI still has lighter sample coverage, though streamed JSONL deduplication and cache-inclusive input normalization are now handled. Antigravity historical usage is not complete yet.
 
 **Language:** Rust
 **Key Principle:** On-demand only. No auto-refresh, no polling. Run command → see results → exit.
@@ -31,7 +31,7 @@ As of 2026-04-25:
 Known gaps:
 
 - durable scan-state persistence for append-only sources is not finished
-- Gemini CLI historical coverage still needs more sample validation
+- Gemini CLI historical coverage still needs more sample validation beyond the current JSON/JSONL parser fixes
 - Antigravity historical usage is still staged work
 - weekly/monthly session counts should not yet be treated as fully deduplicated unique-session metrics
 
@@ -342,7 +342,7 @@ Token refresh:
 | OpenCode | `~/.local/share/opencode/opencode.db` | SQLite, messages table |
 | PI | `~/.pi/agent/sessions/**/*.jsonl` | JSONL with header + entries |
 | GitHub Copilot | `~/.local/share/github-copilot/events.jsonl` | OTEL JSONL events |
-| Gemini CLI | `~/.gemini/tmp/session-*.json` | JSON session files |
+| Gemini CLI | `~/.gemini/tmp/**/session-*.json{,l}` | JSON + streamed JSONL session files |
 
 ### Pricing Source
 
@@ -368,7 +368,7 @@ Cache: ~/.cache/tokenpulse/pricing.json (24h TTL)
 ### Phase 2 - More Providers
 - [x] OpenCode: SQLite session parser
 - [x] PI: session JSONL parser
-- [x] Gemini CLI: auth + quota + provisional session parser
+- [x] Gemini CLI: auth + quota + session parser with JSONL dedup + cache-overlap normalization
 - [x] GitHub Copilot: quota + usage parser
 - [x] Antigravity: quota probe
 - [ ] Antigravity: historical usage parser
