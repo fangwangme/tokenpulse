@@ -43,10 +43,6 @@ pub async fn run(
             }
         }
 
-        if !stale_sources.is_empty() {
-            let stale_sources_list = stale_sources.iter().cloned().collect::<Vec<_>>();
-            store.clear_sources(&stale_sources_list, refresh_pricing)?;
-        }
     }
 
     if rebuild_all {
@@ -74,7 +70,16 @@ pub async fn run(
                     None => messages,
                 };
 
-                if !scoped.is_empty() {
+                if stale_sources.contains(parser.provider_name()) {
+                    if !scoped.is_empty() {
+                        found_any_source = true;
+                        store.replace_source_messages(
+                            parser.provider_name(),
+                            &scoped,
+                            refresh_pricing,
+                        )?;
+                    }
+                } else if !scoped.is_empty() {
                     found_any_source = true;
                     store.ingest_messages(&scoped, refresh_pricing)?;
                 }
@@ -409,6 +414,81 @@ fn print_models_csv(summary: &tokenpulse_core::usage::UsageSummary) {
 #[cfg(test)]
 mod tests {
     use super::parse_provider_names;
+    use chrono::NaiveDate;
+    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+    use tokenpulse_core::{
+        provider::{SessionParser, TokenBreakdown, UnifiedMessage},
+        usage::UsageStore,
+    };
+
+    struct StubParser {
+        provider_name: String,
+        parser_version: String,
+        messages: Vec<UnifiedMessage>,
+    }
+
+    impl SessionParser for StubParser {
+        fn provider_name(&self) -> &str {
+            &self.provider_name
+        }
+
+        fn session_paths(&self) -> Vec<std::path::PathBuf> {
+            Vec::new()
+        }
+
+        fn parse_sessions(&self, _since: Option<NaiveDate>) -> anyhow::Result<Vec<UnifiedMessage>> {
+            Ok(self.messages.clone())
+        }
+
+        fn parser_version(&self) -> &str {
+            &self.parser_version
+        }
+    }
+
+    fn sample_message(source: &str, parser_version: &str, date: &str, key: &str) -> UnifiedMessage {
+        let timestamp = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
+
+        UnifiedMessage::new(
+            source,
+            "gemini-2.5-pro",
+            "google",
+            "session-1",
+            key,
+            timestamp,
+            TokenBreakdown {
+                input: 100,
+                output: 50,
+                cache_read: 10,
+                cache_write: 0,
+                reasoning: 0,
+            },
+        )
+        .with_cost(1.0)
+        .with_parser_version(parser_version)
+    }
+
+    fn ingest_parsed_messages(
+        store: &UsageStore,
+        parser: &dyn SessionParser,
+        refresh_pricing: bool,
+        stale_sources: &std::collections::HashSet<String>,
+    ) {
+        let messages = parser.parse_sessions(None).unwrap();
+        if stale_sources.contains(parser.provider_name()) {
+            if !messages.is_empty() {
+                store
+                    .replace_source_messages(parser.provider_name(), &messages, refresh_pricing)
+                    .unwrap();
+            }
+        } else if !messages.is_empty() {
+            store.ingest_messages(&messages, refresh_pricing).unwrap();
+        }
+    }
 
     #[test]
     fn parse_provider_names_preserves_requested_subset_order() {
@@ -431,5 +511,35 @@ mod tests {
                 "pi".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn stale_parser_rebuild_keeps_existing_rows_when_parser_returns_no_messages() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("tokenpulse-usage-test-{unique}.sqlite3"));
+        let _ = fs::remove_file(&path);
+        let store = UsageStore::with_path(path.clone());
+        store
+            .ingest_messages(&[sample_message("gemini", "gemini-v2", "2024-03-10", "old")], false)
+            .unwrap();
+
+        let parser = StubParser {
+            provider_name: "gemini".to_string(),
+            parser_version: "gemini-v3".to_string(),
+            messages: Vec::new(),
+        };
+        let stale_sources = ["gemini".to_string()].into_iter().collect();
+
+        ingest_parsed_messages(&store, &parser, false, &stale_sources);
+
+        let remaining = store.load_messages(None, &["gemini".to_string()]).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].message_key, "old");
+        assert_eq!(remaining[0].parser_version, "gemini-v2");
+
+        let _ = fs::remove_file(path);
     }
 }

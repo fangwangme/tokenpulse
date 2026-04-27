@@ -221,6 +221,106 @@ impl UsageStore {
         self.delete_scoped(None, sources, refresh_pricing)
     }
 
+    pub fn replace_source_messages(
+        &self,
+        source: &str,
+        messages: &[UnifiedMessage],
+        refresh_pricing: bool,
+    ) -> Result<BTreeSet<String>> {
+        if messages.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+
+        let pricing_cache = PricingCache::new();
+        let pricing = match pricing_cache.get_pricing_sync() {
+            Ok(pricing) => Some(pricing),
+            Err(error) if !refresh_pricing => {
+                warn!(
+                    "Failed to load pricing data during usage ingest; continuing without refreshed pricing: {}",
+                    error
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
+
+        let mut conn = self.open()?;
+        let tx = conn.transaction()?;
+        let now = Utc::now().timestamp_millis();
+        let mut affected_dates = BTreeSet::new();
+
+        let existing_dates = load_source_dates(&tx, source)?;
+        for date in &existing_dates {
+            affected_dates.insert(date.clone());
+        }
+
+        delete_scoped_tx(&tx, None, &[source.to_string()], refresh_pricing)?;
+
+        for message in messages {
+            let snapshot =
+                ensure_pricing_snapshot(&tx, pricing.as_ref(), message, refresh_pricing)?;
+            let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
+
+            tx.execute(
+                r#"
+                INSERT INTO usage_messages (
+                    source, provider_id, model_id, session_id, message_key,
+                    timestamp_ms, date, input_tokens, output_tokens,
+                    cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                    total_tokens, cost_usd, pricing_day, parser_version
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5,
+                    ?6, ?7, ?8, ?9,
+                    ?10, ?11, ?12,
+                    ?13, ?14, ?15, ?16
+                )
+                ON CONFLICT(source, message_key) DO UPDATE SET
+                    provider_id = excluded.provider_id,
+                    model_id = excluded.model_id,
+                    session_id = excluded.session_id,
+                    timestamp_ms = excluded.timestamp_ms,
+                    date = excluded.date,
+                    input_tokens = excluded.input_tokens,
+                    output_tokens = excluded.output_tokens,
+                    cache_read_tokens = excluded.cache_read_tokens,
+                    cache_write_tokens = excluded.cache_write_tokens,
+                    reasoning_tokens = excluded.reasoning_tokens,
+                    total_tokens = excluded.total_tokens,
+                    cost_usd = excluded.cost_usd,
+                    pricing_day = excluded.pricing_day,
+                    parser_version = excluded.parser_version
+                "#,
+                params![
+                    message.client,
+                    message.provider_id,
+                    message.model_id,
+                    message.session_id,
+                    message.message_key,
+                    message.timestamp,
+                    message.date,
+                    message.tokens.input,
+                    message.tokens.output,
+                    message.tokens.cache_read,
+                    message.tokens.cache_write,
+                    message.tokens.reasoning,
+                    message.total_tokens(),
+                    cost,
+                    message.pricing_day,
+                    message.parser_version,
+                ],
+            )?;
+
+            affected_dates.insert(message.date.clone());
+        }
+
+        for date in &affected_dates {
+            rebuild_daily_for_date(&tx, date, now)?;
+        }
+
+        tx.commit()?;
+        Ok(affected_dates)
+    }
+
     pub fn delete_date_range(&self, range: DateRange, refresh_pricing: bool) -> Result<()> {
         let mut conn = self.open()?;
         let tx = conn.transaction()?;
@@ -558,28 +658,7 @@ impl UsageStore {
 
         let mut conn = self.open()?;
         let tx = conn.transaction()?;
-        let snapshot_keys = if refresh_pricing {
-            load_pricing_snapshot_keys(&tx, range, sources)?
-        } else {
-            Vec::new()
-        };
-
-        let mut message_sql = String::from("DELETE FROM usage_messages WHERE 1=1");
-        let message_params = append_range_and_source_filters(&mut message_sql, range, sources);
-        tx.execute(&message_sql, params_from_iter(message_params))?;
-
-        let mut daily_sql = String::from("DELETE FROM daily_model_usage WHERE 1=1");
-        let daily_params = append_range_and_source_filters(&mut daily_sql, range, sources);
-        tx.execute(&daily_sql, params_from_iter(daily_params))?;
-
-        if refresh_pricing {
-            for (date, provider_id, model_id) in snapshot_keys {
-                tx.execute(
-                    "DELETE FROM daily_pricing_snapshots WHERE date = ?1 AND provider_id = ?2 AND model_id = ?3",
-                    params![date, provider_id, model_id],
-                )?;
-            }
-        }
+        delete_scoped_tx(&tx, range, sources, refresh_pricing)?;
 
         tx.commit()?;
         Ok(())
@@ -665,6 +744,46 @@ fn load_pricing_snapshot_keys(
         ))
     })?;
     Ok(rows.flatten().collect())
+}
+
+fn load_source_dates(tx: &Transaction<'_>, source: &str) -> Result<Vec<String>> {
+    let mut stmt = tx.prepare(
+        "SELECT DISTINCT date FROM usage_messages WHERE source = ?1 ORDER BY date ASC",
+    )?;
+    let rows = stmt.query_map(params![source], |row| row.get::<_, String>(0))?;
+    Ok(rows.flatten().collect())
+}
+
+fn delete_scoped_tx(
+    tx: &Transaction<'_>,
+    range: Option<DateRange>,
+    sources: &[String],
+    refresh_pricing: bool,
+) -> Result<()> {
+    let snapshot_keys = if refresh_pricing {
+        load_pricing_snapshot_keys(tx, range, sources)?
+    } else {
+        Vec::new()
+    };
+
+    let mut message_sql = String::from("DELETE FROM usage_messages WHERE 1=1");
+    let message_params = append_range_and_source_filters(&mut message_sql, range, sources);
+    tx.execute(&message_sql, params_from_iter(message_params))?;
+
+    let mut daily_sql = String::from("DELETE FROM daily_model_usage WHERE 1=1");
+    let daily_params = append_range_and_source_filters(&mut daily_sql, range, sources);
+    tx.execute(&daily_sql, params_from_iter(daily_params))?;
+
+    if refresh_pricing {
+        for (date, provider_id, model_id) in snapshot_keys {
+            tx.execute(
+                "DELETE FROM daily_pricing_snapshots WHERE date = ?1 AND provider_id = ?2 AND model_id = ?3",
+                params![date, provider_id, model_id],
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnifiedMessage> {
@@ -1111,6 +1230,55 @@ mod tests {
         assert_eq!(remaining_codex.len(), 1);
         assert_eq!(remaining_codex[0].client, "codex");
         assert!(remaining_claude.is_empty());
+    }
+
+    #[test]
+    fn replace_source_messages_keeps_existing_rows_when_new_parse_is_empty() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        let mut message = sample_message("2024-03-10", "gemini-m1");
+        message.client = "gemini".to_string();
+        message.provider_id = "google".to_string();
+        message.parser_version = "gemini-v2".to_string();
+
+        store.ingest_messages(&[message], false).unwrap();
+        store
+            .replace_source_messages("gemini", &[], false)
+            .unwrap();
+
+        let remaining = store.load_messages(None, &["gemini".to_string()]).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].parser_version, "gemini-v2");
+    }
+
+    #[test]
+    fn replace_source_messages_replaces_old_rows_after_new_parse_succeeds() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        let mut old = sample_message("2024-03-10", "gemini-old");
+        old.client = "gemini".to_string();
+        old.provider_id = "google".to_string();
+        old.parser_version = "gemini-v2".to_string();
+        old.session_id = "old-session".to_string();
+
+        let mut replacement = sample_message("2024-03-11", "gemini-new");
+        replacement.client = "gemini".to_string();
+        replacement.provider_id = "google".to_string();
+        replacement.parser_version = "gemini-v3".to_string();
+        replacement.session_id = "new-session".to_string();
+
+        store.ingest_messages(&[old], false).unwrap();
+        store
+            .replace_source_messages("gemini", &[replacement], false)
+            .unwrap();
+
+        let remaining = store.load_messages(None, &["gemini".to_string()]).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].message_key, "gemini-new");
+        assert_eq!(remaining[0].date, "2024-03-11");
+        assert_eq!(remaining[0].parser_version, "gemini-v3");
     }
 
     #[test]

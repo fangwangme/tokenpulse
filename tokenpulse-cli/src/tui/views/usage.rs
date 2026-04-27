@@ -1808,7 +1808,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
         let reserved = if status_text.is_empty() {
             0
         } else {
-            status_text.chars().count() + 3
+            status_text.chars().count() + 4
         };
         let available = area.width.saturating_sub(reserved as u16) as usize;
         let base = if refresh_str.is_empty() {
