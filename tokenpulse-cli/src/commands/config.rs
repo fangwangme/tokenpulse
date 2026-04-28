@@ -1,7 +1,6 @@
 use crate::ConfigAction;
 use anyhow::Result;
-use tokenpulse_core::config::ConfigManager;
-use tokenpulse_core::config::QuotaDisplayMode;
+use tokenpulse_core::config::{ConfigManager, QuotaDisplayMode, ThemePreference};
 
 pub fn run(action: ConfigAction) -> Result<()> {
     let manager = ConfigManager::new();
@@ -26,6 +25,7 @@ pub fn run(action: ConfigAction) -> Result<()> {
                 "  show_empty_providers: {}",
                 config.display.show_empty_providers
             );
+            println!("  theme: {}", config.display.theme.label());
             let mode_str = match config.display.quota_display_mode {
                 QuotaDisplayMode::Used => "used",
                 QuotaDisplayMode::Remaining => "remaining",
@@ -85,6 +85,21 @@ pub fn run(action: ConfigAction) -> Result<()> {
                     manager.save(&config)?;
                     println!("show_empty_providers = {value}");
                 }
+                "theme" => {
+                    config.display.theme = match value {
+                        "auto" => ThemePreference::Auto,
+                        "dark" => ThemePreference::Dark,
+                        "light" => ThemePreference::Light,
+                        _ => {
+                            anyhow::bail!(
+                                "Invalid value '{}' for theme. Expected: auto, dark, light",
+                                value
+                            );
+                        }
+                    };
+                    manager.save(&config)?;
+                    println!("theme = {}", config.display.theme.label());
+                }
                 "quota_auto_refresh_interval" => {
                     let mins: u32 = value.parse().map_err(|_| {
                         anyhow::anyhow!(
@@ -117,7 +132,7 @@ pub fn run(action: ConfigAction) -> Result<()> {
                 }
                 _ => {
                     anyhow::bail!(
-                        "Unknown setting '{}'. Available settings:\n  quota_display_mode           (used | remaining)\n  show_empty_providers         (true | false)\n  quota_auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)",
+                        "Unknown setting '{}'. Available settings:\n  quota_display_mode           (used | remaining)\n  show_empty_providers         (true | false)\n  theme                        (auto | dark | light)\n  quota_auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)",
                         key
                     );
                 }

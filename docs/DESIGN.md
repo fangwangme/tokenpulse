@@ -383,7 +383,7 @@ Cache: ~/.cache/tokenpulse/pricing.json (24h TTL)
 - [x] Source filter overlay (`s`)
 - [x] Block-character heatmap intensity for accessibility
 - [x] Pace ETA and expected-progress marker on quota gauges
-- [ ] Configurable TUI theme
+- [x] Configurable TUI theme
 - [ ] `--watch` mode (manual refresh with keyboard)
 
 ---

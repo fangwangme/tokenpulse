@@ -1,4 +1,4 @@
-use crate::tui::theme::Theme;
+use crate::tui::theme::{theme_status_label, Theme};
 use crate::tui::widgets::{
     date_at_position, HeatmapMetric, StackedBarChart, ValueFormat, YearHeatmap,
 };
@@ -22,8 +22,9 @@ use ratatui::{
 };
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration as StdDuration, Instant};
-use tokenpulse_core::usage::{
-    normalize_model_name, DailyUsageRow, DashboardDay, ModelSummary, UsageSummary,
+use tokenpulse_core::{
+    config::{ConfigManager, ThemePreference},
+    usage::{normalize_model_name, DailyUsageRow, DashboardDay, ModelSummary, UsageSummary},
 };
 
 // ---------------------------------------------------------------------------
@@ -991,14 +992,18 @@ pub fn run<F>(
 where
     F: FnMut() -> Result<(UsageSummary, Vec<DailyUsageRow>)>,
 {
+    let config_manager = ConfigManager::new();
+    let mut config = config_manager.load().unwrap_or_default();
+    let mut theme_preference = config.display.theme;
+
     enable_raw_mode()?;
+    let mut theme = Theme::from_preference(theme_preference);
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
 
-    let mut theme = Theme::auto();
     let mut dashboard = UsageDashboard::build(&summary, &daily_rows);
     let mut state = UsageState::new(&dashboard);
 
@@ -1006,7 +1011,15 @@ where
         state.clear_expired_refresh_status();
         terminal.draw(|f| {
             let size = f.area();
-            render_dashboard(f, size, &dashboard, &summary, &state, &theme);
+            render_dashboard(
+                f,
+                size,
+                &dashboard,
+                &summary,
+                &state,
+                &theme,
+                theme_preference,
+            );
             if state.show_source_filter {
                 render_source_filter_overlay(f, size, &state, &theme);
             }
@@ -1092,7 +1105,10 @@ where
                     if matches!(key.code, KeyCode::Char('b'))
                         && !key.modifiers.contains(KeyModifiers::CONTROL)
                     {
-                        theme = theme.toggled();
+                        theme_preference = theme_preference.next();
+                        config.display.theme = theme_preference;
+                        config_manager.save(&config)?;
+                        theme = Theme::from_preference(theme_preference);
                         continue;
                     }
 
@@ -1102,7 +1118,15 @@ where
                         state.set_refresh_status("Refreshing data...", RefreshStatusLevel::Info);
                         terminal.draw(|f| {
                             let size = f.area();
-                            render_dashboard(f, size, &dashboard, &summary, &state, &theme);
+                            render_dashboard(
+                                f,
+                                size,
+                                &dashboard,
+                                &summary,
+                                &state,
+                                &theme,
+                                theme_preference,
+                            );
                             if state.show_source_filter {
                                 render_source_filter_overlay(f, size, &state, &theme);
                             }
@@ -1491,6 +1515,7 @@ fn render_dashboard(
     summary: &UsageSummary,
     state: &UsageState,
     theme: &Theme,
+    theme_preference: ThemePreference,
 ) {
     f.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
 
@@ -1510,7 +1535,7 @@ fn render_dashboard(
         UsagePage::Heatmap => render_heatmap_page(f, root[2], dashboard, state, theme),
     }
 
-    render_footer(f, root[3], state, theme);
+    render_footer(f, root[3], state, theme, theme_preference);
 }
 
 fn dashboard_body_area(area: Rect) -> Rect {
@@ -1732,7 +1757,14 @@ fn render_tabs(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: &T
 // Footer
 // ---------------------------------------------------------------------------
 
-fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: &Theme) {
+fn render_footer(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    state: &UsageState,
+    theme: &Theme,
+    theme_preference: ThemePreference,
+) {
+    let theme_label = theme_status_label(theme_preference, theme.mode);
     let filter_hint = if state.enabled_sources.len() < state.all_sources.len() {
         format!(
             " | s filter ({}/{})",
@@ -1745,7 +1777,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
     let help = match state.page {
         UsagePage::Overview => format!(
             " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ select | t/c metric ({}) | ? help{}",
-            theme.mode.label(),
+            theme_label,
             match state.overview_metric {
                 OverviewMetric::Tokens => "tokens",
                 OverviewMetric::Cost => "cost",
@@ -1766,7 +1798,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
             };
             format!(
                 " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ select | / filter | ctrl+l clear | c/t/d sort ({} {}) | ? help{}{}",
-                theme.mode.label(), field, dir, filter, filter_hint
+                theme_label, field, dir, filter, filter_hint
             )
         }
         UsagePage::Daily => {
@@ -1778,12 +1810,12 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: 
             };
             format!(
                 " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ select | T today | c/t/d sort ({} {}) | ? help{}",
-                theme.mode.label(), field, dir, filter_hint
+                theme_label, field, dir, filter_hint
             )
         }
         UsagePage::Heatmap => format!(
             " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ day | T today | pgup/pgdn detail | w window ({}) | t/c/i/o/x/m/n metric ({}) | ? help{}",
-            theme.mode.label(),
+            theme_label,
             state.heatmap_window.label(),
             state.heatmap_metric.short_label(),
             filter_hint
@@ -1934,7 +1966,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
             ("t / c", "toggle tokens / cost metric"),
             ("r", "refresh data"),
             ("s", "source filter"),
-            ("b", "toggle theme"),
+            ("b", "cycle and save theme"),
             ("q / Esc", "quit"),
         ],
         UsagePage::Models => &[
@@ -1945,7 +1977,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
             ("Ctrl+L", "clear filter"),
             ("r", "refresh data"),
             ("s", "source filter"),
-            ("b", "toggle theme"),
+            ("b", "cycle and save theme"),
             ("q / Esc", "quit"),
         ],
         UsagePage::Daily => &[
@@ -1955,7 +1987,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
             ("c / t / d", "sort by cost / tokens / date"),
             ("r", "refresh data"),
             ("s", "source filter"),
-            ("b", "toggle theme"),
+            ("b", "cycle and save theme"),
             ("q / Esc", "quit"),
         ],
         UsagePage::Heatmap => &[
@@ -1967,7 +1999,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
             ("t / c / i / o / x / m / n", "switch metric"),
             ("r", "refresh data"),
             ("s", "source filter"),
-            ("b", "toggle theme"),
+            ("b", "cycle and save theme"),
             ("q / Esc", "quit"),
         ],
     };
@@ -2696,21 +2728,18 @@ fn render_daily_summary(
 
     let mut lines = vec![Line::from(vec![
         Span::styled("Period Total ", Style::default().fg(theme.dim)),
-        Span::styled(
-            format_cost_compact(total_cost),
-            Style::default().fg(theme.gauge_high).bold(),
-        ),
+        Span::styled(format_cost_compact(total_cost), summary_cost_style(theme)),
         Span::raw("    "),
         Span::styled("Avg Daily ", Style::default().fg(theme.dim)),
         Span::styled(
             format_cost_compact(avg_daily_cost),
-            Style::default().fg(theme.fg),
+            summary_cost_style(theme),
         ),
         Span::raw("    "),
         Span::styled("Max Daily ", Style::default().fg(theme.dim)),
         Span::styled(
             format_cost_compact(max_daily_cost),
-            Style::default().fg(theme.fg),
+            summary_cost_style(theme),
         ),
         Span::raw("    "),
         Span::styled(
@@ -2722,22 +2751,13 @@ fn render_daily_summary(
     if inner.height >= 2 {
         lines.push(Line::from(vec![
             Span::styled("Today ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format_cost_compact(today_cost),
-                Style::default().fg(theme.accent).bold(),
-            ),
+            Span::styled(format_cost_compact(today_cost), summary_cost_style(theme)),
             Span::raw("    "),
             Span::styled("This Week ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format_cost_compact(week_cost),
-                Style::default().fg(theme.fg),
-            ),
+            Span::styled(format_cost_compact(week_cost), summary_cost_style(theme)),
             Span::raw("    "),
             Span::styled("This Month ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format_cost_compact(month_cost),
-                Style::default().fg(theme.fg),
-            ),
+            Span::styled(format_cost_compact(month_cost), summary_cost_style(theme)),
         ]));
     }
 
@@ -3131,16 +3151,22 @@ fn render_heatmap_summary_card(
             Span::styled("Total  ", Style::default().fg(theme.dim)),
             Span::styled(
                 format_metric(metric, total),
-                Style::default().fg(theme.accent).bold(),
+                summary_metric_style(metric, theme).bold(),
             ),
         ]),
         Line::from(vec![
             Span::styled("Peak   ", Style::default().fg(theme.dim)),
-            Span::styled(format_metric(metric, peak), Style::default().fg(theme.fg)),
+            Span::styled(
+                format_metric(metric, peak),
+                summary_metric_style(metric, theme),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Avg    ", Style::default().fg(theme.dim)),
-            Span::styled(format_metric(metric, avg), Style::default().fg(theme.fg)),
+            Span::styled(
+                format_metric(metric, avg),
+                summary_metric_style(metric, theme),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Active ", Style::default().fg(theme.dim)),
@@ -3164,30 +3190,21 @@ fn render_heatmap_summary_card(
         Line::raw(""),
         Line::from(vec![
             Span::styled("Today  ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format_cost_compact(today_cost),
-                Style::default().fg(theme.accent).bold(),
-            ),
+            Span::styled(format_cost_compact(today_cost), summary_cost_style(theme)),
         ]),
         Line::from(vec![
             Span::styled("Week   ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format_cost_compact(week_cost),
-                Style::default().fg(theme.fg),
-            ),
+            Span::styled(format_cost_compact(week_cost), summary_cost_style(theme)),
         ]),
         Line::from(vec![
             Span::styled("Month  ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format_cost_compact(month_cost),
-                Style::default().fg(theme.fg),
-            ),
+            Span::styled(format_cost_compact(month_cost), summary_cost_style(theme)),
         ]),
         Line::from(vec![
             Span::styled("All    ", Style::default().fg(theme.dim)),
             Span::styled(
                 format_cost_compact(all_time_cost),
-                Style::default().fg(theme.fg),
+                summary_cost_style(theme),
             ),
         ]),
     ];
@@ -3562,6 +3579,22 @@ fn format_metric(metric: HeatmapMetric, value: f64) -> String {
         | HeatmapMetric::Messages
         | HeatmapMetric::Sessions => format_compact(value.round() as i64),
     }
+}
+
+fn summary_cost_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.accent).bold()
+}
+
+fn summary_metric_style(metric: HeatmapMetric, theme: &Theme) -> Style {
+    let color = match metric {
+        HeatmapMetric::Cost => theme.accent,
+        HeatmapMetric::TotalTokens | HeatmapMetric::InputTokens | HeatmapMetric::OutputTokens => {
+            Color::Rgb(52, 211, 153)
+        }
+        HeatmapMetric::CacheTokens => Color::Rgb(251, 146, 60),
+        HeatmapMetric::Messages | HeatmapMetric::Sessions => Color::Rgb(96, 165, 250),
+    };
+    Style::default().fg(color)
 }
 
 fn model_table_share_total<'a>(

@@ -154,7 +154,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 | `PgUp` / `PgDn`       | Scroll selected-day detail (Activity)    |
 | `a`                   | Toggle all sources (in filter overlay)   |
 | `Space` / `Enter`     | Toggle source (in filter overlay)        |
-| `b`                   | Toggle light/dark theme                  |
+| `b`                   | Cycle and save theme (auto/dark/light)   |
 | `?`                   | Open page help overlay                   |
 
 ## Event Loop

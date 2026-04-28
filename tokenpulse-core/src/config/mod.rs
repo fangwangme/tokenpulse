@@ -31,11 +31,45 @@ pub struct DisplayConfig {
     #[serde(default)]
     pub show_empty_providers: bool,
     #[serde(default)]
+    pub theme: ThemePreference,
+    #[serde(default)]
     pub quota_display_mode: QuotaDisplayMode,
     /// Auto-refresh interval for quota TUI in seconds. 0 = disabled.
     /// Supported values: 0, 60, 120, 300, 600, 900.
     #[serde(default = "default_quota_auto_refresh_secs")]
     pub quota_auto_refresh_secs: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePreference {
+    Auto,
+    Dark,
+    Light,
+}
+
+impl ThemePreference {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Dark,
+            Self::Dark => Self::Light,
+            Self::Light => Self::Auto,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+}
+
+impl Default for ThemePreference {
+    fn default() -> Self {
+        Self::Auto
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -81,6 +115,7 @@ impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
             show_empty_providers: false,
+            theme: ThemePreference::default(),
             quota_display_mode: QuotaDisplayMode::default(),
             quota_auto_refresh_secs: default_quota_auto_refresh_secs(),
         }
@@ -239,6 +274,7 @@ enabled = true
     fn test_display_config_defaults() {
         let config = Config::default();
         assert!(!config.display.show_empty_providers);
+        assert_eq!(config.display.theme, ThemePreference::Auto);
         assert_eq!(
             config.display.quota_display_mode,
             QuotaDisplayMode::Remaining
@@ -258,11 +294,23 @@ quota_auto_refresh_secs = 60
     }
 
     #[test]
+    fn test_theme_deserializes_from_toml() {
+        let toml_str = r#"
+version = 1
+[display]
+theme = "dark"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.display.theme, ThemePreference::Dark);
+    }
+
+    #[test]
     fn test_auto_refresh_secs_defaults_when_absent() {
         let toml_str = r#"
 version = 1
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.display.quota_auto_refresh_secs, 300);
+        assert_eq!(config.display.theme, ThemePreference::Auto);
     }
 }
