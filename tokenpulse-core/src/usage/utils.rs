@@ -155,8 +155,14 @@ mod tests {
             "claude-opus-4-6"
         );
         assert_eq!(normalize_model_name("z-ai/glm-5.1-low"), "glm-5-1");
-        assert_eq!(normalize_model_name("gemini-3-pro-medium"), "gemini-3-pro-preview");
-        assert_eq!(normalize_model_name("gemini-3-flash"), "gemini-3-flash-preview");
+        assert_eq!(
+            normalize_model_name("gemini-3-pro-medium"),
+            "gemini-3-pro-preview"
+        );
+        assert_eq!(
+            normalize_model_name("gemini-3-flash"),
+            "gemini-3-flash-preview"
+        );
     }
 
     #[test]
