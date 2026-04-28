@@ -253,7 +253,7 @@ impl Theme {
             heatmap_border: Color::Rgb(15, 23, 42),
             empty_heatmap: Color::Rgb(226, 232, 240),
             selected_bg: Color::Rgb(203, 213, 225),
-            today_bg: Color::Rgb(220, 252, 231),
+            today_bg: Color::Rgb(153, 246, 228),
         }
     }
 
@@ -421,6 +421,12 @@ mod tests {
         let t = Theme::new(ThemeMode::Dark);
         assert_eq!(t.heatmap_bg, Color::Rgb(20, 28, 40));
         assert_eq!(t.empty_heatmap, Color::Rgb(24, 31, 42));
+    }
+
+    #[test]
+    fn light_theme_today_highlight_stays_visible() {
+        let t = Theme::new(ThemeMode::Light);
+        assert_eq!(t.today_bg, Color::Rgb(153, 246, 228));
     }
 }
 
