@@ -40,7 +40,16 @@ pub fn normalize_model_name(model_id: &str) -> String {
         normalized = stripped.to_string();
     }
 
-    normalized.trim_matches('-').to_string()
+    normalized = normalized.trim_matches('-').to_string();
+
+    match normalized.as_str() {
+        "gemini-3-pro" | "gemini-3-flash" => {
+            normalized.push_str("-preview");
+        }
+        _ => {}
+    }
+
+    normalized
 }
 
 fn strip_tier_suffix(model_id: &str) -> String {
@@ -146,7 +155,8 @@ mod tests {
             "claude-opus-4-6"
         );
         assert_eq!(normalize_model_name("z-ai/glm-5.1-low"), "glm-5-1");
-        assert_eq!(normalize_model_name("gemini-3-pro-medium"), "gemini-3-pro");
+        assert_eq!(normalize_model_name("gemini-3-pro-medium"), "gemini-3-pro-preview");
+        assert_eq!(normalize_model_name("gemini-3-flash"), "gemini-3-flash-preview");
     }
 
     #[test]
