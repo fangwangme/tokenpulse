@@ -1,5 +1,5 @@
 use crate::commands::quota::{build_quota_fetchers, quota_display_name, quota_provider_info_list};
-use crate::tui::theme::Theme;
+use crate::tui::theme::{theme_status_label, Theme};
 use crate::tui::widgets::GradientGauge;
 use anyhow::Result;
 use crossterm::{
@@ -140,18 +140,20 @@ pub fn run(
     provider: Option<String>,
     initial_enabled_providers: Vec<String>,
 ) -> Result<()> {
+    let config_manager = ConfigManager::new();
+    let mut config = config_manager.load().unwrap_or_default();
+    let mut theme_preference = config.display.theme;
+
     enable_raw_mode()?;
+    let mut theme = Theme::from_preference(theme_preference);
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut theme = Theme::auto();
     let mut selected_tab: usize = 0;
     let mut settings_row: usize = 0;
     let mut show_help = false;
-    let config_manager = ConfigManager::new();
-    let mut config = config_manager.load().unwrap_or_default();
     let mut display_mode = initial_display_mode;
     let mut enabled_providers = initial_enabled_providers;
     let mut last_refresh = Instant::now();
@@ -211,7 +213,7 @@ pub fn run(
             let footer_text = format!(
                 " q quit | r refresh | a auto ({}) | b theme ({}) | m mode | e empty | space toggle | ←→ tab | {} provider{} | ? help",
                 auto_hint,
-                theme.mode.label(),
+                theme_status_label(theme_preference, theme.mode),
                 snapshots.len(),
                 if snapshots.len() == 1 { "" } else { "s" }
             );
@@ -256,7 +258,10 @@ pub fn run(
                         last_refresh = Instant::now();
                     }
                     KeyCode::Char('b') => {
-                        theme = theme.toggled();
+                        theme_preference = theme_preference.next();
+                        config.display.theme = theme_preference;
+                        config_manager.save(&config)?;
+                        theme = Theme::from_preference(theme_preference);
                     }
                     KeyCode::Char('m') => {
                         display_mode = toggle_display_mode(&display_mode);
@@ -365,11 +370,11 @@ fn toggle_display_mode(display_mode: &QuotaDisplayMode) -> QuotaDisplayMode {
 }
 
 fn settings_row_count() -> usize {
-    3 + quota_provider_info_list().len()
+    4 + quota_provider_info_list().len()
 }
 
 fn settings_provider_id(row: usize) -> Option<&'static str> {
-    row.checked_sub(3)
+    row.checked_sub(4)
         .and_then(|idx| quota_provider_info_list().get(idx).map(|info| info.id))
 }
 
@@ -810,6 +815,14 @@ fn render_settings(
         theme,
         theme.accent_soft,
     ));
+    lines.push(settings_line(
+        selected_row == 3,
+        "theme",
+        theme_status_label(config.display.theme, theme.mode),
+        "b",
+        theme,
+        theme.antigravity,
+    ));
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "Providers",
@@ -817,7 +830,7 @@ fn render_settings(
     )));
 
     for (idx, info) in quota_provider_info_list().iter().enumerate() {
-        let row = idx + 3;
+        let row = idx + 4;
         let enabled = is_provider_enabled(config, info.id);
         let fetched = fetched_provider_ids.contains(info.id);
         let marker = if selected_row == row { ">" } else { " " };
@@ -924,7 +937,7 @@ fn render_quota_help_overlay(f: &mut ratatui::Frame, area: Rect, theme: &Theme) 
         ("a", "cycle auto-refresh interval"),
         ("m", "toggle used/remaining mode"),
         ("e", "show/hide empty providers"),
-        ("b", "toggle light/dark theme"),
+        ("b", "cycle and save theme"),
         ("q / Esc", "quit"),
     ];
 

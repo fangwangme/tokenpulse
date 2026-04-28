@@ -1,4 +1,5 @@
 use ratatui::style::Color;
+use tokenpulse_core::config::ThemePreference;
 use tokenpulse_core::usage::detect_provider_from_model;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,10 @@ impl ThemeMode {
     }
 
     fn detect_from_terminal() -> Self {
+        if let Some(mode) = detect_terminal_background_via_osc11() {
+            return mode;
+        }
+
         if let Ok(value) = std::env::var("COLORFGBG") {
             if let Some(bg) = value
                 .split(';')
@@ -70,13 +75,6 @@ impl ThemeMode {
     #[cfg(not(target_os = "macos"))]
     fn detect_from_macos() -> Option<Self> {
         None
-    }
-
-    pub fn toggle(self) -> Self {
-        match self {
-            Self::Light => Self::Dark,
-            Self::Dark => Self::Light,
-        }
     }
 
     pub fn label(self) -> &'static str {
@@ -130,15 +128,19 @@ impl Theme {
         Self::new(ThemeMode::detect())
     }
 
+    pub fn from_preference(preference: ThemePreference) -> Self {
+        match preference {
+            ThemePreference::Auto => Self::auto(),
+            ThemePreference::Dark => Self::new(ThemeMode::Dark),
+            ThemePreference::Light => Self::new(ThemeMode::Light),
+        }
+    }
+
     pub fn new(mode: ThemeMode) -> Self {
         match mode {
             ThemeMode::Dark => Self::dark(),
             ThemeMode::Light => Self::light(),
         }
-    }
-
-    pub fn toggled(&self) -> Self {
-        Self::new(self.mode.toggle())
     }
 
     fn dark() -> Self {
@@ -253,7 +255,7 @@ impl Theme {
             heatmap_border: Color::Rgb(15, 23, 42),
             empty_heatmap: Color::Rgb(226, 232, 240),
             selected_bg: Color::Rgb(203, 213, 225),
-            today_bg: Color::Rgb(220, 252, 231),
+            today_bg: Color::Rgb(196, 181, 253),
         }
     }
 
@@ -312,12 +314,140 @@ impl Theme {
     }
 }
 
+pub fn theme_status_label(preference: ThemePreference, resolved: ThemeMode) -> String {
+    match preference {
+        ThemePreference::Auto => format!("auto -> {}", resolved.label()),
+        ThemePreference::Dark => ThemePreference::Dark.label().to_string(),
+        ThemePreference::Light => ThemePreference::Light.label().to_string(),
+    }
+}
+
 fn parse_ansi_color_index(value: &str) -> Option<u8> {
     value.parse::<u8>().ok()
 }
 
 fn detect_system_theme() -> Option<ThemeMode> {
     ThemeMode::detect_from_macos()
+}
+
+#[cfg(unix)]
+fn detect_terminal_background_via_osc11() -> Option<ThemeMode> {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    let stdin_fd = libc::STDIN_FILENO;
+    let stdout_fd = libc::STDOUT_FILENO;
+    if unsafe { libc::isatty(stdin_fd) } != 1 || unsafe { libc::isatty(stdout_fd) } != 1 {
+        return None;
+    }
+
+    let flags = unsafe { libc::fcntl(stdin_fd, libc::F_GETFL) };
+    if flags < 0 {
+        return None;
+    }
+
+    if unsafe { libc::fcntl(stdin_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return None;
+    }
+    let _guard = NonBlockingStdinGuard {
+        fd: stdin_fd,
+        flags,
+    };
+
+    let mut stdout = std::io::stdout();
+    stdout.write_all(b"\x1b]11;?\x07").ok()?;
+    stdout.flush().ok()?;
+
+    let started = Instant::now();
+    let timeout = Duration::from_millis(120);
+    let mut response = Vec::with_capacity(128);
+    let mut buffer = [0_u8; 64];
+
+    while started.elapsed() < timeout {
+        let read = unsafe {
+            libc::read(
+                stdin_fd,
+                buffer.as_mut_ptr().cast::<libc::c_void>(),
+                buffer.len(),
+            )
+        };
+
+        if read > 0 {
+            response.extend_from_slice(&buffer[..read as usize]);
+            if let Some(mode) = parse_osc11_theme_response(&response) {
+                return Some(mode);
+            }
+            if response.len() > 512 {
+                break;
+            }
+        } else {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    parse_osc11_theme_response(&response)
+}
+
+#[cfg(unix)]
+struct NonBlockingStdinGuard {
+    fd: libc::c_int,
+    flags: libc::c_int,
+}
+
+#[cfg(unix)]
+impl Drop for NonBlockingStdinGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::fcntl(self.fd, libc::F_SETFL, self.flags);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn detect_terminal_background_via_osc11() -> Option<ThemeMode> {
+    None
+}
+
+fn parse_osc11_theme_response(response: &[u8]) -> Option<ThemeMode> {
+    let text = String::from_utf8_lossy(response);
+    let marker = "]11;";
+    let start = text.find(marker)? + marker.len();
+    let payload = &text[start..];
+    let end = payload
+        .find(|ch| ch == '\x07' || ch == '\x1b')
+        .unwrap_or(payload.len());
+    theme_from_osc_color(&payload[..end])
+}
+
+fn theme_from_osc_color(value: &str) -> Option<ThemeMode> {
+    let rgb = value
+        .strip_prefix("rgb:")
+        .or_else(|| value.strip_prefix("rgba:"))?;
+    let mut parts = rgb.split('/');
+    let r = parse_osc_color_component(parts.next()?)?;
+    let g = parse_osc_color_component(parts.next()?)?;
+    let b = parse_osc_color_component(parts.next()?)?;
+    let luminance = 0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b);
+    if luminance < 128.0 {
+        Some(ThemeMode::Dark)
+    } else {
+        Some(ThemeMode::Light)
+    }
+}
+
+fn parse_osc_color_component(value: &str) -> Option<u8> {
+    let digits: String = value
+        .chars()
+        .take_while(|ch| ch.is_ascii_hexdigit())
+        .take(4)
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+
+    let raw = u32::from_str_radix(&digits, 16).ok()?;
+    let max = (1_u32 << (digits.len() * 4)) - 1;
+    Some(((raw * 255 + max / 2) / max) as u8)
 }
 
 #[cfg(test)]
@@ -421,6 +551,35 @@ mod tests {
         let t = Theme::new(ThemeMode::Dark);
         assert_eq!(t.heatmap_bg, Color::Rgb(20, 28, 40));
         assert_eq!(t.empty_heatmap, Color::Rgb(24, 31, 42));
+    }
+
+    #[test]
+    fn light_theme_today_highlight_stays_visible() {
+        let t = Theme::new(ThemeMode::Light);
+        assert_eq!(t.today_bg, Color::Rgb(196, 181, 253));
+    }
+
+    #[test]
+    fn osc11_response_detects_dark_background() {
+        assert_eq!(
+            parse_osc11_theme_response(b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
+            Some(ThemeMode::Dark)
+        );
+    }
+
+    #[test]
+    fn osc11_response_detects_light_background() {
+        assert_eq!(
+            parse_osc11_theme_response(b"\x1b]11;rgb:ffff/ffff/ffff\x07"),
+            Some(ThemeMode::Light)
+        );
+    }
+
+    #[test]
+    fn osc_color_component_scales_short_hex_values() {
+        assert_eq!(parse_osc_color_component("0"), Some(0));
+        assert_eq!(parse_osc_color_component("f"), Some(255));
+        assert_eq!(parse_osc_color_component("80"), Some(128));
     }
 }
 
