@@ -1,8 +1,8 @@
-.shared
-.shared/
-.worktrees
 .worktrees/
 .sisyphus/
 
-# Rust
-target
+# Worktree-local state
+.local/
+
+# Fallback Rust output if CARGO_TARGET_DIR is overridden
+target/

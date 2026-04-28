@@ -1,13 +1,12 @@
 # Global Claude Code Rules
 
 ## Project Structure
-- Work in the current non-`main` git worktree for development
-- Never make changes from a checked-out `main` branch worktree
-- If the current worktree is on `main`, stop and switch to or create a non-`main` worktree first
-- Shared resources in `.shared/`
-- Build outputs to `.shared/dist/` or `.shared/release/`
-- Rust build artifacts in `.shared/target/` (via `.cargo/config.toml`)
-  - In worktrees, symlink: `target → .shared/target`
+- Work in a non-`main` git worktree for normal development
+- Only modify `main` directly when the user explicitly authorizes template or repository-structure maintenance
+- Manual worktrees live under `.worktrees/`
+- Worktree-local state lives under `.local/`
+- Shared specs live under `docs/specs/`
+- Agent notes, plans, archives, and project status live under `.agents/`
 
 ## Conventions
 - Keep code clean and minimal

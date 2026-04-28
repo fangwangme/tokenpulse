@@ -12,9 +12,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TARGET_DIR: .shared/target
-
 jobs:
   build-macos:
     strategy:
@@ -45,15 +42,15 @@ jobs:
 
       - name: Package archive
         run: |
-          mkdir -p .shared/release/${{ matrix.artifact_name }}
-          cp $CARGO_TARGET_DIR/${{ matrix.target }}/release/tokenpulse .shared/release/${{ matrix.artifact_name }}/tokenpulse
-          tar -C .shared/release/${{ matrix.artifact_name }} -czf .shared/release/${{ matrix.artifact_name }}.tar.gz tokenpulse
+          mkdir -p .local/release/${{ matrix.artifact_name }}
+          cp .local/target/${{ matrix.target }}/release/tokenpulse .local/release/${{ matrix.artifact_name }}/tokenpulse
+          tar -C .local/release/${{ matrix.artifact_name }} -czf .local/release/${{ matrix.artifact_name }}.tar.gz tokenpulse
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: .shared/release/${{ matrix.artifact_name }}.tar.gz
+          path: .local/release/${{ matrix.artifact_name }}.tar.gz
 
   publish-release:
     needs: build-macos

@@ -8,9 +8,6 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TARGET_DIR: .shared/target
-
 jobs:
   test-and-build:
     runs-on: macos-14
@@ -36,4 +33,4 @@ jobs:
         run: cargo build --release -p tokenpulse-cli --locked
 
       - name: Smoke test CLI
-        run: $CARGO_TARGET_DIR/release/tokenpulse --help
+        run: .local/target/release/tokenpulse --help

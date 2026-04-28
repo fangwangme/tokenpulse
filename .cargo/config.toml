@@ -1,2 +1,2 @@
 [build]
-target-dir = ".shared/target"
+target-dir = ".local/target"
