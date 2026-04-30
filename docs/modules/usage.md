@@ -276,6 +276,7 @@ GitHub-style contribution graph:
 
 - 2 switchable metrics: total tokens and cost
 - 3 window modes (past 26 weeks, past 52 weeks, past 365 days)
+- Clickable legend levels show the current token/cost range for that intensity bucket
 - Range overview includes Today, This Week, This Month, and all-time cost
 - Day drill-down with:
   - Agent totals with per-agent cost

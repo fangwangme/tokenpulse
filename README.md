@@ -57,7 +57,7 @@ Notes:
 - 60-day stacked bar chart switchable between token and cost views
 - solid-cell heatmap coloring for value levels
 - **Platform-inspired heatmap coloring** — cost uses GitHub-style green, tokens use Kaggle-style blue, and intensity scales against the visible window peak
-- mouse-selectable activity heatmap with agent/model drill-down and scrollable selected-day detail
+- mouse-selectable activity heatmap with clickable legend ranges, agent/model drill-down, and scrollable selected-day detail
 - **models table `%` column** — share of the active sort metric for the filtered set (cost when sorted by cost/date, token share when sorted by tokens)
 - **overview space reclaimed** — removed summary cards; freed rows show more models; Today/Week/Month cost shown in Daily and Activity tabs
 - usage `--json` output for scripts

@@ -29,6 +29,40 @@ impl HeatmapMetric {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeatmapScale {
+    pub max_value: f64,
+    pub thresholds: [f64; 4],
+}
+
+impl HeatmapScale {
+    fn from_cell_values(cell_values: &BTreeMap<(usize, usize), f64>) -> Self {
+        let max_value = max_cell_value(cell_values);
+        Self {
+            max_value,
+            thresholds: compute_max_relative_thresholds(cell_values),
+        }
+    }
+
+    pub fn bucket_range(self, bucket: usize) -> Option<(f64, f64)> {
+        if bucket >= 5 || self.max_value <= 0.0 {
+            return None;
+        }
+
+        let low = if bucket == 0 {
+            0.0
+        } else {
+            self.thresholds[bucket - 1]
+        };
+        let high = if bucket == 4 {
+            self.max_value
+        } else {
+            self.thresholds[bucket]
+        };
+        Some((low, high))
+    }
+}
+
 pub struct YearHeatmap<'a> {
     points: &'a [(NaiveDate, f64)],
     metric: HeatmapMetric,
@@ -109,18 +143,18 @@ impl<'a> YearHeatmap<'a> {
             self.palette[4]
         }
     }
-
-    fn thresholds(&self, cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
-        compute_max_relative_thresholds(cell_values)
-    }
 }
 
-fn compute_max_relative_thresholds(cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
-    let max_value = cell_values
+fn max_cell_value(cell_values: &BTreeMap<(usize, usize), f64>) -> f64 {
+    cell_values
         .values()
         .copied()
         .filter(|&v| v > 0.0)
-        .fold(0.0f64, f64::max);
+        .fold(0.0f64, f64::max)
+}
+
+fn compute_max_relative_thresholds(cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
+    let max_value = max_cell_value(cell_values);
     if max_value <= 0.0 {
         return [0.0; 4];
     }
@@ -218,6 +252,51 @@ fn compute_layout(area: Rect, range: Option<(NaiveDate, NaiveDate)>) -> Option<H
 
 fn display_col_x(layout: &HeatmapLayout, display_col: usize) -> u16 {
     layout.grid_x + (display_col * layout.cell_width) as u16
+}
+
+fn cell_values_for_layout(
+    layout: &HeatmapLayout,
+    values: &BTreeMap<NaiveDate, f64>,
+) -> BTreeMap<(usize, usize), f64> {
+    let mut cell_values: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+    let mut cursor = layout.start + Duration::days((layout.first_week_idx * 7) as i64);
+    let mut day_idx = layout.first_week_idx * 7;
+
+    while cursor <= layout.end {
+        let week_idx = day_idx / 7;
+        let Some(display_col) = week_idx.checked_sub(layout.first_week_idx) else {
+            cursor += Duration::days(1);
+            day_idx += 1;
+            continue;
+        };
+        if display_col >= layout.display_cols {
+            break;
+        }
+
+        let row = cursor.weekday().num_days_from_sunday() as usize;
+        let value = if cursor >= layout.window_start {
+            values.get(&cursor).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        cell_values.insert((display_col, row), value);
+
+        cursor += Duration::days(1);
+        day_idx += 1;
+    }
+
+    cell_values
+}
+
+pub fn heatmap_scale(
+    points: &[(NaiveDate, f64)],
+    area: Rect,
+    range: Option<(NaiveDate, NaiveDate)>,
+) -> Option<HeatmapScale> {
+    let layout = compute_layout(area, range)?;
+    let values: BTreeMap<NaiveDate, f64> = points.iter().copied().collect();
+    let cell_values = cell_values_for_layout(&layout, &values);
+    Some(HeatmapScale::from_cell_values(&cell_values))
 }
 
 fn distribute_month_label_positions(
@@ -345,11 +424,11 @@ impl<'a> Widget for YearHeatmap<'a> {
             grid_area
         };
 
-        let mut cell_values: BTreeMap<(usize, usize), f64> = BTreeMap::new();
         let mut month_labels: Vec<(usize, String)> = Vec::new();
         let mut selected_cell = None;
 
         let values: BTreeMap<NaiveDate, f64> = self.points.iter().copied().collect();
+        let cell_values = cell_values_for_layout(&layout, &values);
         let mut cursor = start + Duration::days((first_week_idx * 7) as i64);
         let mut day_idx = first_week_idx * 7;
         let mut last_month = None;
@@ -364,16 +443,9 @@ impl<'a> Widget for YearHeatmap<'a> {
             if display_col >= display_cols {
                 break;
             }
+
             let row = cursor.weekday().num_days_from_sunday() as usize;
-
-            let value = if cursor >= window_start {
-                values.get(&cursor).copied().unwrap_or(0.0)
-            } else {
-                0.0
-            };
-
             let key = (display_col, row);
-            cell_values.insert(key, value);
             if self.selected == Some(cursor) {
                 selected_cell = Some(key);
             }
@@ -388,7 +460,8 @@ impl<'a> Widget for YearHeatmap<'a> {
             day_idx += 1;
         }
 
-        let thresholds = self.thresholds(&cell_values);
+        let scale = HeatmapScale::from_cell_values(&cell_values);
+        let thresholds = scale.thresholds;
 
         let weekday_labels = ["S", "M", "T", "W", "T", "F", "S"];
         for (row, label) in weekday_labels.iter().enumerate() {
@@ -438,7 +511,6 @@ impl<'a> Widget for YearHeatmap<'a> {
             }
         }
 
-        let max_value = cell_values.values().copied().fold(0.0f64, f64::max);
         let visible_start = (start + Duration::days((first_week_idx * 7) as i64)).max(window_start);
         let visible_end =
             (start + Duration::days(((first_week_idx + display_cols) * 7 - 1) as i64)).min(end);
@@ -447,7 +519,7 @@ impl<'a> Widget for YearHeatmap<'a> {
             self.metric.label(),
             visible_start.format("%Y-%m-%d"),
             visible_end.format("%Y-%m-%d"),
-            max_value
+            scale.max_value
         );
         let footer_y = area.y + area.height.saturating_sub(1);
         if footer_y > area.y + 7 {

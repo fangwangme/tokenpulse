@@ -120,6 +120,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 - 2 switchable metrics: total tokens and cost
 - 3 window modes: past 26 weeks, past 52 weeks, past 365 days
 - Mouse-clickable cells — click any day to select it and see drill-down
+- Clickable legend cells — click an intensity level to show its current value range
 - Drill-down: select any day to see token summary, agent totals, and per-agent model cost breakdown
 - Selected-day panel supports scroll when the detail list is taller than the viewport, with a dedicated bottom-row scroll hint so the final token-detail line is not overwritten
 - Streak tracking: current streak and longest streak
