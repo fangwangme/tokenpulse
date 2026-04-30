@@ -166,36 +166,36 @@ impl Theme {
             gauge_mid: Color::Rgb(250, 204, 21),
             gauge_high: Color::Rgb(248, 113, 113),
             token_heatmap: [
-                Color::Rgb(199, 240, 255),
-                Color::Rgb(125, 211, 252),
-                Color::Rgb(56, 189, 248),
-                Color::Rgb(2, 132, 199),
-                Color::Rgb(12, 74, 110),
+                Color::Rgb(184, 236, 255),
+                Color::Rgb(128, 224, 255),
+                Color::Rgb(32, 190, 255),
+                Color::Rgb(0, 148, 209),
+                Color::Rgb(0, 92, 134),
             ],
             cost_heatmap: [
-                Color::Rgb(192, 132, 252),
-                Color::Rgb(168, 85, 247),
-                Color::Rgb(147, 51, 234),
-                Color::Rgb(109, 40, 217),
-                Color::Rgb(76, 29, 149),
+                Color::Rgb(155, 233, 168),
+                Color::Rgb(64, 196, 99),
+                Color::Rgb(48, 161, 78),
+                Color::Rgb(33, 110, 57),
+                Color::Rgb(14, 68, 41),
             ],
             count_heatmap: [
-                Color::Rgb(252, 211, 77),
-                Color::Rgb(245, 158, 11),
-                Color::Rgb(217, 119, 6),
-                Color::Rgb(180, 83, 9),
-                Color::Rgb(120, 53, 15),
+                Color::Rgb(184, 236, 255),
+                Color::Rgb(128, 224, 255),
+                Color::Rgb(32, 190, 255),
+                Color::Rgb(0, 148, 209),
+                Color::Rgb(0, 92, 134),
             ],
             cache_heatmap: [
-                Color::Rgb(240, 217, 161),
-                Color::Rgb(216, 180, 105),
-                Color::Rgb(180, 137, 63),
-                Color::Rgb(134, 95, 43),
-                Color::Rgb(87, 60, 35),
+                Color::Rgb(13, 148, 136),
+                Color::Rgb(15, 118, 110),
+                Color::Rgb(17, 94, 89),
+                Color::Rgb(19, 78, 74),
+                Color::Rgb(20, 64, 60),
             ],
-            heatmap_bg: Color::Rgb(20, 28, 40),
+            heatmap_bg: Color::Rgb(255, 255, 255),
             heatmap_border: Color::Rgb(71, 85, 105),
-            empty_heatmap: Color::Rgb(24, 31, 42),
+            empty_heatmap: Color::Rgb(235, 237, 240),
             selected_bg: Color::Rgb(51, 65, 85),
             today_bg: Color::Rgb(22, 78, 99),
         }
@@ -224,36 +224,36 @@ impl Theme {
             gauge_mid: Color::Rgb(180, 83, 9),
             gauge_high: Color::Rgb(185, 28, 28),
             token_heatmap: [
-                Color::Rgb(199, 240, 255),
-                Color::Rgb(125, 211, 252),
-                Color::Rgb(56, 189, 248),
-                Color::Rgb(2, 132, 199),
-                Color::Rgb(12, 74, 110),
+                Color::Rgb(184, 236, 255),
+                Color::Rgb(128, 224, 255),
+                Color::Rgb(32, 190, 255),
+                Color::Rgb(0, 148, 209),
+                Color::Rgb(0, 92, 134),
             ],
             cost_heatmap: [
-                Color::Rgb(221, 214, 254),
-                Color::Rgb(196, 181, 253),
-                Color::Rgb(167, 139, 250),
-                Color::Rgb(124, 58, 237),
-                Color::Rgb(76, 29, 149),
+                Color::Rgb(155, 233, 168),
+                Color::Rgb(64, 196, 99),
+                Color::Rgb(48, 161, 78),
+                Color::Rgb(33, 110, 57),
+                Color::Rgb(14, 68, 41),
             ],
             count_heatmap: [
-                Color::Rgb(254, 240, 138),
-                Color::Rgb(253, 186, 116),
-                Color::Rgb(251, 146, 60),
-                Color::Rgb(217, 119, 6),
-                Color::Rgb(124, 45, 18),
+                Color::Rgb(184, 236, 255),
+                Color::Rgb(128, 224, 255),
+                Color::Rgb(32, 190, 255),
+                Color::Rgb(0, 148, 209),
+                Color::Rgb(0, 92, 134),
             ],
             cache_heatmap: [
-                Color::Rgb(253, 230, 138),
-                Color::Rgb(245, 158, 11),
-                Color::Rgb(180, 83, 9),
-                Color::Rgb(146, 64, 14),
-                Color::Rgb(120, 53, 15),
+                Color::Rgb(13, 148, 136),
+                Color::Rgb(15, 118, 110),
+                Color::Rgb(17, 94, 89),
+                Color::Rgb(19, 78, 74),
+                Color::Rgb(20, 64, 60),
             ],
-            heatmap_bg: Color::Rgb(248, 250, 252),
+            heatmap_bg: Color::Rgb(255, 255, 255),
             heatmap_border: Color::Rgb(15, 23, 42),
-            empty_heatmap: Color::Rgb(226, 232, 240),
+            empty_heatmap: Color::Rgb(235, 237, 240),
             selected_bg: Color::Rgb(203, 213, 225),
             today_bg: Color::Rgb(196, 181, 253),
         }
@@ -454,6 +454,42 @@ fn parse_osc_color_component(value: &str) -> Option<u8> {
 mod tests {
     use super::*;
 
+    fn rgb(color: Color) -> (u8, u8, u8) {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("expected RGB color");
+        };
+        (r, g, b)
+    }
+
+    fn relative_luminance(color: Color) -> f64 {
+        fn channel(value: u8) -> f64 {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+
+        let (r, g, b) = rgb(color);
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    fn contrast_ratio(a: Color, b: Color) -> f64 {
+        let a = relative_luminance(a);
+        let b = relative_luminance(b);
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    fn heatmap_palettes(theme: &Theme) -> [&[Color; 5]; 4] {
+        [
+            &theme.token_heatmap,
+            &theme.cost_heatmap,
+            &theme.count_heatmap,
+            &theme.cache_heatmap,
+        ]
+    }
+
     #[test]
     fn model_color_anthropic_variants() {
         let t = Theme::default();
@@ -547,10 +583,92 @@ mod tests {
     }
 
     #[test]
-    fn dark_theme_uses_dark_heatmap_surfaces() {
+    fn dark_theme_uses_light_heatmap_surface_for_readable_levels() {
         let t = Theme::new(ThemeMode::Dark);
-        assert_eq!(t.heatmap_bg, Color::Rgb(20, 28, 40));
-        assert_eq!(t.empty_heatmap, Color::Rgb(24, 31, 42));
+        assert_eq!(t.heatmap_bg, Color::Rgb(255, 255, 255));
+        assert_eq!(t.empty_heatmap, Color::Rgb(235, 237, 240));
+    }
+
+    #[test]
+    fn heatmap_metric_palettes_keep_expected_hues() {
+        for theme in [Theme::new(ThemeMode::Dark), Theme::new(ThemeMode::Light)] {
+            for color in theme.token_heatmap.into_iter().chain(theme.count_heatmap) {
+                let (r, g, b) = rgb(color);
+                assert!(
+                    b > g && g > r,
+                    "{} token/count heatmap should stay Kaggle blue: {:?}",
+                    theme.mode.label(),
+                    color
+                );
+            }
+            for color in theme.cost_heatmap {
+                let (r, g, b) = rgb(color);
+                assert!(
+                    g > r && g > b,
+                    "{} cost heatmap should stay green: {:?}",
+                    theme.mode.label(),
+                    color
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn heatmap_palettes_match_between_light_and_dark_themes() {
+        let dark = Theme::new(ThemeMode::Dark);
+        let light = Theme::new(ThemeMode::Light);
+        assert_eq!(dark.token_heatmap, light.token_heatmap);
+        assert_eq!(dark.cost_heatmap, light.cost_heatmap);
+        assert_eq!(dark.count_heatmap, light.count_heatmap);
+        assert_eq!(dark.cache_heatmap, light.cache_heatmap);
+    }
+
+    #[test]
+    fn heatmap_uses_platform_inspired_palettes() {
+        let t = Theme::new(ThemeMode::Light);
+        assert_eq!(t.cost_heatmap[0], Color::Rgb(155, 233, 168));
+        assert_eq!(t.cost_heatmap[4], Color::Rgb(14, 68, 41));
+        assert_eq!(t.token_heatmap[0], Color::Rgb(184, 236, 255));
+        assert_eq!(t.token_heatmap[2], Color::Rgb(32, 190, 255));
+        assert_eq!(t.count_heatmap[0], Color::Rgb(184, 236, 255));
+        assert_eq!(t.count_heatmap[2], Color::Rgb(32, 190, 255));
+    }
+
+    #[test]
+    fn heatmap_lowest_level_is_visible_in_light_and_dark_themes() {
+        for theme in [Theme::new(ThemeMode::Dark), Theme::new(ThemeMode::Light)] {
+            for palette in heatmap_palettes(&theme) {
+                assert!(
+                    contrast_ratio(palette[0], theme.heatmap_bg) >= 1.25,
+                    "{} heatmap low level has insufficient contrast: {:?}",
+                    theme.mode.label(),
+                    palette[0]
+                );
+                assert!(
+                    contrast_ratio(palette[0], theme.heatmap_bg)
+                        > contrast_ratio(theme.empty_heatmap, theme.heatmap_bg),
+                    "{} heatmap low level should be clearer than empty cells",
+                    theme.mode.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn heatmap_levels_increase_contrast_in_light_and_dark_themes() {
+        for theme in [Theme::new(ThemeMode::Dark), Theme::new(ThemeMode::Light)] {
+            for palette in heatmap_palettes(&theme) {
+                let contrasts = palette.map(|color| contrast_ratio(color, theme.heatmap_bg));
+                for pair in contrasts.windows(2) {
+                    assert!(
+                        pair[1] > pair[0],
+                        "{} heatmap levels should progress visually: {:?}",
+                        theme.mode.label(),
+                        contrasts
+                    );
+                }
+            }
+        }
     }
 
     #[test]

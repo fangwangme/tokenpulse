@@ -3054,16 +3054,7 @@ fn render_heatmap_page(
     let range_label = bounds
         .map(|(s, e)| format!("{} → {}", s.format("%Y-%m-%d"), e.format("%Y-%m-%d")))
         .unwrap_or_else(|| "no range".to_string());
-    let legend = Paragraph::new(Line::from(vec![
-        Span::styled("low", Style::default().fg(theme.dim)),
-        Span::raw("  "),
-        Span::styled("░▒▓█", Style::default().fg(palette[4])),
-        Span::raw("  "),
-        Span::styled("high", Style::default().fg(theme.dim)),
-        Span::raw("  "),
-        Span::styled(range_label, Style::default().fg(theme.fg)),
-    ]))
-    .block(
+    let legend = Paragraph::new(heatmap_legend_line(palette, theme, range_label)).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.border)),
@@ -3091,6 +3082,19 @@ fn render_heatmap_page(
         state.heatmap_detail_scroll,
         theme,
     );
+}
+
+fn heatmap_legend_line(palette: [Color; 5], theme: &Theme, range_label: String) -> Line<'static> {
+    let mut legend_spans = vec![Span::styled("low", Style::default().fg(theme.dim))];
+    legend_spans.push(Span::raw("  "));
+    for color in palette {
+        legend_spans.push(Span::styled("██", Style::default().fg(color)));
+    }
+    legend_spans.push(Span::raw("  "));
+    legend_spans.push(Span::styled("high", Style::default().fg(theme.dim)));
+    legend_spans.push(Span::raw("  "));
+    legend_spans.push(Span::styled(range_label, Style::default().fg(theme.fg)));
+    Line::from(legend_spans)
 }
 
 fn render_heatmap_summary_card(
@@ -3878,6 +3882,19 @@ mod tests {
 
         assert!(day.is_some());
         assert_eq!(day.unwrap().total_tokens, 200);
+    }
+
+    #[test]
+    fn heatmap_legend_uses_full_width_palette_cells() {
+        let theme = Theme::default();
+        let palette = theme.token_heatmap;
+        let line = heatmap_legend_line(palette, &theme, "2026-01-01 -> 2026-01-31".to_string());
+
+        for (idx, color) in palette.into_iter().enumerate() {
+            let span = &line.spans[idx + 2];
+            assert_eq!(span.content.as_ref(), "██");
+            assert_eq!(span.style.fg, Some(color));
+        }
     }
 
     #[test]

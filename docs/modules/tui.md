@@ -116,8 +116,8 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 - Sorted by date (most recent first) or cost/tokens
 
 ### Tab 4: Activity
-- GitHub-style contribution graph with metric-specific palettes
-- Block-character intensity (`░░` / `▒▒` / `▓▓` / `██`) scaled to value level — readable without color (color-blind accessible)
+- GitHub-style contribution graph with GitHub-green cost cells and Kaggle-blue token cells
+- Solid-cell coloring scaled to value level, without texture patterns in low activity cells
 - 7 switchable metrics: total tokens, cost, input, output, cache, messages, sessions
 - 3 window modes: past 26 weeks, past 52 weeks, past 365 days
 - Mouse-clickable cells — click any day to select it and see drill-down

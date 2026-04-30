@@ -126,40 +126,62 @@ impl<'a> YearHeatmap<'a> {
     }
 
     fn thresholds(&self, cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
-        match self.metric {
-            HeatmapMetric::Cost => [0.10, 0.50, 2.00, 10.00],
-            _ => compute_quantiles(cell_values),
-        }
+        compute_max_relative_thresholds(cell_values)
     }
 }
 
-fn compute_quantiles(cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
-    let mut sorted: Vec<f64> = cell_values.values().copied().filter(|&v| v > 0.0).collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    if sorted.is_empty() {
+fn compute_max_relative_thresholds(cell_values: &BTreeMap<(usize, usize), f64>) -> [f64; 4] {
+    let max_value = cell_values
+        .values()
+        .copied()
+        .filter(|&v| v > 0.0)
+        .fold(0.0f64, f64::max);
+    if max_value <= 0.0 {
         return [0.0; 4];
     }
-    let p = |pct: f64| -> f64 {
-        let idx = (pct / 100.0 * (sorted.len() - 1) as f64).round() as usize;
-        sorted[idx.min(sorted.len() - 1)]
-    };
-    let thresholds = [p(20.0), p(40.0), p(60.0), p(80.0)];
 
-    // Fallback when values are uniform: use fractional thresholds so cells
-    // actually land in level 5 (>= v*0.95 < v) rather than all mapping to the same bucket.
-    if thresholds[0] == thresholds[3] {
-        let v = thresholds[0];
-        return [v * 0.80, v * 0.90, v * 0.95, v];
+    [
+        max_value * 0.20,
+        max_value * 0.40,
+        max_value * 0.60,
+        max_value * 0.80,
+    ]
+}
+
+fn readable_foreground(background: Color, fallback: Color) -> Color {
+    let Color::Rgb(r, g, b) = background else {
+        return fallback;
+    };
+
+    let luminance = relative_luminance(r, g, b);
+    let black_contrast = (luminance + 0.05) / 0.05;
+    let white_contrast = 1.05 / (luminance + 0.05);
+    if black_contrast >= white_contrast {
+        Color::Black
+    } else {
+        Color::White
+    }
+}
+
+fn relative_luminance(r: u8, g: u8, b: u8) -> f64 {
+    fn channel(value: u8) -> f64 {
+        let value = f64::from(value) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
     }
 
-    thresholds
+    0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
 }
 
 #[derive(Debug, Clone, Copy)]
 struct HeatmapLayout {
+    window_start: NaiveDate,
     start: NaiveDate,
     end: NaiveDate,
-    total_weeks: usize,
+    first_week_idx: usize,
     display_cols: usize,
     cell_width: usize,
     grid_width: usize,
@@ -172,10 +194,11 @@ fn compute_layout(area: Rect, range: Option<(NaiveDate, NaiveDate)>) -> Option<H
         return None;
     }
 
-    let (mut start, end) = range.unwrap_or_else(|| {
+    let (window_start, end) = range.unwrap_or_else(|| {
         let end = Local::now().date_naive();
         (end - Duration::days(364), end)
     });
+    let mut start = window_start;
     while start.weekday() != Weekday::Sun {
         start -= Duration::days(1);
     }
@@ -192,12 +215,14 @@ fn compute_layout(area: Rect, range: Option<(NaiveDate, NaiveDate)>) -> Option<H
 
     let cell_width = if grid_width >= total_weeks * 2 { 2 } else { 1 };
     let display_cols = (grid_width / cell_width).min(total_weeks).max(1);
+    let first_week_idx = total_weeks.saturating_sub(display_cols);
     let rendered_width = display_cols * cell_width;
 
     Some(HeatmapLayout {
+        window_start,
         start,
         end,
-        total_weeks,
+        first_week_idx,
         display_cols,
         cell_width,
         grid_width: rendered_width,
@@ -289,27 +314,9 @@ pub fn date_at_position(
     })?;
     let row = (y - layout.grid_y) as usize;
 
-    let mut cursor = layout.start;
-    let mut day_idx = 0usize;
-    let mut selected = None;
-
-    while cursor <= layout.end {
-        let week_idx = day_idx / 7;
-        let display_col = if layout.total_weeks <= layout.display_cols {
-            week_idx
-        } else {
-            week_idx * layout.display_cols / layout.total_weeks
-        };
-
-        if display_col == col && cursor.weekday().num_days_from_sunday() as usize == row {
-            selected = Some(cursor);
-        }
-
-        cursor += Duration::days(1);
-        day_idx += 1;
-    }
-
-    selected
+    let week_idx = layout.first_week_idx + col;
+    let date = layout.start + Duration::days((week_idx * 7 + row) as i64);
+    (date >= layout.window_start && date <= layout.end).then_some(date)
 }
 
 impl<'a> Widget for YearHeatmap<'a> {
@@ -318,14 +325,16 @@ impl<'a> Widget for YearHeatmap<'a> {
             return;
         };
         let HeatmapLayout {
+            window_start,
             start,
             end,
-            total_weeks,
+            first_week_idx,
             display_cols,
             cell_width,
             grid_width,
             grid_x,
             grid_y,
+            ..
         } = layout;
         let grid_area = Rect::new(
             grid_x,
@@ -356,32 +365,36 @@ impl<'a> Widget for YearHeatmap<'a> {
         let mut selected_cell = None;
 
         let values: BTreeMap<NaiveDate, f64> = self.points.iter().copied().collect();
-        let mut cursor = start;
-        let mut day_idx = 0usize;
+        let mut cursor = start + Duration::days((first_week_idx * 7) as i64);
+        let mut day_idx = first_week_idx * 7;
         let mut last_month = None;
 
         while cursor <= end {
             let week_idx = day_idx / 7;
-            let display_col = if total_weeks <= display_cols {
-                week_idx
-            } else {
-                week_idx * display_cols / total_weeks
+            let Some(display_col) = week_idx.checked_sub(first_week_idx) else {
+                cursor += Duration::days(1);
+                day_idx += 1;
+                continue;
             };
+            if display_col >= display_cols {
+                break;
+            }
             let row = cursor.weekday().num_days_from_sunday() as usize;
 
-            let value = values.get(&cursor).copied().unwrap_or(0.0);
+            let value = if cursor >= window_start {
+                values.get(&cursor).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
 
-            let key = (display_col.min(display_cols.saturating_sub(1)), row);
-            cell_values
-                .entry(key)
-                .and_modify(|existing| *existing = existing.max(value))
-                .or_insert(value);
+            let key = (display_col, row);
+            cell_values.insert(key, value);
             if self.selected == Some(cursor) {
                 selected_cell = Some(key);
             }
 
             let month = cursor.month();
-            if last_month != Some(month) {
+            if cursor >= window_start && last_month != Some(month) {
                 month_labels.push((display_col, cursor.format("%b").to_string()));
                 last_month = Some(month);
             }
@@ -409,10 +422,10 @@ impl<'a> Widget for YearHeatmap<'a> {
             }
         }
 
-        let (sym_empty, sym_selected) = if cell_width >= 2 {
-            ("··", "◆◆")
+        let (sym_cell, sym_selected) = if cell_width >= 2 {
+            ("██", "◆◆")
         } else {
-            ("·", "◆")
+            ("█", "◆")
         };
 
         for col in 0..display_cols {
@@ -428,40 +441,11 @@ impl<'a> Widget for YearHeatmap<'a> {
                 let value = cell_values.get(&(col, row)).copied().unwrap_or(0.0);
                 let color = self.value_to_color(value, &thresholds);
                 let is_selected = selected_cell == Some((col, row));
-                let level = if value <= 0.0 {
-                    0usize
-                } else if value < thresholds[0] {
-                    1
-                } else if value < thresholds[1] {
-                    2
-                } else if value < thresholds[2] {
-                    3
-                } else if value < thresholds[3] {
-                    4
-                } else {
-                    5
-                };
-                let symbol = if is_selected {
-                    sym_selected
-                } else if value <= 0.0 {
-                    sym_empty
-                } else if cell_width >= 2 {
-                    match level {
-                        1 => "░░",
-                        2 => "▒▒",
-                        3 => "▓▓",
-                        _ => "██",
-                    }
-                } else {
-                    match level {
-                        1 => "░",
-                        2 => "▒",
-                        3 => "▓",
-                        _ => "█",
-                    }
-                };
+                let symbol = if is_selected { sym_selected } else { sym_cell };
                 let style = if is_selected {
-                    Style::default().fg(self.selected_color).bg(color)
+                    Style::default()
+                        .fg(readable_foreground(color, self.selected_color))
+                        .bg(color)
                 } else {
                     Style::default().fg(color).bg(self.background)
                 };
@@ -470,11 +454,14 @@ impl<'a> Widget for YearHeatmap<'a> {
         }
 
         let max_value = cell_values.values().copied().fold(0.0f64, f64::max);
+        let visible_start = (start + Duration::days((first_week_idx * 7) as i64)).max(window_start);
+        let visible_end =
+            (start + Duration::days(((first_week_idx + display_cols) * 7 - 1) as i64)).min(end);
         let metric_text = format!(
             "{}  {} → {}  max {:.2}",
             self.metric.label(),
-            start.format("%Y-%m-%d"),
-            end.format("%Y-%m-%d"),
+            visible_start.format("%Y-%m-%d"),
+            visible_end.format("%Y-%m-%d"),
             max_value
         );
         let footer_y = area.y + area.height.saturating_sub(1);
@@ -494,7 +481,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compressed_heatmap_keeps_selected_day_highlight() {
+    fn heatmap_keeps_selected_day_highlight() {
         let start = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap();
         let end = start + Duration::days(69);
         let selected = start + Duration::days(63);
@@ -511,6 +498,61 @@ mod tests {
         let selected_x = display_col_x(&layout, 9);
         let selected_y = area.y + 1;
         assert_eq!(buf[(selected_x, selected_y)].symbol(), "◆");
+    }
+
+    #[test]
+    fn heatmap_uses_solid_cells_without_texture_patterns() {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap();
+        let end = start + Duration::days(34);
+        let points = vec![(start, 1.0), (start + Duration::days(7), 10.0)];
+        let area = Rect::new(0, 0, 72, 10);
+        let mut buf = Buffer::empty(area);
+
+        YearHeatmap::new(&points, HeatmapMetric::TotalTokens)
+            .range_opt(Some((start, end)))
+            .render(area, &mut buf);
+
+        let layout = compute_layout(area, Some((start, end))).unwrap();
+        assert_eq!(layout.cell_width, 2);
+        assert_eq!(
+            buf[(display_col_x(&layout, 0), layout.grid_y)].symbol(),
+            "█"
+        );
+        assert_eq!(
+            buf[(display_col_x(&layout, 1), layout.grid_y)].symbol(),
+            "█"
+        );
+        assert_eq!(
+            buf[(display_col_x(&layout, 0), layout.grid_y + 1)].symbol(),
+            "█"
+        );
+    }
+
+    #[test]
+    fn narrow_heatmap_clips_old_weeks_without_merging_cells() {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap();
+        let end = start + Duration::days(370);
+        let old_sunday = start;
+        let recent_sunday = end - Duration::days(end.weekday().num_days_from_sunday() as i64);
+        let points = vec![(old_sunday, 99.0), (recent_sunday, 1.0)];
+        let area = Rect::new(0, 0, 30, 10);
+        let mut buf = Buffer::empty(area);
+
+        YearHeatmap::new(&points, HeatmapMetric::TotalTokens)
+            .range_opt(Some((start, end)))
+            .render(area, &mut buf);
+
+        let layout = compute_layout(area, Some((start, end))).unwrap();
+        assert_eq!(layout.cell_width, 1);
+        assert!(layout.first_week_idx > 0);
+
+        let first_visible_date =
+            date_at_position(area, Some((start, end)), layout.grid_x, layout.grid_y);
+        assert_ne!(first_visible_date, Some(old_sunday));
+
+        let recent_col = layout.display_cols - 1;
+        let recent_x = display_col_x(&layout, recent_col);
+        assert_eq!(buf[(recent_x, layout.grid_y)].symbol(), "█");
     }
 
     #[test]
@@ -549,7 +591,7 @@ mod tests {
     fn close_month_labels_are_shifted_not_dropped() {
         let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 4, 25).unwrap();
-        let area = Rect::new(0, 0, 40, 10);
+        let area = Rect::new(0, 0, 70, 10);
         let mut buf = Buffer::empty(area);
 
         YearHeatmap::new(&[], HeatmapMetric::TotalTokens)
@@ -571,9 +613,10 @@ mod tests {
             (9, "Jun".to_string()),
         ];
         let layout = HeatmapLayout {
+            window_start: NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(),
             start: NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(),
             end: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
-            total_weeks: 10,
+            first_week_idx: 0,
             display_cols: 10,
             cell_width: 1,
             grid_width: 36,
@@ -591,12 +634,12 @@ mod tests {
     }
 
     #[test]
-    fn quantile_thresholds_keep_top_bucket_below_absolute_max() {
+    fn max_relative_thresholds_scale_all_metrics_to_window_peak() {
         let cell_values = (0..10)
             .map(|i| ((i, 0), (i + 1) as f64))
             .collect::<BTreeMap<_, _>>();
 
-        let thresholds = compute_quantiles(&cell_values);
+        let thresholds = compute_max_relative_thresholds(&cell_values);
         let palette = [
             Color::Black,
             Color::Red,
@@ -605,12 +648,36 @@ mod tests {
             Color::Green,
         ];
 
-        assert!(thresholds[3] < 10.0);
+        assert_eq!(thresholds, [2.0, 4.0, 6.0, 8.0]);
         assert_eq!(
             YearHeatmap::new(&[], HeatmapMetric::TotalTokens)
                 .palette(palette)
-                .value_to_color(9.0, &thresholds),
+                .value_to_color(8.0, &thresholds),
             palette[4]
+        );
+        assert_eq!(
+            YearHeatmap::new(&[], HeatmapMetric::Cost)
+                .palette(palette)
+                .value_to_color(1.0, &thresholds),
+            palette[0]
+        );
+        assert_eq!(
+            YearHeatmap::new(&[], HeatmapMetric::Cost)
+                .palette(palette)
+                .value_to_color(10.0, &thresholds),
+            palette[4]
+        );
+    }
+
+    #[test]
+    fn selected_foreground_adapts_to_cell_background() {
+        assert_eq!(
+            readable_foreground(Color::Rgb(224, 242, 254), Color::White),
+            Color::Black
+        );
+        assert_eq!(
+            readable_foreground(Color::Rgb(8, 47, 73), Color::Black),
+            Color::White
         );
     }
 }

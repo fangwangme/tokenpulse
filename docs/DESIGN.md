@@ -26,7 +26,7 @@ As of 2026-04-25:
 - pricing snapshots are stored per day/model so historical cost does not silently drift
 - quota view shows top 3 windows per provider in Overview tab; all windows in per-provider detail tabs
 - each quota gauge shows an expected-progress marker (`▏`) and ETA to limit
-- activity heatmap uses block characters (`░▒▓█`) scaled to value intensity for colorblind accessibility
+- activity heatmap uses solid colored cells scaled to value intensity
 
 Known gaps:
 
@@ -236,7 +236,7 @@ Current usage TUI notes:
 - `Overview` top models use their own visible scroll hint, cost percentage, and wider model/agent columns so long model IDs and multi-agent attribution fit better
 - `Models` shows a searchable (`/`), sortable table with a sort-aware `%` share column and per-column semantic colors (`Model`=company color, `Tokens`=green, `Cost`=gold, `Msgs`=blue)
 - `Daily` shows Today/This Week/This Month cost, period totals, and daily rows as a colored table (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`) with a 7-day token trend column on wide terminals
-- `Activity` shows range cost stats, a GitHub-style contribution heatmap with block-character intensity (`░▒▓█`) scaled to value level for accessibility, mouse-clickable cells, and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
+- `Activity` shows range cost stats, a GitHub-style contribution heatmap with solid colored cells scaled to value level, GitHub-green cost cells, Kaggle-blue token cells, mouse-clickable cells, and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
 - `Activity` selected-day panel includes total/input/output/cache/reasoning/message/session summary and supports detail scrolling when the agent/model list exceeds the viewport, with the scroll hint rendered on its own bottom row
 - Press `s` on any tab to open a source filter overlay (toggle providers on/off)
 
@@ -381,7 +381,7 @@ Cache: ~/.cache/tokenpulse/pricing.json (24h TTL)
 - [x] Models quick filter (`/`)
 - [x] Daily token trend column
 - [x] Source filter overlay (`s`)
-- [x] Block-character heatmap intensity for accessibility
+- [x] Solid-cell heatmap intensity
 - [x] Pace ETA and expected-progress marker on quota gauges
 - [x] Configurable TUI theme
 - [ ] `--watch` mode (manual refresh with keyboard)

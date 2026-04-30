@@ -55,8 +55,8 @@ Notes:
 - **`r` to refresh** in both quota and usage TUI without restarting (shown in footer for all tabs)
 - usage dashboard with `Overview`, `Models`, `Daily`, and `Activity` tabs
 - 60-day stacked bar chart switchable between token and cost views
-- block-character heatmap intensity (`░▒▓█`) for value levels — accessible without color
-- **GitHub-style quartile heatmap coloring** — equal-count quartiles so activity levels are spread naturally
+- solid-cell heatmap coloring for value levels
+- **Platform-inspired heatmap coloring** — cost uses GitHub-style green, tokens use Kaggle-style blue, and intensity scales against the visible window peak
 - mouse-selectable activity heatmap with agent/model drill-down and scrollable selected-day detail
 - **models table `%` column** — share of the active sort metric for the filtered set (cost when sorted by cost/date, token share when sorted by tokens)
 - **overview space reclaimed** — removed summary cards; freed rows show more models; Today/Week/Month cost shown in Daily and Activity tabs
