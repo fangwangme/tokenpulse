@@ -108,8 +108,6 @@ pub struct Theme {
     pub gauge_high: Color,
     pub token_heatmap: [Color; 5],
     pub cost_heatmap: [Color; 5],
-    pub count_heatmap: [Color; 5],
-    pub cache_heatmap: [Color; 5],
     pub heatmap_bg: Color,
     pub heatmap_border: Color,
     pub empty_heatmap: Color,
@@ -179,20 +177,6 @@ impl Theme {
                 Color::Rgb(33, 110, 57),
                 Color::Rgb(14, 68, 41),
             ],
-            count_heatmap: [
-                Color::Rgb(184, 236, 255),
-                Color::Rgb(128, 224, 255),
-                Color::Rgb(32, 190, 255),
-                Color::Rgb(0, 148, 209),
-                Color::Rgb(0, 92, 134),
-            ],
-            cache_heatmap: [
-                Color::Rgb(13, 148, 136),
-                Color::Rgb(15, 118, 110),
-                Color::Rgb(17, 94, 89),
-                Color::Rgb(19, 78, 74),
-                Color::Rgb(20, 64, 60),
-            ],
             heatmap_bg: Color::Rgb(255, 255, 255),
             heatmap_border: Color::Rgb(71, 85, 105),
             empty_heatmap: Color::Rgb(235, 237, 240),
@@ -236,20 +220,6 @@ impl Theme {
                 Color::Rgb(48, 161, 78),
                 Color::Rgb(33, 110, 57),
                 Color::Rgb(14, 68, 41),
-            ],
-            count_heatmap: [
-                Color::Rgb(184, 236, 255),
-                Color::Rgb(128, 224, 255),
-                Color::Rgb(32, 190, 255),
-                Color::Rgb(0, 148, 209),
-                Color::Rgb(0, 92, 134),
-            ],
-            cache_heatmap: [
-                Color::Rgb(13, 148, 136),
-                Color::Rgb(15, 118, 110),
-                Color::Rgb(17, 94, 89),
-                Color::Rgb(19, 78, 74),
-                Color::Rgb(20, 64, 60),
             ],
             heatmap_bg: Color::Rgb(255, 255, 255),
             heatmap_border: Color::Rgb(15, 23, 42),
@@ -481,13 +451,8 @@ mod tests {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
-    fn heatmap_palettes(theme: &Theme) -> [&[Color; 5]; 4] {
-        [
-            &theme.token_heatmap,
-            &theme.cost_heatmap,
-            &theme.count_heatmap,
-            &theme.cache_heatmap,
-        ]
+    fn heatmap_palettes(theme: &Theme) -> [&[Color; 5]; 2] {
+        [&theme.token_heatmap, &theme.cost_heatmap]
     }
 
     #[test]
@@ -592,11 +557,11 @@ mod tests {
     #[test]
     fn heatmap_metric_palettes_keep_expected_hues() {
         for theme in [Theme::new(ThemeMode::Dark), Theme::new(ThemeMode::Light)] {
-            for color in theme.token_heatmap.into_iter().chain(theme.count_heatmap) {
+            for color in theme.token_heatmap {
                 let (r, g, b) = rgb(color);
                 assert!(
                     b > g && g > r,
-                    "{} token/count heatmap should stay Kaggle blue: {:?}",
+                    "{} token heatmap should stay Kaggle blue: {:?}",
                     theme.mode.label(),
                     color
                 );
@@ -619,8 +584,6 @@ mod tests {
         let light = Theme::new(ThemeMode::Light);
         assert_eq!(dark.token_heatmap, light.token_heatmap);
         assert_eq!(dark.cost_heatmap, light.cost_heatmap);
-        assert_eq!(dark.count_heatmap, light.count_heatmap);
-        assert_eq!(dark.cache_heatmap, light.cache_heatmap);
     }
 
     #[test]
@@ -630,8 +593,6 @@ mod tests {
         assert_eq!(t.cost_heatmap[4], Color::Rgb(14, 68, 41));
         assert_eq!(t.token_heatmap[0], Color::Rgb(184, 236, 255));
         assert_eq!(t.token_heatmap[2], Color::Rgb(32, 190, 255));
-        assert_eq!(t.count_heatmap[0], Color::Rgb(184, 236, 255));
-        assert_eq!(t.count_heatmap[2], Color::Rgb(32, 190, 255));
     }
 
     #[test]

@@ -11,11 +11,6 @@ use std::collections::BTreeMap;
 pub enum HeatmapMetric {
     TotalTokens,
     Cost,
-    InputTokens,
-    OutputTokens,
-    CacheTokens,
-    Messages,
-    Sessions,
 }
 
 impl HeatmapMetric {
@@ -23,11 +18,6 @@ impl HeatmapMetric {
         match self {
             HeatmapMetric::TotalTokens => "Total Tokens",
             HeatmapMetric::Cost => "Cost",
-            HeatmapMetric::InputTokens => "Input Tokens",
-            HeatmapMetric::OutputTokens => "Output Tokens",
-            HeatmapMetric::CacheTokens => "Cache Tokens",
-            HeatmapMetric::Messages => "Messages",
-            HeatmapMetric::Sessions => "Sessions",
         }
     }
 
@@ -35,11 +25,6 @@ impl HeatmapMetric {
         match self {
             HeatmapMetric::TotalTokens => "tokens",
             HeatmapMetric::Cost => "cost",
-            HeatmapMetric::InputTokens => "input",
-            HeatmapMetric::OutputTokens => "output",
-            HeatmapMetric::CacheTokens => "cache",
-            HeatmapMetric::Messages => "messages",
-            HeatmapMetric::Sessions => "sessions",
         }
     }
 }

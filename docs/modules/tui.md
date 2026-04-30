@@ -51,7 +51,6 @@ pub struct Theme {
     // Heatmap palettes by metric family
     pub token_heatmap: [Color; 5],
     pub cost_heatmap: [Color; 5],
-    pub count_heatmap: [Color; 5],
 }
 ```
 
@@ -118,7 +117,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 ### Tab 4: Activity
 - GitHub-style contribution graph with GitHub-green cost cells and Kaggle-blue token cells
 - Solid-cell coloring scaled to value level, without texture patterns in low activity cells
-- 7 switchable metrics: total tokens, cost, input, output, cache, messages, sessions
+- 2 switchable metrics: total tokens and cost
 - 3 window modes: past 26 weeks, past 52 weeks, past 365 days
 - Mouse-clickable cells — click any day to select it and see drill-down
 - Drill-down: select any day to see token summary, agent totals, and per-agent model cost breakdown
@@ -148,8 +147,6 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 | `Ctrl+L`              | Clear Models quick filter                |
 | `s`                   | Open/close source filter overlay         |
 | `w`                   | Cycle activity window (26w/52w/365d)     |
-| `i` / `o` / `x`       | Input/output/cache metrics (activity)    |
-| `m` / `n`             | Messages/sessions metrics (activity)     |
 | `T`                   | Jump to today (Daily/Activity)           |
 | `PgUp` / `PgDn`       | Scroll selected-day detail (Activity)    |
 | `a`                   | Toggle all sources (in filter overlay)   |

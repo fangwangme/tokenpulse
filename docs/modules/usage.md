@@ -274,7 +274,7 @@ Daily operations view:
 
 GitHub-style contribution graph:
 
-- 7 switchable metrics
+- 2 switchable metrics: total tokens and cost
 - 3 window modes (past 26 weeks, past 52 weeks, past 365 days)
 - Range overview includes Today, This Week, This Month, and all-time cost
 - Day drill-down with:

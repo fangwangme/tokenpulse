@@ -205,11 +205,6 @@ impl DailyStats {
         match metric {
             HeatmapMetric::TotalTokens => self.total_tokens as f64,
             HeatmapMetric::Cost => self.cost_usd,
-            HeatmapMetric::InputTokens => self.input_tokens as f64,
-            HeatmapMetric::OutputTokens => self.output_tokens as f64,
-            HeatmapMetric::CacheTokens => self.cache_tokens() as f64,
-            HeatmapMetric::Messages => self.messages as f64,
-            HeatmapMetric::Sessions => self.sessions as f64,
         }
     }
 }
@@ -672,29 +667,6 @@ fn build_agent_model_groups(day: &DailyStats) -> Vec<AgentModelGroup> {
 // ---------------------------------------------------------------------------
 // Palette / window enums
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-enum PaletteMode {
-    Tokens,
-    Cost,
-    Input,
-    Output,
-    Cache,
-    Count,
-}
-
-impl PaletteMode {
-    fn from_metric(metric: HeatmapMetric) -> Self {
-        match metric {
-            HeatmapMetric::TotalTokens => PaletteMode::Tokens,
-            HeatmapMetric::Cost => PaletteMode::Cost,
-            HeatmapMetric::InputTokens => PaletteMode::Input,
-            HeatmapMetric::OutputTokens => PaletteMode::Output,
-            HeatmapMetric::CacheTokens => PaletteMode::Cache,
-            HeatmapMetric::Messages | HeatmapMetric::Sessions => PaletteMode::Count,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeatmapWindow {
@@ -1328,26 +1300,6 @@ where
                                 state.heatmap_metric = HeatmapMetric::Cost;
                                 state.heatmap_detail_scroll = 0;
                             }
-                            KeyCode::Char('i') => {
-                                state.heatmap_metric = HeatmapMetric::InputTokens;
-                                state.heatmap_detail_scroll = 0;
-                            }
-                            KeyCode::Char('o') => {
-                                state.heatmap_metric = HeatmapMetric::OutputTokens;
-                                state.heatmap_detail_scroll = 0;
-                            }
-                            KeyCode::Char('x') => {
-                                state.heatmap_metric = HeatmapMetric::CacheTokens;
-                                state.heatmap_detail_scroll = 0;
-                            }
-                            KeyCode::Char('m') => {
-                                state.heatmap_metric = HeatmapMetric::Messages;
-                                state.heatmap_detail_scroll = 0;
-                            }
-                            KeyCode::Char('n') => {
-                                state.heatmap_metric = HeatmapMetric::Sessions;
-                                state.heatmap_detail_scroll = 0;
-                            }
                             KeyCode::Char('s') => {
                                 state.show_source_filter = true;
                             }
@@ -1814,7 +1766,7 @@ fn render_footer(
             )
         }
         UsagePage::Heatmap => format!(
-            " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ day | T today | pgup/pgdn detail | w window ({}) | t/c/i/o/x/m/n metric ({}) | ? help{}",
+            " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ day | T today | pgup/pgdn detail | w window ({}) | t/c metric ({}) | ? help{}",
             theme_label,
             state.heatmap_window.label(),
             state.heatmap_metric.short_label(),
@@ -1996,7 +1948,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
             ("T", "jump to today"),
             ("PgUp / PgDn", "scroll detail panel"),
             ("w", "cycle time window"),
-            ("t / c / i / o / x / m / n", "switch metric"),
+            ("t / c", "switch tokens / cost metric"),
             ("r", "refresh data"),
             ("s", "source filter"),
             ("b", "cycle and save theme"),
@@ -3511,11 +3463,9 @@ fn heatmap_day_panel_line_count(day: Option<&DailyStats>) -> usize {
 // ---------------------------------------------------------------------------
 
 fn heatmap_palette(theme: &Theme, metric: HeatmapMetric) -> [Color; 5] {
-    match PaletteMode::from_metric(metric) {
-        PaletteMode::Tokens => theme.token_heatmap,
-        PaletteMode::Cost => theme.cost_heatmap,
-        PaletteMode::Input | PaletteMode::Output | PaletteMode::Count => theme.count_heatmap,
-        PaletteMode::Cache => theme.cache_heatmap,
+    match metric {
+        HeatmapMetric::TotalTokens => theme.token_heatmap,
+        HeatmapMetric::Cost => theme.cost_heatmap,
     }
 }
 
@@ -3576,12 +3526,7 @@ fn empty_data_message(state: &UsageState, fallback: &str) -> String {
 fn format_metric(metric: HeatmapMetric, value: f64) -> String {
     match metric {
         HeatmapMetric::Cost => format_cost_compact(value),
-        HeatmapMetric::TotalTokens
-        | HeatmapMetric::InputTokens
-        | HeatmapMetric::OutputTokens
-        | HeatmapMetric::CacheTokens
-        | HeatmapMetric::Messages
-        | HeatmapMetric::Sessions => format_compact(value.round() as i64),
+        HeatmapMetric::TotalTokens => format_compact(value.round() as i64),
     }
 }
 
@@ -3592,11 +3537,7 @@ fn summary_cost_style(theme: &Theme) -> Style {
 fn summary_metric_style(metric: HeatmapMetric, theme: &Theme) -> Style {
     let color = match metric {
         HeatmapMetric::Cost => theme.accent,
-        HeatmapMetric::TotalTokens | HeatmapMetric::InputTokens | HeatmapMetric::OutputTokens => {
-            Color::Rgb(52, 211, 153)
-        }
-        HeatmapMetric::CacheTokens => Color::Rgb(251, 146, 60),
-        HeatmapMetric::Messages | HeatmapMetric::Sessions => Color::Rgb(96, 165, 250),
+        HeatmapMetric::TotalTokens => Color::Rgb(52, 211, 153),
     };
     Style::default().fg(color)
 }
