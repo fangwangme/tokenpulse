@@ -106,6 +106,8 @@ pub struct Theme {
     pub gauge_low: Color,
     pub gauge_mid: Color,
     pub gauge_high: Color,
+    // Heatmap surface stays light in both app themes so low activity levels
+    // remain visible and intensity does not invert between modes.
     pub token_heatmap: [Color; 5],
     pub cost_heatmap: [Color; 5],
     pub heatmap_bg: Color,

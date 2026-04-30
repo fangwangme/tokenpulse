@@ -481,7 +481,7 @@ impl<'a> Widget for YearHeatmap<'a> {
         }
 
         let (sym_cell, sym_selected) = if cell_width >= 2 {
-            ("██", "◆◆")
+            ("██", " ◆")
         } else {
             ("█", "◆")
         };
@@ -554,7 +554,12 @@ mod tests {
         let layout = compute_layout(area, Some((start, end))).unwrap();
         let selected_x = display_col_x(&layout, 9);
         let selected_y = area.y + 1;
-        assert_eq!(buf[(selected_x, selected_y)].symbol(), "◆");
+        if layout.cell_width >= 2 {
+            assert_eq!(buf[(selected_x, selected_y)].symbol(), " ");
+            assert_eq!(buf[(selected_x + 1, selected_y)].symbol(), "◆");
+        } else {
+            assert_eq!(buf[(selected_x, selected_y)].symbol(), "◆");
+        }
     }
 
     #[test]

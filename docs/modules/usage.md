@@ -222,7 +222,7 @@ The usage TUI is organized into four tabs:
 - `Overview` - 60-day stacked bar chart by model company + scrollable top models table
 - `Models` - Full searchable/sortable model table with company-colored model names, sort-aware share percentage, and colored numeric columns
 - `Daily` - Daily summary bar and table with sorting and 7-day token trends on wide terminals
-- `Activity` - GitHub-style contribution graph with range stats and selected-day drill-down
+- `Activity` - GitHub-style calendar heatmap with range stats and selected-day drill-down
 
 ### Source Filtering
 
@@ -272,10 +272,14 @@ Daily operations view:
 
 ### `Activity`
 
-GitHub-style contribution graph:
+Activity calendar heatmap:
 
 - 2 switchable metrics: total tokens and cost
 - 3 window modes (past 26 weeks, past 52 weeks, past 365 days)
+- GitHub-style calendar layout; intensity uses visible-window peak scaling, not equal-count quantiles
+- `<= 0` renders as empty, and positive values use five buckets at 20/40/60/80% of the visible window max
+- Cost uses a GitHub-green palette, tokens use a Kaggle-blue palette, and the heatmap surface stays light in both app themes for consistent low-level readability
+- Narrow terminals clip to the most recent visible weeks instead of merging multiple dates into one cell
 - Clickable legend levels show the current token/cost range for that intensity bucket
 - Range overview includes Today, This Week, This Month, and all-time cost
 - Day drill-down with:

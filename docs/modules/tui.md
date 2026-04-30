@@ -14,7 +14,7 @@ tui/
 │   ├── mod.rs
 │   ├── gauge.rs        # gradient progress bars with percentage + labels
 │   ├── barchart.rs     # stacked bar charts (provider breakdown)
-│   ├── heatmap.rs      # GitHub-style contribution heatmap
+│   ├── heatmap.rs      # contribution-calendar heatmap
 │   └── trend.rs        # compact sparklines
 └── views/
     ├── mod.rs
@@ -115,12 +115,14 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 - Sorted by date (most recent first) or cost/tokens
 
 ### Tab 4: Activity
-- GitHub-style contribution graph with GitHub-green cost cells and Kaggle-blue token cells
-- Solid-cell coloring scaled to value level, without texture patterns in low activity cells
+- GitHub-style calendar layout with GitHub-green cost cells and Kaggle-blue token cells
+- Solid-cell coloring uses five buckets at 20/40/60/80% of the visible window peak, without texture patterns in low activity cells
 - 2 switchable metrics: total tokens and cost
 - 3 window modes: past 26 weeks, past 52 weeks, past 365 days
+- Narrow terminals clip to the most recent visible weeks instead of merging multiple dates into one cell
 - Mouse-clickable cells — click any day to select it and see drill-down
 - Clickable legend cells — click an intensity level to show its current value range
+- The heatmap surface stays light in both app themes so low activity levels remain visible and intensity direction stays consistent
 - Drill-down: select any day to see token summary, agent totals, and per-agent model cost breakdown
 - Selected-day panel supports scroll when the detail list is taller than the viewport, with a dedicated bottom-row scroll hint so the final token-detail line is not overwritten
 - Streak tracking: current streak and longest streak

@@ -236,7 +236,7 @@ Current usage TUI notes:
 - `Overview` top models use their own visible scroll hint, cost percentage, and wider model/agent columns so long model IDs and multi-agent attribution fit better
 - `Models` shows a searchable (`/`), sortable table with a sort-aware `%` share column and per-column semantic colors (`Model`=company color, `Tokens`=green, `Cost`=gold, `Msgs`=blue)
 - `Daily` shows Today/This Week/This Month cost, period totals, and daily rows as a colored table (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`) with a 7-day token trend column on wide terminals
-- `Activity` shows range cost stats, a GitHub-style contribution heatmap with solid colored cells scaled to value level, GitHub-green cost cells, Kaggle-blue token cells, mouse-clickable cells, and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
+- `Activity` shows range cost stats, a GitHub-style calendar heatmap with solid colored cells split at 20/40/60/80% of the visible window peak, GitHub-green cost cells, Kaggle-blue token cells, mouse-clickable cells, clickable legend ranges, and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
 - `Activity` selected-day panel includes total/input/output/cache/reasoning/message/session summary and supports detail scrolling when the agent/model list exceeds the viewport, with the scroll hint rendered on its own bottom row
 - Press `s` on any tab to open a source filter overlay (toggle providers on/off)
 

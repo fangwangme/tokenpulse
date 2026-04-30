@@ -28,6 +28,12 @@ use tokenpulse_core::{
     usage::{normalize_model_name, DailyUsageRow, DashboardDay, ModelSummary, UsageSummary},
 };
 
+const HEATMAP_LEGEND_LOW_LABEL: &str = "low";
+const HEATMAP_LEGEND_HIGH_LABEL: &str = "high";
+const HEATMAP_LEGEND_GAP: &str = "  ";
+const HEATMAP_LEGEND_CELL: &str = "██";
+const HEATMAP_LEGEND_BUCKETS: usize = 5;
+
 // ---------------------------------------------------------------------------
 // Pages
 // ---------------------------------------------------------------------------
@@ -1557,19 +1563,32 @@ fn heatmap_legend_inner_area(area: Rect) -> Rect {
     Block::default().borders(Borders::ALL).inner(sections[1])
 }
 
+fn text_width(text: &str) -> u16 {
+    text.chars().count() as u16
+}
+
+fn heatmap_legend_blocks_start(inner: Rect) -> u16 {
+    inner.x + text_width(HEATMAP_LEGEND_LOW_LABEL) + text_width(HEATMAP_LEGEND_GAP)
+}
+
+fn heatmap_legend_bucket_width() -> u16 {
+    text_width(HEATMAP_LEGEND_CELL)
+}
+
 fn heatmap_legend_bucket_at_position(area: Rect, column: u16, row: u16) -> Option<usize> {
     let inner = heatmap_legend_inner_area(area);
     if row != inner.y {
         return None;
     }
 
-    let blocks_start = inner.x + "low  ".len() as u16;
-    let blocks_width = 5 * 2;
+    let bucket_width = heatmap_legend_bucket_width();
+    let blocks_start = heatmap_legend_blocks_start(inner);
+    let blocks_width = HEATMAP_LEGEND_BUCKETS as u16 * bucket_width;
     if column < blocks_start || column >= blocks_start + blocks_width {
         return None;
     }
 
-    Some(((column - blocks_start) / 2) as usize)
+    Some(((column - blocks_start) / bucket_width) as usize)
 }
 
 fn heatmap_day_panel_area(area: Rect) -> Rect {
@@ -3089,21 +3108,30 @@ fn heatmap_legend_line(
     scale: Option<HeatmapScale>,
     selected_bucket: Option<usize>,
 ) -> Line<'static> {
-    let mut legend_spans = vec![Span::styled("low", Style::default().fg(theme.dim))];
-    legend_spans.push(Span::raw("  "));
+    let mut legend_spans = vec![Span::styled(
+        HEATMAP_LEGEND_LOW_LABEL,
+        Style::default().fg(theme.dim),
+    )];
+    legend_spans.push(Span::raw(HEATMAP_LEGEND_GAP));
     for color in palette {
-        legend_spans.push(Span::styled("██", Style::default().fg(color)));
+        legend_spans.push(Span::styled(
+            HEATMAP_LEGEND_CELL,
+            Style::default().fg(color),
+        ));
     }
-    legend_spans.push(Span::raw("  "));
-    legend_spans.push(Span::styled("high", Style::default().fg(theme.dim)));
+    legend_spans.push(Span::raw(HEATMAP_LEGEND_GAP));
+    legend_spans.push(Span::styled(
+        HEATMAP_LEGEND_HIGH_LABEL,
+        Style::default().fg(theme.dim),
+    ));
     if let Some(label) = heatmap_bucket_range_label(metric, scale, selected_bucket) {
-        legend_spans.push(Span::raw("  "));
+        legend_spans.push(Span::raw(HEATMAP_LEGEND_GAP));
         legend_spans.push(Span::styled(
             label,
             Style::default().fg(theme.accent).bold(),
         ));
     }
-    legend_spans.push(Span::raw("  "));
+    legend_spans.push(Span::raw(HEATMAP_LEGEND_GAP));
     legend_spans.push(Span::styled(range_label, Style::default().fg(theme.fg)));
     Line::from(legend_spans)
 }
@@ -3919,7 +3947,7 @@ mod tests {
 
         for (idx, color) in palette.into_iter().enumerate() {
             let span = &line.spans[idx + 2];
-            assert_eq!(span.content.as_ref(), "██");
+            assert_eq!(span.content.as_ref(), HEATMAP_LEGEND_CELL);
             assert_eq!(span.style.fg, Some(color));
         }
     }
@@ -3929,15 +3957,24 @@ mod tests {
         let area = Rect::new(0, 0, 120, 40);
         let body = dashboard_body_area(area);
         let inner = heatmap_legend_inner_area(body);
-        let start = inner.x + "low  ".len() as u16;
+        let start = heatmap_legend_blocks_start(inner);
+        let bucket_width = heatmap_legend_bucket_width();
 
-        for bucket in 0..5 {
+        for bucket in 0..HEATMAP_LEGEND_BUCKETS {
             assert_eq!(
-                heatmap_legend_bucket_at_position(body, start + (bucket * 2) as u16, inner.y),
+                heatmap_legend_bucket_at_position(
+                    body,
+                    start + bucket as u16 * bucket_width,
+                    inner.y
+                ),
                 Some(bucket)
             );
             assert_eq!(
-                heatmap_legend_bucket_at_position(body, start + (bucket * 2 + 1) as u16, inner.y),
+                heatmap_legend_bucket_at_position(
+                    body,
+                    start + (bucket as u16 + 1) * bucket_width - 1,
+                    inner.y
+                ),
                 Some(bucket)
             );
         }
