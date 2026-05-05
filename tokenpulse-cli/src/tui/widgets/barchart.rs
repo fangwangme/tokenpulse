@@ -105,8 +105,10 @@ impl<'a> Widget for StackedBarChart<'a> {
 
             let mut segments: Vec<_> = values.iter().collect();
             segments.sort_by(|left, right| {
-                stack_order(left.0)
-                    .cmp(&stack_order(right.0))
+                right
+                    .1
+                    .partial_cmp(left.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| left.0.cmp(right.0))
             });
 
@@ -189,16 +191,6 @@ fn allocate_segment_units(
     }
 
     allocated
-}
-
-fn stack_order(name: &str) -> usize {
-    match name {
-        "openai" => 0,
-        "other" => 1,
-        "google" => 2,
-        "anthropic" => 3,
-        _ => 4,
-    }
 }
 
 fn aggregated_bars<'a>(
