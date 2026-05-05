@@ -127,12 +127,34 @@ fn pricing_lookup_candidates(model_id: &str) -> Vec<String> {
         push_generalized_candidates(&mut candidates, &mut seen, &stripped);
     }
 
+    // Generic: strip provider prefixes from three-segment identifiers
+    // e.g. "nvidia/moonshotai/kimi-k2.6" → "moonshotai/kimi-k2.6"
+    if let Some(rest) = strip_three_segment_prefix(model_id) {
+        push_candidate(&mut candidates, &mut seen, rest.to_string());
+        if let Some(alias) = explicit_model_alias(rest) {
+            push_candidate(&mut candidates, &mut seen, alias.to_string());
+        }
+        push_generalized_candidates(&mut candidates, &mut seen, rest);
+    }
+
     if model_id.contains('/') {
         push_candidate(&mut candidates, &mut seen, model_id.replacen('/', ".", 1));
         push_candidate(&mut candidates, &mut seen, model_id.replace('/', "."));
     }
 
     candidates
+}
+
+/// Strip the first segment of a three-segment `/` delimited identifier.
+/// e.g. "nvidia/moonshotai/kimi-k2.6" → Some("moonshotai/kimi-k2.6")
+fn strip_three_segment_prefix(model_id: &str) -> Option<&str> {
+    let (_, after_first) = model_id.split_once('/')?;
+    let (_, after_second) = after_first.split_once('/')?;
+    // There must be exactly three segments, no more
+    after_second
+        .contains('/')
+        .then_some(())
+        .map_or(Some(after_first), |_| None)
 }
 
 fn strip_quality_tier_suffix(model_id: &str) -> Option<String> {
@@ -226,6 +248,7 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
 
         // Provider-prefixed aliases
         "moonshotai/kimi-k2.5" => Some("moonshot/kimi-k2.5"),
+        "moonshotai/kimi-k2.6" => Some("moonshot/kimi-k2.6"),
         "minimaxai/minimax-m2.1" => Some("minimax/MiniMax-M2.1"),
         "minimaxai/minimax-m2.5" => Some("minimax/MiniMax-M2.5"),
         "qwen/qwen3.5-397b-a17b" => Some("openrouter/qwen/qwen3.5-397b-a17b"),
@@ -659,6 +682,38 @@ mod tests {
 
         let result = lookup_model_pricing("claude-opus-4.6", &map);
         assert!(result.is_some(), "claude-opus-4.6 should resolve via alias");
+    }
+
+    #[test]
+    fn test_lookup_strips_three_segment_prefix() {
+        let mut map = HashMap::new();
+        map.insert(
+            "moonshot/kimi-k2.6".to_string(),
+            make_pricing(0.0000009, 0.000004),
+        );
+
+        let candidates = pricing_lookup_candidates("nvidia/moonshotai/kimi-k2.6");
+        println!("candidates: {:?}", candidates);
+
+        let result = lookup_model_pricing("nvidia/moonshotai/kimi-k2.6", &map);
+        assert!(
+            result.is_some(),
+            "nvidia/moonshotai/kimi-k2.6 should resolve via three-segment prefix stripping"
+        );
+        assert_eq!(result.unwrap().input_cost_per_token, 0.0000009);
+    }
+
+    #[test]
+    fn test_strip_three_segment_prefix_function() {
+        assert_eq!(
+            strip_three_segment_prefix("nvidia/moonshotai/kimi-k2.6"),
+            Some("moonshotai/kimi-k2.6")
+        );
+        assert_eq!(strip_three_segment_prefix("foo/bar/baz"), Some("bar/baz"));
+        // Two segments – not touched
+        assert_eq!(strip_three_segment_prefix("moonshotai/kimi-k2.6"), None);
+        // Four segments – not touched
+        assert_eq!(strip_three_segment_prefix("a/b/c/d"), None);
     }
 
     #[test]
