@@ -117,6 +117,20 @@ impl OverviewMetric {
             OverviewMetric::Cost => ValueFormat::Currency,
         }
     }
+
+    fn short_label(self) -> &'static str {
+        match self {
+            OverviewMetric::Tokens => "tokens",
+            OverviewMetric::Cost => "cost",
+        }
+    }
+
+    fn daily_vs7d_header(self) -> &'static str {
+        match self {
+            OverviewMetric::Tokens => "Token vs7d",
+            OverviewMetric::Cost => "Cost vs7d",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +254,15 @@ fn display_source_name(source: &str) -> &'static str {
         "pi" => "PI",
         "antigravity" => "Antigravity",
         _ => "Unknown",
+    }
+}
+
+fn display_source_filter_name(source: &str) -> String {
+    let label = display_source_name(source);
+    if label == "Unknown" {
+        source.to_string()
+    } else {
+        label.to_string()
     }
 }
 
@@ -713,6 +736,7 @@ fn compute_data_date_range(dashboard: &UsageDashboard) -> Option<(NaiveDate, Nai
 struct UsageState {
     page: UsagePage,
     overview_metric: OverviewMetric,
+    daily_metric: OverviewMetric,
     heatmap_metric: HeatmapMetric,
     heatmap_window: HeatmapWindow,
     selected_heatmap_date: Option<NaiveDate>,
@@ -763,6 +787,7 @@ impl UsageState {
         Self {
             page: UsagePage::Overview,
             overview_metric: OverviewMetric::Tokens,
+            daily_metric: OverviewMetric::Cost,
             heatmap_metric: HeatmapMetric::TotalTokens,
             heatmap_window: HeatmapWindow::Past365Days,
             selected_heatmap_date,
@@ -846,6 +871,11 @@ impl UsageState {
     }
 
     fn toggle_sort(&mut self, field: SortField) {
+        match field {
+            SortField::Cost => self.daily_metric.toggle_to_cost(),
+            SortField::Tokens => self.daily_metric.toggle_to_tokens(),
+            SortField::Date => {}
+        }
         if self.sort_field == field {
             self.sort_ascending = !self.sort_ascending;
         } else {
@@ -1816,8 +1846,12 @@ fn render_footer(
                 SortField::Date => "date",
             };
             format!(
-                " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ select | T today | c/t/d sort ({} {}) | ? help{}",
-                theme_label, field, dir, filter_hint
+                " q quit | r refresh | b theme ({}) | ←→ tab | ↑↓ select | T today | c/t/d sort ({} {}) | vs7d {} | ? help{}",
+                theme_label,
+                field,
+                dir,
+                state.daily_metric.short_label(),
+                filter_hint
             )
         }
         UsagePage::Heatmap => format!(
@@ -1941,9 +1975,10 @@ fn render_source_filter_overlay(
         } else {
             Style::default().fg(theme.dim)
         };
+        let label = display_source_filter_name(source);
         lines.push(Line::from(vec![
             Span::styled(format!(" {} ", checkbox), style),
-            Span::styled(source.clone(), style),
+            Span::styled(label, style),
         ]));
     }
 
@@ -1991,7 +2026,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
             ("←→", "switch tab"),
             ("↑↓", "select row"),
             ("T", "jump to today"),
-            ("c / t / d", "sort by cost / tokens / date"),
+            ("c / t / d", "sort by cost / tokens / date; c/t switch vs7d"),
             ("r", "refresh data"),
             ("s", "source filter"),
             ("b", "cycle and save theme"),
@@ -2183,7 +2218,8 @@ fn render_overview_top_models(
     state: &UsageState,
     theme: &Theme,
 ) {
-    let filtered = dashboard.filtered_models(&state.enabled_sources);
+    let mut filtered = dashboard.filtered_models(&state.enabled_sources);
+    sort_overview_models(&mut filtered, state.overview_metric);
     let total_rows = filtered.len();
     let block = Block::default()
         .title(Span::styled(
@@ -2222,7 +2258,10 @@ fn render_overview_top_models(
         filtered.len(),
     );
     let total_width = inner.width as usize;
-    let total_cost = filtered.iter().map(|entry| entry.cost).sum::<f64>();
+    let share_total = filtered
+        .iter()
+        .map(|entry| overview_model_metric_value(entry, state.overview_metric))
+        .sum::<f64>();
     let pct_width = 7usize;
     let cost_width = 8usize;
     let tokens_width = 9usize;
@@ -2269,7 +2308,10 @@ fn render_overview_top_models(
     {
         let provider_hint = model.provider.split(',').next();
         let color = theme.model_color_for(&model.model, provider_hint);
-        let pct = share_percent(model.cost, total_cost);
+        let pct = share_percent(
+            overview_model_metric_value(model, state.overview_metric),
+            share_total,
+        );
         let selected = row_idx == selected_row;
         lines.push(Line::from(vec![
             Span::styled(
@@ -2412,11 +2454,8 @@ fn render_models_page(
     let tokens_width = 9usize;
     let show_last = total_width >= 92;
     let last_width = if show_last { 11usize } else { 0usize };
-    let show_sparkline = total_width >= 110;
-    let sparkline_width = if show_sparkline { 9usize } else { 0usize };
-    let show_efficiency = total_width >= 130;
-    let cost_per_msg_width = if show_efficiency { 10usize } else { 0usize };
-    let tok_per_msg_width = if show_efficiency { 9usize } else { 0usize };
+    let show_sparkline = total_width >= 116;
+    let sparkline_width = if show_sparkline { 15usize } else { 0usize };
     let agent_width = (total_width / 4).clamp(22, 36);
     let model_width = total_width
         .saturating_sub(
@@ -2429,9 +2468,7 @@ fn render_models_page(
                 + 1
                 + msg_width
                 + last_width
-                + sparkline_width
-                + cost_per_msg_width
-                + tok_per_msg_width,
+                + sparkline_width,
         )
         .clamp(12, 40);
     let share_total = model_table_share_total(models.iter().copied(), state.sort_field);
@@ -2461,7 +2498,7 @@ fn render_models_page(
     };
 
     let headers = [
-        "#", "Model", "Agent", "Tokens", "Cost", "%", "Msgs", "Last", "Trend", "$/Msg", "T/Msg",
+        "#", "Model", "Agent", "Tokens", "Cost", "%", "Msgs", "Last", "Trend",
     ];
     let sort_indicator = |field: SortField| -> &str {
         if state.sort_field == field {
@@ -2525,16 +2562,6 @@ fn render_models_page(
     if show_sparkline {
         header_spans.push(Span::styled(
             format!("{:<sparkline_width$}", headers[8]),
-            Style::default().fg(Color::Rgb(52, 211, 153)).bold(),
-        ));
-    }
-    if show_efficiency {
-        header_spans.push(Span::styled(
-            format!("{:<cost_per_msg_width$}", headers[9]),
-            Style::default().fg(Color::Rgb(250, 204, 21)).bold(),
-        ));
-        header_spans.push(Span::styled(
-            format!("{:<tok_per_msg_width$}", headers[10]),
             Style::default().fg(Color::Rgb(52, 211, 153)).bold(),
         ));
     }
@@ -2641,35 +2668,6 @@ fn render_models_page(
                 ),
             ));
         }
-        if show_efficiency {
-            let cost_per_msg = if model.message_count > 0 {
-                format_cost_compact(model.cost / model.message_count as f64)
-            } else {
-                "—".to_string()
-            };
-            let tok_per_msg = if model.message_count > 0 {
-                format_compact(model.tokens / model.message_count as i64)
-            } else {
-                "—".to_string()
-            };
-            spans.push(Span::styled(
-                format!("{:<cost_per_msg_width$}", cost_per_msg),
-                selected_row_style(
-                    Style::default().fg(Color::Rgb(250, 204, 21)),
-                    selected,
-                    theme,
-                ),
-            ));
-            spans.push(Span::styled(
-                format!("{:<tok_per_msg_width$}", tok_per_msg),
-                selected_row_style(
-                    Style::default().fg(Color::Rgb(52, 211, 153)),
-                    selected,
-                    theme,
-                ),
-            ));
-        }
-
         let line = Line::from(spans);
         f.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
     }
@@ -2827,24 +2825,46 @@ fn render_daily_table(
     let show_wow = inner.width >= 100;
     let show_detail_cols = inner.width >= 80;
 
-    // Build cost-by-date map for WoW calculation
-    let cost_by_date: std::collections::HashMap<NaiveDate, f64> =
-        days.iter().map(|d| (d.date, d.cost_usd)).collect();
+    let value_by_date: HashMap<NaiveDate, f64> = days
+        .iter()
+        .map(|day| (day.date, daily_metric_value(day, state.daily_metric)))
+        .collect();
 
     // Header
     let header_y = inner.y;
     let date_width = 15usize;
+    let wow_width = 11usize;
+    let sort_indicator = |field: SortField| -> &str {
+        if state.sort_field == field {
+            if state.sort_ascending {
+                " ↑"
+            } else {
+                " ↓"
+            }
+        } else {
+            ""
+        }
+    };
     let mut header_spans = vec![
         Span::styled(
-            format!("{:<date_width$}", "Date"),
+            format!(
+                "{:<date_width$}",
+                format!("{}{}", "Date", sort_indicator(SortField::Date))
+            ),
             Style::default().fg(theme.accent_soft).bold(),
         ),
         Span::styled(
-            format!("{:<10}", "Tokens"),
+            format!(
+                "{:<10}",
+                format!("{}{}", "Tokens", sort_indicator(SortField::Tokens))
+            ),
             Style::default().fg(Color::Rgb(52, 211, 153)).bold(),
         ),
         Span::styled(
-            format!("{:<10}", "Cost"),
+            format!(
+                "{:<10}",
+                format!("{}{}", "Cost", sort_indicator(SortField::Cost))
+            ),
             Style::default().fg(Color::Rgb(250, 204, 21)).bold(),
         ),
     ];
@@ -2870,7 +2890,7 @@ fn render_daily_table(
     ));
     if show_wow {
         header_spans.push(Span::styled(
-            format!("{:<9}", "Cost vs7d"),
+            format!("{:<wow_width$}", state.daily_metric.daily_vs7d_header()),
             Style::default().fg(theme.dim).bold(),
         ));
     }
@@ -2969,24 +2989,12 @@ fn render_daily_table(
         ));
         if show_wow {
             let prior_date = day.date - Duration::days(7);
-            let wow_text = match cost_by_date.get(&prior_date) {
-                Some(&prior) if prior > 0.0 => {
-                    let pct = (day.cost_usd - prior) / prior * 100.0;
-                    if pct >= 0.0 {
-                        format!("{:>+6.1}%↑", pct)
-                    } else {
-                        format!("{:>+6.1}%↓", pct)
-                    }
-                }
-                _ => "   —  ".to_string(),
-            };
-            let wow_color = match cost_by_date.get(&prior_date) {
-                Some(&prior) if prior > 0.0 && day.cost_usd > prior => Color::Rgb(248, 113, 113),
-                Some(&prior) if prior > 0.0 && day.cost_usd < prior => Color::Rgb(52, 211, 153),
-                _ => theme.dim,
-            };
+            let current = daily_metric_value(day, state.daily_metric);
+            let prior = value_by_date.get(&prior_date).copied();
+            let wow_text = percent_delta_text(current, prior);
+            let wow_color = percent_delta_color(current, prior, theme);
             spans.push(Span::styled(
-                format!("{:<9}", wow_text),
+                format!("{:<wow_width$}", wow_text),
                 selected_row_style(metric_style(wow_color, row_bg), selected, theme),
             ));
         }
@@ -3667,6 +3675,34 @@ fn model_share_percent(model: &ModelSummary, total: f64, sort_field: SortField) 
     share_percent(value, total)
 }
 
+fn overview_model_metric_value(model: &ModelSummary, metric: OverviewMetric) -> f64 {
+    match metric {
+        OverviewMetric::Tokens => model.tokens as f64,
+        OverviewMetric::Cost => model.cost,
+    }
+}
+
+fn sort_overview_models(models: &mut [ModelSummary], metric: OverviewMetric) {
+    models.sort_by(|left, right| match metric {
+        OverviewMetric::Tokens => right
+            .tokens
+            .cmp(&left.tokens)
+            .then_with(|| {
+                right
+                    .cost
+                    .partial_cmp(&left.cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.model.cmp(&right.model)),
+        OverviewMetric::Cost => right
+            .cost
+            .partial_cmp(&left.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.tokens.cmp(&left.tokens))
+            .then_with(|| left.model.cmp(&right.model)),
+    });
+}
+
 fn format_compact(value: i64) -> String {
     let abs = value.abs();
     if abs >= 1_000_000_000 {
@@ -3740,6 +3776,35 @@ fn truncate(text: &str, width: usize) -> String {
     }
     out.push('…');
     out
+}
+
+fn daily_metric_value(day: &DailyStats, metric: OverviewMetric) -> f64 {
+    match metric {
+        OverviewMetric::Tokens => day.total_tokens as f64,
+        OverviewMetric::Cost => day.cost_usd,
+    }
+}
+
+fn percent_delta_text(current: f64, prior: Option<f64>) -> String {
+    match prior {
+        Some(prior) if prior > 0.0 => {
+            let pct = (current - prior) / prior * 100.0;
+            if pct >= 0.0 {
+                format!("{:>+6.1}%↑", pct)
+            } else {
+                format!("{:>+6.1}%↓", pct)
+            }
+        }
+        _ => "   —  ".to_string(),
+    }
+}
+
+fn percent_delta_color(current: f64, prior: Option<f64>, theme: &Theme) -> Color {
+    match prior {
+        Some(prior) if prior > 0.0 && current > prior => Color::Rgb(248, 113, 113),
+        Some(prior) if prior > 0.0 && current < prior => Color::Rgb(52, 211, 153),
+        _ => theme.dim,
+    }
 }
 
 fn metric_style(color: Color, bg: Option<Color>) -> Style {
