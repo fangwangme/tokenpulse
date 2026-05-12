@@ -18,10 +18,8 @@ pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
 pub fn normalize_model_name(model_id: &str) -> String {
     let mut normalized = model_id.trim().to_ascii_lowercase();
 
-    if let Some(stripped) = normalized.strip_suffix("-free") {
-        normalized = stripped.to_string();
-    }
-
+    // Keep explicit "-free" suffixes so free/subsidized SKUs stay distinct
+    // from paid models in summaries and the TUI model table.
     if let Some(stripped) = strip_date_suffix(&normalized) {
         normalized = stripped;
     }
@@ -143,7 +141,7 @@ mod tests {
         );
         assert_eq!(
             normalize_model_name("moonshotai/kimi-k2.5-free"),
-            "kimi-k2-5"
+            "kimi-k2-5-free"
         );
         assert_eq!(normalize_model_name("claude-opus-4.6"), "claude-opus-4-6");
         assert_eq!(
@@ -162,6 +160,10 @@ mod tests {
         assert_eq!(
             normalize_model_name("gemini-3-flash"),
             "gemini-3-flash-preview"
+        );
+        assert_eq!(
+            normalize_model_name("opencode/deepseek-v4-flash-free"),
+            "deepseek-v4-flash-free"
         );
     }
 

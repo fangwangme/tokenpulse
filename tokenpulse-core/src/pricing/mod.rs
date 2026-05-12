@@ -1,6 +1,9 @@
+mod cache;
 pub mod litellm;
+pub mod modelsdev;
+pub mod openrouter;
 
-pub use litellm::PricingCache;
+pub use cache::PricingCache;
 
 use crate::model_id::strip_date_suffix;
 use crate::provider::TokenBreakdown;
@@ -42,6 +45,102 @@ impl ModelPricing {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PricingRecord {
+    pub pricing: ModelPricing,
+    pub source: String,
+    pub version: String,
+}
+
+impl PricingRecord {
+    pub fn new(
+        pricing: ModelPricing,
+        source: impl Into<String>,
+        version: impl Into<String>,
+    ) -> Self {
+        Self {
+            pricing,
+            source: source.into(),
+            version: version.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PricingCatalog {
+    entries: HashMap<String, PricingRecord>,
+}
+
+impl PricingCatalog {
+    pub fn new(entries: HashMap<String, PricingRecord>) -> Self {
+        Self { entries }
+    }
+
+    pub fn entries(&self) -> &HashMap<String, PricingRecord> {
+        &self.entries
+    }
+
+    // Sources are merged in explicit priority order. Keep the first usable
+    // record for a key and only replace missing or zero-priced rows.
+    pub fn insert_if_missing_or_unusable(&mut self, key: String, record: PricingRecord) {
+        match self.entries.get(&key) {
+            Some(existing) if pricing_record_is_usable(existing) => {}
+            _ => {
+                self.entries.insert(key, record);
+            }
+        }
+    }
+
+    pub fn lookup<'a>(
+        &'a self,
+        model_id: &str,
+        provider_id: Option<&str>,
+    ) -> Option<ResolvedPricing<'a>> {
+        for candidate in pricing_lookup_candidates_with_provider(model_id, provider_id) {
+            let Some((key, record)) = self
+                .entries
+                .get_key_value(&candidate)
+                .or_else(|| find_case_insensitive_key_value(&candidate, &self.entries))
+            else {
+                continue;
+            };
+
+            if !pricing_record_is_usable(record) {
+                continue;
+            }
+
+            return Some(ResolvedPricing {
+                matched_key: key.as_str(),
+                pricing: &record.pricing,
+                source: &record.source,
+                version: &record.version,
+            });
+        }
+
+        None
+    }
+}
+
+pub struct ResolvedPricing<'a> {
+    pub matched_key: &'a str,
+    pub pricing: &'a ModelPricing,
+    pub source: &'a str,
+    pub version: &'a str,
+}
+
+fn pricing_record_is_usable(record: &PricingRecord) -> bool {
+    record.pricing.input_cost_per_token > 0.0
+        || record.pricing.output_cost_per_token > 0.0
+        || record
+            .pricing
+            .cache_read_input_token_cost
+            .is_some_and(|value| value > 0.0)
+        || record
+            .pricing
+            .cache_creation_input_token_cost
+            .is_some_and(|value| value > 0.0)
+}
+
 pub fn calculate_cost(tokens: &TokenBreakdown, pricing: &ModelPricing) -> f64 {
     let input = tokens.input as f64 * pricing.input_cost_per_token;
     let output = tokens.output as f64 * pricing.output_cost_per_token;
@@ -65,81 +164,163 @@ pub fn lookup_model_pricing<'a>(
     model_id: &str,
     pricing_map: &'a HashMap<String, ModelPricing>,
 ) -> Option<&'a ModelPricing> {
-    let candidates = pricing_lookup_candidates(model_id);
-
-    for candidate in &candidates {
-        if let Some(pricing) = pricing_map.get(candidate) {
-            return Some(pricing);
-        }
-
-        if let Some(key) = find_case_insensitive_key(candidate, pricing_map) {
-            return pricing_map.get(key);
-        }
-    }
-
-    None
+    lookup_model_pricing_with_provider(model_id, None, pricing_map)
 }
 
-fn pricing_lookup_candidates(model_id: &str) -> Vec<String> {
+pub fn lookup_model_pricing_with_provider<'a>(
+    model_id: &str,
+    provider_id: Option<&str>,
+    pricing_map: &'a HashMap<String, ModelPricing>,
+) -> Option<&'a ModelPricing> {
+    let matched_key = lookup_pricing_key_with_provider(model_id, provider_id, pricing_map)?;
+    pricing_map.get(matched_key)
+}
+
+fn pricing_lookup_candidates_with_provider(
+    model_id: &str,
+    provider_id: Option<&str>,
+) -> Vec<String> {
+    let mut roots = Vec::new();
+    let mut root_seen = HashSet::new();
+
+    for provider_hint in provider_hint_candidates(provider_id) {
+        push_candidate(
+            &mut roots,
+            &mut root_seen,
+            format!("{provider_hint}/{model_id}"),
+        );
+    }
+
+    push_candidate(&mut roots, &mut root_seen, model_id.to_string());
+
+    let mut idx = 0usize;
+    while idx < roots.len() {
+        let root = roots[idx].clone();
+        for suffix in strip_left_segment_suffixes(&root) {
+            push_candidate(&mut roots, &mut root_seen, suffix);
+        }
+        idx += 1;
+    }
+
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
 
-    push_candidate(&mut candidates, &mut seen, model_id.to_string());
-
-    if let Some(alias) = explicit_model_alias(model_id) {
-        push_candidate(&mut candidates, &mut seen, alias.to_string());
+    for root in roots {
+        push_lookup_candidates_for_base(&mut candidates, &mut seen, &root);
     }
 
-    push_generalized_candidates(&mut candidates, &mut seen, model_id);
+    candidates
+}
+
+fn push_lookup_candidates_for_base(
+    candidates: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    model_id: &str,
+) {
+    if model_id.trim().is_empty() {
+        return;
+    }
+
+    push_candidate(candidates, seen, model_id.to_string());
+
+    if let Some(alias) = explicit_model_alias(model_id) {
+        push_candidate(candidates, seen, alias.to_string());
+    }
+
+    push_generalized_candidates(candidates, seen, model_id);
 
     if let Some(base) = strip_quality_tier_suffix(model_id) {
-        push_candidate(&mut candidates, &mut seen, base.clone());
+        push_candidate(candidates, seen, base.clone());
         if let Some(alias) = explicit_model_alias(&base) {
-            push_candidate(&mut candidates, &mut seen, alias.to_string());
+            push_candidate(candidates, seen, alias.to_string());
         }
-        push_generalized_candidates(&mut candidates, &mut seen, &base);
+        push_generalized_candidates(candidates, seen, &base);
     }
 
     // Strip "-free" suffix (e.g. "kimi-k2.5-free" → "kimi-k2.5")
     if let Some(base) = model_id.strip_suffix("-free") {
-        push_candidate(&mut candidates, &mut seen, base.to_string());
+        push_candidate(candidates, seen, base.to_string());
         if let Some(alias) = explicit_model_alias(base) {
-            push_candidate(&mut candidates, &mut seen, alias.to_string());
+            push_candidate(candidates, seen, alias.to_string());
         }
-        push_generalized_candidates(&mut candidates, &mut seen, base);
+        push_generalized_candidates(candidates, seen, base);
     }
 
     if !model_id.contains('/') && !model_id.contains('.') {
-        push_candidate(
-            &mut candidates,
-            &mut seen,
-            format!("anthropic/{}", model_id),
-        );
-        push_candidate(&mut candidates, &mut seen, format!("openai/{}", model_id));
+        push_candidate(candidates, seen, format!("anthropic/{}", model_id));
+        push_candidate(candidates, seen, format!("openai/{}", model_id));
     }
 
     if let Some(stripped) = strip_date_suffix(model_id) {
-        push_candidate(&mut candidates, &mut seen, stripped.clone());
+        push_candidate(candidates, seen, stripped.clone());
 
         if let Some(alias) = explicit_model_alias(&stripped) {
-            push_candidate(&mut candidates, &mut seen, alias.to_string());
+            push_candidate(candidates, seen, alias.to_string());
         }
-        push_generalized_candidates(&mut candidates, &mut seen, &stripped);
+        push_generalized_candidates(candidates, seen, &stripped);
     }
 
     // Generic: strip provider prefixes from three-segment identifiers
     // e.g. "nvidia/moonshotai/kimi-k2.6" → "moonshotai/kimi-k2.6"
     if let Some(rest) = strip_three_segment_prefix(model_id) {
-        push_candidate(&mut candidates, &mut seen, rest.to_string());
+        push_candidate(candidates, seen, rest.to_string());
         if let Some(alias) = explicit_model_alias(rest) {
-            push_candidate(&mut candidates, &mut seen, alias.to_string());
+            push_candidate(candidates, seen, alias.to_string());
         }
-        push_generalized_candidates(&mut candidates, &mut seen, rest);
+        push_generalized_candidates(candidates, seen, rest);
     }
 
     if model_id.contains('/') {
-        push_candidate(&mut candidates, &mut seen, model_id.replacen('/', ".", 1));
-        push_candidate(&mut candidates, &mut seen, model_id.replace('/', "."));
+        push_candidate(candidates, seen, model_id.replacen('/', ".", 1));
+        push_candidate(candidates, seen, model_id.replace('/', "."));
+    }
+}
+
+fn strip_left_segment_suffixes(model_id: &str) -> Vec<String> {
+    let segments: Vec<&str> = model_id
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let mut suffixes = Vec::new();
+
+    for start in 1..segments.len() {
+        suffixes.push(segments[start..].join("/"));
+    }
+
+    suffixes
+}
+
+fn provider_hint_candidates(provider_id: Option<&str>) -> Vec<String> {
+    let Some(provider_id) = provider_id
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+        .filter(|provider| {
+            !provider.eq_ignore_ascii_case("unknown") && !provider.eq_ignore_ascii_case("other")
+        })
+    else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    push_candidate(&mut candidates, &mut seen, provider_id.to_string());
+
+    if provider_id.contains('_') {
+        push_candidate(&mut candidates, &mut seen, provider_id.replace('_', "-"));
+    }
+    if provider_id.contains('-') {
+        push_candidate(&mut candidates, &mut seen, provider_id.replace('-', "_"));
+    }
+
+    match provider_id {
+        "nvidia" => {
+            push_candidate(&mut candidates, &mut seen, "nvidia_nim".to_string());
+            push_candidate(&mut candidates, &mut seen, "nvidia-nim".to_string());
+        }
+        "nvidia_nim" | "nvidia-nim" => {
+            push_candidate(&mut candidates, &mut seen, "nvidia".to_string());
+        }
+        _ => {}
     }
 
     candidates
@@ -245,6 +426,8 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
         "minimax-m2.5" => Some("minimax/MiniMax-M2.5"),
         "minimax-m2.1" => Some("minimax/MiniMax-M2.1"),
         "grok-code" => Some("xai/grok-code-fast-1"),
+        "deepseek-v4-flash" => Some("deepseek/deepseek-v4-flash"),
+        "deepseek-v4-pro" => Some("deepseek/deepseek-v4-pro"),
 
         // Provider-prefixed aliases
         "moonshotai/kimi-k2.5" => Some("moonshot/kimi-k2.5"),
@@ -253,6 +436,8 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
         "minimaxai/minimax-m2.5" => Some("minimax/MiniMax-M2.5"),
         "qwen/qwen3.5-397b-a17b" => Some("openrouter/qwen/qwen3.5-397b-a17b"),
         "deepseek-ai/deepseek-v3.2" => Some("deepseek/deepseek-v3.2"),
+        "deepseek-ai/deepseek-v4-flash" => Some("deepseek/deepseek-v4-flash"),
+        "deepseek-ai/deepseek-v4-pro" => Some("deepseek/deepseek-v4-pro"),
         "nvidia/llama-3.3-nemotron-super-49b-v1.5" => {
             Some("deepinfra/nvidia/Llama-3.3-Nemotron-Super-49B-v1.5")
         }
@@ -263,9 +448,29 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
     }
 }
 
-fn find_case_insensitive_key<'a>(
+fn lookup_pricing_key_with_provider<'a, T>(
+    model_id: &str,
+    provider_id: Option<&str>,
+    pricing_map: &'a HashMap<String, T>,
+) -> Option<&'a str> {
+    let candidates = pricing_lookup_candidates_with_provider(model_id, provider_id);
+
+    for candidate in &candidates {
+        if let Some((key, _)) = pricing_map.get_key_value(candidate) {
+            return Some(key.as_str());
+        }
+
+        if let Some(key) = find_case_insensitive_key_generic(candidate, pricing_map) {
+            return Some(key);
+        }
+    }
+
+    None
+}
+
+fn find_case_insensitive_key_generic<'a, T>(
     candidate: &str,
-    pricing_map: &'a HashMap<String, ModelPricing>,
+    pricing_map: &'a HashMap<String, T>,
 ) -> Option<&'a str> {
     pricing_map
         .keys()
@@ -274,11 +479,30 @@ fn find_case_insensitive_key<'a>(
         .map(String::as_str)
 }
 
+fn find_case_insensitive_key_value<'a, T>(
+    candidate: &str,
+    pricing_map: &'a HashMap<String, T>,
+) -> Option<(&'a String, &'a T)> {
+    let key = pricing_map
+        .keys()
+        .filter(|key| key.eq_ignore_ascii_case(candidate))
+        .min_by_key(|key| key.len())?;
+    pricing_map.get_key_value(key)
+}
+
 pub fn lookup_model_pricing_or_warn<'a>(
     model_id: &str,
     pricing_map: &'a HashMap<String, ModelPricing>,
 ) -> Option<&'a ModelPricing> {
-    let pricing = lookup_model_pricing(model_id, pricing_map);
+    lookup_model_pricing_or_warn_with_provider(model_id, None, pricing_map)
+}
+
+pub fn lookup_model_pricing_or_warn_with_provider<'a>(
+    model_id: &str,
+    provider_id: Option<&str>,
+    pricing_map: &'a HashMap<String, ModelPricing>,
+) -> Option<&'a ModelPricing> {
+    let pricing = lookup_model_pricing_with_provider(model_id, provider_id, pricing_map);
 
     if pricing.is_none() && should_warn_for_missing_model(model_id) {
         warn!("No pricing found for model: {}", model_id);
@@ -692,15 +916,55 @@ mod tests {
             make_pricing(0.0000009, 0.000004),
         );
 
-        let candidates = pricing_lookup_candidates("nvidia/moonshotai/kimi-k2.6");
-        println!("candidates: {:?}", candidates);
-
         let result = lookup_model_pricing("nvidia/moonshotai/kimi-k2.6", &map);
         assert!(
             result.is_some(),
             "nvidia/moonshotai/kimi-k2.6 should resolve via three-segment prefix stripping"
         );
         assert_eq!(result.unwrap().input_cost_per_token, 0.0000009);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_uses_provider_hint_prefix() {
+        let mut map = HashMap::new();
+        map.insert(
+            "nvidia/deepseek-ai/deepseek-v4-pro".to_string(),
+            make_pricing(0.00000174, 0.00000348),
+        );
+
+        let result =
+            lookup_model_pricing_with_provider("deepseek-ai/deepseek-v4-pro", Some("nvidia"), &map);
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().output_cost_per_token, 0.00000348);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_uses_deepseek_v4_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "deepseek/deepseek-v4-flash".to_string(),
+            make_pricing(0.00000014, 0.00000028),
+        );
+
+        let result = lookup_model_pricing("deepseek-ai/deepseek-v4-flash", &map);
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().input_cost_per_token, 0.00000014);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_strips_arbitrary_left_route_prefixes() {
+        let mut map = HashMap::new();
+        map.insert(
+            "deepseek-ai/deepseek-v4-pro".to_string(),
+            make_pricing(0.00000174, 0.00000348),
+        );
+
+        let result = lookup_model_pricing("anthropic/nvidia_nim/deepseek-ai/deepseek-v4-pro", &map);
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().input_cost_per_token, 0.00000174);
     }
 
     #[test]
@@ -750,5 +1014,56 @@ mod tests {
         // Should be a reasonable cost
         assert!(cost > 0.0);
         assert!(cost < 100.0); // Less than $100 for these tokens
+    }
+
+    #[test]
+    fn test_provider_specific_zero_price_free_model_falls_back_to_paid_model() {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "opencode/deepseek-v4-flash-free".to_string(),
+            PricingRecord::new(
+                make_pricing(0.0, 0.0),
+                "models.dev:opencode",
+                "models.dev-api-v1",
+            ),
+        );
+        entries.insert(
+            "deepseek-v4-flash".to_string(),
+            PricingRecord::new(
+                make_pricing(0.00000014, 0.00000028),
+                "models.dev:deepseek",
+                "models.dev-api-v1",
+            ),
+        );
+
+        let catalog = PricingCatalog::new(entries);
+        let resolved = catalog
+            .lookup("deepseek-v4-flash-free", Some("opencode"))
+            .unwrap();
+
+        assert_eq!(resolved.matched_key, "deepseek-v4-flash");
+        assert_eq!(resolved.pricing.input_cost_per_token, 0.00000014);
+        assert_eq!(resolved.source, "models.dev:deepseek");
+    }
+
+    #[test]
+    fn pricing_catalog_replaces_zero_price_with_lower_priority_paid_record() {
+        let mut catalog = PricingCatalog::default();
+        catalog.insert_if_missing_or_unusable(
+            "github-copilot/gpt-5.4".to_string(),
+            PricingRecord::new(make_pricing(0.0, 0.0), "litellm", "litellm-main-v1"),
+        );
+        catalog.insert_if_missing_or_unusable(
+            "github-copilot/gpt-5.4".to_string(),
+            PricingRecord::new(
+                make_pricing(0.0000025, 0.000015),
+                "models.dev:opencode",
+                "models.dev-api-v1",
+            ),
+        );
+
+        let resolved = catalog.lookup("gpt-5.4", Some("github-copilot")).unwrap();
+        assert_eq!(resolved.pricing.input_cost_per_token, 0.0000025);
+        assert_eq!(resolved.source, "models.dev:opencode");
     }
 }
