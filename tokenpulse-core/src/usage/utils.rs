@@ -18,8 +18,6 @@ pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
 pub fn normalize_model_name(model_id: &str) -> String {
     let mut normalized = model_id.trim().to_ascii_lowercase();
 
-    // Keep explicit "-free" suffixes so free/subsidized SKUs stay distinct
-    // from paid models in summaries and the TUI model table.
     if let Some(stripped) = strip_date_suffix(&normalized) {
         normalized = stripped;
     }
@@ -51,12 +49,21 @@ pub fn normalize_model_name(model_id: &str) -> String {
 }
 
 fn strip_tier_suffix(model_id: &str) -> String {
-    for suffix in ["-high", "-medium", "-low"] {
-        if let Some(stripped) = model_id.strip_suffix(suffix) {
-            return stripped.to_string();
+    let mut result = model_id.to_string();
+    loop {
+        let mut stripped = false;
+        for suffix in ["-high", "-medium", "-low", "-free"] {
+            if let Some(s) = result.strip_suffix(suffix) {
+                result = s.to_string();
+                stripped = true;
+                break;
+            }
+        }
+        if !stripped {
+            break;
         }
     }
-    model_id.to_string()
+    result
 }
 
 fn strip_known_prefix(model_id: &str) -> String {
@@ -140,8 +147,8 @@ mod tests {
             "gpt-4-1-mini"
         );
         assert_eq!(
-            normalize_model_name("moonshotai/kimi-k2.5-free"),
-            "kimi-k2-5-free"
+        normalize_model_name("moonshotai/kimi-k2.5-free"),
+        "kimi-k2-5"
         );
         assert_eq!(normalize_model_name("claude-opus-4.6"), "claude-opus-4-6");
         assert_eq!(
@@ -161,10 +168,18 @@ mod tests {
             normalize_model_name("gemini-3-flash"),
             "gemini-3-flash-preview"
         );
-        assert_eq!(
-            normalize_model_name("opencode/deepseek-v4-flash-free"),
-            "deepseek-v4-flash-free"
-        );
+    assert_eq!(
+        normalize_model_name("opencode/deepseek-v4-flash-free"),
+        "deepseek-v4-flash"
+    );
+    assert_eq!(
+        normalize_model_name("antigravity-claude-opus-4-5-thinking-high-free"),
+        "claude-opus-4-5"
+    );
+    assert_eq!(
+        normalize_model_name("kimi-k2.5-free-low"),
+        "kimi-k2-5"
+    );
     }
 
     #[test]
