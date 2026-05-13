@@ -13,6 +13,12 @@
 - Follow existing patterns
 - Ask before making big changes
 
+## Review Focus
+- CI format failures must be checked at the workflow/toolchain level, not just
+  with local `cargo fmt`. In particular, verify `.github/workflows/*.yml`
+  bootstraps a real Rust toolchain and that formatting uses
+  `cargo fmt --all -- --check`.
+
 ## Current Status (tui-opt branch)
 
 ### Completed Improvements
