@@ -1,6 +1,6 @@
 # Model Pricing Mapping
 
-This document explains how TokenPulse maps model ids found in local agent logs to pricing keys from the LiteLLM pricing cache.
+This document explains how TokenPulse maps model ids found in local agent logs to pricing keys from the merged pricing catalog.
 
 ## Goal
 
@@ -78,19 +78,17 @@ Examples:
 
 This normalization is intentionally applied only at the end of the model id so names that contain those words in the middle are preserved.
 
-## Built-In Pricing Overrides
+## Pricing Sources
 
-LiteLLM can lag behind newly released models. When a model is official but absent from the cache, TokenPulse may add a narrow built-in override in `PricingCache`.
+TokenPulse does not hardcode model prices.
 
-Current override:
+Pricing comes from a merged catalog with this priority:
 
-| Model | Source | Input / 1M | Cached input / 1M | Output / 1M |
-|---|---|---:|---:|---:|
-| `GLM-5.1` | Z.ai official pricing | `$1.40` | `$0.26` | `$4.40` |
+1. LiteLLM
+2. models.dev
+3. OpenRouter
 
-Reference: Z.ai pricing docs list GLM-5.1 at `$1.4` input, `$0.26` cached input, and `$4.4` output per 1M tokens: https://docs.z.ai/guides/overview/pricing
-
-The override is intentionally separate from mapping. Mapping should be general; pricing data is a source-data concern.
+Mapping stays separate from source data. Normalization decides which lookup keys to try; source priority decides which matched record wins.
 
 ## When To Add Explicit Aliases
 

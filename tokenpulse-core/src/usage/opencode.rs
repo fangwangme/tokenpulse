@@ -1,4 +1,3 @@
-use crate::pricing::{calculate_cost, lookup_model_pricing_or_warn, PricingCache};
 use crate::provider::{
     local_date_string_from_timestamp, SessionParser, TokenBreakdown, UnifiedMessage,
 };
@@ -7,27 +6,19 @@ use anyhow::Result;
 use chrono::{Local, LocalResult, NaiveDate, TimeZone};
 use rusqlite::Connection;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, warn};
 
-pub struct OpenCodeSessionParser {
-    pricing_cache: PricingCache,
-}
+const PARSER_VERSION: &str = "opencode-v2";
+
+pub struct OpenCodeSessionParser;
 
 impl OpenCodeSessionParser {
     pub fn new() -> Self {
-        Self {
-            pricing_cache: PricingCache::new(),
-        }
+        Self
     }
 
-    fn parse_database(
-        &self,
-        db_path: &PathBuf,
-        pricing: &HashMap<String, crate::pricing::ModelPricing>,
-        since: Option<NaiveDate>,
-    ) -> Vec<UnifiedMessage> {
+    fn parse_database(&self, db_path: &PathBuf, since: Option<NaiveDate>) -> Vec<UnifiedMessage> {
         let conn = match Connection::open(db_path) {
             Ok(connection) => connection,
             Err(error) => {
@@ -45,7 +36,7 @@ impl OpenCodeSessionParser {
 
         let mut messages: Vec<UnifiedMessage> = rows
             .into_iter()
-            .filter_map(|row| self.parse_row(row, pricing))
+            .filter_map(|row| self.parse_row(row))
             .collect();
 
         if let Some(since) = since {
@@ -113,11 +104,7 @@ impl OpenCodeSessionParser {
         Some(rows.flatten().collect())
     }
 
-    fn parse_row(
-        &self,
-        row: OpenCodeRow,
-        pricing: &std::collections::HashMap<String, crate::pricing::ModelPricing>,
-    ) -> Option<UnifiedMessage> {
+    fn parse_row(&self, row: OpenCodeRow) -> Option<UnifiedMessage> {
         let msg_data: OpenCodeMessageData = serde_json::from_str(&row.data).ok()?;
 
         if msg_data.role.as_deref() != Some("assistant") {
@@ -138,7 +125,6 @@ impl OpenCodeSessionParser {
             .or(row.session_id.clone())
             .unwrap_or_else(|| "unknown".to_string());
         let message_id = msg_data.id.clone().or(row.message_id.clone());
-        let source_cost = msg_data.cost.unwrap_or(0.0).max(0.0);
         let timestamp = row
             .timestamp
             .or_else(|| {
@@ -162,14 +148,6 @@ impl OpenCodeSessionParser {
             reasoning: tokens.reasoning.unwrap_or(0).max(0),
         };
 
-        let cost = if source_cost > 0.0 {
-            source_cost
-        } else {
-            lookup_model_pricing_or_warn(&model_id, pricing)
-                .map(|pricing| calculate_cost(&token_breakdown, pricing))
-                .unwrap_or(0.0)
-        };
-
         Some(
             UnifiedMessage::new(
                 "opencode",
@@ -180,7 +158,6 @@ impl OpenCodeSessionParser {
                 timestamp,
                 token_breakdown,
             )
-            .with_cost(cost)
             .with_pricing_day(date)
             .with_parser_version(self.parser_version()),
         )
@@ -208,16 +185,6 @@ impl SessionParser for OpenCodeSessionParser {
     }
 
     fn parse_sessions(&self, _since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
-        let pricing = match self.pricing_cache.get_pricing_sync() {
-            Ok(pricing) => pricing,
-            Err(error) => {
-                warn!(
-                    "Failed to load pricing data for OpenCode usage parsing; continuing without refreshed pricing: {}",
-                    error
-                );
-                HashMap::new()
-            }
-        };
         let mut all_messages = Vec::new();
 
         for db_path in self.session_paths() {
@@ -226,12 +193,16 @@ impl SessionParser for OpenCodeSessionParser {
             }
 
             debug!("Parsing OpenCode database: {:?}", db_path);
-            let msgs = self.parse_database(&db_path, &pricing, _since);
+            let msgs = self.parse_database(&db_path, _since);
             all_messages.extend(msgs);
         }
 
         all_messages.sort_by_key(|message| message.timestamp);
         Ok(all_messages)
+    }
+
+    fn parser_version(&self) -> &str {
+        PARSER_VERSION
     }
 }
 
@@ -270,8 +241,6 @@ struct OpenCodeMessageData {
     model_id: Option<String>,
     #[serde(rename = "providerID", alias = "provider", default)]
     provider_id: Option<String>,
-    #[serde(default)]
-    cost: Option<f64>,
     #[serde(default)]
     tokens: Option<OpenCodeTokens>,
     #[serde(default)]
@@ -313,7 +282,6 @@ impl OpenCodeTime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::io::Write;
 
     #[test]
@@ -363,15 +331,12 @@ mod tests {
         temp_file.write_all(json.as_bytes()).unwrap();
 
         let parser = OpenCodeSessionParser::new();
-        let msg = parser.parse_row(
-            OpenCodeRow {
-                message_id: Some("msg_negative".to_string()),
-                session_id: Some("ses_negative".to_string()),
-                data: json.to_string(),
-                timestamp: None,
-            },
-            &std::collections::HashMap::new(),
-        );
+        let msg = parser.parse_row(OpenCodeRow {
+            message_id: Some("msg_negative".to_string()),
+            session_id: Some("ses_negative".to_string()),
+            data: json.to_string(),
+            timestamp: None,
+        });
 
         assert!(msg.is_some());
         let msg = msg.unwrap();
@@ -392,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_row_prefers_source_cost_over_lookup_price() {
+    fn parse_row_ignores_source_cost_for_centralized_pricing() {
         let parser = OpenCodeSessionParser::new();
         let json = r#"{
             "id": "msg_source_cost",
@@ -410,23 +375,47 @@ mod tests {
             "time": { "created": 1700000000000.0 }
         }"#;
 
-        let pricing = HashMap::from([(
-            "claude-sonnet-4".to_string(),
-            crate::pricing::ModelPricing::simple(1.0, 1.0),
-        )]);
-
         let msg = parser
-            .parse_row(
-                OpenCodeRow {
-                    message_id: Some("msg_source_cost".to_string()),
-                    session_id: Some("ses_source_cost".to_string()),
-                    data: json.to_string(),
-                    timestamp: None,
-                },
-                &pricing,
-            )
+            .parse_row(OpenCodeRow {
+                message_id: Some("msg_source_cost".to_string()),
+                session_id: Some("ses_source_cost".to_string()),
+                data: json.to_string(),
+                timestamp: None,
+            })
             .unwrap();
 
-        assert!((msg.cost - 0.05).abs() < f64::EPSILON);
+        assert_eq!(msg.cost, 0.0);
+    }
+
+    #[test]
+    fn parse_row_leaves_missing_source_cost_for_store_level_pricing() {
+        let parser = OpenCodeSessionParser::new();
+        let json = r#"{
+            "id": "msg_missing_cost",
+            "sessionID": "ses_missing_cost",
+            "role": "assistant",
+            "modelID": "deepseek-ai/deepseek-v4-flash",
+            "providerID": "nvidia",
+            "tokens": {
+                "input": 1000,
+                "output": 500,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+
+        let msg = parser
+            .parse_row(OpenCodeRow {
+                message_id: Some("msg_missing_cost".to_string()),
+                session_id: Some("ses_missing_cost".to_string()),
+                data: json.to_string(),
+                timestamp: None,
+            })
+            .unwrap();
+
+        assert_eq!(msg.cost, 0.0);
+        assert_eq!(msg.model_id, "deepseek-ai/deepseek-v4-flash");
+        assert_eq!(msg.provider_id, "nvidia");
     }
 }

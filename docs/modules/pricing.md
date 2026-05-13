@@ -2,25 +2,37 @@
 
 ## Overview
 
-Fetch model pricing from LiteLLM, cache locally, calculate cost per message.
+Build a merged pricing catalog from aggregator sources, cache it locally, and calculate cost from daily captured pricing snapshots.
 
 ## Architecture
 
-```
+```text
 pricing/
-├── mod.rs          # ModelPricing struct, calculate_cost(), lookup logic
-└── litellm.rs      # fetch from GitHub, disk cache with TTL
+├── cache.rs        # merged catalog cache and source priority
+├── mod.rs          # ModelPricing, lookup logic, catalog types
+├── litellm.rs      # LiteLLM source
+├── modelsdev.rs    # models.dev source
+└── openrouter.rs   # OpenRouter source
 ```
 
 ## Pricing Data Source
 
-**Primary:** LiteLLM model pricing JSON
-```
-GET https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+Source priority:
+
+1. LiteLLM
+2. models.dev
+3. OpenRouter
+
+Endpoints:
+
+```text
+https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+https://models.dev/api.json
+https://openrouter.ai/api/v1/models
 ```
 
 **Cache:** `~/.cache/tokenpulse/pricing.json`
-**TTL:** 24 hours. On network failure, use stale cache.
+**TTL:** 24 hours. If all live fetches fail, TokenPulse uses the stale merged cache.
 
 ## Data Model
 
@@ -54,4 +66,6 @@ pub fn calculate_cost(tokens: &TokenBreakdown, pricing: &ModelPricing) -> f64 {
 1. Exact match: `"claude-opus-4"` → found
 2. With provider prefix: `"anthropic/claude-opus-4"` → found
 3. Strip date suffix: `"claude-opus-4-20260315"` → try `"claude-opus-4"`
-4. Fallback: warn and use $0 cost
+4. Exact provider-qualified matches win over normalized fallback candidates.
+5. Fallback source order per key: LiteLLM -> models.dev -> OpenRouter.
+6. If still missing: warn and use $0 cost.
