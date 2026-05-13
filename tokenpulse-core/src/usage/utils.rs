@@ -147,8 +147,8 @@ mod tests {
             "gpt-4-1-mini"
         );
         assert_eq!(
-        normalize_model_name("moonshotai/kimi-k2.5-free"),
-        "kimi-k2-5"
+            normalize_model_name("moonshotai/kimi-k2.5-free"),
+            "kimi-k2-5"
         );
         assert_eq!(normalize_model_name("claude-opus-4.6"), "claude-opus-4-6");
         assert_eq!(
@@ -168,18 +168,15 @@ mod tests {
             normalize_model_name("gemini-3-flash"),
             "gemini-3-flash-preview"
         );
-    assert_eq!(
-        normalize_model_name("opencode/deepseek-v4-flash-free"),
-        "deepseek-v4-flash"
-    );
-    assert_eq!(
-        normalize_model_name("antigravity-claude-opus-4-5-thinking-high-free"),
-        "claude-opus-4-5"
-    );
-    assert_eq!(
-        normalize_model_name("kimi-k2.5-free-low"),
-        "kimi-k2-5"
-    );
+        assert_eq!(
+            normalize_model_name("opencode/deepseek-v4-flash-free"),
+            "deepseek-v4-flash"
+        );
+        assert_eq!(
+            normalize_model_name("antigravity-claude-opus-4-5-thinking-high-free"),
+            "claude-opus-4-5"
+        );
+        assert_eq!(normalize_model_name("kimi-k2.5-free-low"), "kimi-k2-5");
     }
 
     #[test]

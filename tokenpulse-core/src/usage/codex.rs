@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use tracing::debug;
 
-const PARSER_VERSION: &str = "codex-v2";
+const PARSER_VERSION: &str = "codex-v3";
 
 pub struct CodexSessionParser;
 
@@ -231,7 +231,7 @@ struct CodexUsage {
 
 impl CodexUsage {
     fn total(self) -> i64 {
-        self.input + self.output + self.cached + self.reasoning
+        self.input + self.output
     }
 
     fn delta(self, previous: Self) -> Option<Self> {
@@ -252,13 +252,17 @@ impl CodexUsage {
     }
 
     fn to_tokens(self) -> TokenBreakdown {
+        // Codex/OpenAI reports cached input inside input_tokens and reasoning
+        // inside output_tokens. Split both for UI breakdown without changing
+        // the billed aggregate token count.
         let cached = self.cached.min(self.input).max(0);
+        let reasoning = self.reasoning.min(self.output).max(0);
         TokenBreakdown {
             input: (self.input - cached).max(0),
-            output: self.output.max(0),
+            output: (self.output - reasoning).max(0),
             cache_read: cached,
             cache_write: 0,
-            reasoning: self.reasoning.max(0),
+            reasoning,
         }
     }
 }
@@ -350,6 +354,23 @@ mod tests {
     }
 
     #[test]
+    fn codex_usage_splits_cached_input_and_reasoning_output_without_inflating_total() {
+        let tokens = CodexUsage {
+            input: 1_000,
+            output: 250,
+            cached: 700,
+            reasoning: 100,
+        }
+        .to_tokens();
+
+        assert_eq!(tokens.input, 300);
+        assert_eq!(tokens.output, 150);
+        assert_eq!(tokens.cache_read, 700);
+        assert_eq!(tokens.reasoning, 100);
+        assert_eq!(tokens.total(), 1_250);
+    }
+
+    #[test]
     fn parse_file_prefers_last_usage_and_clamps_cache_to_input() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
@@ -366,8 +387,9 @@ mod tests {
         assert_eq!(messages[0].session_id, "session-1");
         assert_eq!(messages[0].provider_id, "openai");
         assert_eq!(messages[0].tokens.input, 0);
-        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.output, 15);
         assert_eq!(messages[0].tokens.cache_read, 100);
         assert_eq!(messages[0].tokens.reasoning, 5);
+        assert_eq!(messages[0].tokens.total(), 120);
     }
 }

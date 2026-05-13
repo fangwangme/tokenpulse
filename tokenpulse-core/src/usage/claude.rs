@@ -6,11 +6,11 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::debug;
 
-const PARSER_VERSION: &str = "claude-v3";
+const PARSER_VERSION: &str = "claude-v4";
 
 pub struct ClaudeSessionParser;
 
@@ -19,8 +19,9 @@ impl ClaudeSessionParser {
         Self
     }
 
-    fn parse_file(&self, path: PathBuf, seen_keys: &mut HashSet<String>) -> Vec<UnifiedMessage> {
+    fn parse_file(&self, path: PathBuf) -> Vec<UnifiedMessage> {
         let mut messages = Vec::new();
+        let mut message_positions = HashMap::new();
         let session_id = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -94,10 +95,8 @@ impl ClaudeSessionParser {
                 ),
             };
 
-            if !seen_keys.insert(message_key.clone()) {
-                continue;
-            }
-
+            // Claude reports uncached input separately from cache read/write tokens.
+            // Do not subtract cache fields from input, or cached-heavy requests go to zero.
             let tokens = TokenBreakdown {
                 input: usage.input_tokens.unwrap_or(0).max(0),
                 output: usage.output_tokens.unwrap_or(0).max(0),
@@ -113,7 +112,9 @@ impl ClaudeSessionParser {
                 .provider_hint(message.provider.as_deref())
                 .unwrap_or_else(|| detect_provider_from_model(&model_id));
 
-            messages.push(
+            upsert_message(
+                &mut messages,
+                &mut message_positions,
                 UnifiedMessage::new(
                     "claude",
                     model_id,
@@ -152,14 +153,16 @@ impl SessionParser for ClaudeSessionParser {
 
     fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
         let mut all_messages = Vec::new();
-        let mut seen_keys = HashSet::new();
+        let mut message_positions = HashMap::new();
         for root in self.session_paths() {
             if !root.exists() {
                 continue;
             }
             let files = scanner::discover_files(&root, "jsonl", since);
             for file in files {
-                all_messages.extend(self.parse_file(file, &mut seen_keys));
+                for message in self.parse_file(file) {
+                    upsert_message(&mut all_messages, &mut message_positions, message);
+                }
             }
         }
         all_messages.sort_by_key(|message| message.timestamp);
@@ -175,6 +178,28 @@ fn parse_rfc3339_ms(value: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|dt| dt.timestamp_millis())
+}
+
+fn upsert_message(
+    messages: &mut Vec<UnifiedMessage>,
+    message_positions: &mut HashMap<String, usize>,
+    message: UnifiedMessage,
+) {
+    let key = message.message_key.clone();
+    if let Some(position) = message_positions.get(&key).copied() {
+        if should_replace_message(&messages[position], &message) {
+            messages[position] = message;
+        }
+    } else {
+        message_positions.insert(key, messages.len());
+        messages.push(message);
+    }
+}
+
+fn should_replace_message(existing: &UnifiedMessage, candidate: &UnifiedMessage) -> bool {
+    candidate.timestamp > existing.timestamp
+        || (candidate.timestamp == existing.timestamp
+            && candidate.total_tokens() >= existing.total_tokens())
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,10 +329,10 @@ fn strip_ansi_escapes(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::HashMap;
 
     #[test]
-    fn parse_file_deduplicates_message_and_request_ids() {
+    fn parse_file_keeps_latest_duplicate_message_and_request_ids() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         std::fs::write(
@@ -317,13 +342,12 @@ mod tests {
         )
         .unwrap();
 
-        let mut seen = HashSet::new();
-        let messages = ClaudeSessionParser::new().parse_file(path, &mut seen);
+        let messages = ClaudeSessionParser::new().parse_file(path);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].message_key, "msg-1:req-1");
-        assert_eq!(messages[0].tokens.input, 10);
-        assert_eq!(messages[0].tokens.output, 5);
+        assert_eq!(messages[0].tokens.input, 99);
+        assert_eq!(messages[0].tokens.output, 99);
     }
 
     #[test]
@@ -336,8 +360,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut seen = HashSet::new();
-        let messages = ClaudeSessionParser::new().parse_file(path, &mut seen);
+        let messages = ClaudeSessionParser::new().parse_file(path);
 
         assert_eq!(messages.len(), 1);
         assert!(messages[0].message_key.starts_with("session:"));
@@ -346,6 +369,26 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 20);
         assert_eq!(messages[0].tokens.cache_read, 5);
         assert_eq!(messages[0].tokens.cache_write, 2);
+    }
+
+    #[test]
+    fn parse_file_keeps_claude_cache_tokens_separate_from_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","requestId":"req-1","timestamp":"2026-04-01T12:00:00Z","message":{"id":"msg-1","model":"claude-opus-4-6","usage":{"input_tokens":1,"output_tokens":117,"cache_read_input_tokens":55725,"cache_creation_input_tokens":3911}}}"#,
+        )
+        .unwrap();
+
+        let messages = ClaudeSessionParser::new().parse_file(path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1);
+        assert_eq!(messages[0].tokens.output, 117);
+        assert_eq!(messages[0].tokens.cache_read, 55_725);
+        assert_eq!(messages[0].tokens.cache_write, 3_911);
+        assert_eq!(messages[0].tokens.total(), 59_754);
     }
 
     #[test]
@@ -358,11 +401,113 @@ mod tests {
         )
         .unwrap();
 
-        let mut seen = HashSet::new();
-        let messages = ClaudeSessionParser::new().parse_file(path, &mut seen);
+        let messages = ClaudeSessionParser::new().parse_file(path);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id, "nvidia-nim");
         assert_eq!(messages[0].model_id, "deepseek-ai/deepseek-v4-pro");
+    }
+
+    #[test]
+    fn upsert_message_keeps_more_complete_duplicate_with_same_timestamp() {
+        let mut messages = Vec::new();
+        let mut positions = HashMap::new();
+
+        upsert_message(
+            &mut messages,
+            &mut positions,
+            UnifiedMessage::new(
+                "claude",
+                "claude-opus-4-1",
+                "anthropic",
+                "session-1",
+                "msg-1:req-1",
+                1_743_508_800_000,
+                TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+            )
+            .with_parser_version(PARSER_VERSION),
+        );
+
+        upsert_message(
+            &mut messages,
+            &mut positions,
+            UnifiedMessage::new(
+                "claude",
+                "claude-opus-4-1",
+                "anthropic",
+                "session-1",
+                "msg-1:req-1",
+                1_743_508_800_000,
+                TokenBreakdown {
+                    input: 10,
+                    output: 99,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+            )
+            .with_parser_version(PARSER_VERSION),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.output, 99);
+    }
+
+    #[test]
+    fn upsert_message_does_not_replace_newer_duplicate_with_older_copy() {
+        let mut messages = Vec::new();
+        let mut positions = HashMap::new();
+
+        upsert_message(
+            &mut messages,
+            &mut positions,
+            UnifiedMessage::new(
+                "claude",
+                "claude-opus-4-1",
+                "anthropic",
+                "session-1",
+                "msg-1:req-1",
+                1_743_508_800_100,
+                TokenBreakdown {
+                    input: 10,
+                    output: 99,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+            )
+            .with_parser_version(PARSER_VERSION),
+        );
+
+        upsert_message(
+            &mut messages,
+            &mut positions,
+            UnifiedMessage::new(
+                "claude",
+                "claude-opus-4-1",
+                "anthropic",
+                "session-1",
+                "msg-1:req-1",
+                1_743_508_800_000,
+                TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+            )
+            .with_parser_version(PARSER_VERSION),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1_743_508_800_100);
+        assert_eq!(messages[0].tokens.output, 99);
     }
 }
