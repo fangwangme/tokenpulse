@@ -44,10 +44,10 @@ pub fn fetch_sync() -> Result<HashMap<String, PricingRecord>> {
             let Some(cost) = model.cost else {
                 continue;
             };
-            let Some(input_cost) = cost.input else {
+            let Some(input_cost) = cost.input.and_then(price_per_token) else {
                 continue;
             };
-            let Some(output_cost) = cost.output else {
+            let Some(output_cost) = cost.output.and_then(price_per_token) else {
                 continue;
             };
 
@@ -55,10 +55,10 @@ pub fn fetch_sync() -> Result<HashMap<String, PricingRecord>> {
                 format!("{provider}/{}", model.id),
                 PricingRecord::new(
                     ModelPricing::new(
-                        input_cost / TOKENS_PER_MILLION,
-                        output_cost / TOKENS_PER_MILLION,
-                        cost.cache_read.map(|value| value / TOKENS_PER_MILLION),
-                        cost.cache_write.map(|value| value / TOKENS_PER_MILLION),
+                        input_cost,
+                        output_cost,
+                        cost.cache_read.and_then(price_per_token),
+                        cost.cache_write.and_then(price_per_token),
                     ),
                     format!("models.dev:{provider}"),
                     MODELSDEV_VERSION,
@@ -72,4 +72,30 @@ pub fn fetch_sync() -> Result<HashMap<String, PricingRecord>> {
     }
 
     Ok(entries)
+}
+
+fn price_per_token(value: f64) -> Option<f64> {
+    value
+        .is_finite()
+        .then_some(value)
+        .filter(|price| *price >= 0.0)
+        .map(|price| price / TOKENS_PER_MILLION)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn price_per_token_accepts_non_negative_finite_values() {
+        assert_eq!(price_per_token(1.4), Some(0.0000014));
+        assert_eq!(price_per_token(0.0), Some(0.0));
+    }
+
+    #[test]
+    fn price_per_token_rejects_negative_and_non_finite_values() {
+        assert_eq!(price_per_token(-1.0), None);
+        assert_eq!(price_per_token(f64::NAN), None);
+        assert_eq!(price_per_token(f64::INFINITY), None);
+    }
 }

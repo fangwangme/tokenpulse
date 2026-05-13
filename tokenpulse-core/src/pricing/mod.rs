@@ -363,6 +363,8 @@ fn push_generalized_candidates(
         push_candidate(candidates, seen, glm_model.clone());
         push_candidate(candidates, seen, format!("zai/{}", glm_model));
         push_candidate(candidates, seen, format!("zai.{}", glm_model));
+        push_candidate(candidates, seen, format!("z-ai/{}", glm_model));
+        push_candidate(candidates, seen, format!("openrouter/z-ai/{}", glm_model));
     }
 
     let lower = normalized.to_ascii_lowercase();
@@ -380,6 +382,8 @@ fn push_generalized_candidates(
         if let Some(glm_model) = canonicalize_glm_model(rest) {
             push_candidate(candidates, seen, format!("zai/{}", glm_model));
             push_candidate(candidates, seen, format!("zai.{}", glm_model));
+            push_candidate(candidates, seen, format!("z-ai/{}", glm_model));
+            push_candidate(candidates, seen, format!("openrouter/z-ai/{}", glm_model));
         }
     }
 }
@@ -789,6 +793,32 @@ mod tests {
         let result = lookup_model_pricing("z-ai/glm5.1", &map);
         assert!(result.is_some());
         assert_eq!(result.unwrap().output_cost_per_token, 0.0000044);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_uses_openrouter_glm_5_1_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "z-ai/glm-5.1".to_string(),
+            make_pricing(0.00000105, 0.0000035),
+        );
+
+        let result = lookup_model_pricing("glm5.1", &map);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().output_cost_per_token, 0.0000035);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_uses_prefixed_openrouter_glm_5_1_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "openrouter/z-ai/glm-5.1".to_string(),
+            make_pricing(0.00000105, 0.0000035),
+        );
+
+        let result = lookup_model_pricing("z-ai/glm5.1", &map);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().input_cost_per_token, 0.00000105);
     }
 
     #[test]
