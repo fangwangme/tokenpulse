@@ -6,12 +6,12 @@ A Rust CLI tool with two core features:
 1. **Quota** - On-demand check of remaining usage quota for coding agents
 2. **Usage** - Ledger-backed historical usage dashboard with cost estimation
 
-**Current Usage Scope:** Claude Code, Codex, OpenCode, Gemini CLI, PI, Copilot CLI
+**Current Usage Scope:** Claude Code, Codex, OpenCode, Gemini CLI, PI, Copilot CLI, Antigravity
 **Current Quota Scope:** Claude Code, Codex, Gemini CLI, GitHub Copilot, Antigravity
-**Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI still has lighter sample coverage, though streamed JSONL deduplication and cache-inclusive input normalization are now handled. Antigravity historical usage is not complete yet.
+**Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI still has lighter sample coverage, though streamed JSONL deduplication and cache-inclusive input normalization are now handled.
 
 **Language:** Rust
-**Key Principle:** On-demand only. No auto-refresh, no polling. Run command → see results → exit.
+**Key Principle:** On-demand by default, with optional auto-refresh for quota TUI. Run command → see results → exit. Use `a` key in quota TUI to cycle live auto-refresh intervals (1/2/5/10/15 min).
 
 ---
 
@@ -32,7 +32,6 @@ Known gaps:
 
 - durable scan-state persistence for append-only sources is not finished
 - Gemini CLI historical coverage still needs more sample validation beyond the current JSON/JSONL parser fixes
-- Antigravity historical usage is still staged work
 - weekly/monthly session counts should not yet be treated as fully deduplicated unique-session metrics
 
 ---
@@ -62,8 +61,9 @@ tokenpulse/
 │       │   ├── copilot.rs        # GitHub Copilot OTEL parser
 │       │   ├── opencode.rs       # OpenCode parser
 │       │   ├── gemini.rs         # Gemini CLI parser
-│       │   ├── pi.rs             # PI parser
-│       │   └── utils.rs          # model/provider normalization helpers
+│   │   ├── pi.rs             # PI parser
+│   │   ├── antigravity.rs    # Antigravity parser
+│   │   └── utils.rs          # model/provider normalization helpers
 │       ├── quota/
 │       │   ├── mod.rs
 │       │   ├── claude.rs
@@ -343,6 +343,7 @@ Token refresh:
 | PI | `~/.pi/agent/sessions/**/*.jsonl` | JSONL with header + entries |
 | GitHub Copilot | `~/.local/share/github-copilot/events.jsonl` | OTEL JSONL events |
 | Gemini CLI | `~/.gemini/tmp/**/session-*.json{,l}` | JSON + streamed JSONL session files |
+| Antigravity | `~/.config/tokenpulse/antigravity-cache/sessions/*.jsonl` | JSONL |
 
 ### Pricing Source
 
@@ -371,7 +372,7 @@ Cache: ~/.cache/tokenpulse/pricing.json (24h TTL)
 - [x] Gemini CLI: auth + quota + session parser with JSONL dedup + cache-overlap normalization
 - [x] GitHub Copilot: quota + usage parser
 - [x] Antigravity: quota probe
-- [ ] Antigravity: historical usage parser
+- [x] Antigravity: historical usage parser
 
 ### Phase 3 - Polish
 - [x] More TUI tabs: Overview, Models, Daily, Activity
