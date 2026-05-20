@@ -4,15 +4,22 @@ use chrono::NaiveDate;
 use std::collections::HashSet;
 use tokenpulse_core::{
     usage::{
-        build_usage_summary_from_daily, ClaudeSessionParser, CodexSessionParser,
-        CopilotSessionParser, DateRange, GeminiSessionParser, OpenCodeSessionParser,
-        PiSessionParser, UsageStore,
+        build_usage_summary_from_daily, AntigravitySessionParser, ClaudeSessionParser,
+        CodexSessionParser, CopilotSessionParser, DateRange, GeminiSessionParser,
+        OpenCodeSessionParser, PiSessionParser, UsageStore,
     },
     SessionParser, UnifiedMessage,
 };
 
-const SUPPORTED_USAGE_PROVIDERS: &[&str] =
-    &["claude", "codex", "copilot", "opencode", "gemini", "pi"];
+const SUPPORTED_USAGE_PROVIDERS: &[&str] = &[
+    "claude",
+    "codex",
+    "copilot",
+    "opencode",
+    "gemini",
+    "pi",
+    "antigravity",
+];
 
 pub async fn run(
     since: Option<String>,
@@ -131,6 +138,7 @@ pub async fn run(
             eprintln!(" - OpenCode: ~/.local/share/opencode/");
             eprintln!(" - Gemini CLI: ~/.gemini/tmp/");
             eprintln!(" - PI: ~/.pi/agent/sessions/");
+            eprintln!(" - Antigravity: ~/.config/tokenpulse/antigravity-cache/sessions/");
             eprintln!("\nIf Gemini totals look stale after this fix, run: tokenpulse usage -p gemini --rebuild-all");
         }
         return Ok(());
@@ -236,6 +244,9 @@ fn build_parsers(provider_names: &[String]) -> Vec<Box<dyn SessionParser>> {
             "opencode" => Some(Box::new(OpenCodeSessionParser::new()) as Box<dyn SessionParser>),
             "gemini" => Some(Box::new(GeminiSessionParser::new()) as Box<dyn SessionParser>),
             "pi" => Some(Box::new(PiSessionParser::new()) as Box<dyn SessionParser>),
+            "antigravity" => {
+                Some(Box::new(AntigravitySessionParser::new()) as Box<dyn SessionParser>)
+            }
             _ => None,
         })
         .collect()
@@ -511,6 +522,7 @@ mod tests {
                 "opencode".to_string(),
                 "gemini".to_string(),
                 "pi".to_string(),
+                "antigravity".to_string(),
             ]
         );
     }

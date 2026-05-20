@@ -6,3 +6,8 @@
 
 # Fallback Rust output if CARGO_TARGET_DIR is overridden
 target/
+
+# Local Antigravity data directories
+.antigravity/
+.antigravitycli/
+

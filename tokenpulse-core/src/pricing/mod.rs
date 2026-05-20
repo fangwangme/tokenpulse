@@ -410,20 +410,49 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
         // Antigravity variants → canonical models
         "antigravity-gemini-3-pro"
         | "antigravity-gemini-3-pro-high"
-        | "antigravity-gemini-3-pro-low" => Some("gemini-3-pro-preview"),
-        "antigravity-gemini-3-flash" => Some("gemini-3-flash-preview"),
+        | "antigravity-gemini-3-pro-low"
+        | "gemini-3-pro-high"
+        | "gemini-3-pro-low"
+        | "gemini-3.1-pro-high"
+        | "gemini-3-1-pro"
+        | "gemini-3-pro"
+        | "gemini-3.1-pro" => Some("gemini-3-pro-preview"),
+
+        "antigravity-gemini-3-flash-a" | "gemini-3-flash-a" => Some("gemini-3.5-flash"),
+
+        "antigravity-gemini-3-flash" | "gemini-3-flash" | "gemini-3-flash-c" => {
+            Some("gemini-3-flash-preview")
+        }
+
         "antigravity-claude-opus-4-5-thinking"
         | "antigravity-claude-opus-4-5-thinking-high"
         | "antigravity-claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
-        "antigravity-claude-opus-4-6-thinking" => Some("claude-opus-4-6"),
+
+        "antigravity-claude-opus-4-6-thinking" | "claude-opus-4-6" => Some("claude-opus-4-5"),
+
         "claude-opus-4.6" => Some("openrouter/anthropic/claude-opus-4.6"),
         "claude-opus-4.5" => Some("openrouter/anthropic/claude-opus-4.5"),
-        "claude-sonnet-4.6" => Some("openrouter/anthropic/claude-sonnet-4.6"),
+
+        "claude-sonnet-4.6" | "claude-sonnet-4-6" => Some("claude-sonnet-4-5"),
         "claude-sonnet-4.5" => Some("openrouter/anthropic/claude-sonnet-4.5"),
         "claude-haiku-4.5" => Some("openrouter/anthropic/claude-haiku-4.5"),
+        "claude-haiku-4.6" | "claude-haiku-4-6" => Some("openrouter/anthropic/claude-haiku-4.5"),
 
-        // Gemini quality tier aliases
-        "gemini-3-pro-high" | "gemini-3-pro-low" => Some("gemini-3-pro-preview"),
+        // Antigravity Placeholders → canonical models (Strictly from tokscale)
+        "MODEL_PLACEHOLDER_M26" | "model-placeholder-m26" => Some("claude-opus-4-5"),
+
+        "MODEL_PLACEHOLDER_M35" | "model-placeholder-m35" => Some("claude-sonnet-4-5"),
+
+        "MODEL_PLACEHOLDER_M36"
+        | "model-placeholder-m36"
+        | "MODEL_PLACEHOLDER_M37"
+        | "model-placeholder-m37" => Some("gemini-3-pro-preview"),
+
+        "MODEL_PLACEHOLDER_M47" | "model-placeholder-m47" => Some("gemini-3-flash-preview"),
+
+        "model_openai_gpt_oss_120b_medium" | "model-openai-gpt-oss-120b-medium" => {
+            Some("openrouter/openai/gpt-oss-120b-medium")
+        }
 
         // Bare model names (often from -free stripping) → LiteLLM keys
         "kimi-k2.5" => Some("moonshot/kimi-k2.5"),

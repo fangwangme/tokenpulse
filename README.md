@@ -17,6 +17,7 @@ Usage parsing currently supports:
 - Gemini CLI
 - PI
 - GitHub Copilot CLI
+- Antigravity
 
 Quota fetching currently supports:
 
@@ -28,9 +29,10 @@ Quota fetching currently supports:
 
 Notes:
 
-- usage coverage is strongest today for Claude Code, Codex, OpenCode, and Copilot
+- usage coverage is strongest today for Claude Code, Codex, OpenCode, Copilot, and Antigravity
 - Gemini usage now handles streamed JSONL deduplication and cache-inclusive input tokens, but still has less sample coverage than Claude/Codex/OpenCode/Copilot
-- Antigravity historical usage is not complete yet
+- Antigravity usage scans local conversation files and syncs with running Language Servers (GUI/CLI)
+
 
 ## Screenshots
 
