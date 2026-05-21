@@ -65,7 +65,7 @@ a historical mapping ledger for unresolved placeholders such as
    and current online aliases.
 3. Session metadata is written to the TokenPulse Antigravity cache with
    meaningful model IDs such as `claude-opus-4-6-thinking`,
-   `gemini-3.1-pro-high`, or `gemini-3.5-flash-medium`, not
+   `gemini-3.1-pro-preview-high`, or `gemini-3.5-flash-medium`, not
    `MODEL_PLACEHOLDER_*`.
 4. The scanner reads the cache and stores usage rows.
 5. Usage/model summaries group variants by normalizing provider prefixes,
@@ -107,13 +107,13 @@ Keys are normalized to lowercase with dashes converted to underscores so
 | --- | --- | --- |
 | `MODEL_PLACEHOLDER_M26` | `claude-opus-4-6-thinking` | `openusage` lists this internal ID as "Claude Opus 4.6 (Thinking)"; Antigravity Mobility CLI article lists the same. Tokscale confirms this placeholder belongs to Claude Opus 4.6, but collapses thinking for pricing. |
 | `MODEL_PLACEHOLDER_M35` | `claude-sonnet-4-6-thinking` | Antigravity Mobility CLI article lists this internal ID as "Claude Sonnet 4.6 (Thinking)". Tokscale confirms the placeholder belongs to Claude Sonnet 4.6, but collapses thinking for pricing. |
-| `MODEL_PLACEHOLDER_M36` | `gemini-3.1-pro-low` | Antigravity Mobility CLI article lists this internal ID as "Gemini 3.1 Pro (Low)"; Tokscale confirms M36 is Gemini 3.1 Pro. |
-| `MODEL_PLACEHOLDER_M37` | `gemini-3.1-pro-high` | Antigravity Mobility CLI article lists this internal ID as "Gemini 3.1 Pro (High)"; Tokscale confirms M37 is Gemini 3.1 Pro. |
+| `MODEL_PLACEHOLDER_M36` | `gemini-3.1-pro-preview-low` | Antigravity Mobility CLI article lists this internal ID as "Gemini 3.1 Pro (Low)"; TokenPulse keeps `preview` because Gemini 3.1 Pro is priced and displayed as the preview model family. |
+| `MODEL_PLACEHOLDER_M37` | `gemini-3.1-pro-preview-high` | Antigravity Mobility CLI article lists this internal ID as "Gemini 3.1 Pro (High)"; TokenPulse keeps `preview` because Gemini 3.1 Pro is priced and displayed as the preview model family. |
 | `MODEL_PLACEHOLDER_M47` | `gemini-3-flash-preview` | Antigravity Mobility CLI article lists this internal ID as "Gemini 3 Flash"; Tokscale maps M47 to `gemini-3-flash-preview`. |
 | `MODEL_OPENAI_GPT_OSS_120B_MEDIUM` | `gpt-oss-120b-medium` | Antigravity Mobility CLI article lists this internal ID as "GPT-OSS 120B (Medium)"; Tokscale maps the same placeholder to `gpt-oss-120b-medium`. |
 | `MODEL_PLACEHOLDER_M132` | `gemini-3.5-flash-high` | Captured local Antigravity 2.0.1 `GetUserStatus` response. |
 | `MODEL_PLACEHOLDER_M20` | `gemini-3.5-flash-medium` | Captured local Antigravity 2.0.1 `GetUserStatus` response. |
-| `MODEL_PLACEHOLDER_M16` | `gemini-3.1-pro-high` | Captured local Antigravity 2.0.1 `GetUserStatus` response. |
+| `MODEL_PLACEHOLDER_M16` | `gemini-3.1-pro-preview-high` | Captured local Antigravity 2.0.1 `GetUserStatus` response; normalized with `preview` for the same model-family rule as M37. |
 | `gemini-3-flash-a` | `gemini-3.5-flash` | Product/runtime finding for this branch: Antigravity reports this internal Flash A ID for the Gemini 3.5 Flash model. Public sources confirm Gemini 3.5 Flash availability in Antigravity, but no public source found for the internal `gemini-3-flash-a` ID. Keep this mapping isolated and revisit when Antigravity publishes or another project records the ID. |
 
 ## Dynamic mappings captured from Antigravity

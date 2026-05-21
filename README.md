@@ -123,9 +123,12 @@ tokenpulse usage -p claude,codex,copilot
 tokenpulse usage --refresh-days 2026-04-01:2026-04-09
 tokenpulse usage --refresh-pricing
 tokenpulse usage --rebuild-all
+tokenpulse usage -p antigravity --rebuild-cache
 ```
 
 If you previously ingested Gemini usage before the parser fix, the next `tokenpulse usage` run will automatically rebuild stored Gemini rows when it sees an older parser version. You can also force a one-shot refresh with `tokenpulse usage -p gemini --rebuild-all`.
+
+Antigravity keeps a TokenPulse-managed raw cache under `~/.config/tokenpulse/antigravity-cache/`. Normal usage runs refresh Antigravity sessions whose local conversation files changed in the last two days. Use `tokenpulse usage -p antigravity --rebuild-cache` to rebuild all discoverable Antigravity raw cache files from a running Antigravity language server.
 
 ## Data Model
 

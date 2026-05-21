@@ -18,12 +18,22 @@ const MODEL_ALIAS_HISTORY_VERSION: u32 = 1;
 const MODEL_ALIAS_HISTORY_FILE_NAME: &str = "model-aliases.json";
 const ANTIGRAVITY_LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
 const ANTIGRAVITY_RPC_BODY_CAP: usize = 16 * 1024 * 1024;
+const ANTIGRAVITY_DEFAULT_CACHE_REBUILD_WINDOW_MS: i64 = 2 * 24 * 3600 * 1000;
 
-pub struct AntigravitySessionParser;
+pub struct AntigravitySessionParser {
+    rebuild_cache: bool,
+}
 
 impl AntigravitySessionParser {
     pub fn new() -> Self {
-        Self
+        Self {
+            rebuild_cache: false,
+        }
+    }
+
+    pub fn with_rebuild_cache(mut self, rebuild_cache: bool) -> Self {
+        self.rebuild_cache = rebuild_cache;
+        self
     }
 
     fn parse_file(&self, path: PathBuf) -> Vec<UnifiedMessage> {
@@ -161,12 +171,13 @@ impl SessionParser for AntigravitySessionParser {
         let mut all_messages = Vec::new();
 
         for root in self.session_paths() {
-            if !root.exists() {
-                let _ = std::fs::create_dir_all(&root);
-            }
-
             // Sync first!
-            if let Err(e) = sync_antigravity(&root) {
+            if let Err(e) = sync_antigravity_with_options(
+                &root,
+                AntigravitySyncOptions {
+                    rebuild_all_cache: self.rebuild_cache,
+                },
+            ) {
                 debug!("Failed to sync Antigravity: {}", e);
             }
 
@@ -216,12 +227,24 @@ struct ProcessCandidate {
     csrf_token: String,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct AntigravitySyncOptions {
+    rebuild_all_cache: bool,
+}
+
 pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
+    sync_antigravity_with_options(sessions_dir, AntigravitySyncOptions::default())
+}
+
+fn sync_antigravity_with_options(
+    sessions_dir: &Path,
+    options: AntigravitySyncOptions,
+) -> Result<()> {
     let connections = match detect_antigravity_connections() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "Warning: Antigravity language server process discovery failed: {}",
+            warn!(
+                "Antigravity language server process discovery failed: {}",
                 e
             );
             return Ok(());
@@ -229,11 +252,20 @@ pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
     };
 
     if connections.is_empty() {
-        if let Err(e) = merge_and_save_model_alias_history(sessions_dir, &HashMap::new()) {
-            debug!("Failed to seed Antigravity model alias history: {}", e);
+        if sessions_dir.exists() {
+            if let Err(e) = merge_and_save_model_alias_history(sessions_dir, &HashMap::new()) {
+                debug!("Failed to seed Antigravity model alias history: {}", e);
+            }
         }
         debug!("No running Antigravity language servers detected; skipping sync and reading cache");
         return Ok(());
+    }
+
+    std::fs::create_dir_all(sessions_dir)?;
+
+    let cached_files_before = count_antigravity_session_cache_files(sessions_dir);
+    if options.rebuild_all_cache {
+        clear_antigravity_session_cache(sessions_dir)?;
     }
 
     let dynamic_model_aliases = fetch_dynamic_model_aliases(&connections);
@@ -246,16 +278,10 @@ pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
             }
         };
 
-    let cached_files_before = match std::fs::read_dir(sessions_dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "jsonl"))
-            .count(),
-        Err(_) => 0,
-    };
     let mut synced_sessions_count = 0;
 
-    let mut summaries = Vec::new();
+    let mut unique_summaries: HashMap<String, (Option<i64>, Vec<AntigravityConnection>)> =
+        HashMap::new();
     for connection in &connections {
         let response = match rpc_request(connection, "GetAllCascadeTrajectories", &json!({})) {
             Ok(r) => r,
@@ -296,65 +322,38 @@ pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
                 .or_else(|| item.get("updatedAt"))
                 .and_then(parse_timestamp_value);
 
-            summaries.push((session_id, last_modified_ms, connection.clone()));
+            upsert_sync_summary(
+                &mut unique_summaries,
+                session_id,
+                last_modified_ms,
+                connection.clone(),
+            );
         }
     }
 
-    // Discover conversation IDs from local folders
     let local_conversation_ids = discover_local_conversation_ids();
     debug!(
         "Discovered {} local conversation files",
         local_conversation_ids.len()
     );
     for (session_id, local_modified_ms) in local_conversation_ids {
-        if !summaries.iter().any(|(id, _, _)| id == &session_id) {
-            for connection in &connections {
-                summaries.push((session_id.clone(), local_modified_ms, connection.clone()));
-            }
-        }
-    }
-
-    let mut unique_summaries: HashMap<String, (Option<i64>, Vec<AntigravityConnection>)> =
-        HashMap::new();
-    for (session_id, last_modified_ms, conn) in summaries {
-        if let Some((existing_lm, conns)) = unique_summaries.get_mut(&session_id) {
-            if last_modified_ms.unwrap_or(0) > existing_lm.unwrap_or(0) {
-                *existing_lm = last_modified_ms;
-            }
-            if !conns
-                .iter()
-                .any(|c| c.pid == conn.pid && c.port == conn.port)
-            {
-                conns.push(conn);
-            }
+        if let Some((existing_lm, _)) = unique_summaries.get_mut(&session_id) {
+            *existing_lm = newer_timestamp(*existing_lm, local_modified_ms);
         } else {
-            unique_summaries.insert(session_id, (last_modified_ms, vec![conn]));
+            unique_summaries.insert(session_id, (local_modified_ms, connections.clone()));
         }
     }
 
     let total_detected_sessions = unique_summaries.len();
-    let max_summary_ms = unique_summaries
-        .values()
-        .filter_map(|(lm, _)| *lm)
-        .max()
-        .unwrap_or_else(|| Local::now().timestamp_millis());
-
-    let sync_threshold_existing_ms = max_summary_ms - 2 * 24 * 3600 * 1000; // 2 days
-    let sync_threshold_new_ms = max_summary_ms - 7 * 24 * 3600 * 1000; // 7 days
+    let now_ms = Local::now().timestamp_millis();
+    let sync_threshold_ms = now_ms - ANTIGRAVITY_DEFAULT_CACHE_REBUILD_WINDOW_MS;
 
     for (session_id, (last_modified_ms, conns)) in unique_summaries {
-        let lm = last_modified_ms.unwrap_or(max_summary_ms);
+        let lm = last_modified_ms.unwrap_or(now_ms);
         let file_name = session_artifact_file_stem(&session_id);
         let path = sessions_dir.join(format!("{}.jsonl", file_name));
-        let exists = path.exists();
 
-        // 1. Skip if older than 7 days (even if file does not exist)
-        if lm < sync_threshold_new_ms {
-            continue;
-        }
-
-        // 2. Skip if older than 2 days and the file already exists
-        if lm < sync_threshold_existing_ms && exists {
+        if !options.rebuild_all_cache && lm < sync_threshold_ms {
             continue;
         }
 
@@ -470,13 +469,7 @@ pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
         }
     }
 
-    let cached_files_after = match std::fs::read_dir(sessions_dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "jsonl"))
-            .count(),
-        Err(_) => 0,
-    };
+    let cached_files_after = count_antigravity_session_cache_files(sessions_dir);
 
     info!("Antigravity sync: Synced local Antigravity cache from running language servers.");
     info!("detected connections: {}", connections.len());
@@ -487,6 +480,55 @@ pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
         cached_files_before, cached_files_after
     );
 
+    Ok(())
+}
+
+fn upsert_sync_summary(
+    summaries: &mut HashMap<String, (Option<i64>, Vec<AntigravityConnection>)>,
+    session_id: String,
+    last_modified_ms: Option<i64>,
+    conn: AntigravityConnection,
+) {
+    if let Some((existing_lm, conns)) = summaries.get_mut(&session_id) {
+        *existing_lm = newer_timestamp(*existing_lm, last_modified_ms);
+        if !conns
+            .iter()
+            .any(|c| c.pid == conn.pid && c.port == conn.port)
+        {
+            conns.push(conn);
+        }
+    } else {
+        summaries.insert(session_id, (last_modified_ms, vec![conn]));
+    }
+}
+
+fn newer_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn count_antigravity_session_cache_files(sessions_dir: &Path) -> usize {
+    match std::fs::read_dir(sessions_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "jsonl"))
+            .count(),
+        Err(_) => 0,
+    }
+}
+
+fn clear_antigravity_session_cache(sessions_dir: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(sessions_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() && path.extension().map_or(false, |ext| ext == "jsonl") {
+            std::fs::remove_file(path)?;
+        }
+    }
     Ok(())
 }
 
@@ -697,6 +739,60 @@ const STATIC_MODEL_ALIASES: &[StaticModelAlias] = &[
         source: "tokscale;format-normalization",
     },
     StaticModelAlias {
+        raw_model_id: "antigravity-gemini-3-pro",
+        model_id: "gemini-3-pro-preview",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "antigravity-gemini-3-pro-high",
+        model_id: "gemini-3-pro-preview-high",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "antigravity-gemini-3-pro-low",
+        model_id: "gemini-3-pro-preview-low",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3-pro",
+        model_id: "gemini-3-pro-preview",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3-pro-high",
+        model_id: "gemini-3-pro-preview-high",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3-pro-low",
+        model_id: "gemini-3-pro-preview-low",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3.0-pro",
+        model_id: "gemini-3-pro-preview",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3.0-pro-high",
+        model_id: "gemini-3-pro-preview-high",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3.0-pro-low",
+        model_id: "gemini-3-pro-preview-low",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
         raw_model_id: "gemini-3-pro-preview-high",
         model_id: "gemini-3-pro-preview-high",
         label: None,
@@ -705,6 +801,60 @@ const STATIC_MODEL_ALIASES: &[StaticModelAlias] = &[
     StaticModelAlias {
         raw_model_id: "gemini-3-pro-preview-low",
         model_id: "gemini-3-pro-preview-low",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3.1-pro",
+        model_id: "gemini-3.1-pro-preview",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3.1-pro-high",
+        model_id: "gemini-3.1-pro-preview-high",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3.1-pro-low",
+        model_id: "gemini-3.1-pro-preview-low",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3-1-pro",
+        model_id: "gemini-3.1-pro-preview",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3-1-pro-high",
+        model_id: "gemini-3.1-pro-preview-high",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3-1-pro-low",
+        model_id: "gemini-3.1-pro-preview-low",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3-1-pro-preview",
+        model_id: "gemini-3.1-pro-preview",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3-1-pro-preview-high",
+        model_id: "gemini-3.1-pro-preview-high",
+        label: None,
+        source: "format-normalization",
+    },
+    StaticModelAlias {
+        raw_model_id: "gemini-3-1-pro-preview-low",
+        model_id: "gemini-3.1-pro-preview-low",
         label: None,
         source: "format-normalization",
     },
@@ -1095,9 +1245,18 @@ fn antigravity_label_to_model_id(label: &str) -> Option<String> {
 
     let model_id = tokens.join("-");
     match model_id.as_str() {
+        "gemini-3-0-pro-high" => Some("gemini-3-pro-preview-high".to_string()),
+        "gemini-3-0-pro-low" => Some("gemini-3-pro-preview-low".to_string()),
+        "gemini-3-0-pro" => Some("gemini-3-pro-preview".to_string()),
         "gemini-3-0-pro-preview-high" => Some("gemini-3-pro-preview-high".to_string()),
         "gemini-3-0-pro-preview-low" => Some("gemini-3-pro-preview-low".to_string()),
         "gemini-3-0-pro-preview" => Some("gemini-3-pro-preview".to_string()),
+        "gemini-3-1-pro-high" => Some("gemini-3.1-pro-preview-high".to_string()),
+        "gemini-3-1-pro-low" => Some("gemini-3.1-pro-preview-low".to_string()),
+        "gemini-3-1-pro" => Some("gemini-3.1-pro-preview".to_string()),
+        "gemini-3-1-pro-preview-high" => Some("gemini-3.1-pro-preview-high".to_string()),
+        "gemini-3-1-pro-preview-low" => Some("gemini-3.1-pro-preview-low".to_string()),
+        "gemini-3-1-pro-preview" => Some("gemini-3.1-pro-preview".to_string()),
         _ => Some(model_id),
     }
 }
@@ -1738,7 +1897,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
         assert_eq!(msg.session_id, "sess-123");
-        assert_eq!(msg.model_id, "antigravity-gemini-3-pro");
+        assert_eq!(msg.model_id, "gemini-3-pro-preview");
         assert_eq!(msg.provider_id, "google");
         assert_eq!(msg.message_key, "resp-456");
         assert_eq!(msg.timestamp, 1672531201000);
@@ -1942,6 +2101,34 @@ mod tests {
     }
 
     #[test]
+    fn test_antigravity_gemini_3_pro_aliases_keep_display_and_pricing_ids_aligned() {
+        assert_eq!(
+            resolve_antigravity_model_id("antigravity-gemini-3-pro"),
+            "gemini-3-pro-preview"
+        );
+        assert_eq!(
+            resolve_antigravity_model_id("antigravity-gemini-3-pro-high"),
+            "gemini-3-pro-preview-high"
+        );
+        assert_eq!(
+            resolve_antigravity_model_id("antigravity-gemini-3-pro-low"),
+            "gemini-3-pro-preview-low"
+        );
+        assert_eq!(
+            resolve_antigravity_model_id("gemini-3.0-pro-high"),
+            "gemini-3-pro-preview-high"
+        );
+        assert_eq!(
+            resolve_antigravity_model_id("gemini-3.1-pro-high"),
+            "gemini-3.1-pro-preview-high"
+        );
+        assert_eq!(
+            resolve_antigravity_model_id("gemini-3-1-pro-preview-low"),
+            "gemini-3.1-pro-preview-low"
+        );
+    }
+
+    #[test]
     fn test_antigravity_label_to_model_id_handles_future_label_shapes() {
         assert_eq!(
             antigravity_label_to_model_id("Claude Opus 4.5 (Thinking)").as_deref(),
@@ -1954,6 +2141,18 @@ mod tests {
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3.0 Pro Preview (High)").as_deref(),
             Some("gemini-3-pro-preview-high")
+        );
+        assert_eq!(
+            antigravity_label_to_model_id("Gemini 3.0 Pro (High)").as_deref(),
+            Some("gemini-3-pro-preview-high")
+        );
+        assert_eq!(
+            antigravity_label_to_model_id("Gemini 3.1 Pro (High)").as_deref(),
+            Some("gemini-3.1-pro-preview-high")
+        );
+        assert_eq!(
+            antigravity_label_to_model_id("Gemini 3.1 Pro Preview (Low)").as_deref(),
+            Some("gemini-3.1-pro-preview-low")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3 Pro Preview (Low)").as_deref(),

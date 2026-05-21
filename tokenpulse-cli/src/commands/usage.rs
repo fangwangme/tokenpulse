@@ -27,6 +27,7 @@ pub async fn run(
     refresh_days: Option<String>,
     refresh_pricing: bool,
     rebuild_all: bool,
+    rebuild_cache: bool,
     use_tui: bool,
     json: bool,
     csv: Option<String>,
@@ -37,7 +38,7 @@ pub async fn run(
     let refresh_range = refresh_days.as_deref().map(parse_date_range).transpose()?;
 
     let provider_names = parse_provider_names(provider.as_deref());
-    let parsers = build_parsers(&provider_names);
+    let parsers = build_parsers(&provider_names, rebuild_cache);
     let store = UsageStore::new();
     let mut stale_sources = HashSet::new();
 
@@ -187,7 +188,7 @@ fn build_reload_fn(
 )> {
     move || {
         let store = UsageStore::new();
-        let parsers = build_parsers(&provider_names);
+        let parsers = build_parsers(&provider_names, false);
 
         for parser in &parsers {
             let since = store.default_since(parser.provider_name(), output_since)?;
@@ -234,7 +235,7 @@ fn parse_provider_names(provider: Option<&str>) -> Vec<String> {
     }
 }
 
-fn build_parsers(provider_names: &[String]) -> Vec<Box<dyn SessionParser>> {
+fn build_parsers(provider_names: &[String], rebuild_cache: bool) -> Vec<Box<dyn SessionParser>> {
     provider_names
         .iter()
         .filter_map(|provider| match provider.as_str() {
@@ -244,9 +245,9 @@ fn build_parsers(provider_names: &[String]) -> Vec<Box<dyn SessionParser>> {
             "opencode" => Some(Box::new(OpenCodeSessionParser::new()) as Box<dyn SessionParser>),
             "gemini" => Some(Box::new(GeminiSessionParser::new()) as Box<dyn SessionParser>),
             "pi" => Some(Box::new(PiSessionParser::new()) as Box<dyn SessionParser>),
-            "antigravity" => {
-                Some(Box::new(AntigravitySessionParser::new()) as Box<dyn SessionParser>)
-            }
+            "antigravity" => Some(Box::new(
+                AntigravitySessionParser::new().with_rebuild_cache(rebuild_cache),
+            ) as Box<dyn SessionParser>),
             _ => None,
         })
         .collect()
