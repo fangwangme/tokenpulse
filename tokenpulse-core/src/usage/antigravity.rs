@@ -9,8 +9,6 @@ use chrono::{Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -18,6 +16,8 @@ use tracing::{debug, info, warn};
 const PARSER_VERSION: &str = "antigravity-v2";
 const MODEL_ALIAS_HISTORY_VERSION: u32 = 1;
 const MODEL_ALIAS_HISTORY_FILE_NAME: &str = "model-aliases.json";
+const ANTIGRAVITY_LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
+const ANTIGRAVITY_RPC_BODY_CAP: usize = 16 * 1024 * 1024;
 
 pub struct AntigravitySessionParser;
 
@@ -204,6 +204,7 @@ pub struct AntigravityConnection {
     pub pid: u32,
     pub port: u16,
     pub csrf_token: String,
+    pub scheme: String,
     pub fingerprint: String,
 }
 
@@ -305,10 +306,10 @@ pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
         "Discovered {} local conversation files",
         local_conversation_ids.len()
     );
-    for session_id in local_conversation_ids {
+    for (session_id, local_modified_ms) in local_conversation_ids {
         if !summaries.iter().any(|(id, _, _)| id == &session_id) {
             for connection in &connections {
-                summaries.push((session_id.clone(), None, connection.clone()));
+                summaries.push((session_id.clone(), local_modified_ms, connection.clone()));
             }
         }
     }
@@ -541,14 +542,14 @@ const STATIC_MODEL_ALIASES: &[StaticModelAlias] = &[
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M36",
-        model_id: "gemini-3.1-pro-low",
-        label: Some("Gemini 3.1 Pro (Low)"),
+        model_id: "gemini-3.1-pro-preview-low",
+        label: Some("Gemini 3.1 Pro Preview (Low)"),
         source: "captured-antigravity-get-user-status;tokscale",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M37",
-        model_id: "gemini-3.1-pro-high",
-        label: Some("Gemini 3.1 Pro (High)"),
+        model_id: "gemini-3.1-pro-preview-high",
+        label: Some("Gemini 3.1 Pro Preview (High)"),
         source: "tokscale;antigravity-mobility-cli",
     },
     StaticModelAlias {
@@ -577,8 +578,8 @@ const STATIC_MODEL_ALIASES: &[StaticModelAlias] = &[
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M16",
-        model_id: "gemini-3.1-pro-high",
-        label: Some("Gemini 3.1 Pro (High)"),
+        model_id: "gemini-3.1-pro-preview-high",
+        label: Some("Gemini 3.1 Pro Preview (High)"),
         source: "captured-antigravity-get-user-status",
     },
     StaticModelAlias {
@@ -1038,16 +1039,34 @@ fn resolve_antigravity_model_id_with_aliases(
     model_id: &str,
     dynamic_aliases: &HashMap<String, ModelAlias>,
 ) -> String {
-    dynamic_aliases
-        .get(&normalize_alias_key(model_id))
-        .map(|alias| alias.model_id.as_str())
+    alias_key_candidates(model_id)
+        .iter()
+        .find_map(|key| {
+            dynamic_aliases
+                .get(key)
+                .map(|alias| alias.model_id.as_str())
+        })
         .or_else(|| antigravity_model_alias(model_id))
         .unwrap_or(model_id)
         .to_string()
 }
 
 fn normalize_alias_key(model_id: &str) -> String {
-    model_id.trim().to_ascii_lowercase().replace('-', "_")
+    model_id.trim().to_ascii_lowercase()
+}
+
+fn legacy_normalize_alias_key(model_id: &str) -> String {
+    normalize_alias_key(model_id).replace('-', "_")
+}
+
+fn alias_key_candidates(model_id: &str) -> Vec<String> {
+    let key = normalize_alias_key(model_id);
+    let legacy_key = legacy_normalize_alias_key(model_id);
+    if legacy_key == key {
+        vec![key]
+    } else {
+        vec![key, legacy_key]
+    }
 }
 
 fn antigravity_label_to_model_id(label: &str) -> Option<String> {
@@ -1084,10 +1103,13 @@ fn antigravity_label_to_model_id(label: &str) -> Option<String> {
 }
 
 fn antigravity_model_alias(model_id: &str) -> Option<&'static str> {
-    let key = normalize_alias_key(model_id);
+    let keys = alias_key_candidates(model_id);
     STATIC_MODEL_ALIASES
         .iter()
-        .find(|alias| normalize_alias_key(alias.raw_model_id) == key)
+        .find(|alias| {
+            let alias_keys = alias_key_candidates(alias.raw_model_id);
+            keys.iter().any(|key| alias_keys.contains(key))
+        })
         .map(|alias| alias.model_id)
 }
 
@@ -1157,14 +1179,18 @@ fn sanitize_session_id(session_id: &str) -> String {
 }
 
 fn session_artifact_file_stem(session_id: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let sanitized = sanitize_session_id(session_id);
-    let mut hasher = DefaultHasher::new();
-    session_id.hash(&mut hasher);
-    let hash = hasher.finish();
+    let hash = stable_fnv1a_64(session_id);
     format!("{}-{:016x}", sanitized, hash)
+}
+
+fn stable_fnv1a_64(value: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn to_safe_i64(value: Option<&Value>) -> i64 {
@@ -1202,12 +1228,13 @@ pub fn detect_antigravity_connections() -> Result<Vec<AntigravityConnection>> {
     for candidate in candidates {
         let ports = candidate_probe_ports(&candidate, find_listening_ports(candidate.pid)?);
         for port in ports {
-            if probe_heartbeat(port, &candidate.csrf_token) {
+            if let Some(scheme) = probe_heartbeat(port, &candidate.csrf_token) {
                 connections.push(AntigravityConnection {
                     pid: candidate.pid,
                     port,
                     csrf_token: candidate.csrf_token.clone(),
-                    fingerprint: format!("pid:{}:port:{}", candidate.pid, port),
+                    scheme: scheme.to_string(),
+                    fingerprint: format!("pid:{}:{}:{}", candidate.pid, scheme, port),
                 });
                 break;
             }
@@ -1309,12 +1336,12 @@ fn is_antigravity_process(command: &str) -> bool {
         || lower.contains("\\antigravity-cli\\")
 }
 
-fn discover_local_conversation_ids() -> Vec<String> {
+fn discover_local_conversation_ids() -> Vec<(String, Option<i64>)> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
     discover_local_conversation_ids_from_home(&home)
 }
 
-fn discover_local_conversation_ids_from_home(home: &Path) -> Vec<String> {
+fn discover_local_conversation_ids_from_home(home: &Path) -> Vec<(String, Option<i64>)> {
     let dirs = vec![
         home.join(".gemini")
             .join("antigravity")
@@ -1337,7 +1364,12 @@ fn discover_local_conversation_ids_from_home(home: &Path) -> Vec<String> {
                         if ext == "pb" || ext == "db" {
                             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                                 if stem.len() >= 20 {
-                                    session_ids.push(stem.to_string());
+                                    let modified_ms = path
+                                        .metadata()
+                                        .ok()
+                                        .and_then(|metadata| metadata.modified().ok())
+                                        .and_then(system_time_to_millis);
+                                    session_ids.push((stem.to_string(), modified_ms));
                                 }
                             }
                         }
@@ -1346,9 +1378,15 @@ fn discover_local_conversation_ids_from_home(home: &Path) -> Vec<String> {
             }
         }
     }
-    session_ids.sort();
-    session_ids.dedup();
+    session_ids.sort_by(|left, right| left.0.cmp(&right.0));
+    session_ids.dedup_by(|left, right| left.0 == right.0);
     session_ids
+}
+
+fn system_time_to_millis(time: std::time::SystemTime) -> Option<i64> {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
 }
 
 #[cfg(target_os = "macos")]
@@ -1387,19 +1425,27 @@ fn extract_declared_port(command: &str) -> Option<u16> {
 
 fn extract_flag_value(command: &str, flag: &str) -> Option<String> {
     let compact = format!("{}=", flag);
-    if let Some(idx) = command.find(&compact) {
-        let rest = &command[idx + compact.len()..];
-        return rest
-            .split_whitespace()
-            .next()
-            .map(|value| value.to_string());
+    for token in command.split_whitespace() {
+        if let Some(value) = token.strip_prefix(&compact) {
+            return Some(unquote_flag_value(value));
+        }
     }
 
-    let idx = command.find(flag)?;
-    let rest = &command[idx + flag.len()..];
-    rest.split_whitespace()
-        .find(|value| !value.is_empty())
-        .map(|value| value.trim().to_string())
+    let mut tokens = command.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == flag {
+            return tokens.next().map(unquote_flag_value);
+        }
+    }
+
+    None
+}
+
+fn unquote_flag_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|ch| ch == '\'' || ch == '"')
+        .to_string()
 }
 
 fn find_listening_ports(pid: u32) -> Result<Vec<u16>> {
@@ -1458,60 +1504,32 @@ fn parse_port_from_line(line: &str) -> Option<u16> {
     None
 }
 
-fn probe_heartbeat(port: u16, csrf_token: &str) -> bool {
-    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+fn probe_heartbeat(port: u16, csrf_token: &str) -> Option<&'static str> {
+    for scheme in ["https", "http"] {
+        if probe_heartbeat_with_scheme(scheme, port, csrf_token) {
+            return Some(scheme);
+        }
+    }
+    None
+}
+
+fn probe_heartbeat_with_scheme(scheme: &'static str, port: u16, csrf_token: &str) -> bool {
+    let body = json!({ "uuid": "00000000-0000-0000-0000-000000000000" });
+    let Ok((status, text)) = language_server_request_text(
+        scheme,
+        port,
+        csrf_token,
+        "Heartbeat",
+        &body,
+        Duration::from_secs(2),
+        4096,
+    ) else {
         return false;
     };
 
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-
-    let body = r#"{"uuid":"00000000-0000-0000-0000-000000000000"}"#;
-    let request = format!(
-        "POST /exa.language_server_pb.LanguageServerService/Heartbeat HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnect-Protocol-Version: 1\r\nX-Codeium-Csrf-Token: {}\r\nConnection: close\r\n\r\n{}",
-        port,
-        body.len(),
-        csrf_token,
-        body
-    );
-
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
-    }
-
-    let mut reader = BufReader::new(stream);
-    let mut status_line = String::new();
-    if reader.read_line(&mut status_line).is_err() {
-        return false;
-    }
-
-    let status_ok = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|value| value.parse::<u16>().ok())
-        .is_some_and(|status| status == 200);
-    if !status_ok {
-        return false;
-    }
-
-    loop {
-        let mut header = String::new();
-        if reader.read_line(&mut header).is_err() {
-            return false;
-        }
-        if header.trim().is_empty() {
-            break;
-        }
-    }
-
-    let mut buffer = String::new();
-    let _ = reader.by_ref().take(4096).read_to_string(&mut buffer);
-
-    if !heartbeat_response_looks_well_formed(&buffer) {
-        return false;
-    }
-
-    probe_endpoint_identity(port, csrf_token)
+    status == 200
+        && heartbeat_response_looks_well_formed(&text)
+        && probe_endpoint_identity(scheme, port, csrf_token)
 }
 
 fn heartbeat_response_looks_well_formed(body: &str) -> bool {
@@ -1523,12 +1541,12 @@ fn heartbeat_response_looks_well_formed(body: &str) -> bool {
     serde_json::from_str::<Value>(slice).is_ok()
 }
 
-fn probe_endpoint_identity(port: u16, csrf_token: &str) -> bool {
+fn probe_endpoint_identity(scheme: &'static str, port: u16, csrf_token: &str) -> bool {
     for method in [
         "GetCascadeTrajectoryGeneratorMetadata",
         "GetAllCascadeTrajectories",
     ] {
-        if let Some(body) = identity_probe_request(port, csrf_token, method) {
+        if let Some(body) = identity_probe_request(scheme, port, csrf_token, method) {
             if response_contains_antigravity_marker(&body) {
                 return true;
             }
@@ -1537,80 +1555,24 @@ fn probe_endpoint_identity(port: u16, csrf_token: &str) -> bool {
     false
 }
 
-fn identity_probe_request(port: u16, csrf_token: &str, method: &str) -> Option<String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-
-    let body = r#"{}"#;
-    let request = format!(
-        "POST /exa.language_server_pb.LanguageServerService/{} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnect-Protocol-Version: 1\r\nX-Codeium-Csrf-Token: {}\r\nConnection: close\r\n\r\n{}",
-        method,
+fn identity_probe_request(
+    scheme: &'static str,
+    port: u16,
+    csrf_token: &str,
+    method: &str,
+) -> Option<String> {
+    let (status, text) = language_server_request_text(
+        scheme,
         port,
-        body.len(),
         csrf_token,
-        body
-    );
+        method,
+        &json!({}),
+        Duration::from_secs(2),
+        4096,
+    )
+    .ok()?;
 
-    if stream.write_all(request.as_bytes()).is_err() {
-        return None;
-    }
-
-    let mut reader = BufReader::new(stream);
-    let mut status_line = String::new();
-    if reader.read_line(&mut status_line).is_err() {
-        return None;
-    }
-
-    let status_ok = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|value| value.parse::<u16>().ok())
-        .is_some_and(|status| status == 200);
-
-    let mut content_length: Option<usize> = None;
-    let mut chunked = false;
-    loop {
-        let mut header = String::new();
-        if reader.read_line(&mut header).is_err() {
-            return None;
-        }
-        let trimmed = header.trim();
-        if trimmed.is_empty() {
-            break;
-        }
-
-        let lower = trimmed.to_ascii_lowercase();
-        if let Some(value) = lower.strip_prefix("content-length:") {
-            content_length = value.trim().parse::<usize>().ok();
-        }
-        if lower.contains("transfer-encoding") && lower.contains("chunked") {
-            chunked = true;
-        }
-    }
-
-    if !status_ok {
-        return None;
-    }
-
-    if chunked {
-        return read_chunked_body_prefix(&mut reader, 4096).ok();
-    }
-
-    if let Some(length) = content_length {
-        let read_length = length.min(4096);
-        let mut bytes = vec![0_u8; read_length];
-        reader.read_exact(&mut bytes).ok()?;
-        return String::from_utf8(bytes).ok();
-    }
-
-    let mut buffer = String::new();
-    reader
-        .by_ref()
-        .take(4096)
-        .read_to_string(&mut buffer)
-        .ok()?;
-    Some(buffer)
+    (status == 200).then_some(text)
 }
 
 fn response_contains_antigravity_marker(body: &str) -> bool {
@@ -1674,148 +1636,71 @@ fn contains_antigravity_marker(value: &Value) -> bool {
     }
 }
 
-fn read_chunked_body_prefix(
-    reader: &mut BufReader<TcpStream>,
-    max_body_bytes: usize,
-) -> Result<String> {
-    let mut body = Vec::new();
-    while body.len() < max_body_bytes {
-        let mut size_line = String::new();
-        reader.read_line(&mut size_line)?;
-        let chunk_size = parse_chunk_size_line(&size_line)?;
-        if chunk_size == 0 {
-            break;
-        }
-
-        let remaining = max_body_bytes - body.len();
-        let read_size = chunk_size.min(remaining);
-        let mut chunk = vec![0_u8; read_size];
-        reader.read_exact(&mut chunk)?;
-        body.extend_from_slice(&chunk);
-
-        if read_size < chunk_size {
-            break;
-        }
-
-        let mut crlf = [0_u8; 2];
-        reader.read_exact(&mut crlf)?;
-    }
-
-    Ok(String::from_utf8(body)?)
-}
-
-fn read_chunked_body_with_cap(
-    reader: &mut BufReader<TcpStream>,
-    max_body_bytes: usize,
-) -> Result<String> {
-    let mut body = Vec::new();
-    loop {
-        let mut size_line = String::new();
-        reader.read_line(&mut size_line)?;
-        let chunk_size = parse_chunk_size_line(&size_line)?;
-        if chunk_size == 0 {
-            break;
-        }
-
-        if chunk_size > max_body_bytes || body.len().saturating_add(chunk_size) > max_body_bytes {
-            anyhow::bail!(
-                "RPC body of {} bytes exceeds {} cap",
-                body.len().saturating_add(chunk_size),
-                max_body_bytes
-            );
-        }
-
-        let mut chunk = vec![0_u8; chunk_size];
-        reader.read_exact(&mut chunk)?;
-        body.extend_from_slice(&chunk);
-
-        let mut crlf = [0_u8; 2];
-        reader.read_exact(&mut crlf)?;
-    }
-
-    Ok(String::from_utf8(body)?)
-}
-
-fn parse_chunk_size_line(size_line: &str) -> Result<usize> {
-    let trimmed = size_line.trim();
-    let chunk_size = trimmed
-        .split(';')
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("Missing chunk size"))?;
-
-    usize::from_str_radix(chunk_size, 16).map_err(|e| anyhow::anyhow!("Invalid chunk size: {}", e))
-}
-
 fn run_command(program: &str, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new(program).args(args).output()?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -> Result<Value> {
-    let mut stream = TcpStream::connect(("127.0.0.1", connection.port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-
-    let body_text = serde_json::to_string(body)?;
-    let request = format!(
-        "POST /exa.language_server_pb.LanguageServerService/{} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnect-Protocol-Version: 1\r\nX-Codeium-Csrf-Token: {}\r\nConnection: close\r\n\r\n{}",
-        method,
-        connection.port,
-        body_text.len(),
-        connection.csrf_token,
-        body_text
+fn language_server_request_text(
+    scheme: &str,
+    port: u16,
+    csrf_token: &str,
+    method: &str,
+    body: &Value,
+    timeout: Duration,
+    max_body_bytes: usize,
+) -> Result<(u16, String)> {
+    let url = format!(
+        "{}://127.0.0.1:{}/{}/{}",
+        scheme, port, ANTIGRAVITY_LS_SERVICE, method
     );
+    let body_text = serde_json::to_string(body)?;
+    let csrf_token = csrf_token.to_string();
 
-    stream.write_all(request.as_bytes())?;
+    std::thread::spawn(move || -> Result<(u16, String)> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .danger_accept_invalid_certs(true)
+            .build()?;
+        let response = client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("Connect-Protocol-Version", "1")
+            .header("X-Codeium-Csrf-Token", csrf_token)
+            .body(body_text)
+            .send()?;
+        let status_code = response.status().as_u16();
 
-    let mut reader = BufReader::new(stream);
-    let mut status_line = String::new();
-    reader.read_line(&mut status_line)?;
-
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|value| value.parse::<u16>().ok())
-        .ok_or_else(|| anyhow::anyhow!("Malformed HTTP response from Antigravity RPC"))?;
-
-    let mut content_length: Option<usize> = None;
-    let mut chunked = false;
-    loop {
-        let mut header = String::new();
-        reader.read_line(&mut header)?;
-        let trimmed = header.trim();
-        if trimmed.is_empty() {
-            break;
+        if let Some(length) = response.content_length() {
+            if length > max_body_bytes as u64 {
+                anyhow::bail!("RPC body of {length} bytes exceeds {max_body_bytes} cap");
+            }
         }
 
-        let lower = trimmed.to_ascii_lowercase();
-        if let Some(value) = lower.strip_prefix("content-length:") {
-            content_length = value.trim().parse::<usize>().ok();
+        let bytes = response.bytes()?;
+        if bytes.len() > max_body_bytes {
+            anyhow::bail!(
+                "RPC body of {} bytes exceeds {} cap",
+                bytes.len(),
+                max_body_bytes
+            );
         }
-        if lower.contains("transfer-encoding") && lower.contains("chunked") {
-            chunked = true;
-        }
-    }
+        Ok((status_code, String::from_utf8(bytes.to_vec())?))
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("Antigravity language server request thread panicked"))?
+}
 
-    let response_body = if chunked {
-        read_chunked_body_with_cap(&mut reader, 16 * 1024 * 1024)?
-    } else if let Some(length) = content_length {
-        if length > 16 * 1024 * 1024 {
-            anyhow::bail!("RPC body of {length} bytes exceeds 16MB cap");
-        }
-        let mut bytes = vec![0_u8; length];
-        reader.read_exact(&mut bytes)?;
-        String::from_utf8(bytes)?
-    } else {
-        let mut text = String::new();
-        reader
-            .by_ref()
-            .take(16 * 1024 * 1024 + 1)
-            .read_to_string(&mut text)?;
-        text
-    };
+fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -> Result<Value> {
+    let (status_code, response_body) = language_server_request_text(
+        &connection.scheme,
+        connection.port,
+        &connection.csrf_token,
+        method,
+        body,
+        Duration::from_secs(10),
+        ANTIGRAVITY_RPC_BODY_CAP,
+    )?;
 
     if status_code != 200 {
         return Err(anyhow::anyhow!(
@@ -1929,7 +1814,7 @@ mod tests {
         normalize_cached_antigravity_artifact(&file_path, &HashMap::new()).unwrap();
 
         let content = std::fs::read_to_string(&file_path).unwrap();
-        assert!(content.contains(r#""modelId":"gemini-3.1-pro-high""#));
+        assert!(content.contains(r#""modelId":"gemini-3.1-pro-preview-high""#));
         assert!(content.contains(r#""modelId":"gemini-3.5-flash""#));
         assert!(!content.contains("MODEL_PLACEHOLDER_M37"));
         assert!(!content.contains("gemini-3-flash-a"));
@@ -1985,7 +1870,7 @@ mod tests {
         );
         assert_eq!(
             resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M37", &saved),
-            "gemini-3.1-pro-high"
+            "gemini-3.1-pro-preview-high"
         );
 
         let history_path = model_alias_history_path(&sessions_dir).unwrap();
@@ -2025,6 +1910,38 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_alias_key_preserves_separator_distinctions() {
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            normalize_alias_key("gemini-3-pro"),
+            ModelAlias {
+                raw_model_id: "gemini-3-pro".to_string(),
+                model_id: "gemini-3-pro-preview".to_string(),
+                label: None,
+                source: "test".to_string(),
+            },
+        );
+        aliases.insert(
+            normalize_alias_key("gemini_3_pro"),
+            ModelAlias {
+                raw_model_id: "gemini_3_pro".to_string(),
+                model_id: "underscore-model".to_string(),
+                label: None,
+                source: "test".to_string(),
+            },
+        );
+
+        assert_eq!(
+            resolve_antigravity_model_id_with_aliases("gemini-3-pro", &aliases),
+            "gemini-3-pro-preview"
+        );
+        assert_eq!(
+            resolve_antigravity_model_id_with_aliases("gemini_3_pro", &aliases),
+            "underscore-model"
+        );
+    }
+
+    #[test]
     fn test_antigravity_label_to_model_id_handles_future_label_shapes() {
         assert_eq!(
             antigravity_label_to_model_id("Claude Opus 4.5 (Thinking)").as_deref(),
@@ -2043,6 +1960,29 @@ mod tests {
             Some("gemini-3-pro-preview-low")
         );
         assert_eq!(antigravity_label_to_model_id("Unknown Beta"), None);
+    }
+
+    #[test]
+    fn test_extract_flag_value_matches_exact_flags_and_strips_quotes() {
+        let command = "language_server --other_csrf_token=00000000000000000000000000000000 --csrf_token=\"abcdefabcdefabcdefabcdefabcdefab\" --extension_server_port '54321'";
+
+        assert_eq!(
+            extract_flag_value(command, "--csrf_token").as_deref(),
+            Some("abcdefabcdefabcdefabcdefabcdefab")
+        );
+        assert_eq!(
+            extract_flag_value(command, "--extension_server_port").as_deref(),
+            Some("54321")
+        );
+        assert_eq!(extract_flag_value(command, "--csrf").as_deref(), None);
+    }
+
+    #[test]
+    fn test_session_artifact_file_stem_uses_stable_hash() {
+        assert_eq!(
+            session_artifact_file_stem("session/with spaces"),
+            "session-with-spaces-ffc7e153e201ef5f"
+        );
     }
 
     #[test]
@@ -2068,7 +2008,11 @@ mod tests {
         let discovered = discover_local_conversation_ids_from_home(temp_dir.path());
 
         assert_eq!(discovered.len(), 2);
-        assert!(discovered.contains(&"12345678901234567890".to_string()));
-        assert!(discovered.contains(&"abcdefabcdefabcdefabcdef".to_string()));
+        assert!(discovered
+            .iter()
+            .any(|(id, modified_ms)| id == "12345678901234567890" && modified_ms.is_some()));
+        assert!(discovered
+            .iter()
+            .any(|(id, modified_ms)| id == "abcdefabcdefabcdefabcdef" && modified_ms.is_some()));
     }
 }

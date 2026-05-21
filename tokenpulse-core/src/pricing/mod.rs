@@ -419,9 +419,15 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
 
         "gemini-3.1-pro-high"
         | "gemini-3.1-pro-low"
+        | "gemini-3.1-pro-preview-high"
+        | "gemini-3.1-pro-preview-low"
+        | "gemini-3.1-pro-preview"
         | "gemini-3.1-pro"
         | "gemini-3-1-pro-high"
         | "gemini-3-1-pro-low"
+        | "gemini-3-1-pro-preview-high"
+        | "gemini-3-1-pro-preview-low"
+        | "gemini-3-1-pro-preview"
         | "gemini-3-1-pro" => Some("gemini-3.1-pro-preview"),
 
         "antigravity-gemini-3-flash-a" | "gemini-3-flash-a" => Some("gemini-3.5-flash"),
@@ -432,7 +438,10 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
 
         "antigravity-claude-opus-4-5-thinking"
         | "antigravity-claude-opus-4-5-thinking-high"
-        | "antigravity-claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
+        | "antigravity-claude-opus-4-5-thinking-medium"
+        | "claude-opus-4-5-thinking"
+        | "claude-opus-4-5-thinking-high"
+        | "claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
 
         "antigravity-claude-opus-4-6-thinking" | "claude-opus-4-6-thinking" | "claude-opus-4-6" => {
             Some("openrouter/anthropic/claude-opus-4.6")
@@ -1000,6 +1009,33 @@ mod tests {
                 .input_cost_per_token,
             0.000003
         );
+        assert_eq!(
+            lookup_model_pricing("gemini-3.1-pro-preview-high", &map)
+                .unwrap()
+                .input_cost_per_token,
+            0.000003
+        );
+    }
+
+    #[test]
+    fn test_lookup_claude_4_5_thinking_variants_keep_pricing() {
+        let mut map = HashMap::new();
+        map.insert(
+            "claude-opus-4-5".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+
+        for model in [
+            "antigravity-claude-opus-4-5-thinking",
+            "claude-opus-4-5-thinking",
+            "claude-opus-4-5-thinking-high",
+            "claude-opus-4-5-thinking-medium",
+        ] {
+            assert!(
+                lookup_model_pricing(model, &map).is_some(),
+                "{model} should resolve to claude-opus-4-5 pricing"
+            );
+        }
     }
 
     #[test]
