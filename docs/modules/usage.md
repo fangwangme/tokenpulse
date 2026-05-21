@@ -22,7 +22,7 @@ Current provider maturity:
 - `OpenCode`: usable for daily token tracking
 - `Gemini CLI`: provisional parser, needs more real-world validation
 - `PI`: parser retained, secondary product scope
-- `Antigravity`: quota support exists, historical usage support is not complete
+- `Antigravity`: usable for daily token tracking and LS sync
 
 ## Architecture
 
@@ -299,7 +299,7 @@ Current limits worth keeping in mind:
 - durable append-only scan-state is not complete yet
 - weekly/monthly `session_count` should not be treated as audit-grade unique-session counts yet
 - Gemini historical accuracy needs more fixtures
-- Antigravity historical usage is not complete
+- Antigravity sync requires the active language server process to be running for real-time updates
 - cost accuracy depends on model pricing matching or source-provided cost
 
 ## Working Rules

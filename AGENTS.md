@@ -47,9 +47,10 @@
 - **Overview cards removed**: freed space for more model rows; cost stats (Today/Week/Month) moved to Daily and Activity tabs
 - **Daily tab global stats**: summary bar shows Today/This Week/This Month cost alongside period stats
 - **Activity global stats**: Range Overview shows Today/Week/Month/All-time cost below window stats
+- **Antigravity usage tracking**: Fully integrated process discovery, dynamic/historical model alias mapping and normalization, and automated LS sync for Antigravity sessions
 
 ### Architecture
 - **Workspace**: `tokenpulse-core` (library) + `tokenpulse-cli` (binary)
 - **TUI**: ratatui 0.29 + crossterm 0.28 (with mouse capture)
 - **Data**: SQLite via rusqlite (bundled)
-- **Tests**: 145 passing
+- **Tests**: 166 passing
