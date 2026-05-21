@@ -1681,7 +1681,7 @@ fn probe_heartbeat_with_scheme(scheme: &'static str, port: u16, csrf_token: &str
         "Heartbeat",
         &body,
         Duration::from_secs(2),
-        4096,
+        ANTIGRAVITY_RPC_BODY_CAP,
     ) else {
         return false;
     };
@@ -1727,7 +1727,7 @@ fn identity_probe_request(
         method,
         &json!({}),
         Duration::from_secs(2),
-        4096,
+        ANTIGRAVITY_RPC_BODY_CAP,
     )
     .ok()?;
 
