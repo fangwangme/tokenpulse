@@ -1,3 +1,4 @@
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
@@ -8,6 +9,7 @@ pub mod scanner;
 pub mod store;
 pub(crate) mod utils;
 
+pub use antigravity::AntigravitySessionParser;
 pub use claude::ClaudeSessionParser;
 pub use codex::CodexSessionParser;
 pub use copilot::CopilotSessionParser;

@@ -4,15 +4,22 @@ use chrono::NaiveDate;
 use std::collections::HashSet;
 use tokenpulse_core::{
     usage::{
-        build_usage_summary_from_daily, ClaudeSessionParser, CodexSessionParser,
-        CopilotSessionParser, DateRange, GeminiSessionParser, OpenCodeSessionParser,
-        PiSessionParser, UsageStore,
+        build_usage_summary_from_daily, AntigravitySessionParser, ClaudeSessionParser,
+        CodexSessionParser, CopilotSessionParser, DateRange, GeminiSessionParser,
+        OpenCodeSessionParser, PiSessionParser, UsageStore,
     },
     SessionParser, UnifiedMessage,
 };
 
-const SUPPORTED_USAGE_PROVIDERS: &[&str] =
-    &["claude", "codex", "copilot", "opencode", "gemini", "pi"];
+const SUPPORTED_USAGE_PROVIDERS: &[&str] = &[
+    "claude",
+    "codex",
+    "copilot",
+    "opencode",
+    "gemini",
+    "pi",
+    "antigravity",
+];
 
 pub async fn run(
     since: Option<String>,
@@ -20,6 +27,7 @@ pub async fn run(
     refresh_days: Option<String>,
     refresh_pricing: bool,
     rebuild_all: bool,
+    rebuild_cache: bool,
     use_tui: bool,
     json: bool,
     csv: Option<String>,
@@ -30,7 +38,7 @@ pub async fn run(
     let refresh_range = refresh_days.as_deref().map(parse_date_range).transpose()?;
 
     let provider_names = parse_provider_names(provider.as_deref());
-    let parsers = build_parsers(&provider_names);
+    let parsers = build_parsers(&provider_names, rebuild_cache);
     let store = UsageStore::new();
     let mut stale_sources = HashSet::new();
 
@@ -131,6 +139,7 @@ pub async fn run(
             eprintln!(" - OpenCode: ~/.local/share/opencode/");
             eprintln!(" - Gemini CLI: ~/.gemini/tmp/");
             eprintln!(" - PI: ~/.pi/agent/sessions/");
+            eprintln!(" - Antigravity: ~/.config/tokenpulse/antigravity-cache/sessions/");
             eprintln!("\nIf Gemini totals look stale after this fix, run: tokenpulse usage -p gemini --rebuild-all");
         }
         return Ok(());
@@ -179,7 +188,7 @@ fn build_reload_fn(
 )> {
     move || {
         let store = UsageStore::new();
-        let parsers = build_parsers(&provider_names);
+        let parsers = build_parsers(&provider_names, false);
 
         for parser in &parsers {
             let since = store.default_since(parser.provider_name(), output_since)?;
@@ -226,7 +235,7 @@ fn parse_provider_names(provider: Option<&str>) -> Vec<String> {
     }
 }
 
-fn build_parsers(provider_names: &[String]) -> Vec<Box<dyn SessionParser>> {
+fn build_parsers(provider_names: &[String], rebuild_cache: bool) -> Vec<Box<dyn SessionParser>> {
     provider_names
         .iter()
         .filter_map(|provider| match provider.as_str() {
@@ -236,6 +245,9 @@ fn build_parsers(provider_names: &[String]) -> Vec<Box<dyn SessionParser>> {
             "opencode" => Some(Box::new(OpenCodeSessionParser::new()) as Box<dyn SessionParser>),
             "gemini" => Some(Box::new(GeminiSessionParser::new()) as Box<dyn SessionParser>),
             "pi" => Some(Box::new(PiSessionParser::new()) as Box<dyn SessionParser>),
+            "antigravity" => Some(Box::new(
+                AntigravitySessionParser::new().with_rebuild_cache(rebuild_cache),
+            ) as Box<dyn SessionParser>),
             _ => None,
         })
         .collect()
@@ -511,6 +523,7 @@ mod tests {
                 "opencode".to_string(),
                 "gemini".to_string(),
                 "pi".to_string(),
+                "antigravity".to_string(),
             ]
         );
     }

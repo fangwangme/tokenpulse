@@ -1348,7 +1348,9 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -1811,7 +1813,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokenpulse-cli"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1831,7 +1833,7 @@ dependencies = [
 
 [[package]]
 name = "tokenpulse-core"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",

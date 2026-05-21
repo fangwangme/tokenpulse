@@ -407,23 +407,77 @@ fn push_candidate(candidates: &mut Vec<String>, seen: &mut HashSet<String>, cand
 
 fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
     match model_id {
-        // Antigravity variants → canonical models
+        // Antigravity variants → same-model pricing keys. Do not cross model versions.
         "antigravity-gemini-3-pro"
         | "antigravity-gemini-3-pro-high"
-        | "antigravity-gemini-3-pro-low" => Some("gemini-3-pro-preview"),
-        "antigravity-gemini-3-flash" => Some("gemini-3-flash-preview"),
+        | "antigravity-gemini-3-pro-low"
+        | "gemini-3-pro-high"
+        | "gemini-3-pro-low"
+        | "gemini-3-pro"
+        | "gemini-3-pro-preview-high"
+        | "gemini-3-pro-preview-low" => Some("gemini-3-pro-preview"),
+
+        "gemini-3.1-pro-high"
+        | "gemini-3.1-pro-low"
+        | "gemini-3.1-pro-preview-high"
+        | "gemini-3.1-pro-preview-low"
+        | "gemini-3.1-pro-preview"
+        | "gemini-3.1-pro"
+        | "gemini-3-1-pro-high"
+        | "gemini-3-1-pro-low"
+        | "gemini-3-1-pro-preview-high"
+        | "gemini-3-1-pro-preview-low"
+        | "gemini-3-1-pro-preview"
+        | "gemini-3-1-pro" => Some("gemini-3.1-pro-preview"),
+
+        "antigravity-gemini-3-flash-a" | "gemini-3-flash-a" => Some("gemini-3.5-flash"),
+
+        "antigravity-gemini-3-flash" | "gemini-3-flash" | "gemini-3-flash-c" => {
+            Some("gemini-3-flash-preview")
+        }
+
         "antigravity-claude-opus-4-5-thinking"
         | "antigravity-claude-opus-4-5-thinking-high"
-        | "antigravity-claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
-        "antigravity-claude-opus-4-6-thinking" => Some("claude-opus-4-6"),
+        | "antigravity-claude-opus-4-5-thinking-medium"
+        | "claude-opus-4-5-thinking"
+        | "claude-opus-4-5-thinking-high"
+        | "claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
+
+        "antigravity-claude-opus-4-6-thinking" | "claude-opus-4-6-thinking" | "claude-opus-4-6" => {
+            Some("openrouter/anthropic/claude-opus-4.6")
+        }
+
         "claude-opus-4.6" => Some("openrouter/anthropic/claude-opus-4.6"),
         "claude-opus-4.5" => Some("openrouter/anthropic/claude-opus-4.5"),
-        "claude-sonnet-4.6" => Some("openrouter/anthropic/claude-sonnet-4.6"),
+
+        "antigravity-claude-sonnet-4-6-thinking"
+        | "claude-sonnet-4-6-thinking"
+        | "claude-sonnet-4.6"
+        | "claude-sonnet-4-6" => Some("openrouter/anthropic/claude-sonnet-4.6"),
         "claude-sonnet-4.5" => Some("openrouter/anthropic/claude-sonnet-4.5"),
         "claude-haiku-4.5" => Some("openrouter/anthropic/claude-haiku-4.5"),
+        "claude-haiku-4.6" | "claude-haiku-4-6" => Some("openrouter/anthropic/claude-haiku-4.6"),
 
-        // Gemini quality tier aliases
-        "gemini-3-pro-high" | "gemini-3-pro-low" => Some("gemini-3-pro-preview"),
+        // Antigravity placeholders retained for legacy cache rows that were not
+        // normalized before pricing. These must resolve to the same real model.
+        "MODEL_PLACEHOLDER_M26" | "model-placeholder-m26" => {
+            Some("openrouter/anthropic/claude-opus-4.6")
+        }
+
+        "MODEL_PLACEHOLDER_M35" | "model-placeholder-m35" => {
+            Some("openrouter/anthropic/claude-sonnet-4.6")
+        }
+
+        "MODEL_PLACEHOLDER_M36"
+        | "model-placeholder-m36"
+        | "MODEL_PLACEHOLDER_M37"
+        | "model-placeholder-m37" => Some("gemini-3.1-pro-preview"),
+
+        "MODEL_PLACEHOLDER_M47" | "model-placeholder-m47" => Some("gemini-3-flash-preview"),
+
+        "model_openai_gpt_oss_120b_medium" | "model-openai-gpt-oss-120b-medium" => {
+            Some("openrouter/openai/gpt-oss-120b-medium")
+        }
 
         // Bare model names (often from -free stripping) → LiteLLM keys
         "kimi-k2.5" => Some("moonshot/kimi-k2.5"),
@@ -927,6 +981,64 @@ mod tests {
     }
 
     #[test]
+    fn test_lookup_gemini_3_1_uses_3_1_pricing_not_3_pro() {
+        let mut wrong_version = HashMap::new();
+        wrong_version.insert(
+            "gemini-3-pro-preview".to_string(),
+            make_pricing(0.000002, 0.000012),
+        );
+
+        assert!(lookup_model_pricing("gemini-3.1-pro-high", &wrong_version).is_none());
+        assert!(lookup_model_pricing("MODEL_PLACEHOLDER_M37", &wrong_version).is_none());
+
+        let mut map = HashMap::new();
+        map.insert(
+            "gemini-3.1-pro-preview".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+
+        assert_eq!(
+            lookup_model_pricing("gemini-3.1-pro-high", &map)
+                .unwrap()
+                .input_cost_per_token,
+            0.000003
+        );
+        assert_eq!(
+            lookup_model_pricing("MODEL_PLACEHOLDER_M37", &map)
+                .unwrap()
+                .input_cost_per_token,
+            0.000003
+        );
+        assert_eq!(
+            lookup_model_pricing("gemini-3.1-pro-preview-high", &map)
+                .unwrap()
+                .input_cost_per_token,
+            0.000003
+        );
+    }
+
+    #[test]
+    fn test_lookup_claude_4_5_thinking_variants_keep_pricing() {
+        let mut map = HashMap::new();
+        map.insert(
+            "claude-opus-4-5".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+
+        for model in [
+            "antigravity-claude-opus-4-5-thinking",
+            "claude-opus-4-5-thinking",
+            "claude-opus-4-5-thinking-high",
+            "claude-opus-4-5-thinking-medium",
+        ] {
+            assert!(
+                lookup_model_pricing(model, &map).is_some(),
+                "{model} should resolve to claude-opus-4-5 pricing"
+            );
+        }
+    }
+
+    #[test]
     fn test_lookup_claude_dot_version_alias() {
         let mut map = HashMap::new();
         map.insert(
@@ -936,6 +1048,62 @@ mod tests {
 
         let result = lookup_model_pricing("claude-opus-4.6", &map);
         assert!(result.is_some(), "claude-opus-4.6 should resolve via alias");
+    }
+
+    #[test]
+    fn test_lookup_claude_4_6_does_not_fall_back_to_4_5_pricing() {
+        let mut map = HashMap::new();
+        map.insert(
+            "openrouter/anthropic/claude-opus-4.5".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+        map.insert(
+            "openrouter/anthropic/claude-sonnet-4.5".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+
+        assert!(lookup_model_pricing("claude-opus-4-6", &map).is_none());
+        assert!(lookup_model_pricing("claude-sonnet-4-6", &map).is_none());
+        assert!(lookup_model_pricing("MODEL_PLACEHOLDER_M26", &map).is_none());
+        assert!(lookup_model_pricing("MODEL_PLACEHOLDER_M35", &map).is_none());
+    }
+
+    #[test]
+    fn test_lookup_claude_4_6_variants_use_4_6_pricing() {
+        let mut map = HashMap::new();
+        map.insert(
+            "openrouter/anthropic/claude-opus-4.6".to_string(),
+            make_pricing(0.000004, 0.00002),
+        );
+        map.insert(
+            "openrouter/anthropic/claude-sonnet-4.6".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+
+        assert_eq!(
+            lookup_model_pricing("claude-opus-4-6", &map)
+                .unwrap()
+                .input_cost_per_token,
+            0.000004
+        );
+        assert_eq!(
+            lookup_model_pricing("claude-opus-4-6-thinking", &map)
+                .unwrap()
+                .input_cost_per_token,
+            0.000004
+        );
+        assert_eq!(
+            lookup_model_pricing("claude-sonnet-4-6", &map)
+                .unwrap()
+                .input_cost_per_token,
+            0.000003
+        );
+        assert_eq!(
+            lookup_model_pricing("MODEL_PLACEHOLDER_M35", &map)
+                .unwrap()
+                .input_cost_per_token,
+            0.000003
+        );
     }
 
     #[test]

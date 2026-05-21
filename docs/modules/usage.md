@@ -22,7 +22,7 @@ Current provider maturity:
 - `OpenCode`: usable for daily token tracking
 - `Gemini CLI`: provisional parser, needs more real-world validation
 - `PI`: parser retained, secondary product scope
-- `Antigravity`: quota support exists, historical usage support is not complete
+- `Antigravity`: usable for daily token tracking and LS sync
 
 ## Architecture
 
@@ -202,9 +202,12 @@ tokenpulse usage -p claude,codex,opencode
 tokenpulse usage --refresh-days 2026-03-01:2026-03-07
 tokenpulse usage --refresh-pricing
 tokenpulse usage --rebuild-all
+tokenpulse usage -p antigravity --rebuild-cache
 ```
 
 `tokenpulse usage` now opens the interactive dashboard automatically when both stdin/stdout are attached to a terminal. Use `--no-tui` to force the plain-text summary for scripts, pipes, or quick dumps.
+
+Antigravity usage sync maintains raw cache files in `~/.config/tokenpulse/antigravity-cache/sessions/`. Regular runs rebuild sessions whose Antigravity or Antigravity CLI conversation files were modified in the last two days. `--rebuild-cache` removes and rebuilds all discoverable raw cache files for providers that support it; currently this applies to Antigravity and requires a running Antigravity language server.
 
 Non-TUI output includes:
 
@@ -296,7 +299,7 @@ Current limits worth keeping in mind:
 - durable append-only scan-state is not complete yet
 - weekly/monthly `session_count` should not be treated as audit-grade unique-session counts yet
 - Gemini historical accuracy needs more fixtures
-- Antigravity historical usage is not complete
+- Antigravity sync requires the active language server process to be running for real-time updates
 - cost accuracy depends on model pricing matching or source-provided cost
 
 ## Working Rules

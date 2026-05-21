@@ -74,7 +74,7 @@ Examples:
 |---|---|
 | `antigravity-claude-opus-4-5-thinking-high` | `antigravity-claude-opus-4-5-thinking` |
 | `gemini-3-pro-medium` | `gemini-3-pro` |
-| `z-ai/glm-5.1-low` | `glm-5-1` |
+| `z-ai/glm-5.1-low` | `z-ai/glm-5.1` |
 
 This normalization is intentionally applied only at the end of the model id so names that contain those words in the middle are preserved.
 

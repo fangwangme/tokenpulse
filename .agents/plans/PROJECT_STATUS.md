@@ -22,3 +22,9 @@
 - Simplified worktree structure around `.worktrees/` and `.local/`.
 - Removed the old shared-state convention from active project configuration.
 - Updated `.agents/` to use `notes/`, `plans/`, `archived/`, and project status tracking.
+
+### 2026-05-20
+
+- Integrated Antigravity usage and session data parsing.
+- Corrected the cascade/conversation ID mapping in the Antigravity local sync process.
+
