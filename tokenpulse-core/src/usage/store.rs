@@ -48,11 +48,10 @@ pub struct UsageStore {
 
 impl UsageStore {
     pub fn new() -> Self {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("tokenpulse");
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let data_dir = home.join(".local").join("share").join("tokenpulse");
         Self {
-            path: cache_dir.join("usage.sqlite3"),
+            path: data_dir.join("usage.db"),
         }
     }
 

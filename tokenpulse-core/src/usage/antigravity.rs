@@ -159,9 +159,10 @@ impl SessionParser for AntigravitySessionParser {
     }
 
     fn session_paths(&self) -> Vec<PathBuf> {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         vec![home
-            .join(".config")
+            .join(".local")
+            .join("share")
             .join("tokenpulse")
             .join("antigravity-cache")
             .join("sessions")]
@@ -240,6 +241,8 @@ fn sync_antigravity_with_options(
     sessions_dir: &Path,
     options: AntigravitySyncOptions,
 ) -> Result<()> {
+    std::fs::create_dir_all(sessions_dir)?;
+
     let connections = match detect_antigravity_connections() {
         Ok(c) => c,
         Err(e) => {
@@ -260,8 +263,6 @@ fn sync_antigravity_with_options(
         debug!("No running Antigravity language servers detected; skipping sync and reading cache");
         return Ok(());
     }
-
-    std::fs::create_dir_all(sessions_dir)?;
 
     let cached_files_before = count_antigravity_session_cache_files(sessions_dir);
     if options.rebuild_all_cache {
@@ -1496,7 +1497,7 @@ fn is_antigravity_process(command: &str) -> bool {
 }
 
 fn discover_local_conversation_ids() -> Vec<(String, Option<i64>)> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     discover_local_conversation_ids_from_home(&home)
 }
 
@@ -1523,11 +1524,29 @@ fn discover_local_conversation_ids_from_home(home: &Path) -> Vec<(String, Option
                         if ext == "pb" || ext == "db" {
                             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                                 if stem.len() >= 20 {
-                                    let modified_ms = path
+                                    let mut modified_ms = path
                                         .metadata()
                                         .ok()
                                         .and_then(|metadata| metadata.modified().ok())
                                         .and_then(system_time_to_millis);
+                                    if ext == "db" {
+                                        for extra_ext in &["db-wal", "db-shm"] {
+                                            let extra_path = path.with_extension(extra_ext);
+                                            if extra_path.exists() {
+                                                if let Some(extra_ms) = extra_path
+                                                    .metadata()
+                                                    .ok()
+                                                    .and_then(|metadata| metadata.modified().ok())
+                                                    .and_then(system_time_to_millis)
+                                                {
+                                                    modified_ms = match modified_ms {
+                                                        Some(m) => Some(m.max(extra_ms)),
+                                                        None => Some(extra_ms),
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
                                     session_ids.push((stem.to_string(), modified_ms));
                                 }
                             }
@@ -1706,7 +1725,7 @@ fn probe_endpoint_identity(scheme: &'static str, port: u16, csrf_token: &str) ->
         "GetAllCascadeTrajectories",
     ] {
         if let Some(body) = identity_probe_request(scheme, port, csrf_token, method) {
-            if response_contains_antigravity_marker(&body) {
+            if response_contains_antigravity_marker(method, &body) {
                 return true;
             }
         }
@@ -1734,7 +1753,7 @@ fn identity_probe_request(
     (status == 200).then_some(text)
 }
 
-fn response_contains_antigravity_marker(body: &str) -> bool {
+fn response_contains_antigravity_marker(method: &str, body: &str) -> bool {
     let trimmed = body.trim_start();
     let json_start = trimmed.find(['{', '[']);
     let Some(idx) = json_start else {
@@ -1743,6 +1762,14 @@ fn response_contains_antigravity_marker(body: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(&trimmed[idx..]) else {
         return prefix_contains_antigravity_marker(&trimmed[idx..]);
     };
+    if method == "GetAllCascadeTrajectories" {
+        if value.is_array() && value.as_array().map_or(false, |a| a.is_empty()) {
+            return true;
+        }
+        if value.is_object() && value.as_object().map_or(false, |m| m.is_empty()) {
+            return true;
+        }
+    }
     contains_antigravity_marker(&value)
 }
 
@@ -2200,7 +2227,17 @@ mod tests {
         let txt_file = "12345678901234567890.txt";
 
         std::fs::write(anti_dir.join(uuid_1), "mock").unwrap();
-        std::fs::write(cli_dir.join(uuid_2), "mock").unwrap();
+
+        let db_file_path = cli_dir.join(uuid_2);
+        std::fs::write(&db_file_path, "mock").unwrap();
+
+        // Wait briefly to ensure file modification times are different
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let wal_file_path = cli_dir.join("abcdefabcdefabcdefabcdef.db-wal");
+        std::fs::write(&wal_file_path, "mock").unwrap();
+        let wal_mtime = wal_file_path.metadata().unwrap().modified().unwrap();
+
         std::fs::write(anti_dir.join(non_uuid), "mock").unwrap();
         std::fs::write(cli_dir.join(txt_file), "mock").unwrap();
 
@@ -2210,8 +2247,13 @@ mod tests {
         assert!(discovered
             .iter()
             .any(|(id, modified_ms)| id == "12345678901234567890" && modified_ms.is_some()));
-        assert!(discovered
+
+        let db_entry = discovered
             .iter()
-            .any(|(id, modified_ms)| id == "abcdefabcdefabcdefabcdef" && modified_ms.is_some()));
+            .find(|(id, _)| id == "abcdefabcdefabcdefabcdef")
+            .unwrap();
+        let db_entry_mtime_ms = db_entry.1.unwrap();
+        let wal_mtime_ms = system_time_to_millis(wal_mtime).unwrap();
+        assert_eq!(db_entry_mtime_ms, wal_mtime_ms);
     }
 }

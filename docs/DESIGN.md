@@ -344,13 +344,13 @@ Token refresh:
 | PI | `~/.pi/agent/sessions/**/*.jsonl` | JSONL with header + entries |
 | GitHub Copilot | `~/.local/share/github-copilot/events.jsonl` | OTEL JSONL events |
 | Gemini CLI | `~/.gemini/tmp/**/session-*.json{,l}` | JSON + streamed JSONL session files |
-| Antigravity | `~/.config/tokenpulse/antigravity-cache/sessions/*.jsonl` | JSONL |
+| Antigravity | `~/.local/share/tokenpulse/antigravity-cache/sessions/*.jsonl` | JSONL |
 
 ### Pricing Source
 
 ```
 GET https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
-Cache: ~/.cache/tokenpulse/pricing.json (24h TTL)
+Cache: ~/.local/share/tokenpulse/pricing.json (24h TTL)
 ```
 
 ---
