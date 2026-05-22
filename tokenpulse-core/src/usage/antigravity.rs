@@ -236,10 +236,63 @@ pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
     sync_antigravity_with_options(sessions_dir, AntigravitySyncOptions::default())
 }
 
+fn link_or_copy(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        if std::os::unix::fs::symlink(src, dst).is_ok() {
+            return Ok(());
+        }
+    }
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_file(src, dst).is_ok() {
+            return Ok(());
+        }
+    }
+    std::fs::copy(src, dst).map(|_| ())
+}
+
+fn sync_cli_conversations_to_desktop(home: &Path) {
+    let cli_dir = home.join(".gemini").join("antigravity-cli").join("conversations");
+    let desktop_dir = home.join(".gemini").join("antigravity").join("conversations");
+    if !cli_dir.exists() || !desktop_dir.exists() {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(&cli_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(file_name) = path.file_name() {
+                    let dest_path = desktop_dir.join(file_name);
+                    if !dest_path.exists() {
+                        let _ = link_or_copy(&path, &dest_path);
+                    } else {
+                        if let Ok(src_meta) = path.metadata() {
+                            if let Ok(dest_meta) = dest_path.metadata() {
+                                if dest_meta.is_file() {
+                                    if let (Ok(src_mod), Ok(dest_mod)) = (src_meta.modified(), dest_meta.modified()) {
+                                        if src_mod > dest_mod {
+                                            let _ = std::fs::remove_file(&dest_path);
+                                            let _ = link_or_copy(&path, &dest_path);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn sync_antigravity_with_options(
     sessions_dir: &Path,
     options: AntigravitySyncOptions,
 ) -> Result<()> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+    sync_cli_conversations_to_desktop(&home);
+
     let connections = match detect_antigravity_connections() {
         Ok(c) => c,
         Err(e) => {
@@ -1523,11 +1576,29 @@ fn discover_local_conversation_ids_from_home(home: &Path) -> Vec<(String, Option
                         if ext == "pb" || ext == "db" {
                             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                                 if stem.len() >= 20 {
-                                    let modified_ms = path
+                                    let mut modified_ms = path
                                         .metadata()
                                         .ok()
                                         .and_then(|metadata| metadata.modified().ok())
                                         .and_then(system_time_to_millis);
+                                    if ext == "db" {
+                                        for extra_ext in &["db-wal", "db-shm"] {
+                                            let extra_path = path.with_extension(extra_ext);
+                                            if extra_path.exists() {
+                                                if let Some(extra_ms) = extra_path
+                                                    .metadata()
+                                                    .ok()
+                                                    .and_then(|metadata| metadata.modified().ok())
+                                                    .and_then(system_time_to_millis)
+                                                {
+                                                    modified_ms = match modified_ms {
+                                                        Some(m) => Some(m.max(extra_ms)),
+                                                        None => Some(extra_ms),
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
                                     session_ids.push((stem.to_string(), modified_ms));
                                 }
                             }
@@ -2203,7 +2274,17 @@ mod tests {
         let txt_file = "12345678901234567890.txt";
 
         std::fs::write(anti_dir.join(uuid_1), "mock").unwrap();
-        std::fs::write(cli_dir.join(uuid_2), "mock").unwrap();
+        
+        let db_file_path = cli_dir.join(uuid_2);
+        std::fs::write(&db_file_path, "mock").unwrap();
+        
+        // Wait briefly to ensure file modification times are different
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        
+        let wal_file_path = cli_dir.join("abcdefabcdefabcdefabcdef.db-wal");
+        std::fs::write(&wal_file_path, "mock").unwrap();
+        let wal_mtime = wal_file_path.metadata().unwrap().modified().unwrap();
+
         std::fs::write(anti_dir.join(non_uuid), "mock").unwrap();
         std::fs::write(cli_dir.join(txt_file), "mock").unwrap();
 
@@ -2213,8 +2294,13 @@ mod tests {
         assert!(discovered
             .iter()
             .any(|(id, modified_ms)| id == "12345678901234567890" && modified_ms.is_some()));
-        assert!(discovered
+        
+        let db_entry = discovered
             .iter()
-            .any(|(id, modified_ms)| id == "abcdefabcdefabcdefabcdef" && modified_ms.is_some()));
+            .find(|(id, _)| id == "abcdefabcdefabcdefabcdef")
+            .unwrap();
+        let db_entry_mtime_ms = db_entry.1.unwrap();
+        let wal_mtime_ms = system_time_to_millis(wal_mtime).unwrap();
+        assert_eq!(db_entry_mtime_ms, wal_mtime_ms);
     }
 }
