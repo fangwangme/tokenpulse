@@ -364,9 +364,8 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
 
     for (idx, quota_fetcher) in providers.into_iter().enumerate() {
         let provider_name = quota_fetcher.provider_name().to_string();
-        let use_cache = provider_name != "antigravity";
 
-        if use_cache && !refresh {
+        if !refresh {
             if let Some(cached) = cache_store.load_valid(&provider_name, observed_at)? {
                 results[idx] = Some(Ok(cached.snapshot));
                 continue;
@@ -379,10 +378,8 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
 
     let fetched_results = fetch_all(to_fetch).await;
     for ((idx, provider_name), result) in fetch_indices.into_iter().zip(fetched_results) {
-        if provider_name != "antigravity" {
-            if let Ok(snapshot) = &result {
-                cache_store.save(&provider_name, observed_at, snapshot)?;
-            }
+        if let Ok(snapshot) = &result {
+            cache_store.save(&provider_name, observed_at, snapshot)?;
         }
         results[idx] = Some(result);
     }

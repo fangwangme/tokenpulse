@@ -127,9 +127,7 @@ fn refresh_quota_results(
 
     for result in &results {
         if let Ok(snapshot) = result {
-            if snapshot.provider != "antigravity" {
-                cache_store.save(&snapshot.provider, observed_at, snapshot)?;
-            }
+            cache_store.save(&snapshot.provider, observed_at, snapshot)?;
         }
     }
 

@@ -49,9 +49,7 @@ pub fn detect_providers() -> Vec<DetectedProvider> {
             name: "antigravity".to_string(),
             display_name: "Antigravity".to_string(),
             detected: AntigravityAuth::detect(),
-            credential_hint: if AntigravityAuth::has_cli_keyring_credentials() {
-                "AGY CLI keyring credentials found".to_string()
-            } else if AntigravityAuth::detect() {
+            credential_hint: if AntigravityAuth::detect() {
                 "state.vscdb found".to_string()
             } else {
                 "not detected".to_string()
