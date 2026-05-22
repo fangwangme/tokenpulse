@@ -159,9 +159,10 @@ impl SessionParser for AntigravitySessionParser {
     }
 
     fn session_paths(&self) -> Vec<PathBuf> {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         vec![home
-            .join(".config")
+            .join(".local")
+            .join("share")
             .join("tokenpulse")
             .join("antigravity-cache")
             .join("sessions")]
@@ -236,144 +237,13 @@ pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
     sync_antigravity_with_options(sessions_dir, AntigravitySyncOptions::default())
 }
 
-fn link_or_copy(src: &Path, dst: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        if std::os::unix::fs::symlink(src, dst).is_ok() {
-            return Ok(());
-        }
-    }
-    #[cfg(windows)]
-    {
-        if std::os::windows::fs::symlink_file(src, dst).is_ok() {
-            return Ok(());
-        }
-    }
-    std::fs::copy(src, dst).map(|_| ())
-}
-
-fn cleanup_pending_symlinks(sessions_dir: &Path) {
-    let list_file = match sessions_dir.parent() {
-        Some(parent) => parent.join("pending-symlinks.json"),
-        None => return,
-    };
-    if list_file.exists() {
-        if let Ok(content) = std::fs::read_to_string(&list_file) {
-            if let Ok(paths) = serde_json::from_str::<Vec<PathBuf>>(&content) {
-                for path in paths {
-                    if path.exists() {
-                        let _ = std::fs::remove_file(&path);
-                    }
-                }
-            }
-        }
-        let _ = std::fs::remove_file(&list_file);
-    }
-}
-
-fn sync_cli_conversations_to_desktop(home: &Path, sessions_dir: &Path) -> Vec<PathBuf> {
-    let mut to_sync = Vec::new();
-    let cli_dir = home.join(".gemini").join("antigravity-cli").join("conversations");
-    let desktop_dir = home.join(".gemini").join("antigravity").join("conversations");
-    if !cli_dir.exists() || !desktop_dir.exists() {
-        return Vec::new();
-    }
-    if let Ok(entries) = std::fs::read_dir(&cli_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(file_name) = path.file_name() {
-                    let dest_path = desktop_dir.join(file_name);
-                    let should_link = if !dest_path.exists() {
-                        true
-                    } else {
-                        if let Ok(src_meta) = path.metadata() {
-                            if let Ok(dest_meta) = dest_path.metadata() {
-                                if dest_meta.is_file() {
-                                    if let (Ok(src_mod), Ok(dest_mod)) = (src_meta.modified(), dest_meta.modified()) {
-                                        src_mod > dest_mod
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    };
-                    if should_link {
-                        to_sync.push((path, dest_path));
-                    }
-                }
-            }
-        }
-    }
-
-    if to_sync.is_empty() {
-        return Vec::new();
-    }
-
-    if let Some(parent) = sessions_dir.parent() {
-        let list_file = parent.join("pending-symlinks.json");
-        let dest_paths: Vec<PathBuf> = to_sync.iter().map(|(_, dest)| dest.clone()).collect();
-        if let Ok(serialized) = serde_json::to_string(&dest_paths) {
-            let _ = std::fs::write(&list_file, serialized);
-        }
-    }
-
-    let mut synced_paths = Vec::new();
-    for (src, dest) in to_sync {
-        if dest.exists() {
-            let _ = std::fs::remove_file(&dest);
-        }
-        if link_or_copy(&src, &dest).is_ok() {
-            synced_paths.push(dest);
-        }
-    }
-    synced_paths
-}
-
-struct TempSymlinkGuard {
-    paths: Vec<PathBuf>,
-    list_file: Option<PathBuf>,
-}
-
-impl Drop for TempSymlinkGuard {
-    fn drop(&mut self) {
-        for path in &self.paths {
-            if path.exists() {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-        if let Some(ref list_file) = self.list_file {
-            if list_file.exists() {
-                let _ = std::fs::remove_file(list_file);
-            }
-        }
-    }
-}
-
 fn sync_antigravity_with_options(
     sessions_dir: &Path,
     options: AntigravitySyncOptions,
 ) -> Result<()> {
-    cleanup_pending_symlinks(sessions_dir);
-
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-
     if let Some(parent) = sessions_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
-
-    let synced_paths = sync_cli_conversations_to_desktop(&home, sessions_dir);
-    let _guard = TempSymlinkGuard {
-        paths: synced_paths,
-        list_file: sessions_dir.parent().map(|p| p.join("pending-symlinks.json")),
-    };
 
     let connections = match detect_antigravity_connections() {
         Ok(c) => c,
@@ -2386,27 +2256,4 @@ mod tests {
         assert_eq!(db_entry_mtime_ms, wal_mtime_ms);
     }
 
-    #[test]
-    fn test_cleanup_pending_symlinks() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let sessions_dir = temp_dir.path().join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-
-        let list_file = temp_dir.path().join("pending-symlinks.json");
-        let dummy_file = temp_dir.path().join("dummy_symlink.pb");
-        std::fs::write(&dummy_file, "dummy content").unwrap();
-
-        assert!(dummy_file.exists());
-
-        let paths = vec![dummy_file.clone()];
-        let serialized = serde_json::to_string(&paths).unwrap();
-        std::fs::write(&list_file, serialized).unwrap();
-
-        assert!(list_file.exists());
-
-        cleanup_pending_symlinks(&sessions_dir);
-
-        assert!(!dummy_file.exists());
-        assert!(!list_file.exists());
-    }
 }

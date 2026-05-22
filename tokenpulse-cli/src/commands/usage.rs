@@ -139,7 +139,7 @@ pub async fn run(
             eprintln!(" - OpenCode: ~/.local/share/opencode/");
             eprintln!(" - Gemini CLI: ~/.gemini/tmp/");
             eprintln!(" - PI: ~/.pi/agent/sessions/");
-            eprintln!(" - Antigravity: ~/.config/tokenpulse/antigravity-cache/sessions/");
+            eprintln!(" - Antigravity: ~/.local/share/tokenpulse/antigravity-cache/sessions/");
             eprintln!("\nIf Gemini totals look stale after this fix, run: tokenpulse usage -p gemini --rebuild-all");
         }
         return Ok(());

@@ -16,11 +16,11 @@ pub struct PricingCache {
 
 impl PricingCache {
     pub fn new() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-        let cache_dir = home.join(".cache").join("tokenpulse");
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let data_dir = home.join(".local").join("share").join("tokenpulse");
 
         Self {
-            cache_path: cache_dir.join("pricing.json"),
+            cache_path: data_dir.join("pricing.json"),
         }
     }
 

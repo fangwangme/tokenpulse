@@ -24,13 +24,10 @@ pub struct QuotaCacheStore {
 impl QuotaCacheStore {
     pub fn new() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let db_path = home
-            .join(".local")
-            .join("share")
-            .join("tokenpulse")
-            .join("tokenpulse.db");
-
-        Self { db_path }
+        let data_dir = home.join(".local").join("share").join("tokenpulse");
+        Self {
+            db_path: data_dir.join("tokenpulse.db"),
+        }
     }
 
     pub fn load_valid(

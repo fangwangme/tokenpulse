@@ -137,7 +137,7 @@ pub struct ConfigManager {
 impl ConfigManager {
     pub fn new() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let config_dir = home.join(".config").join("tokenpulse");
+        let config_dir = home.join(".local").join("share").join("tokenpulse");
 
         Self {
             config_path: config_dir.join("config.toml"),
