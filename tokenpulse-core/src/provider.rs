@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub struct QuotaSnapshot {
     pub provider: String,
     pub plan: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
     pub windows: Vec<RateWindow>,
     pub credits: Option<CreditInfo>,
     pub fetched_at: DateTime<Utc>,
@@ -220,6 +222,7 @@ mod tests {
         let snapshot = QuotaSnapshot {
             provider: "claude".to_string(),
             plan: Some("Pro".to_string()),
+            account: None,
             windows: vec![
                 RateWindow {
                     label: "Session".to_string(),
@@ -331,6 +334,7 @@ mod tests {
         let snapshot = QuotaSnapshot {
             provider: "claude".to_string(),
             plan: Some("Pro".to_string()),
+            account: None,
             windows: vec![],
             credits: None,
             fetched_at: Utc::now(),

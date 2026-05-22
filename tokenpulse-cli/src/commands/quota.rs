@@ -5,7 +5,7 @@ use tokenpulse_core::config::{ConfigManager, QuotaDisplayMode};
 use tokenpulse_core::{
     quota::{
         fetch_all, AntigravityQuotaFetcher, ClaudeQuotaFetcher, CodexQuotaFetcher,
-        CopilotQuotaFetcher, GeminiQuotaFetcher, QuotaCacheStore,
+        CopilotQuotaFetcher, QuotaCacheStore,
     },
     QuotaFetcher,
 };
@@ -214,6 +214,20 @@ fn format_provider_content(
 ) -> Vec<String> {
     let mut lines = vec![quota_display_name(&snapshot.provider).to_string()];
 
+    if snapshot.plan.is_some() || snapshot.account.is_some() {
+        let mut plan_line = String::new();
+        if let Some(account) = &snapshot.account {
+            plan_line.push_str(account);
+            if snapshot.plan.is_some() {
+                plan_line.push_str(" | ");
+            }
+        }
+        if let Some(plan) = &snapshot.plan {
+            plan_line.push_str(&format!("Plan: {}", plan));
+        }
+        lines.push(plan_line);
+    }
+
     for window in &snapshot.windows {
         lines.push(String::new());
         for line in format_window_block(window, display_mode) {
@@ -350,8 +364,9 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
 
     for (idx, quota_fetcher) in providers.into_iter().enumerate() {
         let provider_name = quota_fetcher.provider_name().to_string();
+        let use_cache = provider_name != "antigravity";
 
-        if !refresh {
+        if use_cache && !refresh {
             if let Some(cached) = cache_store.load_valid(&provider_name, observed_at)? {
                 results[idx] = Some(Ok(cached.snapshot));
                 continue;
@@ -364,8 +379,10 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
 
     let fetched_results = fetch_all(to_fetch).await;
     for ((idx, provider_name), result) in fetch_indices.into_iter().zip(fetched_results) {
-        if let Ok(snapshot) = &result {
-            cache_store.save(&provider_name, observed_at, snapshot)?;
+        if provider_name != "antigravity" {
+            if let Ok(snapshot) = &result {
+                cache_store.save(&provider_name, observed_at, snapshot)?;
+            }
         }
         results[idx] = Some(result);
     }
@@ -457,12 +474,6 @@ const QUOTA_PROVIDERS: &[QuotaProviderEntry] = &[
         display_name: "GITHUB COPILOT",
         url: "https://github.com/features/copilot",
         make_fetcher: || Box::new(CopilotQuotaFetcher::new()),
-    },
-    QuotaProviderEntry {
-        id: "gemini",
-        display_name: "GEMINI CLI",
-        url: "https://github.com/google-gemini/gemini-cli",
-        make_fetcher: || Box::new(GeminiQuotaFetcher::new()),
     },
     QuotaProviderEntry {
         id: "antigravity",

@@ -127,7 +127,9 @@ fn refresh_quota_results(
 
     for result in &results {
         if let Ok(snapshot) = result {
-            cache_store.save(&snapshot.provider, observed_at, snapshot)?;
+            if snapshot.provider != "antigravity" {
+                cache_store.save(&snapshot.provider, observed_at, snapshot)?;
+            }
         }
     }
 
@@ -571,7 +573,7 @@ fn render_snapshot_card(
     let fixed_label_width = max_label_len.min(inner.width.saturating_sub(30) as usize);
 
     let mut constraints = Vec::new();
-    if snapshot.plan.is_some() {
+    if snapshot.plan.is_some() || snapshot.account.is_some() {
         constraints.push(Constraint::Length(1));
     }
     for _ in &windows {
@@ -588,11 +590,25 @@ fn render_snapshot_card(
         .split(inner);
 
     let mut cursor = 0usize;
-    if let Some(plan) = &snapshot.plan {
-        let line = Paragraph::new(Line::from(vec![
-            Span::styled("Plan ", Style::default().fg(theme.dim)),
-            Span::styled(plan.clone(), Style::default().fg(theme.fg).bold()),
-        ]));
+    if snapshot.plan.is_some() || snapshot.account.is_some() {
+        let mut spans = Vec::new();
+        if let Some(account) = &snapshot.account {
+            spans.push(Span::styled(
+                account.clone(),
+                Style::default().fg(theme.fg).bold(),
+            ));
+            if snapshot.plan.is_some() {
+                spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
+            }
+        }
+        if let Some(plan) = &snapshot.plan {
+            spans.push(Span::styled("Plan ", Style::default().fg(theme.dim)));
+            spans.push(Span::styled(
+                plan.clone(),
+                Style::default().fg(theme.fg).bold(),
+            ));
+        }
+        let line = Paragraph::new(Line::from(spans));
         f.render_widget(line, sections[cursor]);
         cursor += 1;
     }

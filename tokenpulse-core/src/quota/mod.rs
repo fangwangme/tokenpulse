@@ -3,14 +3,12 @@ pub mod cache;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
-pub mod gemini;
 
 pub use antigravity::AntigravityQuotaFetcher;
 pub use cache::{CachedQuotaSnapshot, QuotaCacheStore};
 pub use claude::ClaudeQuotaFetcher;
 pub use codex::CodexQuotaFetcher;
 pub use copilot::CopilotQuotaFetcher;
-pub use gemini::GeminiQuotaFetcher;
 
 use crate::{QuotaFetcher, QuotaSnapshot};
 use anyhow::Result;

@@ -215,9 +215,27 @@ impl SessionParser for AntigravitySessionParser {
 pub struct AntigravityConnection {
     pub pid: u32,
     pub port: u16,
-    pub csrf_token: String,
+    pub csrf_token: Option<String>,
     pub scheme: String,
     pub fingerprint: String,
+    pub runtime_kind: AntigravityRuntimeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AntigravityRuntimeKind {
+    Desktop,
+    Cli,
+    Unknown,
+}
+
+impl AntigravityRuntimeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Cli => "cli",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -225,7 +243,15 @@ struct ProcessCandidate {
     pid: u32,
     ppid: u32,
     declared_port: Option<u16>,
-    csrf_token: String,
+    csrf_token: Option<String>,
+    runtime_kind: AntigravityRuntimeKind,
+}
+
+#[derive(Debug, Clone)]
+struct LocalConversationId {
+    session_id: String,
+    modified_ms: Option<i64>,
+    runtime_kind: AntigravityRuntimeKind,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -281,8 +307,7 @@ fn sync_antigravity_with_options(
 
     let mut synced_sessions_count = 0;
 
-    let mut unique_summaries: HashMap<String, (Option<i64>, Vec<AntigravityConnection>)> =
-        HashMap::new();
+    let mut unique_summaries: HashMap<String, AntigravitySyncSummary> = HashMap::new();
     for connection in &connections {
         let response = match rpc_request(connection, "GetAllCascadeTrajectories", &json!({})) {
             Ok(r) => r,
@@ -337,11 +362,18 @@ fn sync_antigravity_with_options(
         "Discovered {} local conversation files",
         local_conversation_ids.len()
     );
-    for (session_id, local_modified_ms) in local_conversation_ids {
-        if let Some((existing_lm, _)) = unique_summaries.get_mut(&session_id) {
-            *existing_lm = newer_timestamp(*existing_lm, local_modified_ms);
+    for local in local_conversation_ids {
+        if let Some(summary) = unique_summaries.get_mut(&local.session_id) {
+            summary.last_modified_ms = newer_timestamp(summary.last_modified_ms, local.modified_ms);
+            prioritize_connections_for_runtime(summary, &connections, local.runtime_kind);
         } else {
-            unique_summaries.insert(session_id, (local_modified_ms, connections.clone()));
+            unique_summaries.insert(
+                local.session_id,
+                AntigravitySyncSummary {
+                    last_modified_ms: local.modified_ms,
+                    connections: connections_for_runtime(&connections, local.runtime_kind),
+                },
+            );
         }
     }
 
@@ -349,7 +381,8 @@ fn sync_antigravity_with_options(
     let now_ms = Local::now().timestamp_millis();
     let sync_threshold_ms = now_ms - ANTIGRAVITY_DEFAULT_CACHE_REBUILD_WINDOW_MS;
 
-    for (session_id, (last_modified_ms, conns)) in unique_summaries {
+    for (session_id, summary) in unique_summaries {
+        let last_modified_ms = summary.last_modified_ms;
         let lm = last_modified_ms.unwrap_or(now_ms);
         let file_name = session_artifact_file_stem(&session_id);
         let path = sessions_dir.join(format!("{}.jsonl", file_name));
@@ -359,10 +392,13 @@ fn sync_antigravity_with_options(
         }
 
         let mut metadata_response = None;
-        for conn in &conns {
+        for conn in &summary.connections {
             debug!(
-                "Syncing Antigravity session {} (modified: {:?}) from port {}",
-                session_id, last_modified_ms, conn.port
+                "Syncing Antigravity session {} (modified: {:?}) from {} port {}",
+                session_id,
+                last_modified_ms,
+                conn.runtime_kind.as_str(),
+                conn.port
             );
             match rpc_request(
                 conn,
@@ -485,22 +521,85 @@ fn sync_antigravity_with_options(
 }
 
 fn upsert_sync_summary(
-    summaries: &mut HashMap<String, (Option<i64>, Vec<AntigravityConnection>)>,
+    summaries: &mut HashMap<String, AntigravitySyncSummary>,
     session_id: String,
     last_modified_ms: Option<i64>,
     conn: AntigravityConnection,
 ) {
-    if let Some((existing_lm, conns)) = summaries.get_mut(&session_id) {
-        *existing_lm = newer_timestamp(*existing_lm, last_modified_ms);
-        if !conns
-            .iter()
-            .any(|c| c.pid == conn.pid && c.port == conn.port)
-        {
-            conns.push(conn);
-        }
+    if let Some(summary) = summaries.get_mut(&session_id) {
+        summary.last_modified_ms = newer_timestamp(summary.last_modified_ms, last_modified_ms);
+        push_unique_connection(&mut summary.connections, conn);
     } else {
-        summaries.insert(session_id, (last_modified_ms, vec![conn]));
+        summaries.insert(
+            session_id,
+            AntigravitySyncSummary {
+                last_modified_ms,
+                connections: vec![conn],
+            },
+        );
     }
+}
+
+#[derive(Debug, Clone)]
+struct AntigravitySyncSummary {
+    last_modified_ms: Option<i64>,
+    connections: Vec<AntigravityConnection>,
+}
+
+fn push_unique_connection(
+    connections: &mut Vec<AntigravityConnection>,
+    conn: AntigravityConnection,
+) {
+    if !connections
+        .iter()
+        .any(|c| c.pid == conn.pid && c.port == conn.port)
+    {
+        connections.push(conn);
+    }
+}
+
+fn connections_for_runtime(
+    connections: &[AntigravityConnection],
+    runtime_kind: AntigravityRuntimeKind,
+) -> Vec<AntigravityConnection> {
+    let mut ordered = Vec::new();
+    if runtime_kind != AntigravityRuntimeKind::Unknown {
+        for conn in connections
+            .iter()
+            .filter(|conn| conn.runtime_kind == runtime_kind)
+        {
+            push_unique_connection(&mut ordered, conn.clone());
+        }
+    }
+    for conn in connections {
+        push_unique_connection(&mut ordered, conn.clone());
+    }
+    ordered
+}
+
+fn prioritize_connections_for_runtime(
+    summary: &mut AntigravitySyncSummary,
+    all_connections: &[AntigravityConnection],
+    runtime_kind: AntigravityRuntimeKind,
+) {
+    if runtime_kind == AntigravityRuntimeKind::Unknown {
+        return;
+    }
+
+    let mut ordered = Vec::new();
+    for conn in all_connections
+        .iter()
+        .filter(|conn| conn.runtime_kind == runtime_kind)
+    {
+        push_unique_connection(&mut ordered, conn.clone());
+    }
+    for conn in summary.connections.drain(..) {
+        push_unique_connection(&mut ordered, conn);
+    }
+    for conn in all_connections {
+        push_unique_connection(&mut ordered, conn.clone());
+    }
+    summary.connections = ordered;
 }
 
 fn newer_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
@@ -1388,13 +1487,14 @@ pub fn detect_antigravity_connections() -> Result<Vec<AntigravityConnection>> {
     for candidate in candidates {
         let ports = candidate_probe_ports(&candidate, find_listening_ports(candidate.pid)?);
         for port in ports {
-            if let Some(scheme) = probe_heartbeat(port, &candidate.csrf_token) {
+            if let Some(scheme) = probe_heartbeat(port, candidate.csrf_token.as_deref()) {
                 connections.push(AntigravityConnection {
                     pid: candidate.pid,
                     port,
                     csrf_token: candidate.csrf_token.clone(),
                     scheme: scheme.to_string(),
                     fingerprint: format!("pid:{}:{}:{}", candidate.pid, scheme, port),
+                    runtime_kind: candidate.runtime_kind,
                 });
                 break;
             }
@@ -1450,26 +1550,30 @@ fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
             continue;
         }
 
-        let exe_ok = process_executable_path(pid)
+        let exe_path = process_executable_path(pid);
+        let exe_ok = exe_path
+            .as_ref()
             .map(|path| {
                 let lower = path.to_string_lossy().to_lowercase();
-                lower.contains("antigravity") || lower.contains("language_server")
+                lower.contains("antigravity")
+                    || lower.contains("language_server")
+                    || path_basename_is(path, "agy")
             })
             .unwrap_or(true);
         if !exe_ok {
             continue;
         }
 
-        let Some(csrf_token) = extract_csrf_token(&command) else {
-            continue;
-        };
+        let csrf_token = extract_csrf_token(&command);
         let declared_port = extract_declared_port(&command);
+        let runtime_kind = infer_antigravity_runtime_kind(&command, exe_path.as_deref());
 
         candidates.push(ProcessCandidate {
             pid,
             ppid,
             declared_port,
             csrf_token,
+            runtime_kind,
         });
     }
 
@@ -1487,6 +1591,7 @@ fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
 
 fn is_antigravity_process(command: &str) -> bool {
     let lower = command.to_lowercase();
+    let first_token = command.split_whitespace().next().unwrap_or("");
     (lower.contains("language_server")
         && (lower.contains("antigravity")
             || lower.contains("--app_data_dir") && lower.contains("antigravity")))
@@ -1494,25 +1599,68 @@ fn is_antigravity_process(command: &str) -> bool {
         || lower.contains("\\antigravity\\")
         || lower.contains("/antigravity-cli/")
         || lower.contains("\\antigravity-cli\\")
+        || path_basename_is(Path::new(first_token), "agy")
 }
 
-fn discover_local_conversation_ids() -> Vec<(String, Option<i64>)> {
+fn infer_antigravity_runtime_kind(
+    command: &str,
+    exe_path: Option<&Path>,
+) -> AntigravityRuntimeKind {
+    let lower = command.to_lowercase();
+    let exe_lower = exe_path
+        .map(|path| path.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let first_token = command.split_whitespace().next().unwrap_or("");
+
+    if lower.contains("antigravity-cli")
+        || exe_lower.contains("antigravity-cli")
+        || path_basename_is(Path::new(first_token), "agy")
+        || exe_path.map_or(false, |path| path_basename_is(path, "agy"))
+        || extract_flag_value(command, "--app_data_dir").as_deref() == Some("antigravity-cli")
+    {
+        AntigravityRuntimeKind::Cli
+    } else if lower.contains("/antigravity/")
+        || lower.contains("\\antigravity\\")
+        || lower.contains("antigravity.app")
+        || exe_lower.contains("antigravity.app")
+        || extract_flag_value(command, "--app_data_dir").as_deref() == Some("antigravity")
+    {
+        AntigravityRuntimeKind::Desktop
+    } else {
+        AntigravityRuntimeKind::Unknown
+    }
+}
+
+fn path_basename_is(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
+fn discover_local_conversation_ids() -> Vec<LocalConversationId> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     discover_local_conversation_ids_from_home(&home)
 }
 
-fn discover_local_conversation_ids_from_home(home: &Path) -> Vec<(String, Option<i64>)> {
+fn discover_local_conversation_ids_from_home(home: &Path) -> Vec<LocalConversationId> {
     let dirs = vec![
-        home.join(".gemini")
-            .join("antigravity")
-            .join("conversations"),
-        home.join(".gemini")
-            .join("antigravity-cli")
-            .join("conversations"),
+        (
+            home.join(".gemini")
+                .join("antigravity")
+                .join("conversations"),
+            AntigravityRuntimeKind::Desktop,
+        ),
+        (
+            home.join(".gemini")
+                .join("antigravity-cli")
+                .join("conversations"),
+            AntigravityRuntimeKind::Cli,
+        ),
     ];
 
     let mut session_ids = Vec::new();
-    for dir in dirs {
+    for (dir, runtime_kind) in dirs {
         if !dir.exists() {
             continue;
         }
@@ -1547,7 +1695,11 @@ fn discover_local_conversation_ids_from_home(home: &Path) -> Vec<(String, Option
                                             }
                                         }
                                     }
-                                    session_ids.push((stem.to_string(), modified_ms));
+                                    session_ids.push(LocalConversationId {
+                                        session_id: stem.to_string(),
+                                        modified_ms,
+                                        runtime_kind,
+                                    });
                                 }
                             }
                         }
@@ -1556,8 +1708,14 @@ fn discover_local_conversation_ids_from_home(home: &Path) -> Vec<(String, Option
             }
         }
     }
-    session_ids.sort_by(|left, right| left.0.cmp(&right.0));
-    session_ids.dedup_by(|left, right| left.0 == right.0);
+    session_ids.sort_by(|left, right| {
+        left.session_id
+            .cmp(&right.session_id)
+            .then_with(|| left.modified_ms.cmp(&right.modified_ms))
+    });
+    session_ids.dedup_by(|left, right| {
+        left.session_id == right.session_id && left.runtime_kind == right.runtime_kind
+    });
     session_ids
 }
 
@@ -1682,7 +1840,7 @@ fn parse_port_from_line(line: &str) -> Option<u16> {
     None
 }
 
-fn probe_heartbeat(port: u16, csrf_token: &str) -> Option<&'static str> {
+fn probe_heartbeat(port: u16, csrf_token: Option<&str>) -> Option<&'static str> {
     for scheme in ["https", "http"] {
         if probe_heartbeat_with_scheme(scheme, port, csrf_token) {
             return Some(scheme);
@@ -1691,7 +1849,7 @@ fn probe_heartbeat(port: u16, csrf_token: &str) -> Option<&'static str> {
     None
 }
 
-fn probe_heartbeat_with_scheme(scheme: &'static str, port: u16, csrf_token: &str) -> bool {
+fn probe_heartbeat_with_scheme(scheme: &'static str, port: u16, csrf_token: Option<&str>) -> bool {
     let body = json!({ "uuid": "00000000-0000-0000-0000-000000000000" });
     let Ok((status, text)) = language_server_request_text(
         scheme,
@@ -1719,7 +1877,7 @@ fn heartbeat_response_looks_well_formed(body: &str) -> bool {
     serde_json::from_str::<Value>(slice).is_ok()
 }
 
-fn probe_endpoint_identity(scheme: &'static str, port: u16, csrf_token: &str) -> bool {
+fn probe_endpoint_identity(scheme: &'static str, port: u16, csrf_token: Option<&str>) -> bool {
     for method in [
         "GetCascadeTrajectoryGeneratorMetadata",
         "GetAllCascadeTrajectories",
@@ -1736,7 +1894,7 @@ fn probe_endpoint_identity(scheme: &'static str, port: u16, csrf_token: &str) ->
 fn identity_probe_request(
     scheme: &'static str,
     port: u16,
-    csrf_token: &str,
+    csrf_token: Option<&str>,
     method: &str,
 ) -> Option<String> {
     let (status, text) = language_server_request_text(
@@ -1830,7 +1988,7 @@ fn run_command(program: &str, args: &[&str]) -> Result<String> {
 fn language_server_request_text(
     scheme: &str,
     port: u16,
-    csrf_token: &str,
+    csrf_token: Option<&str>,
     method: &str,
     body: &Value,
     timeout: Duration,
@@ -1841,20 +1999,24 @@ fn language_server_request_text(
         scheme, port, ANTIGRAVITY_LS_SERVICE, method
     );
     let body_text = serde_json::to_string(body)?;
-    let csrf_token = csrf_token.to_string();
+    let csrf_token = csrf_token
+        .filter(|token| !token.trim().is_empty())
+        .map(String::from);
 
     std::thread::spawn(move || -> Result<(u16, String)> {
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)
             .danger_accept_invalid_certs(true)
             .build()?;
-        let response = client
+        let mut request = client
             .post(url)
             .header("Content-Type", "application/json")
             .header("Connect-Protocol-Version", "1")
-            .header("X-Codeium-Csrf-Token", csrf_token)
-            .body(body_text)
-            .send()?;
+            .body(body_text);
+        if let Some(csrf_token) = csrf_token {
+            request = request.header("X-Codeium-Csrf-Token", csrf_token);
+        }
+        let response = request.send()?;
         let status_code = response.status().as_u16();
 
         if let Some(length) = response.content_length() {
@@ -1881,7 +2043,7 @@ fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -
     let (status_code, response_body) = language_server_request_text(
         &connection.scheme,
         connection.port,
-        &connection.csrf_token,
+        connection.csrf_token.as_deref(),
         method,
         body,
         Duration::from_secs(10),
@@ -2204,6 +2366,24 @@ mod tests {
     }
 
     #[test]
+    fn test_detects_antigravity_cli_process_shape() {
+        assert!(is_antigravity_process("agy"));
+        assert!(is_antigravity_process("/Users/test/.local/bin/agy"));
+        assert_eq!(
+            infer_antigravity_runtime_kind("agy", None),
+            AntigravityRuntimeKind::Cli
+        );
+        assert_eq!(
+            infer_antigravity_runtime_kind("language_server --app_data_dir antigravity-cli", None),
+            AntigravityRuntimeKind::Cli
+        );
+        assert_eq!(
+            infer_antigravity_runtime_kind("language_server --app_data_dir antigravity", None),
+            AntigravityRuntimeKind::Desktop
+        );
+    }
+
+    #[test]
     fn test_session_artifact_file_stem_uses_stable_hash() {
         assert_eq!(
             session_artifact_file_stem("session/with spaces"),
@@ -2246,13 +2426,16 @@ mod tests {
         assert_eq!(discovered.len(), 2);
         assert!(discovered
             .iter()
-            .any(|(id, modified_ms)| id == "12345678901234567890" && modified_ms.is_some()));
+            .any(|entry| entry.session_id == "12345678901234567890"
+                && entry.modified_ms.is_some()
+                && entry.runtime_kind == AntigravityRuntimeKind::Desktop));
 
         let db_entry = discovered
             .iter()
-            .find(|(id, _)| id == "abcdefabcdefabcdefabcdef")
+            .find(|entry| entry.session_id == "abcdefabcdefabcdefabcdef")
             .unwrap();
-        let db_entry_mtime_ms = db_entry.1.unwrap();
+        assert_eq!(db_entry.runtime_kind, AntigravityRuntimeKind::Cli);
+        let db_entry_mtime_ms = db_entry.modified_ms.unwrap();
         let wal_mtime_ms = system_time_to_millis(wal_mtime).unwrap();
         assert_eq!(db_entry_mtime_ms, wal_mtime_ms);
     }
