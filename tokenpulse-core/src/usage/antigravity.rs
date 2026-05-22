@@ -252,11 +252,12 @@ fn link_or_copy(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::copy(src, dst).map(|_| ())
 }
 
-fn sync_cli_conversations_to_desktop(home: &Path) {
+fn sync_cli_conversations_to_desktop(home: &Path) -> Vec<PathBuf> {
+    let mut synced_paths = Vec::new();
     let cli_dir = home.join(".gemini").join("antigravity-cli").join("conversations");
     let desktop_dir = home.join(".gemini").join("antigravity").join("conversations");
     if !cli_dir.exists() || !desktop_dir.exists() {
-        return;
+        return synced_paths;
     }
     if let Ok(entries) = std::fs::read_dir(&cli_dir) {
         for entry in entries.flatten() {
@@ -265,7 +266,9 @@ fn sync_cli_conversations_to_desktop(home: &Path) {
                 if let Some(file_name) = path.file_name() {
                     let dest_path = desktop_dir.join(file_name);
                     if !dest_path.exists() {
-                        let _ = link_or_copy(&path, &dest_path);
+                        if link_or_copy(&path, &dest_path).is_ok() {
+                            synced_paths.push(dest_path);
+                        }
                     } else {
                         if let Ok(src_meta) = path.metadata() {
                             if let Ok(dest_meta) = dest_path.metadata() {
@@ -273,7 +276,11 @@ fn sync_cli_conversations_to_desktop(home: &Path) {
                                     if let (Ok(src_mod), Ok(dest_mod)) = (src_meta.modified(), dest_meta.modified()) {
                                         if src_mod > dest_mod {
                                             let _ = std::fs::remove_file(&dest_path);
-                                            let _ = link_or_copy(&path, &dest_path);
+                                            if link_or_copy(&path, &dest_path).is_ok() {
+                                                synced_paths.push(dest_path);
+                                            }
+                                        } else {
+                                            synced_paths.push(dest_path);
                                         }
                                     }
                                 }
@@ -284,6 +291,21 @@ fn sync_cli_conversations_to_desktop(home: &Path) {
             }
         }
     }
+    synced_paths
+}
+
+struct TempSymlinkGuard {
+    paths: Vec<PathBuf>,
+}
+
+impl Drop for TempSymlinkGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            if path.exists() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
 }
 
 fn sync_antigravity_with_options(
@@ -291,7 +313,8 @@ fn sync_antigravity_with_options(
     options: AntigravitySyncOptions,
 ) -> Result<()> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    sync_cli_conversations_to_desktop(&home);
+    let synced_paths = sync_cli_conversations_to_desktop(&home);
+    let _guard = TempSymlinkGuard { paths: synced_paths };
 
     let connections = match detect_antigravity_connections() {
         Ok(c) => c,
