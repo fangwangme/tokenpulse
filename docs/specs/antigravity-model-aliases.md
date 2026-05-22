@@ -33,7 +33,7 @@ placeholder no longer appears in the live model list.
 
 TokenPulse persists every dynamically observed mapping in:
 
-`~/.config/tokenpulse/antigravity-cache/model-aliases.json`
+`~/.local/share/tokenpulse/antigravity-cache/model-aliases.json`
 
 That file is a historical mapping ledger. Each sync seeds it from the static
 table and merges the current `GetUserStatus` model list into the ledger,

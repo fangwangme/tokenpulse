@@ -128,7 +128,7 @@ tokenpulse usage -p antigravity --rebuild-cache
 
 If you previously ingested Gemini usage before the parser fix, the next `tokenpulse usage` run will automatically rebuild stored Gemini rows when it sees an older parser version. You can also force a one-shot refresh with `tokenpulse usage -p gemini --rebuild-all`.
 
-Antigravity keeps a TokenPulse-managed raw cache under `~/.config/tokenpulse/antigravity-cache/`. Normal usage runs refresh Antigravity sessions whose local conversation files changed in the last two days. Use `tokenpulse usage -p antigravity --rebuild-cache` to rebuild all discoverable Antigravity raw cache files from a running Antigravity language server.
+Antigravity keeps a TokenPulse-managed raw cache under `~/.local/share/tokenpulse/antigravity-cache/`. Normal usage runs refresh Antigravity sessions whose local conversation files changed in the last two days. Use `tokenpulse usage -p antigravity --rebuild-cache` to rebuild all discoverable Antigravity raw cache files from a running Antigravity language server.
 
 ## Data Model
 
@@ -141,11 +141,11 @@ The usage dashboard keeps those separate so the same model family can be attribu
 
 ## Local Storage
 
-TokenPulse stores local state under standard cache/config locations:
+TokenPulse stores local state under a single unified directory:
 
-- config: `~/.config/tokenpulse/config.toml`
-- usage ledger: platform cache dir, typically `~/Library/Caches/tokenpulse/usage.sqlite3` on macOS
-- pricing cache: `~/.cache/tokenpulse/pricing.json`
+- config: `~/.local/share/tokenpulse/config.toml`
+- usage ledger: `~/.local/share/tokenpulse/usage.db`
+- pricing cache: `~/.local/share/tokenpulse/pricing.json`
 
 ## Project Structure
 

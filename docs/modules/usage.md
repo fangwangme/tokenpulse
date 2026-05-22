@@ -110,7 +110,7 @@ pub struct UsageRollup {
 
 The usage ledger lives in the user cache directory:
 
-- default path: `~/.cache/tokenpulse/usage.sqlite3`
+- default path: `~/.local/share/tokenpulse/usage.db`
 
 Main tables:
 
@@ -207,7 +207,7 @@ tokenpulse usage -p antigravity --rebuild-cache
 
 `tokenpulse usage` now opens the interactive dashboard automatically when both stdin/stdout are attached to a terminal. Use `--no-tui` to force the plain-text summary for scripts, pipes, or quick dumps.
 
-Antigravity usage sync maintains raw cache files in `~/.config/tokenpulse/antigravity-cache/sessions/`. Regular runs rebuild sessions whose Antigravity or Antigravity CLI conversation files were modified in the last two days. `--rebuild-cache` removes and rebuilds all discoverable raw cache files for providers that support it; currently this applies to Antigravity and requires a running Antigravity language server.
+Antigravity usage sync maintains raw cache files in `~/.local/share/tokenpulse/antigravity-cache/sessions/`. Regular runs rebuild sessions whose Antigravity or Antigravity CLI conversation files were modified in the last two days. `--rebuild-cache` removes and rebuilds all discoverable raw cache files for providers that support it; currently this applies to Antigravity and requires a running Antigravity language server.
 
 Non-TUI output includes:
 
@@ -233,7 +233,7 @@ All tabs support runtime source filtering:
 - Press `s` to open filter overlay
 - Toggle individual providers on/off
 - Data in all views updates immediately
-- Config file (`~/.config/tokenpulse/config.toml`) controls which providers are loaded
+- Config file (`~/.local/share/tokenpulse/config.toml`) controls which providers are loaded
 
 ### `Overview`
 

@@ -31,7 +31,7 @@ https://models.dev/api.json
 https://openrouter.ai/api/v1/models
 ```
 
-**Cache:** `~/.cache/tokenpulse/pricing.json`
+**Cache:** `~/.local/share/tokenpulse/pricing.json`
 **TTL:** 24 hours. If all live fetches fail, TokenPulse uses the stale merged cache.
 
 ## Data Model

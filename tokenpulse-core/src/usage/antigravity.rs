@@ -241,9 +241,7 @@ fn sync_antigravity_with_options(
     sessions_dir: &Path,
     options: AntigravitySyncOptions,
 ) -> Result<()> {
-    if let Some(parent) = sessions_dir.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    std::fs::create_dir_all(sessions_dir)?;
 
     let connections = match detect_antigravity_connections() {
         Ok(c) => c,
@@ -265,8 +263,6 @@ fn sync_antigravity_with_options(
         debug!("No running Antigravity language servers detected; skipping sync and reading cache");
         return Ok(());
     }
-
-    std::fs::create_dir_all(sessions_dir)?;
 
     let cached_files_before = count_antigravity_session_cache_files(sessions_dir);
     if options.rebuild_all_cache {
@@ -1501,7 +1497,7 @@ fn is_antigravity_process(command: &str) -> bool {
 }
 
 fn discover_local_conversation_ids() -> Vec<(String, Option<i64>)> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     discover_local_conversation_ids_from_home(&home)
 }
 
@@ -1766,8 +1762,13 @@ fn response_contains_antigravity_marker(method: &str, body: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(&trimmed[idx..]) else {
         return prefix_contains_antigravity_marker(&trimmed[idx..]);
     };
-    if method == "GetAllCascadeTrajectories" && (value.is_object() || value.is_array()) {
-        return true;
+    if method == "GetAllCascadeTrajectories" {
+        if value.is_array() && value.as_array().map_or(false, |a| a.is_empty()) {
+            return true;
+        }
+        if value.is_object() && value.as_object().map_or(false, |m| m.is_empty()) {
+            return true;
+        }
     }
     contains_antigravity_marker(&value)
 }
