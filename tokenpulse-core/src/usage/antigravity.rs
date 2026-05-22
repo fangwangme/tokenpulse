@@ -1706,7 +1706,7 @@ fn probe_endpoint_identity(scheme: &'static str, port: u16, csrf_token: &str) ->
         "GetAllCascadeTrajectories",
     ] {
         if let Some(body) = identity_probe_request(scheme, port, csrf_token, method) {
-            if response_contains_antigravity_marker(&body) {
+            if response_contains_antigravity_marker(method, &body) {
                 return true;
             }
         }
@@ -1734,7 +1734,7 @@ fn identity_probe_request(
     (status == 200).then_some(text)
 }
 
-fn response_contains_antigravity_marker(body: &str) -> bool {
+fn response_contains_antigravity_marker(method: &str, body: &str) -> bool {
     let trimmed = body.trim_start();
     let json_start = trimmed.find(['{', '[']);
     let Some(idx) = json_start else {
@@ -1743,6 +1743,9 @@ fn response_contains_antigravity_marker(body: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(&trimmed[idx..]) else {
         return prefix_contains_antigravity_marker(&trimmed[idx..]);
     };
+    if method == "GetAllCascadeTrajectories" && (value.is_object() || value.is_array()) {
+        return true;
+    }
     contains_antigravity_marker(&value)
 }
 
