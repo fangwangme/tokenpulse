@@ -235,7 +235,7 @@ fn open_cache_db(sessions_dir: &Path) -> Result<rusqlite::Connection> {
     let db_path = sessions_dir.join("cache.db");
     let conn = rusqlite::Connection::open(db_path)?;
     conn.execute("PRAGMA foreign_keys = ON;", [])?;
-    
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sessions (
             session_id TEXT PRIMARY KEY,
@@ -296,7 +296,8 @@ fn open_cache_db(sessions_dir: &Path) -> Result<rusqlite::Connection> {
 }
 
 fn count_antigravity_session_cache_rows(conn: &rusqlite::Connection) -> usize {
-    conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0)).unwrap_or(0)
+    conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+        .unwrap_or(0)
 }
 
 pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
@@ -402,31 +403,62 @@ fn sync_antigravity_with_options(
                 .or_else(|| item.get("updatedAt"))
                 .and_then(parse_timestamp_value);
 
-            let project_id = item.get("projectId").and_then(Value::as_str).map(String::from);
-            let trajectory_id = item.get("trajectoryId").and_then(Value::as_str).map(String::from);
-            let title = item.get("summary").and_then(Value::as_str).map(String::from);
+            let project_id = item
+                .get("projectId")
+                .and_then(Value::as_str)
+                .map(String::from);
+            let trajectory_id = item
+                .get("trajectoryId")
+                .and_then(Value::as_str)
+                .map(String::from);
+            let title = item
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(String::from);
             let status = item.get("status").and_then(Value::as_str).map(String::from);
             let step_count = item.get("stepCount").and_then(Value::as_i64);
             let created_time_ms = item.get("createdTime").and_then(parse_timestamp_value);
-            let last_user_input_time_ms = item.get("lastUserInputTime").and_then(parse_timestamp_value);
-            let parent_conversation_id = item.get("parentConversationId").and_then(Value::as_str).map(String::from);
-            
-            let mendel_experiment_ids = item.get("mendelExperimentIds")
-                .and_then(|v| {
-                    if let Some(arr) = v.as_array() {
-                        let ids: Vec<String> = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
-                        Some(ids.join(","))
-                    } else {
-                        v.as_str().map(String::from)
-                    }
-                });
-            
+            let last_user_input_time_ms = item
+                .get("lastUserInputTime")
+                .and_then(parse_timestamp_value);
+            let parent_conversation_id = item
+                .get("parentConversationId")
+                .and_then(Value::as_str)
+                .map(String::from);
+
+            let mendel_experiment_ids = item.get("mendelExperimentIds").and_then(|v| {
+                if let Some(arr) = v.as_array() {
+                    let ids: Vec<String> = arr
+                        .iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect();
+                    Some(ids.join(","))
+                } else {
+                    v.as_str().map(String::from)
+                }
+            });
+
             let workspace = item.get("workspace");
-            let workspace_path = workspace.and_then(|w| w.get("workspacePath").or_else(|| w.get("path"))).and_then(Value::as_str).map(String::from);
-            let git_root = workspace.and_then(|w| w.get("gitRoot")).and_then(Value::as_str).map(String::from);
-            let repository = workspace.and_then(|w| w.get("repository")).and_then(Value::as_str).map(String::from);
-            let git_origin_url = workspace.and_then(|w| w.get("gitOriginUrl")).and_then(Value::as_str).map(String::from);
-            let branch_name = workspace.and_then(|w| w.get("branchName")).and_then(Value::as_str).map(String::from);
+            let workspace_path = workspace
+                .and_then(|w| w.get("workspacePath").or_else(|| w.get("path")))
+                .and_then(Value::as_str)
+                .map(String::from);
+            let git_root = workspace
+                .and_then(|w| w.get("gitRoot"))
+                .and_then(Value::as_str)
+                .map(String::from);
+            let repository = workspace
+                .and_then(|w| w.get("repository"))
+                .and_then(Value::as_str)
+                .map(String::from);
+            let git_origin_url = workspace
+                .and_then(|w| w.get("gitOriginUrl"))
+                .and_then(Value::as_str)
+                .map(String::from);
+            let branch_name = workspace
+                .and_then(|w| w.get("branchName"))
+                .and_then(Value::as_str)
+                .map(String::from);
 
             let summary_data = AntigravitySyncSummary {
                 last_modified_ms,
@@ -447,15 +479,12 @@ fn sync_antigravity_with_options(
                 mendel_experiment_ids,
             };
 
-            upsert_sync_summary(
-                &mut unique_summaries,
-                session_id,
-                summary_data,
-            );
+            upsert_sync_summary(&mut unique_summaries, session_id, summary_data);
         }
     }
 
-    let active_kinds: Vec<AntigravityRuntimeKind> = connections.iter().map(|c| c.runtime_kind).collect();
+    let active_kinds: Vec<AntigravityRuntimeKind> =
+        connections.iter().map(|c| c.runtime_kind).collect();
     let local_conversation_ids = discover_local_conversation_ids(&active_kinds);
     debug!(
         "Discovered {} local conversation files",
@@ -640,7 +669,12 @@ fn sync_antigravity_with_options(
                         .or(created_at)
                         .unwrap_or(now_ms);
 
-                    if input == 0 && output == 0 && cache_read == 0 && reasoning == 0 && cache_write == 0 {
+                    if input == 0
+                        && output == 0
+                        && cache_read == 0
+                        && reasoning == 0
+                        && cache_write == 0
+                    {
                         continue;
                     }
 
@@ -1408,14 +1442,14 @@ fn normalize_cached_antigravity_artifacts(
     model_aliases: &HashMap<String, ModelAlias>,
 ) -> Result<()> {
     let mut conn = open_cache_db(sessions_dir)?;
-    
+
     let mut all_aliases = static_model_aliases();
     for (k, v) in model_aliases {
         all_aliases.insert(k.clone(), v.clone());
     }
 
     let tx = conn.transaction()?;
-    
+
     for (alias_key, alias) in &all_aliases {
         tx.execute(
             "UPDATE sessions SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
@@ -1426,7 +1460,7 @@ fn normalize_cached_antigravity_artifacts(
             rusqlite::params![&alias.model_id, &alias.raw_model_id, alias_key],
         )?;
     }
-    
+
     tx.commit()?;
     Ok(())
 }
@@ -1788,7 +1822,9 @@ fn path_basename_is(path: &Path, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn discover_local_conversation_ids(active_kinds: &[AntigravityRuntimeKind]) -> Vec<LocalConversationId> {
+fn discover_local_conversation_ids(
+    active_kinds: &[AntigravityRuntimeKind],
+) -> Vec<LocalConversationId> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     discover_local_conversation_ids_from_home(&home, active_kinds)
 }
@@ -2246,7 +2282,9 @@ mod tests {
             ],
         ).unwrap();
 
-        let parser = AntigravitySessionParser::new().with_custom_paths(vec![sessions_dir]).with_skip_sync(true);
+        let parser = AntigravitySessionParser::new()
+            .with_custom_paths(vec![sessions_dir])
+            .with_skip_sync(true);
         let messages = parser.parse_sessions(None).unwrap();
 
         assert_eq!(messages.len(), 1);
@@ -2294,7 +2332,9 @@ mod tests {
             ],
         ).unwrap();
 
-        let parser = AntigravitySessionParser::new().with_custom_paths(vec![sessions_dir]).with_skip_sync(true);
+        let parser = AntigravitySessionParser::new()
+            .with_custom_paths(vec![sessions_dir])
+            .with_skip_sync(true);
         let messages = parser.parse_sessions(None).unwrap();
 
         assert_eq!(messages.len(), 1);
@@ -2312,12 +2352,18 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
         let conn = open_cache_db(&sessions_dir).unwrap();
-        
+
         conn.execute(
             "INSERT INTO sessions (session_id, client, model_id, synced_at)
              VALUES (?, ?, ?, ?)",
-            rusqlite::params!["sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M26", 1672531200000_i64],
-        ).unwrap();
+            rusqlite::params![
+                "sess-1",
+                "antigravity-cli",
+                "MODEL_PLACEHOLDER_M26",
+                1672531200000_i64
+            ],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2327,8 +2373,14 @@ mod tests {
         conn.execute(
             "INSERT INTO sessions (session_id, client, model_id, synced_at)
              VALUES (?, ?, ?, ?)",
-            rusqlite::params!["sess-2", "antigravity-cli", "gemini-3-flash-a", 1672531200000_i64],
-        ).unwrap();
+            rusqlite::params![
+                "sess-2",
+                "antigravity-cli",
+                "gemini-3-flash-a",
+                1672531200000_i64
+            ],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2338,8 +2390,14 @@ mod tests {
         conn.execute(
             "INSERT INTO sessions (session_id, client, model_id, synced_at)
              VALUES (?, ?, ?, ?)",
-            rusqlite::params!["sess-3", "antigravity-cli", "claude-opus-4.6-thinking", 1672531200000_i64],
-        ).unwrap();
+            rusqlite::params![
+                "sess-3",
+                "antigravity-cli",
+                "claude-opus-4.6-thinking",
+                1672531200000_i64
+            ],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2348,7 +2406,9 @@ mod tests {
 
         normalize_cached_antigravity_artifacts(&sessions_dir, &HashMap::new()).unwrap();
 
-        let parser = AntigravitySessionParser::new().with_custom_paths(vec![sessions_dir]).with_skip_sync(true);
+        let parser = AntigravitySessionParser::new()
+            .with_custom_paths(vec![sessions_dir])
+            .with_skip_sync(true);
         let messages = parser.parse_sessions(None).unwrap();
 
         assert_eq!(messages.len(), 3);
@@ -2370,8 +2430,14 @@ mod tests {
         conn.execute(
             "INSERT INTO sessions (session_id, client, model_id, synced_at)
              VALUES (?, ?, ?, ?)",
-            rusqlite::params!["sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M37", 1672531200000_i64],
-        ).unwrap();
+            rusqlite::params![
+                "sess-1",
+                "antigravity-cli",
+                "MODEL_PLACEHOLDER_M37",
+                1672531200000_i64
+            ],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2380,11 +2446,15 @@ mod tests {
 
         normalize_cached_antigravity_artifacts(&sessions_dir, &HashMap::new()).unwrap();
 
-        let mut stmt = conn.prepare("SELECT model_id FROM sessions WHERE session_id = 'sess-1'").unwrap();
+        let mut stmt = conn
+            .prepare("SELECT model_id FROM sessions WHERE session_id = 'sess-1'")
+            .unwrap();
         let session_model: String = stmt.query_row([], |row| row.get(0)).unwrap();
         assert_eq!(session_model, "gemini-3.1-pro-preview-high");
 
-        let mut stmt2 = conn.prepare("SELECT model_id FROM session_usage WHERE id = 'msg-1'").unwrap();
+        let mut stmt2 = conn
+            .prepare("SELECT model_id FROM session_usage WHERE id = 'msg-1'")
+            .unwrap();
         let usage_model: String = stmt2.query_row([], |row| row.get(0)).unwrap();
         assert_eq!(usage_model, "gemini-3.5-flash");
     }
