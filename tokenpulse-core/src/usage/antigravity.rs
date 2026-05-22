@@ -133,7 +133,7 @@ impl SessionParser for AntigravitySessionParser {
 
             for row in rows {
                 let (
-                    _client,
+                    client,
                     model_id,
                     provider_id,
                     session_id,
@@ -157,7 +157,7 @@ impl SessionParser for AntigravitySessionParser {
                 };
 
                 let msg = UnifiedMessage::new(
-                    "antigravity".to_string(),
+                    client,
                     model_id,
                     provider_id,
                     session_id,
@@ -204,6 +204,16 @@ impl AntigravityRuntimeKind {
             Self::Desktop => "desktop",
             Self::Cli => "cli",
             Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for AntigravityRuntimeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Desktop => write!(f, "Desktop"),
+            Self::Cli => write!(f, "CLI"),
+            Self::Unknown => write!(f, "Unknown"),
         }
     }
 }
@@ -492,13 +502,19 @@ fn sync_antigravity_with_options(
     for local in local_conversation_ids {
         if let Some(summary) = unique_summaries.get_mut(&local.session_id) {
             summary.last_modified_ms = newer_timestamp(summary.last_modified_ms, local.modified_ms);
-            prioritize_connections_for_runtime(summary, &connections, local.runtime_kind);
+            prioritize_connections_for_runtime(
+                &mut summary.connections,
+                &connections,
+                local.runtime_kind,
+            );
         } else {
+            let mut conns = Vec::new();
+            prioritize_connections_for_runtime(&mut conns, &connections, local.runtime_kind);
             unique_summaries.insert(
                 local.session_id.clone(),
                 AntigravitySyncSummary {
                     last_modified_ms: local.modified_ms,
-                    connections: connections_for_runtime(&connections, local.runtime_kind),
+                    connections: conns,
                     trajectory_id: None,
                     title: None,
                     status: None,
@@ -731,6 +747,12 @@ fn sync_antigravity_with_options(
     Ok(())
 }
 
+fn update_opt<T>(dest: &mut Option<T>, src: Option<T>) {
+    if dest.is_none() {
+        *dest = src;
+    }
+}
+
 fn upsert_sync_summary(
     summaries: &mut HashMap<String, AntigravitySyncSummary>,
     session_id: String,
@@ -741,48 +763,29 @@ fn upsert_sync_summary(
         for conn in data.connections {
             push_unique_connection(&mut summary.connections, conn);
         }
-        if summary.trajectory_id.is_none() {
-            summary.trajectory_id = data.trajectory_id;
-        }
-        if summary.title.is_none() {
-            summary.title = data.title;
-        }
-        if summary.status.is_none() {
-            summary.status = data.status;
-        }
-        if summary.step_count.is_none() {
-            summary.step_count = data.step_count;
-        }
-        if summary.created_time_ms.is_none() {
-            summary.created_time_ms = data.created_time_ms;
-        }
-        if summary.last_user_input_time_ms.is_none() {
-            summary.last_user_input_time_ms = data.last_user_input_time_ms;
-        }
-        if summary.project_id.is_none() {
-            summary.project_id = data.project_id;
-        }
-        if summary.workspace_path.is_none() {
-            summary.workspace_path = data.workspace_path;
-        }
-        if summary.git_root.is_none() {
-            summary.git_root = data.git_root;
-        }
-        if summary.repository.is_none() {
-            summary.repository = data.repository;
-        }
-        if summary.git_origin_url.is_none() {
-            summary.git_origin_url = data.git_origin_url;
-        }
-        if summary.branch_name.is_none() {
-            summary.branch_name = data.branch_name;
-        }
-        if summary.parent_conversation_id.is_none() {
-            summary.parent_conversation_id = data.parent_conversation_id;
-        }
-        if summary.mendel_experiment_ids.is_none() {
-            summary.mendel_experiment_ids = data.mendel_experiment_ids;
-        }
+        update_opt(&mut summary.trajectory_id, data.trajectory_id);
+        update_opt(&mut summary.title, data.title);
+        update_opt(&mut summary.status, data.status);
+        update_opt(&mut summary.step_count, data.step_count);
+        update_opt(&mut summary.created_time_ms, data.created_time_ms);
+        update_opt(
+            &mut summary.last_user_input_time_ms,
+            data.last_user_input_time_ms,
+        );
+        update_opt(&mut summary.project_id, data.project_id);
+        update_opt(&mut summary.workspace_path, data.workspace_path);
+        update_opt(&mut summary.git_root, data.git_root);
+        update_opt(&mut summary.repository, data.repository);
+        update_opt(&mut summary.git_origin_url, data.git_origin_url);
+        update_opt(&mut summary.branch_name, data.branch_name);
+        update_opt(
+            &mut summary.parent_conversation_id,
+            data.parent_conversation_id,
+        );
+        update_opt(
+            &mut summary.mendel_experiment_ids,
+            data.mendel_experiment_ids,
+        );
     } else {
         summaries.insert(session_id, data);
     }
@@ -819,48 +822,27 @@ fn push_unique_connection(
     }
 }
 
-fn connections_for_runtime(
-    connections: &[AntigravityConnection],
+fn prioritize_connections_for_runtime(
+    connections: &mut Vec<AntigravityConnection>,
+    all_connections: &[AntigravityConnection],
     runtime_kind: AntigravityRuntimeKind,
-) -> Vec<AntigravityConnection> {
+) {
     let mut ordered = Vec::new();
     if runtime_kind != AntigravityRuntimeKind::Unknown {
-        for conn in connections
+        for conn in all_connections
             .iter()
             .filter(|conn| conn.runtime_kind == runtime_kind)
         {
             push_unique_connection(&mut ordered, conn.clone());
         }
     }
-    for conn in connections {
-        push_unique_connection(&mut ordered, conn.clone());
-    }
-    ordered
-}
-
-fn prioritize_connections_for_runtime(
-    summary: &mut AntigravitySyncSummary,
-    all_connections: &[AntigravityConnection],
-    runtime_kind: AntigravityRuntimeKind,
-) {
-    if runtime_kind == AntigravityRuntimeKind::Unknown {
-        return;
-    }
-
-    let mut ordered = Vec::new();
-    for conn in all_connections
-        .iter()
-        .filter(|conn| conn.runtime_kind == runtime_kind)
-    {
-        push_unique_connection(&mut ordered, conn.clone());
-    }
-    for conn in summary.connections.drain(..) {
+    for conn in connections.drain(..) {
         push_unique_connection(&mut ordered, conn);
     }
     for conn in all_connections {
         push_unique_connection(&mut ordered, conn.clone());
     }
-    summary.connections = ordered;
+    *connections = ordered;
 }
 
 fn newer_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
@@ -1333,9 +1315,15 @@ fn collect_model_aliases_from_configs(
 }
 
 fn model_alias_history_path(sessions_dir: &Path) -> Option<PathBuf> {
-    sessions_dir
-        .parent()
-        .map(|cache_dir| cache_dir.join(MODEL_ALIAS_HISTORY_FILE_NAME))
+    let dir = if sessions_dir
+        .file_name()
+        .map_or(false, |name| name == "sessions")
+    {
+        sessions_dir.parent()?
+    } else {
+        sessions_dir
+    };
+    Some(dir.join(MODEL_ALIAS_HISTORY_FILE_NAME))
 }
 
 fn load_model_alias_history_map(sessions_dir: &Path) -> Result<HashMap<String, ModelAlias>> {
@@ -1436,10 +1424,29 @@ fn merge_and_save_model_alias_history(
     Ok(merged_aliases)
 }
 
+fn normalized_paths() -> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    static PATHS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    > = std::sync::OnceLock::new();
+    PATHS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
 fn normalize_cached_antigravity_artifacts(
     sessions_dir: &Path,
     model_aliases: &HashMap<String, ModelAlias>,
 ) -> Result<()> {
+    let canonical = sessions_dir
+        .canonicalize()
+        .unwrap_or_else(|_| sessions_dir.to_path_buf());
+    {
+        let paths = normalized_paths()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Normalized paths mutex poisoned"))?;
+        if paths.contains(&canonical) {
+            return Ok(());
+        }
+    }
+
     let mut conn = open_cache_db(sessions_dir)?;
 
     let mut all_aliases = static_model_aliases();
@@ -1461,6 +1468,14 @@ fn normalize_cached_antigravity_artifacts(
     }
 
     tx.commit()?;
+
+    {
+        let mut paths = normalized_paths()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Normalized paths mutex poisoned"))?;
+        paths.insert(canonical);
+    }
+
     Ok(())
 }
 

@@ -65,14 +65,23 @@ impl UsageStore {
 
     pub fn latest_message_date(&self, source: &str) -> Result<Option<NaiveDate>> {
         let conn = self.open()?;
-        let value: Option<String> = conn
-            .query_row(
+        let value: Option<String> = if source == "antigravity" {
+            conn.query_row(
+                "SELECT MAX(date) FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop')",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten()
+        } else {
+            conn.query_row(
                 "SELECT MAX(date) FROM usage_messages WHERE source = ?1",
                 params![source],
                 |row| row.get(0),
             )
             .optional()?
-            .flatten();
+            .flatten()
+        };
 
         Ok(value.and_then(|date| NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()))
     }
@@ -83,8 +92,21 @@ impl UsageStore {
         parser_version: &str,
     ) -> Result<bool> {
         let conn = self.open()?;
-        Ok(conn
-            .query_row(
+        let has_stale = if source == "antigravity" {
+            conn.query_row(
+                r#"
+                SELECT 1
+                FROM usage_messages
+                WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop') AND parser_version != ?1
+                LIMIT 1
+                "#,
+                params![parser_version],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        } else {
+            conn.query_row(
                 r#"
                 SELECT 1
                 FROM usage_messages
@@ -95,7 +117,9 @@ impl UsageStore {
                 |_| Ok(()),
             )
             .optional()?
-            .is_some())
+            .is_some()
+        };
+        Ok(has_stale)
     }
 
     pub fn default_since(
@@ -444,7 +468,7 @@ impl UsageStore {
         let mut sql = String::from(
             r#"
             SELECT COUNT(*),
-                   COUNT(DISTINCT source || '::' || session_id)
+                   COUNT(DISTINCT CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END || '::' || session_id)
             FROM usage_messages
             WHERE 1=1
             "#,
@@ -468,7 +492,8 @@ impl UsageStore {
         let conn = self.open()?;
         let mut sql = String::from(
             r#"
-            SELECT source, provider_id, model_id, session_id, message_key,
+            SELECT CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END AS source,
+                   provider_id, model_id, session_id, message_key,
                    timestamp_ms, date, input_tokens, output_tokens,
                    cache_read_tokens, cache_write_tokens, reasoning_tokens,
                    cost_usd, pricing_day, parser_version
@@ -504,7 +529,7 @@ impl UsageStore {
                    SUM(total_tokens),
                    SUM(cost_usd),
                    COUNT(*),
-                   COUNT(DISTINCT source || '::' || session_id)
+                   COUNT(DISTINCT CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END || '::' || session_id)
             FROM usage_messages
             WHERE 1=1
             "#,
@@ -525,15 +550,25 @@ impl UsageStore {
         let conn = self.open()?;
         let mut sql = String::from(
             r#"
-            SELECT date, source, provider_id, model_id,
-                   input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                   reasoning_tokens, total_tokens, cost_usd, message_count, session_count
+            SELECT date,
+                   CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END AS source,
+                   provider_id,
+                   model_id,
+                   SUM(input_tokens),
+                   SUM(output_tokens),
+                   SUM(cache_read_tokens),
+                   SUM(cache_write_tokens),
+                   SUM(reasoning_tokens),
+                   SUM(total_tokens),
+                   SUM(cost_usd),
+                   SUM(message_count),
+                   SUM(session_count)
             FROM daily_model_usage
             WHERE 1=1
             "#,
         );
         let params = append_common_filters(&mut sql, since, sources);
-        sql.push_str(" ORDER BY date ASC, cost_usd DESC");
+        sql.push_str(" GROUP BY date, CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END, provider_id, model_id ORDER BY date ASC, SUM(cost_usd) DESC");
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params), row_to_daily)?;
@@ -549,17 +584,17 @@ impl UsageStore {
         let conn = self.open()?;
         let mut sql = String::from(
             r#"
-            SELECT source,
+            SELECT CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END AS source,
                    SUM(cost_usd),
                    SUM(total_tokens),
                    COUNT(*),
-                   COUNT(DISTINCT source || '::' || session_id)
+                   COUNT(DISTINCT CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END || '::' || session_id)
             FROM usage_messages
             WHERE 1=1
             "#,
         );
         let params = append_common_filters(&mut sql, since, sources);
-        sql.push_str(" GROUP BY source ORDER BY SUM(total_tokens) DESC, source ASC");
+        sql.push_str(" GROUP BY CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END ORDER BY SUM(total_tokens) DESC, source ASC");
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params), row_to_provider_summary)?;
@@ -576,18 +611,18 @@ impl UsageStore {
             r#"
             SELECT model_id,
                    provider_id,
-                    source,
-                    session_id,
-                    SUM(cost_usd),
-                    SUM(total_tokens),
-                    COUNT(*)
+                   CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END AS source,
+                   session_id,
+                   SUM(cost_usd),
+                   SUM(total_tokens),
+                   COUNT(*)
             FROM usage_messages
             WHERE 1=1
             "#,
         );
         let params = append_common_filters(&mut sql, since, sources);
         sql.push_str(
-            " GROUP BY source, provider_id, model_id, session_id ORDER BY SUM(total_tokens) DESC, model_id ASC",
+            " GROUP BY CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END, provider_id, model_id, session_id ORDER BY SUM(total_tokens) DESC, model_id ASC",
         );
 
         let mut stmt = conn.prepare(&sql)?;
@@ -637,9 +672,9 @@ impl UsageStore {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(&self.path)?;
+        let mut conn = Connection::open(&self.path)?;
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
-        ensure_schema_initialized(&self.path, &conn)?;
+        ensure_schema_initialized(&self.path, &mut conn)?;
         Ok(conn)
     }
 
@@ -685,12 +720,25 @@ fn append_common_filters(
 
     if !sources.is_empty() {
         sql.push_str(" AND source IN (");
-        for idx in 0..sources.len() {
-            if idx > 0 {
-                sql.push_str(", ");
+        let mut first = true;
+        for source in sources {
+            if source == "antigravity" {
+                for s in &["antigravity", "antigravity-cli", "antigravity-desktop"] {
+                    if !first {
+                        sql.push_str(", ");
+                    }
+                    sql.push('?');
+                    params.push(Value::from((*s).to_string()));
+                    first = false;
+                }
+            } else {
+                if !first {
+                    sql.push_str(", ");
+                }
+                sql.push('?');
+                params.push(Value::from(source.clone()));
+                first = false;
             }
-            sql.push('?');
-            params.push(Value::from(sources[idx].clone()));
         }
         sql.push(')');
     }
@@ -714,12 +762,25 @@ fn append_range_and_source_filters(
 
     if !sources.is_empty() {
         sql.push_str(" AND source IN (");
-        for (idx, source) in sources.iter().enumerate() {
-            if idx > 0 {
-                sql.push_str(", ");
+        let mut first = true;
+        for source in sources {
+            if source == "antigravity" {
+                for s in &["antigravity", "antigravity-cli", "antigravity-desktop"] {
+                    if !first {
+                        sql.push_str(", ");
+                    }
+                    sql.push('?');
+                    params.push(Value::from((*s).to_string()));
+                    first = false;
+                }
+            } else {
+                if !first {
+                    sql.push_str(", ");
+                }
+                sql.push('?');
+                params.push(Value::from(source.clone()));
+                first = false;
             }
-            sql.push('?');
-            params.push(Value::from(source.clone()));
         }
         sql.push(')');
     }
@@ -747,10 +808,23 @@ fn load_pricing_snapshot_keys(
 }
 
 fn load_source_dates(tx: &Transaction<'_>, source: &str) -> Result<Vec<String>> {
-    let mut stmt =
-        tx.prepare("SELECT DISTINCT date FROM usage_messages WHERE source = ?1 ORDER BY date ASC")?;
-    let rows = stmt.query_map(params![source], |row| row.get::<_, String>(0))?;
-    Ok(rows.flatten().collect())
+    let mapper = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
+    let dates = if source == "antigravity" {
+        let mut stmt = tx.prepare("SELECT DISTINCT date FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop') ORDER BY date ASC")?;
+        let res = stmt
+            .query_map([], mapper)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        res
+    } else {
+        let mut stmt = tx.prepare(
+            "SELECT DISTINCT date FROM usage_messages WHERE source = ?1 ORDER BY date ASC",
+        )?;
+        let res = stmt
+            .query_map(params![source], mapper)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        res
+    };
+    Ok(dates)
 }
 
 fn delete_scoped_tx(
@@ -1012,7 +1086,7 @@ struct AggregatedModelSummary {
     message_count: usize,
 }
 
-fn ensure_schema_initialized(path: &PathBuf, conn: &Connection) -> Result<()> {
+fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()> {
     if initialized_paths()
         .lock()
         .map_err(|_| anyhow!("Usage store schema mutex poisoned"))?
@@ -1022,78 +1096,6 @@ fn ensure_schema_initialized(path: &PathBuf, conn: &Connection) -> Result<()> {
     }
 
     conn.execute_batch(USAGE_SCHEMA_SQL)?;
-
-    // Check if legacy sources ('antigravity-cli', 'antigravity-desktop') exist in usage_messages
-    let has_legacy: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM usage_messages WHERE source IN ('antigravity-cli', 'antigravity-desktop'))",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-
-    if has_legacy {
-        conn.execute("BEGIN TRANSACTION;", [])?;
-        if let Err(e) = (|| -> Result<()> {
-            // Update source names to 'antigravity'
-            conn.execute(
-                "UPDATE OR REPLACE usage_messages SET source = 'antigravity' WHERE source IN ('antigravity-cli', 'antigravity-desktop');",
-                [],
-            )?;
-
-            // Delete daily_model_usage rows for the legacy and new sources
-            conn.execute(
-                "DELETE FROM daily_model_usage WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop');",
-                [],
-            )?;
-
-            // Rebuild daily_model_usage for all dates that contain 'antigravity' source
-            let now = Utc::now().timestamp_millis();
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT date FROM usage_messages WHERE source = 'antigravity';",
-            )?;
-            let dates: Vec<String> = stmt
-                .query_map([], |row| row.get(0))?
-                .filter_map(Result::ok)
-                .collect();
-
-            for date in dates {
-                conn.execute(
-                    r#"
-                    INSERT INTO daily_model_usage (
-                        date, source, provider_id, model_id,
-                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                        reasoning_tokens, total_tokens, cost_usd, message_count, session_count, updated_at
-                    )
-                    SELECT
-                        date,
-                        source,
-                        provider_id,
-                        model_id,
-                        SUM(input_tokens),
-                        SUM(output_tokens),
-                        SUM(cache_read_tokens),
-                        SUM(cache_write_tokens),
-                        SUM(reasoning_tokens),
-                        SUM(total_tokens),
-                        SUM(cost_usd),
-                        COUNT(*),
-                        COUNT(DISTINCT session_id),
-                        ?2
-                    FROM usage_messages
-                    WHERE date = ?1 AND source = 'antigravity'
-                    GROUP BY date, source, provider_id, model_id
-                    "#,
-                    params![date, now],
-                )?;
-            }
-            Ok(())
-        })() {
-            let _ = conn.execute("ROLLBACK;", []);
-            return Err(e);
-        }
-        conn.execute("COMMIT;", [])?;
-    }
 
     initialized_paths()
         .lock()
@@ -1433,51 +1435,27 @@ mod tests {
     }
 
     #[test]
-    fn test_antigravity_source_name_migration() {
+    fn test_antigravity_source_names_handling() {
         let tempdir = tempfile::tempdir().unwrap();
         let db_path = tempdir.path().join("usage.sqlite3");
 
-        // 1. Manually create tables and insert legacy rows before schema initialization/migration is run.
-        {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(USAGE_SCHEMA_SQL).unwrap();
-
-            // Insert legacy messages (source is 'antigravity-cli' or 'antigravity-desktop')
-            let mut msg1 = sample_message("2026-05-22", "key1");
-            msg1.client = "antigravity-cli".to_string();
-            let mut msg2 = sample_message("2026-05-22", "key2");
-            msg2.client = "antigravity-desktop".to_string();
-            let mut msg3 = sample_message("2026-05-22", "key3");
-            msg3.client = "antigravity".to_string();
-
-            // Ingest using store-like inserts manually to simulate pre-migration state
-            conn.execute(
-                "INSERT INTO usage_messages (source, provider_id, model_id, session_id, message_key, timestamp_ms, date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens, cost_usd, pricing_day, parser_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                params![msg1.client, msg1.provider_id, msg1.model_id, msg1.session_id, msg1.message_key, msg1.timestamp, msg1.date, msg1.tokens.input, msg1.tokens.output, msg1.tokens.cache_read, msg1.tokens.cache_write, msg1.tokens.reasoning, msg1.total_tokens(), 0.0, msg1.pricing_day, msg1.parser_version]
-            ).unwrap();
-
-            conn.execute(
-                "INSERT INTO usage_messages (source, provider_id, model_id, session_id, message_key, timestamp_ms, date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens, cost_usd, pricing_day, parser_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                params![msg2.client, msg2.provider_id, msg2.model_id, msg2.session_id, msg2.message_key, msg2.timestamp, msg2.date, msg2.tokens.input, msg2.tokens.output, msg2.tokens.cache_read, msg2.tokens.cache_write, msg2.tokens.reasoning, msg2.total_tokens(), 0.0, msg2.pricing_day, msg2.parser_version]
-            ).unwrap();
-
-            conn.execute(
-                "INSERT INTO usage_messages (source, provider_id, model_id, session_id, message_key, timestamp_ms, date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens, cost_usd, pricing_day, parser_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                params![msg3.client, msg3.provider_id, msg3.model_id, msg3.session_id, msg3.message_key, msg3.timestamp, msg3.date, msg3.tokens.input, msg3.tokens.output, msg3.tokens.cache_read, msg3.tokens.cache_write, msg3.tokens.reasoning, msg3.total_tokens(), 0.0, msg3.pricing_day, msg3.parser_version]
-            ).unwrap();
-
-            // Insert daily stats for them to see if they get correctly deleted and rebuilt
-            conn.execute(
-                "INSERT INTO daily_model_usage (date, source, provider_id, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens, cost_usd, message_count, session_count, updated_at) VALUES ('2026-05-22', 'antigravity-cli', 'anthropic', 'claude-3-opus', 100, 50, 10, 5, 0, 165, 0.0, 1, 1, 12345)",
-                []
-            ).unwrap();
-        }
-
-        // 2. Open via store, triggering ensure_schema_initialized migration code (since initialized_paths won't have it yet)
         let store = UsageStore::with_path(db_path);
-        let conn = store.open().unwrap();
 
-        // 3. Verify messages are migrated
+        // Ingest three messages with distinct antigravity source kinds and distinct session IDs
+        let mut msg1 = sample_message("2026-05-22", "key1");
+        msg1.client = "antigravity-cli".to_string();
+        msg1.session_id = "session-1".to_string();
+        let mut msg2 = sample_message("2026-05-22", "key2");
+        msg2.client = "antigravity-desktop".to_string();
+        msg2.session_id = "session-2".to_string();
+        let mut msg3 = sample_message("2026-05-22", "key3");
+        msg3.client = "antigravity".to_string();
+        msg3.session_id = "session-3".to_string();
+
+        store.ingest_messages(&[msg1, msg2, msg3], false).unwrap();
+
+        // 1. Verify that they remain distinct in the database
+        let conn = store.open().unwrap();
         let count_cli: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM usage_messages WHERE source = 'antigravity-cli'",
@@ -1500,45 +1478,23 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(count_cli, 0);
-        assert_eq!(count_desktop, 0);
-        assert_eq!(count_antigravity, 3);
+        assert_eq!(count_cli, 1);
+        assert_eq!(count_desktop, 1);
+        assert_eq!(count_antigravity, 1);
 
-        // 4. Verify daily stats are rebuilt correctly
-        let daily_cli: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM daily_model_usage WHERE source = 'antigravity-cli'",
-                [],
-                |r| r.get(0),
-            )
+        // 2. Verify that querying with source filter "antigravity" returns all three sources combined
+        let summaries = store
+            .load_model_summaries(None, &["antigravity".to_string()])
             .unwrap();
-        let daily_desktop: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM daily_model_usage WHERE source = 'antigravity-desktop'",
-                [],
-                |r| r.get(0),
-            )
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].message_count, 3);
+        assert_eq!(summaries[0].session_count, 3);
+
+        // 3. Verify that load_summary_counts with source filter "antigravity" also aggregates them
+        let (msg_cnt, session_cnt) = store
+            .load_summary_counts(None, &["antigravity".to_string()])
             .unwrap();
-        let daily_antigravity: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM daily_model_usage WHERE source = 'antigravity'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-
-        assert_eq!(daily_cli, 0);
-        assert_eq!(daily_desktop, 0);
-        assert_eq!(daily_antigravity, 1);
-
-        // Verify daily stats totals
-        let (total_input, msg_count): (i64, i64) = conn.query_row(
-            "SELECT input_tokens, message_count FROM daily_model_usage WHERE source = 'antigravity'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?))
-        ).unwrap();
-
-        assert_eq!(total_input, 300); // 100 * 3
-        assert_eq!(msg_count, 3);
+        assert_eq!(msg_cnt, 3);
+        assert_eq!(session_cnt, 3);
     }
 }
