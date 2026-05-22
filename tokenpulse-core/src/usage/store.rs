@@ -1360,4 +1360,3 @@ mod tests {
         assert_eq!(session_count, 2);
     }
 }
-

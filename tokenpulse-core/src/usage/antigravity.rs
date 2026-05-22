@@ -2226,13 +2226,13 @@ mod tests {
         let txt_file = "12345678901234567890.txt";
 
         std::fs::write(anti_dir.join(uuid_1), "mock").unwrap();
-        
+
         let db_file_path = cli_dir.join(uuid_2);
         std::fs::write(&db_file_path, "mock").unwrap();
-        
+
         // Wait briefly to ensure file modification times are different
         std::thread::sleep(std::time::Duration::from_millis(50));
-        
+
         let wal_file_path = cli_dir.join("abcdefabcdefabcdefabcdef.db-wal");
         std::fs::write(&wal_file_path, "mock").unwrap();
         let wal_mtime = wal_file_path.metadata().unwrap().modified().unwrap();
@@ -2246,7 +2246,7 @@ mod tests {
         assert!(discovered
             .iter()
             .any(|(id, modified_ms)| id == "12345678901234567890" && modified_ms.is_some()));
-        
+
         let db_entry = discovered
             .iter()
             .find(|(id, _)| id == "abcdefabcdefabcdefabcdef")
@@ -2255,5 +2255,4 @@ mod tests {
         let wal_mtime_ms = system_time_to_millis(wal_mtime).unwrap();
         assert_eq!(db_entry_mtime_ms, wal_mtime_ms);
     }
-
 }
