@@ -344,7 +344,7 @@ Token refresh:
 | PI | `~/.pi/agent/sessions/**/*.jsonl` | JSONL with header + entries |
 | GitHub Copilot | `~/.local/share/github-copilot/events.jsonl` | OTEL JSONL events |
 | Gemini CLI | `~/.gemini/tmp/**/session-*.json{,l}` | JSON + streamed JSONL session files |
-| Antigravity | `~/.local/share/tokenpulse/antigravity-cache/sessions/*.jsonl` | JSONL |
+| Antigravity | `~/.local/share/tokenpulse/antigravity-cache/cache.db` | SQLite |
 
 ### Pricing Source
 

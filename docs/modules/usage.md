@@ -207,7 +207,7 @@ tokenpulse usage -p antigravity --rebuild-cache
 
 `tokenpulse usage` now opens the interactive dashboard automatically when both stdin/stdout are attached to a terminal. Use `--no-tui` to force the plain-text summary for scripts, pipes, or quick dumps.
 
-Antigravity usage sync maintains raw cache files in `~/.local/share/tokenpulse/antigravity-cache/sessions/`. Regular runs rebuild sessions whose Antigravity or Antigravity CLI conversation files were modified in the last two days. `--rebuild-cache` removes and rebuilds all discoverable raw cache files for providers that support it; currently this applies to Antigravity and requires a running Antigravity language server.
+Antigravity usage sync maintains a local cache database in `~/.local/share/tokenpulse/antigravity-cache/cache.db`. Regular runs rebuild sessions whose Antigravity or Antigravity CLI conversation files were modified in the last two days. `--rebuild-cache` clears and rebuilds the SQLite cache database; currently this applies to Antigravity and requires a running Antigravity language server.
 
 Non-TUI output includes:
 

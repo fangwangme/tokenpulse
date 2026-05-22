@@ -70,8 +70,7 @@ impl SessionParser for AntigravitySessionParser {
                 .join(".local")
                 .join("share")
                 .join("tokenpulse")
-                .join("antigravity-cache")
-                .join("sessions")]
+                .join("antigravity-cache")]
         }
     }
 
@@ -134,7 +133,7 @@ impl SessionParser for AntigravitySessionParser {
 
             for row in rows {
                 let (
-                    client,
+                    _client,
                     model_id,
                     provider_id,
                     session_id,
@@ -158,7 +157,7 @@ impl SessionParser for AntigravitySessionParser {
                 };
 
                 let msg = UnifiedMessage::new(
-                    client,
+                    "antigravity".to_string(),
                     model_id,
                     provider_id,
                     session_id,
@@ -1465,6 +1464,7 @@ fn normalize_cached_antigravity_artifacts(
     Ok(())
 }
 
+#[cfg(test)]
 fn resolve_antigravity_model_id(model_id: &str) -> String {
     resolve_antigravity_model_id_with_aliases(model_id, &HashMap::new())
 }
@@ -1600,6 +1600,7 @@ fn extract_trajectory_entries(response: &Value) -> Vec<(String, Value)> {
     Vec::new()
 }
 
+#[cfg(test)]
 fn sanitize_session_id(session_id: &str) -> String {
     let sanitized: String = session_id
         .trim()
@@ -1621,12 +1622,14 @@ fn sanitize_session_id(session_id: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn session_artifact_file_stem(session_id: &str) -> String {
     let sanitized = sanitize_session_id(session_id);
     let hash = stable_fnv1a_64(session_id);
     format!("{}-{:016x}", sanitized, hash)
 }
 
+#[cfg(test)]
 fn stable_fnv1a_64(value: &str) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in value.as_bytes() {
