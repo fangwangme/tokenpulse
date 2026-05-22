@@ -59,10 +59,6 @@ enum Commands {
         #[clap(long)]
         rebuild_all: bool,
 
-        /// Rebuild provider raw cache when supported. Currently applies to Antigravity.
-        #[clap(long)]
-        rebuild_cache: bool,
-
         /// Emit CSV output (daily or models). Example: --csv daily
         #[clap(long, value_enum, conflicts_with = "json", conflicts_with = "tui")]
         csv: Option<CsvFormat>,
@@ -129,7 +125,6 @@ async fn main() -> anyhow::Result<()> {
             refresh_days,
             refresh_pricing,
             rebuild_all,
-            rebuild_cache,
             csv,
             json,
             tui,
@@ -142,7 +137,6 @@ async fn main() -> anyhow::Result<()> {
                 refresh_days,
                 refresh_pricing,
                 rebuild_all,
-                rebuild_cache,
                 if json || csv.is_some() {
                     false
                 } else {
