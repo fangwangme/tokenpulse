@@ -589,7 +589,7 @@ fn sync_antigravity_with_options(
             if let Some(cached_lm) =
                 cached_sessions.get(&(client_str.to_string(), session_id.clone()))
             {
-                if *cached_lm == lm {
+                if *cached_lm >= lm {
                     debug!("Session {} is unchanged, skipping sync", session_id);
                     continue;
                 }
