@@ -69,7 +69,6 @@ tokenpulse/
 │       │   ├── claude.rs
 │       │   ├── codex.rs
 │       │   ├── copilot.rs
-│       │   ├── gemini.rs
 │       │   ├── antigravity.rs
 │       │   └── cache.rs
 │       └── pricing/              # model pricing and cost calculation
@@ -244,7 +243,7 @@ Current usage TUI notes:
 - **Company color** = model family owner (`OpenAI`, `Google`, `Anthropic`, `Others`)
 - **Agent** = client tool (`Claude Code`, `Codex`, `OpenCode`, `Gemini CLI`, `Copilot CLI`, `Pi`, `Antigravity`)
 
-The TUI uses company color for model names and chart segments, while agent/source labels remain textual attribution. In data model terms, `UnifiedMessage.client` = agent and `UnifiedMessage.provider_id` = provider/backend identifier.
+The TUI uses company color for model names and chart segments, while agent/source labels remain textual attribution. In data model terms, `UnifiedMessage.client` = agent and `UnifiedMessage.provider_id` = provider/backend identifier. `UnifiedMessage.client_detail` is optional sub-client attribution; Antigravity uses it to keep CLI/Desktop cache entries separate while displaying and aggregating them as one `antigravity` agent.
 
 ---
 
@@ -287,6 +286,7 @@ pub struct TokenBreakdown {
 
 pub struct UnifiedMessage {
     pub client: String,             // "claude", "codex", "opencode", "pi"
+    pub client_detail: Option<String>,
     pub model_id: String,           // "claude-opus-4", "o3"
     pub provider_id: String,        // "anthropic", "openai"
     pub session_id: String,
@@ -369,7 +369,7 @@ Cache: ~/.local/share/tokenpulse/pricing.json (24h TTL)
 ### Phase 2 - More Providers
 - [x] OpenCode: SQLite session parser
 - [x] PI: session JSONL parser
-- [x] Gemini CLI: auth + quota + session parser with JSONL dedup + cache-overlap normalization
+- [x] Gemini CLI: historical session parser with JSONL dedup + cache-overlap normalization
 - [x] GitHub Copilot: quota + usage parser
 - [x] Antigravity: quota probe
 - [x] Antigravity: historical usage parser

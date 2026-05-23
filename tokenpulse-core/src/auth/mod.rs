@@ -55,7 +55,8 @@ pub fn detect_providers() -> Vec<DetectedProvider> {
             },
             credential_hint: {
                 let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
-                if home.join("Library")
+                if home
+                    .join("Library")
                     .join("Application Support")
                     .join("Antigravity")
                     .exists()

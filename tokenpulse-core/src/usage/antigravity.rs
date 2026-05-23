@@ -105,7 +105,7 @@ impl SessionParser for AntigravitySessionParser {
             let conn = open_cache_db(&root)?;
             let since_str = since.map(|d| d.format("%Y-%m-%d").to_string());
             let mut stmt = conn.prepare(
-                "SELECT client, model_id, provider_id, session_id, id, timestamp,
+                "SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
                         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
                         pricing_day, parser_version
                  FROM session_usage
@@ -157,7 +157,7 @@ impl SessionParser for AntigravitySessionParser {
                 };
 
                 let msg = UnifiedMessage::new(
-                    client,
+                    "antigravity",
                     model_id,
                     provider_id,
                     session_id,
@@ -165,6 +165,7 @@ impl SessionParser for AntigravitySessionParser {
                     timestamp,
                     tokens,
                 )
+                .with_client_detail(client)
                 .with_pricing_day(pricing_day)
                 .with_parser_version(parser_version);
 
@@ -191,7 +192,7 @@ pub struct AntigravityConnection {
     pub runtime_kind: AntigravityRuntimeKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AntigravityRuntimeKind {
     Desktop,
     Cli,
@@ -231,6 +232,12 @@ struct ProcessCandidate {
 struct LocalConversationId {
     session_id: String,
     modified_ms: Option<i64>,
+    runtime_kind: AntigravityRuntimeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AntigravitySessionCacheKey {
+    session_id: String,
     runtime_kind: AntigravityRuntimeKind,
 }
 
@@ -361,20 +368,33 @@ fn sync_antigravity_with_options(
 
     let mut synced_sessions_count = 0;
 
-    let mut cached_sessions: HashMap<String, i64> = HashMap::new();
-    if let Ok(mut stmt) = db_conn.prepare("SELECT session_id, last_modified_ms FROM sessions") {
+    let mut cached_sessions: HashMap<(String, String), i64> = HashMap::new();
+    if let Ok(mut stmt) = db_conn.prepare(
+        r#"
+        SELECT client, session_id, last_modified_ms FROM sessions
+        UNION
+        SELECT session_usage.client, sessions.session_id, sessions.last_modified_ms
+        FROM session_usage
+        JOIN sessions ON sessions.session_id = session_usage.session_id
+        "#,
+    ) {
         if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
         }) {
             for row in rows {
-                if let Ok((id, Some(last_mod))) = row {
-                    cached_sessions.insert(id, last_mod);
+                if let Ok((client, id, Some(last_mod))) = row {
+                    cached_sessions.insert((client, id), last_mod);
                 }
             }
         }
     }
 
-    let mut unique_summaries: HashMap<String, AntigravitySyncSummary> = HashMap::new();
+    let mut unique_summaries: HashMap<AntigravitySessionCacheKey, AntigravitySyncSummary> =
+        HashMap::new();
     for connection in &connections {
         let response = match rpc_request(connection, "GetAllCascadeTrajectories", &json!({})) {
             Ok(r) => r,
@@ -488,7 +508,14 @@ fn sync_antigravity_with_options(
                 mendel_experiment_ids,
             };
 
-            upsert_sync_summary(&mut unique_summaries, session_id, summary_data);
+            upsert_sync_summary(
+                &mut unique_summaries,
+                AntigravitySessionCacheKey {
+                    session_id,
+                    runtime_kind: connection.runtime_kind,
+                },
+                summary_data,
+            );
         }
     }
 
@@ -500,7 +527,11 @@ fn sync_antigravity_with_options(
         local_conversation_ids.len()
     );
     for local in local_conversation_ids {
-        if let Some(summary) = unique_summaries.get_mut(&local.session_id) {
+        let cache_key = AntigravitySessionCacheKey {
+            session_id: local.session_id.clone(),
+            runtime_kind: local.runtime_kind,
+        };
+        if let Some(summary) = unique_summaries.get_mut(&cache_key) {
             summary.last_modified_ms = newer_timestamp(summary.last_modified_ms, local.modified_ms);
             prioritize_connections_for_runtime(
                 &mut summary.connections,
@@ -511,7 +542,7 @@ fn sync_antigravity_with_options(
             let mut conns = Vec::new();
             prioritize_connections_for_runtime(&mut conns, &connections, local.runtime_kind);
             unique_summaries.insert(
-                local.session_id.clone(),
+                cache_key,
                 AntigravitySyncSummary {
                     last_modified_ms: local.modified_ms,
                     connections: conns,
@@ -538,12 +569,16 @@ fn sync_antigravity_with_options(
     let now_ms = Local::now().timestamp_millis();
     let sync_threshold_ms = now_ms - ANTIGRAVITY_DEFAULT_CACHE_REBUILD_WINDOW_MS;
 
-    for (session_id, summary) in unique_summaries {
+    for (cache_key, summary) in unique_summaries {
+        let session_id = cache_key.session_id;
+        let client_str = client_str_for_runtime_kind(cache_key.runtime_kind);
         let last_modified_ms = summary.last_modified_ms;
         let lm = last_modified_ms.unwrap_or(now_ms);
 
         if !options.rebuild_all_cache {
-            if let Some(cached_lm) = cached_sessions.get(&session_id) {
+            if let Some(cached_lm) =
+                cached_sessions.get(&(client_str.to_string(), session_id.clone()))
+            {
                 if *cached_lm == lm {
                     debug!("Session {} is unchanged, skipping sync", session_id);
                     continue;
@@ -556,7 +591,6 @@ fn sync_antigravity_with_options(
         }
 
         let mut metadata_response = None;
-        let mut selected_conn = None;
         for conn in &summary.connections {
             debug!(
                 "Syncing Antigravity session {} (modified: {:?}) from {} port {}",
@@ -572,7 +606,6 @@ fn sync_antigravity_with_options(
             ) {
                 Ok(r) => {
                     metadata_response = Some(r);
-                    selected_conn = Some(conn.clone());
                     break;
                 }
                 Err(e) => {
@@ -585,9 +618,6 @@ fn sync_antigravity_with_options(
         }
 
         let Some(metadata_response) = metadata_response else {
-            continue;
-        };
-        let Some(conn) = selected_conn else {
             continue;
         };
 
@@ -617,13 +647,10 @@ fn sync_antigravity_with_options(
         }
 
         let tx = db_conn.transaction()?;
-        tx.execute("DELETE FROM sessions WHERE session_id = ?;", [&session_id])?;
-
-        let client_str = match conn.runtime_kind {
-            AntigravityRuntimeKind::Cli => "antigravity-cli",
-            AntigravityRuntimeKind::Desktop => "antigravity-desktop",
-            _ => "antigravity",
-        };
+        tx.execute(
+            "DELETE FROM session_usage WHERE client = ? AND session_id = ?;",
+            rusqlite::params![client_str, &session_id],
+        )?;
 
         tx.execute(
             "INSERT INTO sessions (
@@ -631,9 +658,28 @@ fn sync_antigravity_with_options(
                 created_time_ms, last_modified_ms, last_user_input_time_ms, project_id,
                 workspace_path, git_root, repository, git_origin_url, branch_name,
                 parent_conversation_id, mendel_experiment_ids, synced_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                trajectory_id = excluded.trajectory_id,
+                client = excluded.client,
+                title = excluded.title,
+                model_id = excluded.model_id,
+                status = excluded.status,
+                step_count = excluded.step_count,
+                created_time_ms = excluded.created_time_ms,
+                last_modified_ms = excluded.last_modified_ms,
+                last_user_input_time_ms = excluded.last_user_input_time_ms,
+                project_id = excluded.project_id,
+                workspace_path = excluded.workspace_path,
+                git_root = excluded.git_root,
+                repository = excluded.repository,
+                git_origin_url = excluded.git_origin_url,
+                branch_name = excluded.branch_name,
+                parent_conversation_id = excluded.parent_conversation_id,
+                mendel_experiment_ids = excluded.mendel_experiment_ids,
+                synced_at = excluded.synced_at",
             rusqlite::params![
-                session_id,
+                &session_id,
                 summary.trajectory_id,
                 client_str,
                 summary.title,
@@ -693,23 +739,28 @@ fn sync_antigravity_with_options(
                         continue;
                     }
 
-                    let response_id = usage.get("responseId").and_then(Value::as_str);
-                    let message_key = response_id.map(String::from).unwrap_or_else(|| {
-                        format!("{}:{}:{}:{}", session_id, timestamp, model_id, step_idx)
-                    });
+                    let raw_message_key = usage
+                        .get("responseId")
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("{}:{}:{}", timestamp, model_id, step_idx));
+                    let message_key =
+                        antigravity_logical_message_key(&session_id, &raw_message_key);
+                    let storage_message_id =
+                        antigravity_storage_message_id(client_str, &message_key);
 
                     let provider_id = detect_provider_from_model(&model_id);
                     let date_str = local_date_string_from_timestamp(timestamp);
 
                     tx.execute(
-                        "INSERT INTO session_usage (
+                        "INSERT OR REPLACE INTO session_usage (
                             id, session_id, client, model_id, provider_id, timestamp, step_index,
                             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
                             response_id, pricing_day, parser_version
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         rusqlite::params![
-                            message_key,
-                            session_id,
+                            storage_message_id,
+                            &session_id,
                             client_str,
                             model_id,
                             provider_id,
@@ -720,7 +771,7 @@ fn sync_antigravity_with_options(
                             cache_read,
                             cache_write,
                             reasoning,
-                            response_id,
+                            message_key,
                             date_str,
                             PARSER_VERSION,
                         ],
@@ -747,6 +798,22 @@ fn sync_antigravity_with_options(
     Ok(())
 }
 
+fn client_str_for_runtime_kind(runtime_kind: AntigravityRuntimeKind) -> &'static str {
+    match runtime_kind {
+        AntigravityRuntimeKind::Cli => "antigravity-cli",
+        AntigravityRuntimeKind::Desktop => "antigravity-desktop",
+        AntigravityRuntimeKind::Unknown => "antigravity",
+    }
+}
+
+fn antigravity_logical_message_key(session_id: &str, raw_message_key: &str) -> String {
+    format!("{session_id}:{raw_message_key}")
+}
+
+fn antigravity_storage_message_id(client: &str, logical_message_key: &str) -> String {
+    format!("{client}:{logical_message_key}")
+}
+
 fn update_opt<T>(dest: &mut Option<T>, src: Option<T>) {
     if dest.is_none() {
         *dest = src;
@@ -754,11 +821,11 @@ fn update_opt<T>(dest: &mut Option<T>, src: Option<T>) {
 }
 
 fn upsert_sync_summary(
-    summaries: &mut HashMap<String, AntigravitySyncSummary>,
-    session_id: String,
+    summaries: &mut HashMap<AntigravitySessionCacheKey, AntigravitySyncSummary>,
+    cache_key: AntigravitySessionCacheKey,
     data: AntigravitySyncSummary,
 ) {
-    if let Some(summary) = summaries.get_mut(&session_id) {
+    if let Some(summary) = summaries.get_mut(&cache_key) {
         summary.last_modified_ms = newer_timestamp(summary.last_modified_ms, data.last_modified_ms);
         for conn in data.connections {
             push_unique_connection(&mut summary.connections, conn);
@@ -787,7 +854,7 @@ fn upsert_sync_summary(
             data.mendel_experiment_ids,
         );
     } else {
-        summaries.insert(session_id, data);
+        summaries.insert(cache_key, data);
     }
 }
 
@@ -2307,6 +2374,8 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
+        assert_eq!(msg.client, "antigravity");
+        assert_eq!(msg.client_detail.as_deref(), Some("antigravity-cli"));
         assert_eq!(msg.session_id, "sess-123");
         assert_eq!(msg.model_id, "gemini-3-pro-preview");
         assert_eq!(msg.provider_id, "google");
@@ -2361,6 +2430,50 @@ mod tests {
         assert_eq!(msg.message_key, "resp-456");
         assert_eq!(msg.tokens.input, 200);
         assert_eq!(msg.tokens.output, 60);
+    }
+
+    #[test]
+    fn test_parse_file_keeps_cli_and_desktop_copies_for_logical_dedup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let conn = open_cache_db(&sessions_dir).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, trajectory_id, client, title, model_id, status, step_count, created_time_ms, last_modified_ms, last_user_input_time_ms, synced_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params!["sess-dup", "traj-dup", "antigravity-cli", "title", "gemini-3-pro-preview", "status", 1_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64],
+        ).unwrap();
+
+        let logical_key = antigravity_logical_message_key("sess-dup", "resp-dup");
+        for client in ["antigravity-cli", "antigravity-desktop"] {
+            let storage_id = antigravity_storage_message_id(client, &logical_key);
+            conn.execute(
+                "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, response_id, pricing_day, parser_version)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    storage_id, "sess-dup", client, "gemini-3-pro-preview", "google", 1672531201000_i64, 0_i64,
+                    150_i64, 50_i64, 20_i64, 0_i64, 10_i64, &logical_key, "2023-01-01", "antigravity-v2"
+                ],
+            ).unwrap();
+        }
+
+        let parser = AntigravitySessionParser::new()
+            .with_custom_paths(vec![sessions_dir])
+            .with_skip_sync(true);
+        let messages = parser.parse_sessions(None).unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|msg| msg.client == "antigravity"));
+        assert!(messages
+            .iter()
+            .all(|msg| msg.session_id == "sess-dup" && msg.message_key == logical_key));
+        let details = messages
+            .iter()
+            .filter_map(|msg| msg.client_detail.as_deref())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(details.contains("antigravity-cli"));
+        assert!(details.contains("antigravity-desktop"));
     }
 
     #[test]

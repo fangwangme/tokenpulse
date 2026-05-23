@@ -20,7 +20,7 @@ Current provider maturity:
 - `Codex`: usable for daily token tracking
 - `Copilot`: usable for daily token tracking (OTEL events)
 - `OpenCode`: usable for daily token tracking
-- `Gemini CLI`: provisional parser, needs more real-world validation
+- `Gemini CLI`: historical parser only
 - `PI`: parser retained, secondary product scope
 - `Antigravity`: usable for daily token tracking and LS sync
 
@@ -56,6 +56,7 @@ The usage pipeline is:
 ```rust
 pub struct UnifiedMessage {
     pub client: String,
+    pub client_detail: Option<String>,
     pub model_id: String,
     pub provider_id: String,
     pub session_id: String,
@@ -210,6 +211,8 @@ tokenpulse usage --rebuild-all
 `tokenpulse usage` now opens the interactive dashboard automatically when both stdin/stdout are attached to a terminal. Use `--no-tui` to force the plain-text summary for scripts, pipes, or quick dumps.
 
 Antigravity usage sync maintains a local cache database in `~/.local/share/tokenpulse/antigravity-cache/cache.db`. Regular runs rebuild sessions whose Antigravity or Antigravity CLI conversation files were modified in the last two days. Running with `--rebuild-all` clears the database of parsed messages and fully rebuilds the local SQLite cache database by querying all discoverable sessions from a running Antigravity language server.
+
+Antigravity CLI and Desktop are treated as sub-clients of the same `antigravity` source. The parser stores the concrete runtime in `client_detail` (`antigravity-cli` or `antigravity-desktop`) and uses a storage key shaped like `client:session_id:message_id`, while usage aggregates deduplicate on the logical `antigravity + session_id + message_id` key. This allows the same message to exist in both CLI and Desktop cache paths without counting its tokens twice.
 
 Non-TUI output includes:
 

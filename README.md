@@ -23,14 +23,13 @@ Quota fetching currently supports:
 
 - Claude Code
 - Codex
-- Gemini CLI
 - GitHub Copilot
 - Antigravity
 
 Notes:
 
 - usage coverage is strongest today for Claude Code, Codex, OpenCode, Copilot, and Antigravity
-- Gemini usage now handles streamed JSONL deduplication and cache-inclusive input tokens, but still has less sample coverage than Claude/Codex/OpenCode/Copilot
+- Gemini usage is retained for historical analytics and handles streamed JSONL deduplication plus cache-inclusive input tokens
 - Antigravity usage scans local conversation files and syncs with running Language Servers (GUI/CLI)
 
 
@@ -127,7 +126,7 @@ tokenpulse usage --rebuild-all
 
 If you previously ingested Gemini usage before the parser fix, the next `tokenpulse usage` run will automatically rebuild stored Gemini rows when it sees an older parser version. You can also force a one-shot refresh with `tokenpulse usage -p gemini --rebuild-all`.
 
-Antigravity keeps a TokenPulse-managed raw cache under `~/.local/share/tokenpulse/antigravity-cache/`. Normal usage runs refresh Antigravity sessions whose local conversation files changed in the last two days. Use `tokenpulse usage --rebuild-all` to rebuild all discoverable Antigravity raw cache files from a running Antigravity language server.
+Antigravity keeps a TokenPulse-managed raw cache under `~/.local/share/tokenpulse/antigravity-cache/`. Normal usage runs refresh Antigravity sessions whose local CLI/Desktop conversation files changed in the last two days. CLI and Desktop copies are stored separately but roll up under one `antigravity` source and are deduplicated by `session_id + message_id`. Use `tokenpulse usage --rebuild-all` to rebuild all discoverable Antigravity raw cache files from a running Antigravity language server.
 
 ## Data Model
 

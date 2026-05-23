@@ -12,6 +12,9 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use tracing::warn;
 
+const CANONICAL_SOURCE_SQL: &str =
+    "CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END";
+
 #[derive(Debug, Clone)]
 pub struct DailyUsageRow {
     pub date: String,
@@ -467,18 +470,18 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<(usize, usize)> {
         let conn = self.open()?;
-        let mut sql = String::from(
+        let mut sql = format!(
             r#"
             SELECT COUNT(*),
                    COUNT(DISTINCT source || '::' || session_id)
             FROM (
                 SELECT
                     date,
-                    source,
+                    {CANONICAL_SOURCE_SQL} AS source,
                     session_id,
                     message_key
                 FROM usage_messages
-                GROUP BY date, source, session_id, message_key
+                GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
             )
             WHERE 1=1
             "#,
@@ -539,7 +542,7 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<DashboardDay>> {
         let conn = self.open()?;
-        let mut sql = String::from(
+        let mut sql = format!(
             r#"
             SELECT date,
                    SUM(input_tokens),
@@ -554,7 +557,7 @@ impl UsageStore {
             FROM (
                 SELECT
                     date,
-                    source,
+                    {CANONICAL_SOURCE_SQL} AS source,
                     session_id,
                     message_key,
                     MAX(input_tokens) AS input_tokens,
@@ -565,7 +568,7 @@ impl UsageStore {
                     MAX(total_tokens) AS total_tokens,
                     MAX(cost_usd) AS cost_usd
                 FROM usage_messages
-                GROUP BY date, source, session_id, message_key
+                GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
             )
             WHERE 1=1
             "#,
@@ -584,10 +587,10 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<DailyUsageRow>> {
         let conn = self.open()?;
-        let mut sql = String::from(
+        let mut sql = format!(
             r#"
             SELECT date,
-                   source,
+                   {CANONICAL_SOURCE_SQL} AS source,
                    provider_id,
                    model_id,
                    SUM(input_tokens),
@@ -604,7 +607,9 @@ impl UsageStore {
             "#,
         );
         let params = append_common_filters(&mut sql, since, sources);
-        sql.push_str(" GROUP BY date, source, provider_id, model_id ORDER BY date ASC, SUM(cost_usd) DESC");
+        sql.push_str(&format!(
+            " GROUP BY date, {CANONICAL_SOURCE_SQL}, provider_id, model_id ORDER BY date ASC, SUM(cost_usd) DESC",
+        ));
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params), row_to_daily)?;
@@ -618,7 +623,7 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<ProviderSummary>> {
         let conn = self.open()?;
-        let mut sql = String::from(
+        let mut sql = format!(
             r#"
             SELECT source,
                    SUM(cost_usd),
@@ -628,13 +633,13 @@ impl UsageStore {
             FROM (
                 SELECT
                     date,
-                    source,
+                    {CANONICAL_SOURCE_SQL} AS source,
                     session_id,
                     message_key,
                     MAX(cost_usd) AS cost_usd,
                     MAX(total_tokens) AS total_tokens
                 FROM usage_messages
-                GROUP BY date, source, session_id, message_key
+                GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
             )
             WHERE 1=1
             "#,
@@ -653,7 +658,7 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<ModelSummary>> {
         let conn = self.open()?;
-        let mut sql = String::from(
+        let mut sql = format!(
             r#"
             SELECT model_id,
                    provider_id,
@@ -665,15 +670,15 @@ impl UsageStore {
             FROM (
                 SELECT
                     date,
-                    source,
-                    provider_id,
-                    model_id,
+                    {CANONICAL_SOURCE_SQL} AS source,
                     session_id,
                     message_key,
+                    MAX(provider_id) AS provider_id,
+                    MAX(model_id) AS model_id,
                     MAX(cost_usd) AS cost_usd,
                     MAX(total_tokens) AS total_tokens
                 FROM usage_messages
-                GROUP BY date, source, provider_id, model_id, session_id, message_key
+                GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
             )
             WHERE 1=1
             "#,
@@ -822,7 +827,10 @@ fn append_range_and_source_filters(
         sql.push_str(" AND source IN (");
         let mut first = true;
         for source in sources {
-            if source == "antigravity" || source == "antigravity-cli" || source == "antigravity-desktop" {
+            if source == "antigravity"
+                || source == "antigravity-cli"
+                || source == "antigravity-desktop"
+            {
                 for s in &["antigravity", "antigravity-cli", "antigravity-desktop"] {
                     if !first {
                         sql.push_str(", ");
@@ -997,7 +1005,8 @@ fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<
         params![date],
     )?;
     tx.execute(
-        r#"
+        &format!(
+            r#"
         INSERT INTO daily_model_usage (
             date, source, provider_id, model_id,
             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
@@ -1021,11 +1030,11 @@ fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<
         FROM (
             SELECT
                 date,
-                source,
-                provider_id,
-                model_id,
+                {CANONICAL_SOURCE_SQL} AS source,
                 session_id,
                 message_key,
+                MAX(provider_id) AS provider_id,
+                MAX(model_id) AS model_id,
                 MAX(input_tokens) AS input_tokens,
                 MAX(output_tokens) AS output_tokens,
                 MAX(cache_read_tokens) AS cache_read_tokens,
@@ -1035,10 +1044,11 @@ fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<
                 MAX(cost_usd) AS cost_usd
             FROM usage_messages
             WHERE date = ?1
-            GROUP BY date, source, provider_id, model_id, session_id, message_key
+            GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
         )
         GROUP BY date, source, provider_id, model_id
         "#,
+        ),
         params![date, now],
     )?;
     Ok(())
@@ -1172,84 +1182,6 @@ fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()
     }
 
     conn.execute_batch(USAGE_SCHEMA_SQL)?;
-
-    let client_is_pk: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('usage_messages') WHERE name = 'client' AND pk > 0",
-        [],
-        |row| {
-            let count: i64 = row.get(0)?;
-            Ok(count > 0)
-        },
-    )?;
-
-    if !client_is_pk {
-        conn.execute_batch(
-            r#"
-            PRAGMA foreign_keys=OFF;
-            BEGIN TRANSACTION;
-            
-            ALTER TABLE usage_messages RENAME TO usage_messages_old;
-            
-            CREATE TABLE usage_messages (
-                source TEXT NOT NULL,
-                client TEXT NOT NULL,
-                provider_id TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                message_key TEXT NOT NULL,
-                timestamp_ms INTEGER NOT NULL,
-                date TEXT NOT NULL,
-                input_tokens INTEGER NOT NULL,
-                output_tokens INTEGER NOT NULL,
-                cache_read_tokens INTEGER NOT NULL,
-                cache_write_tokens INTEGER NOT NULL,
-                reasoning_tokens INTEGER NOT NULL,
-                total_tokens INTEGER NOT NULL,
-                cost_usd REAL NOT NULL,
-                pricing_day TEXT NOT NULL,
-                parser_version TEXT NOT NULL,
-                PRIMARY KEY (source, client, message_key)
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_usage_messages_date ON usage_messages(date);
-            CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date ON usage_messages(source, date);
-            CREATE INDEX IF NOT EXISTS idx_usage_messages_zero_cost
-                ON usage_messages(date, source)
-                WHERE cost_usd <= 0 AND total_tokens > 0;
-            
-            INSERT INTO usage_messages (
-                source, client, provider_id, model_id, session_id, message_key,
-                timestamp_ms, date, input_tokens, output_tokens,
-                cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                total_tokens, cost_usd, pricing_day, parser_version
-            )
-            SELECT
-                source,
-                COALESCE(client, source) AS client,
-                provider_id,
-                model_id,
-                session_id,
-                message_key,
-                timestamp_ms,
-                date,
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-                reasoning_tokens,
-                total_tokens,
-                cost_usd,
-                pricing_day,
-                parser_version
-            FROM usage_messages_old;
-            
-            DROP TABLE usage_messages_old;
-            
-            COMMIT;
-            PRAGMA foreign_keys=ON;
-            "#,
-        )?;
-    }
 
     initialized_paths()
         .lock()
@@ -1661,7 +1593,7 @@ mod tests {
         msg4.client_detail = Some("antigravity-cli".to_string());
         msg4.session_id = "session-dup".to_string();
         msg4.tokens.input = 100;
-        
+
         let mut msg5 = sample_message("2026-05-22", "dup_key");
         msg5.client = "antigravity".to_string();
         msg5.client_detail = Some("antigravity-desktop".to_string());
