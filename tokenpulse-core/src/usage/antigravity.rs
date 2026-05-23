@@ -73,7 +73,7 @@ impl SessionParser for AntigravitySessionParser {
         }
     }
 
-    fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
+    fn parse_sessions(&self, _since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
         let mut all_messages = Vec::new();
 
         for root in self.session_paths() {
