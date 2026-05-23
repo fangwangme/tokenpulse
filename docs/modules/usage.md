@@ -47,6 +47,8 @@ The usage pipeline is:
 4. rebuild `daily_model_usage` for affected dates
 5. derive `DashboardDay`, weekly rollups, monthly rollups, agent summaries, and normalized model summaries from the ledger
 
+For file-backed agents, incremental runs treat a modified session file as the authoritative copy for that session: changed files are parsed in parallel, then the ledger rows for those changed sessions are replaced before daily aggregates are rebuilt. This keeps rewritten or compacted session files from leaving stale messages behind. OpenCode remains row-incremental through its own SQLite timestamp filter, and Antigravity continues to use its Language Server-backed cache database.
+
 ## Core Data Model
 
 ### Parsed Messages
@@ -213,6 +215,8 @@ tokenpulse usage --rebuild-all
 Antigravity usage sync maintains a local cache database in `~/.local/share/tokenpulse/antigravity-cache/cache.db`. Regular runs rebuild sessions whose Antigravity or Antigravity CLI conversation files were modified in the last two days. Running with `--rebuild-all` clears the database of parsed messages and fully rebuilds the local SQLite cache database by querying all discoverable sessions from a running Antigravity language server.
 
 Antigravity CLI and Desktop are treated as sub-clients of the same `antigravity` source. The parser stores the concrete runtime in `client_detail` (`antigravity-cli` or `antigravity-desktop`) and uses a storage key shaped like `client:session_id:message_id`, while usage aggregates deduplicate on the logical `antigravity + session_id + message_id` key. This allows the same message to exist in both CLI and Desktop cache paths without counting its tokens twice.
+
+Claude Code, Codex, Copilot, Gemini CLI, and PI do not maintain separate raw cache databases. Their normal incremental path discovers session files by mtime, parses matching files concurrently, and replaces only the sessions represented by those files. Range refreshes and full rebuilds still use the broader source/date clearing paths.
 
 Non-TUI output includes:
 

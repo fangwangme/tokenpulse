@@ -8,7 +8,7 @@ use tokenpulse_core::{
         CodexSessionParser, CopilotSessionParser, DateRange, GeminiSessionParser,
         OpenCodeSessionParser, PiSessionParser, UsageStore,
     },
-    SessionParser, UnifiedMessage,
+    IncrementalIngestMode, SessionParser, UnifiedMessage,
 };
 
 const SUPPORTED_USAGE_PROVIDERS: &[&str] = &[
@@ -87,7 +87,15 @@ pub async fn run(
                     }
                 } else if !scoped.is_empty() {
                     found_any_source = true;
-                    store.ingest_messages(&scoped, refresh_pricing)?;
+                    if !rebuild_all
+                        && refresh_range.is_none()
+                        && parser.incremental_ingest_mode()
+                            == IncrementalIngestMode::ReplaceChangedSessions
+                    {
+                        store.replace_sessions_messages(&scoped, refresh_pricing)?;
+                    } else {
+                        store.ingest_messages(&scoped, refresh_pricing)?;
+                    }
                 }
             }
             Err(error) => {
@@ -194,7 +202,13 @@ fn build_reload_fn(
             match parser.parse_sessions(since) {
                 Ok(messages) => {
                     if !messages.is_empty() {
-                        store.ingest_messages(&messages, false)?;
+                        if parser.incremental_ingest_mode()
+                            == IncrementalIngestMode::ReplaceChangedSessions
+                        {
+                            store.replace_sessions_messages(&messages, false)?;
+                        } else {
+                            store.ingest_messages(&messages, false)?;
+                        }
                     }
                 }
                 Err(_) => {} // tolerate per-provider errors during reload

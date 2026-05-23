@@ -235,6 +235,130 @@ impl UsageStore {
         Ok(affected_dates)
     }
 
+    pub fn replace_sessions_messages(
+        &self,
+        messages: &[UnifiedMessage],
+        refresh_pricing: bool,
+    ) -> Result<BTreeSet<String>> {
+        if messages.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+
+        let pricing_cache = PricingCache::new();
+        let pricing = match pricing_cache.get_pricing_sync() {
+            Ok(pricing) => Some(pricing),
+            Err(error) if !refresh_pricing => {
+                warn!(
+                    "Failed to load pricing data during usage ingest; continuing without refreshed pricing: {}",
+                    error
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
+
+        let mut conn = self.open()?;
+        let tx = conn.transaction()?;
+        let now = Utc::now().timestamp_millis();
+        let mut affected_dates = BTreeSet::new();
+        let session_keys: BTreeSet<(String, String, String)> = messages
+            .iter()
+            .map(|message| {
+                (
+                    message.client.clone(),
+                    message
+                        .client_detail
+                        .clone()
+                        .unwrap_or_else(|| message.client.clone()),
+                    message.session_id.clone(),
+                )
+            })
+            .collect();
+
+        for (source, client, session_id) in &session_keys {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT date FROM usage_messages WHERE source = ?1 AND client = ?2 AND session_id = ?3",
+            )?;
+            let rows = stmt.query_map(params![source, client, session_id], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows.flatten() {
+                affected_dates.insert(row);
+            }
+            drop(stmt);
+
+            tx.execute(
+                "DELETE FROM usage_messages WHERE source = ?1 AND client = ?2 AND session_id = ?3",
+                params![source, client, session_id],
+            )?;
+        }
+
+        for message in messages {
+            let snapshot =
+                ensure_pricing_snapshot(&tx, pricing.as_ref(), message, refresh_pricing)?;
+            let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
+
+            tx.execute(
+                r#"
+                INSERT INTO usage_messages (
+                    source, client, provider_id, model_id, session_id, message_key,
+                    timestamp_ms, date, input_tokens, output_tokens,
+                    cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                    total_tokens, cost_usd, pricing_day, parser_version
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6,
+                    ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?17
+                )
+                ON CONFLICT(source, client, message_key) DO UPDATE SET
+                    provider_id = excluded.provider_id,
+                    model_id = excluded.model_id,
+                    session_id = excluded.session_id,
+                    timestamp_ms = excluded.timestamp_ms,
+                    date = excluded.date,
+                    input_tokens = excluded.input_tokens,
+                    output_tokens = excluded.output_tokens,
+                    cache_read_tokens = excluded.cache_read_tokens,
+                    cache_write_tokens = excluded.cache_write_tokens,
+                    reasoning_tokens = excluded.reasoning_tokens,
+                    total_tokens = excluded.total_tokens,
+                    cost_usd = excluded.cost_usd,
+                    pricing_day = excluded.pricing_day,
+                    parser_version = excluded.parser_version
+                "#,
+                params![
+                    message.client,
+                    message.client_detail.as_deref().unwrap_or(&message.client),
+                    message.provider_id,
+                    message.model_id,
+                    message.session_id,
+                    message.message_key,
+                    message.timestamp,
+                    message.date,
+                    message.tokens.input,
+                    message.tokens.output,
+                    message.tokens.cache_read,
+                    message.tokens.cache_write,
+                    message.tokens.reasoning,
+                    message.total_tokens(),
+                    cost,
+                    message.pricing_day,
+                    message.parser_version,
+                ],
+            )?;
+
+            affected_dates.insert(message.date.clone());
+        }
+
+        for date in &affected_dates {
+            rebuild_daily_for_date(&tx, date, now)?;
+        }
+
+        tx.commit()?;
+        Ok(affected_dates)
+    }
+
     pub fn delete_sources_in_date_range(
         &self,
         range: DateRange,
@@ -1469,6 +1593,48 @@ mod tests {
         assert_eq!(remaining[0].message_key, "gemini-new");
         assert_eq!(remaining[0].date, "2024-03-11");
         assert_eq!(remaining[0].parser_version, "gemini-v3");
+    }
+
+    #[test]
+    fn replace_sessions_messages_replaces_only_changed_sessions() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        let mut old_changed = sample_message("2024-03-10", "changed-old");
+        old_changed.session_id = "changed-session".to_string();
+
+        let mut untouched = sample_message("2024-03-11", "untouched");
+        untouched.session_id = "untouched-session".to_string();
+
+        store
+            .ingest_messages(&[old_changed, untouched], false)
+            .unwrap();
+
+        let mut replacement = sample_message("2024-03-12", "changed-new");
+        replacement.session_id = "changed-session".to_string();
+
+        store
+            .replace_sessions_messages(&[replacement], false)
+            .unwrap();
+
+        let remaining = store.load_messages(None, &["claude".to_string()]).unwrap();
+        let keys = remaining
+            .iter()
+            .map(|message| message.message_key.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(remaining.len(), 2);
+        assert!(keys.contains("changed-new"));
+        assert!(keys.contains("untouched"));
+        assert!(!keys.contains("changed-old"));
+
+        let days = store
+            .load_dashboard_days(None, &["claude".to_string()])
+            .unwrap();
+        assert_eq!(
+            days.iter().map(|day| day.date.as_str()).collect::<Vec<_>>(),
+            vec!["2024-03-11", "2024-03-12"]
+        );
     }
 
     #[test]

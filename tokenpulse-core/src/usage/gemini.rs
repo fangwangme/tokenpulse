@@ -1,4 +1,4 @@
-use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
+use crate::provider::{IncrementalIngestMode, SessionParser, TokenBreakdown, UnifiedMessage};
 use crate::usage::scanner;
 
 use anyhow::Result;
@@ -208,16 +208,15 @@ impl SessionParser for GeminiSessionParser {
             }
             let mut files = scanner::discover_files(&root, "json", since);
             files.extend(scanner::discover_files(&root, "jsonl", since));
-            for file in files {
-                if file
-                    .file_name()
+            files.retain(|file| {
+                file.file_name()
                     .and_then(|name| name.to_str())
                     .map(|name| name.starts_with("session-") || name.ends_with(".jsonl"))
                     .unwrap_or(false)
-                {
-                    all_messages.extend(self.parse_file(file));
-                }
-            }
+            });
+            all_messages.extend(scanner::parse_files_parallel(files, |file| {
+                self.parse_file(file)
+            }));
         }
         all_messages.sort_by_key(|message| message.timestamp);
         Ok(all_messages)
@@ -225,6 +224,10 @@ impl SessionParser for GeminiSessionParser {
 
     fn parser_version(&self) -> &str {
         PARSER_VERSION
+    }
+
+    fn incremental_ingest_mode(&self) -> IncrementalIngestMode {
+        IncrementalIngestMode::ReplaceChangedSessions
     }
 }
 

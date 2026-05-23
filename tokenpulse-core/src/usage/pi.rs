@@ -1,5 +1,6 @@
 use crate::provider::{
-    local_date_string_from_timestamp, SessionParser, TokenBreakdown, UnifiedMessage,
+    local_date_string_from_timestamp, IncrementalIngestMode, SessionParser, TokenBreakdown,
+    UnifiedMessage,
 };
 use crate::usage::scanner;
 use crate::usage::utils::detect_provider_from_model;
@@ -176,10 +177,9 @@ impl SessionParser for PiSessionParser {
             let files = scanner::discover_files(&root, "jsonl", since);
             debug!("Found {} files for PI", files.len());
 
-            for file in files {
-                let msgs = self.parse_file(file);
-                all_messages.extend(msgs);
-            }
+            all_messages.extend(scanner::parse_files_parallel(files, |file| {
+                self.parse_file(file)
+            }));
         }
 
         all_messages.sort_by_key(|m| m.timestamp);
@@ -188,6 +188,10 @@ impl SessionParser for PiSessionParser {
 
     fn parser_version(&self) -> &str {
         PARSER_VERSION
+    }
+
+    fn incremental_ingest_mode(&self) -> IncrementalIngestMode {
+        IncrementalIngestMode::ReplaceChangedSessions
     }
 }
 

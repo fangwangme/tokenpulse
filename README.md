@@ -128,6 +128,8 @@ If you previously ingested Gemini usage before the parser fix, the next `tokenpu
 
 Antigravity keeps a TokenPulse-managed raw cache under `~/.local/share/tokenpulse/antigravity-cache/`. Normal usage runs refresh Antigravity sessions whose local CLI/Desktop conversation files changed in the last two days. CLI and Desktop copies are stored separately but roll up under one `antigravity` source and are deduplicated by `session_id + message_id`. Use `tokenpulse usage --rebuild-all` to rebuild all discoverable Antigravity raw cache files from a running Antigravity language server.
 
+For file-backed agents such as Claude Code, Codex, Copilot, Gemini CLI, and PI, normal usage runs parse changed session files in parallel and replace the ledger rows for those changed sessions. OpenCode keeps its direct SQLite timestamp scan because it can read only recent database rows without reparsing whole session files.
+
 ## Data Model
 
 TokenPulse tracks two different concepts:

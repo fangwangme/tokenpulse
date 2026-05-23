@@ -138,6 +138,12 @@ pub fn local_date_string_from_timestamp(timestamp: i64) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncrementalIngestMode {
+    UpsertMessages,
+    ReplaceChangedSessions,
+}
+
 #[async_trait]
 pub trait QuotaFetcher: Send + Sync {
     fn provider_name(&self) -> &str;
@@ -151,6 +157,9 @@ pub trait SessionParser: Send + Sync {
     fn parse_sessions(&self, since: Option<chrono::NaiveDate>) -> Result<Vec<UnifiedMessage>>;
     fn parser_version(&self) -> &str {
         "v1"
+    }
+    fn incremental_ingest_mode(&self) -> IncrementalIngestMode {
+        IncrementalIngestMode::UpsertMessages
     }
 }
 

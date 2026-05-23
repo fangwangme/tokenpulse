@@ -345,6 +345,8 @@ Token refresh:
 | Gemini CLI | `~/.gemini/tmp/**/session-*.json{,l}` | JSON + streamed JSONL session files |
 | Antigravity | `~/.local/share/tokenpulse/antigravity-cache/cache.db` | SQLite |
 
+Normal incremental scans parse changed file-backed session files in parallel and replace rows for the changed sessions. OpenCode is kept on direct SQLite timestamp filtering, and Antigravity keeps the dedicated LS-backed cache because those sources already expose stronger incremental boundaries than file mtime alone.
+
 ### Pricing Source
 
 ```
@@ -407,5 +409,6 @@ pub trait QuotaFetcher {
 pub trait SessionParser {
     fn provider_name(&self) -> &str;
     fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>>;
+    fn incremental_ingest_mode(&self) -> IncrementalIngestMode;
 }
 ```
