@@ -605,8 +605,9 @@ fn render_snapshot_card(
         .unwrap_or(10);
     let fixed_label_width = max_label_len.min(inner.width.saturating_sub(30) as usize);
 
+    let has_account_display = snapshot.account.is_some() && show_account;
     let mut constraints = Vec::new();
-    if snapshot.plan.is_some() || snapshot.account.is_some() {
+    if snapshot.plan.is_some() || has_account_display {
         constraints.push(Constraint::Length(1));
     }
     for _ in &windows {
@@ -623,25 +624,22 @@ fn render_snapshot_card(
         .split(inner);
 
     let mut cursor = 0usize;
-    if snapshot.plan.is_some() || snapshot.account.is_some() {
+    if snapshot.plan.is_some() || has_account_display {
         let mut spans = Vec::new();
-        if let Some(account) = &snapshot.account {
-            let display_account = if show_account {
-                account.clone()
-            } else {
-                mask_account(account)
-            };
-            let max_acc_len = (inner.width as usize).saturating_sub(25).max(15);
-            let truncated_acc = truncate(&display_account, max_acc_len);
-            spans.push(Span::styled(
-                truncated_acc,
-                Style::default().fg(theme.fg).bold(),
-            ));
-            if snapshot.plan.is_some() {
-                spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
+        if has_account_display {
+            if let Some(account) = &snapshot.account {
+                let max_acc_len = (inner.width as usize).saturating_sub(25).max(15);
+                let truncated_acc = truncate(account, max_acc_len);
+                spans.push(Span::styled(
+                    truncated_acc,
+                    Style::default().fg(theme.fg).bold(),
+                ));
             }
         }
         if let Some(plan) = &snapshot.plan {
+            if has_account_display {
+                spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
+            }
             spans.push(Span::styled("Plan: ", Style::default().fg(theme.dim)));
             let max_plan_len = (inner.width as usize).saturating_sub(30).max(10);
             let truncated_plan = truncate(plan, max_plan_len);
@@ -650,9 +648,11 @@ fn render_snapshot_card(
                 Style::default().fg(theme.fg).bold(),
             ));
         }
-        let line = Paragraph::new(Line::from(spans));
-        f.render_widget(line, sections[cursor]);
-        cursor += 1;
+        if !spans.is_empty() {
+            let line = Paragraph::new(Line::from(spans));
+            f.render_widget(line, sections[cursor]);
+            cursor += 1;
+        }
     }
 
     for window in &windows {
@@ -1049,39 +1049,4 @@ fn render_quota_help_overlay(f: &mut ratatui::Frame, area: Rect, theme: &Theme) 
         Paragraph::new(lines).style(Style::default().fg(theme.fg)),
         inner,
     );
-}
-
-fn mask_account(account: &str) -> String {
-    if let Some((username, domain)) = account.split_once('@') {
-        if username.len() <= 2 {
-            format!("*@{}", domain)
-        } else {
-            let mut masked = String::new();
-            masked.push(username.chars().next().unwrap());
-            masked.push_str("***");
-            masked.push(username.chars().last().unwrap());
-            format!("{}@{}", masked, domain)
-        }
-    } else if account.len() <= 4 {
-        "***".to_string()
-    } else {
-        let mut masked = String::new();
-        masked.push(account.chars().next().unwrap());
-        masked.push_str("***");
-        masked.push(account.chars().last().unwrap());
-        masked
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mask_account() {
-        assert_eq!(mask_account("john.doe@example.com"), "j***e@example.com");
-        assert_eq!(mask_account("ab@example.com"), "*@example.com");
-        assert_eq!(mask_account("myaccount"), "m***t");
-        assert_eq!(mask_account("abc"), "***");
-    }
 }

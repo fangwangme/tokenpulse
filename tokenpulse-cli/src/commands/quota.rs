@@ -215,17 +215,16 @@ fn format_provider_content(
 ) -> Vec<String> {
     let mut lines = vec![quota_display_name(&snapshot.provider).to_string()];
 
-    if snapshot.plan.is_some() || snapshot.account.is_some() {
+    let has_account_display = snapshot.account.is_some() && show_account;
+
+    if snapshot.plan.is_some() || has_account_display {
         let mut plan_line = String::new();
-        if let Some(account) = &snapshot.account {
-            let display_account = if show_account {
-                account.clone()
-            } else {
-                mask_account(account)
-            };
-            plan_line.push_str(&display_account);
-            if snapshot.plan.is_some() {
-                plan_line.push_str(" | ");
+        if has_account_display {
+            if let Some(account) = &snapshot.account {
+                plan_line.push_str(account);
+                if snapshot.plan.is_some() {
+                    plan_line.push_str(" | ");
+                }
             }
         }
         if let Some(plan) = &snapshot.plan {
@@ -536,40 +535,5 @@ pub fn build_quota_fetchers(
             .filter(|e| enabled_providers.contains(&e.id.to_string()))
             .map(|e| (e.make_fetcher)())
             .collect(),
-    }
-}
-
-fn mask_account(account: &str) -> String {
-    if let Some((username, domain)) = account.split_once('@') {
-        if username.len() <= 2 {
-            format!("*@{}", domain)
-        } else {
-            let mut masked = String::new();
-            masked.push(username.chars().next().unwrap());
-            masked.push_str("***");
-            masked.push(username.chars().last().unwrap());
-            format!("{}@{}", masked, domain)
-        }
-    } else if account.len() <= 4 {
-        "***".to_string()
-    } else {
-        let mut masked = String::new();
-        masked.push(account.chars().next().unwrap());
-        masked.push_str("***");
-        masked.push(account.chars().last().unwrap());
-        masked
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mask_account() {
-        assert_eq!(mask_account("john.doe@example.com"), "j***e@example.com");
-        assert_eq!(mask_account("ab@example.com"), "*@example.com");
-        assert_eq!(mask_account("myaccount"), "m***t");
-        assert_eq!(mask_account("abc"), "***");
     }
 }
