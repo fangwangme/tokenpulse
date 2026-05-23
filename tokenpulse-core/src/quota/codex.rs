@@ -211,9 +211,12 @@ impl QuotaFetcher for CodexQuotaFetcher {
             }
         }
 
+        let email = self.auth.load_email();
+
         Ok(QuotaSnapshot {
             provider: "codex".to_string(),
             plan: quota.plan_type,
+            account: email,
             windows,
             credits: None,
             fetched_at: Utc::now(),

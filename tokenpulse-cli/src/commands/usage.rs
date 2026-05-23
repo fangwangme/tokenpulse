@@ -27,7 +27,6 @@ pub async fn run(
     refresh_days: Option<String>,
     refresh_pricing: bool,
     rebuild_all: bool,
-    rebuild_cache: bool,
     use_tui: bool,
     json: bool,
     csv: Option<String>,
@@ -38,7 +37,7 @@ pub async fn run(
     let refresh_range = refresh_days.as_deref().map(parse_date_range).transpose()?;
 
     let provider_names = parse_provider_names(provider.as_deref());
-    let parsers = build_parsers(&provider_names, rebuild_cache);
+    let parsers = build_parsers(&provider_names, rebuild_all);
     let store = UsageStore::new();
     let mut stale_sources = HashSet::new();
 
@@ -235,7 +234,7 @@ fn parse_provider_names(provider: Option<&str>) -> Vec<String> {
     }
 }
 
-fn build_parsers(provider_names: &[String], rebuild_cache: bool) -> Vec<Box<dyn SessionParser>> {
+fn build_parsers(provider_names: &[String], rebuild_all: bool) -> Vec<Box<dyn SessionParser>> {
     provider_names
         .iter()
         .filter_map(|provider| match provider.as_str() {
@@ -246,7 +245,7 @@ fn build_parsers(provider_names: &[String], rebuild_cache: bool) -> Vec<Box<dyn 
             "gemini" => Some(Box::new(GeminiSessionParser::new()) as Box<dyn SessionParser>),
             "pi" => Some(Box::new(PiSessionParser::new()) as Box<dyn SessionParser>),
             "antigravity" => Some(Box::new(
-                AntigravitySessionParser::new().with_rebuild_cache(rebuild_cache),
+                AntigravitySessionParser::new().with_rebuild_cache(rebuild_all),
             ) as Box<dyn SessionParser>),
             _ => None,
         })

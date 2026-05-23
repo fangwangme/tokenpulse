@@ -1,14 +1,10 @@
-pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
-pub mod gemini;
 
-pub use antigravity::AntigravityAuth;
 pub use claude::ClaudeAuth;
 pub use codex::CodexAuth;
 pub use copilot::CopilotAuth;
-pub use gemini::GeminiAuth;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CredentialStatus {
@@ -48,23 +44,27 @@ pub fn detect_providers() -> Vec<DetectedProvider> {
             },
         },
         DetectedProvider {
-            name: "gemini".to_string(),
-            display_name: "Gemini".to_string(),
-            detected: GeminiAuth::detect(),
-            credential_hint: if GeminiAuth::detect() {
-                "~/.gemini/oauth_creds.json found".to_string()
-            } else {
-                "not detected".to_string()
-            },
-        },
-        DetectedProvider {
             name: "antigravity".to_string(),
             display_name: "Antigravity".to_string(),
-            detected: AntigravityAuth::detect(),
-            credential_hint: if AntigravityAuth::detect() {
-                "state.vscdb found".to_string()
-            } else {
-                "not detected".to_string()
+            detected: {
+                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
+                home.join("Library")
+                    .join("Application Support")
+                    .join("Antigravity")
+                    .exists()
+            },
+            credential_hint: {
+                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
+                if home
+                    .join("Library")
+                    .join("Application Support")
+                    .join("Antigravity")
+                    .exists()
+                {
+                    "installed".to_string()
+                } else {
+                    "not detected".to_string()
+                }
             },
         },
         DetectedProvider {
@@ -74,4 +74,44 @@ pub fn detect_providers() -> Vec<DetectedProvider> {
             credential_hint: CopilotAuth::credential_hint(),
         },
     ]
+}
+
+pub fn decode_base64(input: &str) -> anyhow::Result<Vec<u8>> {
+    let input = input.replace('-', "+").replace('_', "/");
+    let padded_len = (input.len() + 3) / 4 * 4;
+    let mut padded = input.to_string();
+    while padded.len() < padded_len {
+        padded.push('=');
+    }
+
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::STANDARD;
+    engine
+        .decode(&padded)
+        .map_err(|e| anyhow::anyhow!("Base64 decode error: {}", e))
+}
+
+pub fn decode_jwt_email(token: &str) -> Option<String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let payload_bytes = decode_base64(parts[1]).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    json.get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+pub fn decode_jwt_client_id(token: &str) -> Option<String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let payload_bytes = decode_base64(parts[1]).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    json.get("azp")
+        .or_else(|| json.get("aud"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }

@@ -243,6 +243,7 @@ impl QuotaFetcher for CopilotQuotaFetcher {
             return Ok(QuotaSnapshot {
                 provider: "copilot".to_string(),
                 plan: data.copilot_plan,
+                account: None,
                 windows,
                 credits: None,
                 fetched_at: Utc::now(),

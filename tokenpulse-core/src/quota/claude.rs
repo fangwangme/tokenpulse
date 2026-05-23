@@ -190,6 +190,7 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
         Ok(QuotaSnapshot {
             provider: "claude".to_string(),
             plan: Some("Pro".to_string()),
+            account: None,
             windows,
             credits,
             fetched_at: Utc::now(),

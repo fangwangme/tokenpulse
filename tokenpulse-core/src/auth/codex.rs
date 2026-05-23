@@ -64,6 +64,23 @@ impl CodexAuth {
         Err(anyhow!("Codex credentials not found"))
     }
 
+    pub fn load_email(&self) -> Option<String> {
+        if let Ok(creds) = self.load_credentials() {
+            if let Some(tokens) = creds.tokens {
+                if let Some(id_token) = tokens.id_token {
+                    if let Some(email) = crate::auth::decode_jwt_email(&id_token) {
+                        return Some(email);
+                    }
+                }
+                // Fallback to access_token JWT
+                if let Some(email) = crate::auth::decode_jwt_email(&tokens.access_token) {
+                    return Some(email);
+                }
+            }
+        }
+        None
+    }
+
     pub fn detect() -> bool {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
         let paths = vec![

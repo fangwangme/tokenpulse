@@ -571,7 +571,7 @@ fn render_snapshot_card(
     let fixed_label_width = max_label_len.min(inner.width.saturating_sub(30) as usize);
 
     let mut constraints = Vec::new();
-    if snapshot.plan.is_some() {
+    if snapshot.plan.is_some() || snapshot.account.is_some() {
         constraints.push(Constraint::Length(1));
     }
     for _ in &windows {
@@ -588,11 +588,29 @@ fn render_snapshot_card(
         .split(inner);
 
     let mut cursor = 0usize;
-    if let Some(plan) = &snapshot.plan {
-        let line = Paragraph::new(Line::from(vec![
-            Span::styled("Plan ", Style::default().fg(theme.dim)),
-            Span::styled(plan.clone(), Style::default().fg(theme.fg).bold()),
-        ]));
+    if snapshot.plan.is_some() || snapshot.account.is_some() {
+        let mut spans = Vec::new();
+        if let Some(account) = &snapshot.account {
+            let max_acc_len = (inner.width as usize).saturating_sub(25).max(15);
+            let truncated_acc = truncate(account, max_acc_len);
+            spans.push(Span::styled(
+                truncated_acc,
+                Style::default().fg(theme.fg).bold(),
+            ));
+            if snapshot.plan.is_some() {
+                spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
+            }
+        }
+        if let Some(plan) = &snapshot.plan {
+            spans.push(Span::styled("Plan: ", Style::default().fg(theme.dim)));
+            let max_plan_len = (inner.width as usize).saturating_sub(30).max(10);
+            let truncated_plan = truncate(plan, max_plan_len);
+            spans.push(Span::styled(
+                truncated_plan,
+                Style::default().fg(theme.fg).bold(),
+            ));
+        }
+        let line = Paragraph::new(Line::from(spans));
         f.render_widget(line, sections[cursor]);
         cursor += 1;
     }

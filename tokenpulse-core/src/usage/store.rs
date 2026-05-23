@@ -12,6 +12,9 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use tracing::warn;
 
+const CANONICAL_SOURCE_SQL: &str =
+    "CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END";
+
 #[derive(Debug, Clone)]
 pub struct DailyUsageRow {
     pub date: String,
@@ -65,14 +68,23 @@ impl UsageStore {
 
     pub fn latest_message_date(&self, source: &str) -> Result<Option<NaiveDate>> {
         let conn = self.open()?;
-        let value: Option<String> = conn
-            .query_row(
+        let value: Option<String> = if source == "antigravity" {
+            conn.query_row(
+                "SELECT MAX(date) FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop')",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten()
+        } else {
+            conn.query_row(
                 "SELECT MAX(date) FROM usage_messages WHERE source = ?1",
                 params![source],
                 |row| row.get(0),
             )
             .optional()?
-            .flatten();
+            .flatten()
+        };
 
         Ok(value.and_then(|date| NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()))
     }
@@ -83,8 +95,21 @@ impl UsageStore {
         parser_version: &str,
     ) -> Result<bool> {
         let conn = self.open()?;
-        Ok(conn
-            .query_row(
+        let has_stale = if source == "antigravity" {
+            conn.query_row(
+                r#"
+                SELECT 1
+                FROM usage_messages
+                WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop') AND parser_version != ?1
+                LIMIT 1
+                "#,
+                params![parser_version],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        } else {
+            conn.query_row(
                 r#"
                 SELECT 1
                 FROM usage_messages
@@ -95,7 +120,9 @@ impl UsageStore {
                 |_| Ok(()),
             )
             .optional()?
-            .is_some())
+            .is_some()
+        };
+        Ok(has_stale)
     }
 
     pub fn default_since(
@@ -150,17 +177,17 @@ impl UsageStore {
             tx.execute(
                 r#"
                 INSERT INTO usage_messages (
-                    source, provider_id, model_id, session_id, message_key,
+                    source, client, provider_id, model_id, session_id, message_key,
                     timestamp_ms, date, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, reasoning_tokens,
                     total_tokens, cost_usd, pricing_day, parser_version
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5,
-                    ?6, ?7, ?8, ?9,
-                    ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16
+                    ?1, ?2, ?3, ?4, ?5, ?6,
+                    ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?17
                 )
-                ON CONFLICT(source, message_key) DO UPDATE SET
+                ON CONFLICT(source, client, message_key) DO UPDATE SET
                     provider_id = excluded.provider_id,
                     model_id = excluded.model_id,
                     session_id = excluded.session_id,
@@ -178,6 +205,7 @@ impl UsageStore {
                 "#,
                 params![
                     message.client,
+                    message.client_detail.as_deref().unwrap_or(&message.client),
                     message.provider_id,
                     message.model_id,
                     message.session_id,
@@ -263,17 +291,17 @@ impl UsageStore {
             tx.execute(
                 r#"
                 INSERT INTO usage_messages (
-                    source, provider_id, model_id, session_id, message_key,
+                    source, client, provider_id, model_id, session_id, message_key,
                     timestamp_ms, date, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, reasoning_tokens,
                     total_tokens, cost_usd, pricing_day, parser_version
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5,
-                    ?6, ?7, ?8, ?9,
-                    ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16
+                    ?1, ?2, ?3, ?4, ?5, ?6,
+                    ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?17
                 )
-                ON CONFLICT(source, message_key) DO UPDATE SET
+                ON CONFLICT(source, client, message_key) DO UPDATE SET
                     provider_id = excluded.provider_id,
                     model_id = excluded.model_id,
                     session_id = excluded.session_id,
@@ -291,6 +319,7 @@ impl UsageStore {
                 "#,
                 params![
                     message.client,
+                    message.client_detail.as_deref().unwrap_or(&message.client),
                     message.provider_id,
                     message.model_id,
                     message.session_id,
@@ -379,7 +408,7 @@ impl UsageStore {
 
         let mut sql = String::from(
             r#"
-            SELECT source, message_key, provider_id, model_id, date,
+            SELECT source, client, message_key, provider_id, model_id, date,
                    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens
             FROM usage_messages
             WHERE cost_usd <= 0 AND total_tokens > 0
@@ -394,12 +423,13 @@ impl UsageStore {
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
                 TokenBreakdown {
-                    input: row.get(5)?,
-                    output: row.get(6)?,
-                    cache_read: row.get(7)?,
-                    cache_write: row.get(8)?,
-                    reasoning: row.get(9)?,
+                    input: row.get(6)?,
+                    output: row.get(7)?,
+                    cache_read: row.get(8)?,
+                    cache_write: row.get(9)?,
+                    reasoning: row.get(10)?,
                 },
             ))
         })?;
@@ -408,7 +438,7 @@ impl UsageStore {
         let mut repaired = 0usize;
 
         for row in rows.flatten() {
-            let (source, message_key, provider_id, model_id, date, tokens) = row;
+            let (source, client, message_key, provider_id, model_id, date, tokens) = row;
             let Some(pricing_row) = pricing.lookup(&model_id, Some(provider_id.as_str())) else {
                 continue;
             };
@@ -418,8 +448,8 @@ impl UsageStore {
             }
 
             tx.execute(
-                "UPDATE usage_messages SET cost_usd = ?1 WHERE source = ?2 AND message_key = ?3",
-                params![cost, source, message_key],
+                "UPDATE usage_messages SET cost_usd = ?1 WHERE source = ?2 AND client = ?3 AND message_key = ?4",
+                params![cost, source, client, message_key],
             )?;
             affected_dates.insert(date);
             repaired += 1;
@@ -441,11 +471,19 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<(usize, usize)> {
         let conn = self.open()?;
-        let mut sql = String::from(
+        let mut sql = format!(
             r#"
             SELECT COUNT(*),
                    COUNT(DISTINCT source || '::' || session_id)
-            FROM usage_messages
+            FROM (
+                SELECT
+                    date,
+                    {CANONICAL_SOURCE_SQL} AS source,
+                    session_id,
+                    message_key
+                FROM usage_messages
+                GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
+            )
             WHERE 1=1
             "#,
         );
@@ -468,10 +506,22 @@ impl UsageStore {
         let conn = self.open()?;
         let mut sql = String::from(
             r#"
-            SELECT source, provider_id, model_id, session_id, message_key,
-                   timestamp_ms, date, input_tokens, output_tokens,
-                   cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                   cost_usd, pricing_day, parser_version
+            SELECT source,
+                   client,
+                   provider_id,
+                   model_id,
+                   session_id,
+                   message_key,
+                   timestamp_ms,
+                   date,
+                   input_tokens,
+                   output_tokens,
+                   cache_read_tokens,
+                   cache_write_tokens,
+                   reasoning_tokens,
+                   cost_usd,
+                   pricing_day,
+                   parser_version
             FROM usage_messages
             WHERE 1=1
             "#,
@@ -493,7 +543,7 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<DashboardDay>> {
         let conn = self.open()?;
-        let mut sql = String::from(
+        let mut sql = format!(
             r#"
             SELECT date,
                    SUM(input_tokens),
@@ -505,7 +555,22 @@ impl UsageStore {
                    SUM(cost_usd),
                    COUNT(*),
                    COUNT(DISTINCT source || '::' || session_id)
-            FROM usage_messages
+            FROM (
+                SELECT
+                    date,
+                    {CANONICAL_SOURCE_SQL} AS source,
+                    session_id,
+                    message_key,
+                    MAX(input_tokens) AS input_tokens,
+                    MAX(output_tokens) AS output_tokens,
+                    MAX(cache_read_tokens) AS cache_read_tokens,
+                    MAX(cache_write_tokens) AS cache_write_tokens,
+                    MAX(reasoning_tokens) AS reasoning_tokens,
+                    MAX(total_tokens) AS total_tokens,
+                    MAX(cost_usd) AS cost_usd
+                FROM usage_messages
+                GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
+            )
             WHERE 1=1
             "#,
         );
@@ -523,17 +588,29 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<DailyUsageRow>> {
         let conn = self.open()?;
-        let mut sql = String::from(
+        let mut sql = format!(
             r#"
-            SELECT date, source, provider_id, model_id,
-                   input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                   reasoning_tokens, total_tokens, cost_usd, message_count, session_count
+            SELECT date,
+                   {CANONICAL_SOURCE_SQL} AS source,
+                   provider_id,
+                   model_id,
+                   SUM(input_tokens),
+                   SUM(output_tokens),
+                   SUM(cache_read_tokens),
+                   SUM(cache_write_tokens),
+                   SUM(reasoning_tokens),
+                   SUM(total_tokens),
+                   SUM(cost_usd),
+                   SUM(message_count),
+                   SUM(session_count)
             FROM daily_model_usage
             WHERE 1=1
             "#,
         );
         let params = append_common_filters(&mut sql, since, sources);
-        sql.push_str(" ORDER BY date ASC, cost_usd DESC");
+        sql.push_str(&format!(
+            " GROUP BY date, {CANONICAL_SOURCE_SQL}, provider_id, model_id ORDER BY date ASC, SUM(cost_usd) DESC",
+        ));
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params), row_to_daily)?;
@@ -547,14 +624,24 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<ProviderSummary>> {
         let conn = self.open()?;
-        let mut sql = String::from(
+        let mut sql = format!(
             r#"
             SELECT source,
                    SUM(cost_usd),
                    SUM(total_tokens),
                    COUNT(*),
                    COUNT(DISTINCT source || '::' || session_id)
-            FROM usage_messages
+            FROM (
+                SELECT
+                    date,
+                    {CANONICAL_SOURCE_SQL} AS source,
+                    session_id,
+                    message_key,
+                    MAX(cost_usd) AS cost_usd,
+                    MAX(total_tokens) AS total_tokens
+                FROM usage_messages
+                GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
+            )
             WHERE 1=1
             "#,
         );
@@ -572,16 +659,28 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<ModelSummary>> {
         let conn = self.open()?;
-        let mut sql = String::from(
+        let mut sql = format!(
             r#"
             SELECT model_id,
                    provider_id,
-                    source,
+                   source,
+                   session_id,
+                   SUM(cost_usd),
+                   SUM(total_tokens),
+                   COUNT(*)
+            FROM (
+                SELECT
+                    date,
+                    {CANONICAL_SOURCE_SQL} AS source,
                     session_id,
-                    SUM(cost_usd),
-                    SUM(total_tokens),
-                    COUNT(*)
-            FROM usage_messages
+                    message_key,
+                    MAX(provider_id) AS provider_id,
+                    MAX(model_id) AS model_id,
+                    MAX(cost_usd) AS cost_usd,
+                    MAX(total_tokens) AS total_tokens
+                FROM usage_messages
+                GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
+            )
             WHERE 1=1
             "#,
         );
@@ -637,9 +736,9 @@ impl UsageStore {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(&self.path)?;
+        let mut conn = Connection::open(&self.path)?;
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
-        ensure_schema_initialized(&self.path, &conn)?;
+        ensure_schema_initialized(&self.path, &mut conn)?;
         Ok(conn)
     }
 
@@ -685,12 +784,25 @@ fn append_common_filters(
 
     if !sources.is_empty() {
         sql.push_str(" AND source IN (");
-        for idx in 0..sources.len() {
-            if idx > 0 {
-                sql.push_str(", ");
+        let mut first = true;
+        for source in sources {
+            if source == "antigravity" {
+                for s in &["antigravity", "antigravity-cli", "antigravity-desktop"] {
+                    if !first {
+                        sql.push_str(", ");
+                    }
+                    sql.push('?');
+                    params.push(Value::from((*s).to_string()));
+                    first = false;
+                }
+            } else {
+                if !first {
+                    sql.push_str(", ");
+                }
+                sql.push('?');
+                params.push(Value::from(source.clone()));
+                first = false;
             }
-            sql.push('?');
-            params.push(Value::from(sources[idx].clone()));
         }
         sql.push(')');
     }
@@ -714,12 +826,25 @@ fn append_range_and_source_filters(
 
     if !sources.is_empty() {
         sql.push_str(" AND source IN (");
-        for (idx, source) in sources.iter().enumerate() {
-            if idx > 0 {
-                sql.push_str(", ");
+        let mut first = true;
+        for source in sources {
+            if source == "antigravity" {
+                for s in &["antigravity", "antigravity-cli", "antigravity-desktop"] {
+                    if !first {
+                        sql.push_str(", ");
+                    }
+                    sql.push('?');
+                    params.push(Value::from((*s).to_string()));
+                    first = false;
+                }
+            } else {
+                if !first {
+                    sql.push_str(", ");
+                }
+                sql.push('?');
+                params.push(Value::from(source.clone()));
+                first = false;
             }
-            sql.push('?');
-            params.push(Value::from(source.clone()));
         }
         sql.push(')');
     }
@@ -747,10 +872,23 @@ fn load_pricing_snapshot_keys(
 }
 
 fn load_source_dates(tx: &Transaction<'_>, source: &str) -> Result<Vec<String>> {
-    let mut stmt =
-        tx.prepare("SELECT DISTINCT date FROM usage_messages WHERE source = ?1 ORDER BY date ASC")?;
-    let rows = stmt.query_map(params![source], |row| row.get::<_, String>(0))?;
-    Ok(rows.flatten().collect())
+    let mapper = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
+    let dates = if source == "antigravity" {
+        let mut stmt = tx.prepare("SELECT DISTINCT date FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop') ORDER BY date ASC")?;
+        let res = stmt
+            .query_map([], mapper)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        res
+    } else {
+        let mut stmt = tx.prepare(
+            "SELECT DISTINCT date FROM usage_messages WHERE source = ?1 ORDER BY date ASC",
+        )?;
+        let res = stmt
+            .query_map(params![source], mapper)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        res
+    };
+    Ok(dates)
 }
 
 fn delete_scoped_tx(
@@ -786,19 +924,20 @@ fn delete_scoped_tx(
 }
 
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnifiedMessage> {
-    let input: i64 = row.get(7)?;
-    let output: i64 = row.get(8)?;
-    let cache_read: i64 = row.get(9)?;
-    let cache_write: i64 = row.get(10)?;
-    let reasoning: i64 = row.get(11)?;
+    let input: i64 = row.get(8)?;
+    let output: i64 = row.get(9)?;
+    let cache_read: i64 = row.get(10)?;
+    let cache_write: i64 = row.get(11)?;
+    let reasoning: i64 = row.get(12)?;
     Ok(UnifiedMessage {
         client: row.get(0)?,
-        provider_id: row.get(1)?,
-        model_id: row.get(2)?,
-        session_id: row.get(3)?,
-        message_key: row.get(4)?,
-        timestamp: row.get(5)?,
-        date: row.get(6)?,
+        client_detail: row.get(1)?,
+        provider_id: row.get(2)?,
+        model_id: row.get(3)?,
+        session_id: row.get(4)?,
+        message_key: row.get(5)?,
+        timestamp: row.get(6)?,
+        date: row.get(7)?,
         tokens: TokenBreakdown {
             input,
             output,
@@ -806,9 +945,9 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnifiedMessage> {
             cache_write,
             reasoning,
         },
-        cost: row.get(12)?,
-        pricing_day: row.get(13)?,
-        parser_version: row.get(14)?,
+        cost: row.get(13)?,
+        pricing_day: row.get(14)?,
+        parser_version: row.get(15)?,
     })
 }
 
@@ -864,7 +1003,8 @@ fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<
         params![date],
     )?;
     tx.execute(
-        r#"
+        &format!(
+            r#"
         INSERT INTO daily_model_usage (
             date, source, provider_id, model_id,
             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
@@ -885,10 +1025,28 @@ fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<
             COUNT(*),
             COUNT(DISTINCT session_id),
             ?2
-        FROM usage_messages
-        WHERE date = ?1
+        FROM (
+            SELECT
+                date,
+                {CANONICAL_SOURCE_SQL} AS source,
+                session_id,
+                message_key,
+                MAX(provider_id) AS provider_id,
+                MAX(model_id) AS model_id,
+                MAX(input_tokens) AS input_tokens,
+                MAX(output_tokens) AS output_tokens,
+                MAX(cache_read_tokens) AS cache_read_tokens,
+                MAX(cache_write_tokens) AS cache_write_tokens,
+                MAX(reasoning_tokens) AS reasoning_tokens,
+                MAX(total_tokens) AS total_tokens,
+                MAX(cost_usd) AS cost_usd
+            FROM usage_messages
+            WHERE date = ?1
+            GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
+        )
         GROUP BY date, source, provider_id, model_id
         "#,
+        ),
         params![date, now],
     )?;
     Ok(())
@@ -1012,13 +1170,43 @@ struct AggregatedModelSummary {
     message_count: usize,
 }
 
-fn ensure_schema_initialized(path: &PathBuf, conn: &Connection) -> Result<()> {
+fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()> {
     if initialized_paths()
         .lock()
         .map_err(|_| anyhow!("Usage store schema mutex poisoned"))?
         .contains(path)
     {
         return Ok(());
+    }
+
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usage_messages'",
+            [],
+            |row| {
+                let count: i64 = row.get(0)?;
+                Ok(count > 0)
+            },
+        )
+        .unwrap_or(false);
+
+    if table_exists {
+        let client_is_pk: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('usage_messages') WHERE name = 'client' AND pk > 0",
+                [],
+                |row| {
+                    let count: i64 = row.get(0)?;
+                    Ok(count > 0)
+                },
+            )
+            .unwrap_or(false);
+
+        if !client_is_pk {
+            let _ = conn.execute("DROP TABLE IF EXISTS usage_messages;", []);
+            let _ = conn.execute("DROP TABLE IF EXISTS daily_model_usage;", []);
+            let _ = conn.execute("DROP TABLE IF EXISTS daily_pricing_snapshots;", []);
+        }
     }
 
     conn.execute_batch(USAGE_SCHEMA_SQL)?;
@@ -1059,6 +1247,7 @@ fn has_zero_cost_repairs_pending(
 const USAGE_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS usage_messages (
     source TEXT NOT NULL,
+    client TEXT NOT NULL,
     provider_id TEXT NOT NULL,
     model_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
@@ -1074,7 +1263,7 @@ CREATE TABLE IF NOT EXISTS usage_messages (
     cost_usd REAL NOT NULL,
     pricing_day TEXT NOT NULL,
     parser_version TEXT NOT NULL,
-    PRIMARY KEY (source, message_key)
+    PRIMARY KEY (source, client, message_key)
 );
 CREATE INDEX IF NOT EXISTS idx_usage_messages_date ON usage_messages(date);
 CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date ON usage_messages(source, date);
@@ -1358,5 +1547,104 @@ mod tests {
         let (message_count, session_count) = store.load_summary_counts(None, &[]).unwrap();
         assert_eq!(message_count, 2);
         assert_eq!(session_count, 2);
+    }
+
+    #[test]
+    fn test_antigravity_source_names_handling() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db_path = tempdir.path().join("usage.sqlite3");
+
+        let store = UsageStore::with_path(db_path);
+
+        // Ingest three messages with distinct antigravity source kinds and distinct session IDs
+        let mut msg1 = sample_message("2026-05-22", "key1");
+        msg1.client = "antigravity".to_string();
+        msg1.client_detail = Some("antigravity-cli".to_string());
+        msg1.session_id = "session-1".to_string();
+        let mut msg2 = sample_message("2026-05-22", "key2");
+        msg2.client = "antigravity".to_string();
+        msg2.client_detail = Some("antigravity-desktop".to_string());
+        msg2.session_id = "session-2".to_string();
+        let mut msg3 = sample_message("2026-05-22", "key3");
+        msg3.client = "antigravity".to_string();
+        msg3.client_detail = Some("antigravity".to_string());
+        msg3.session_id = "session-3".to_string();
+
+        store.ingest_messages(&[msg1, msg2, msg3], false).unwrap();
+
+        // 1. Verify that they remain distinct in the database under client detail
+        let conn = store.open().unwrap();
+        let count_cli: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_messages WHERE client = 'antigravity-cli'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let count_desktop: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_messages WHERE client = 'antigravity-desktop'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let count_antigravity: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_messages WHERE client = 'antigravity'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(count_cli, 1);
+        assert_eq!(count_desktop, 1);
+        assert_eq!(count_antigravity, 1);
+
+        // 2. Verify that querying with source filter "antigravity" returns all three sources combined
+        let summaries = store
+            .load_model_summaries(None, &["antigravity".to_string()])
+            .unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].message_count, 3);
+        assert_eq!(summaries[0].session_count, 3);
+
+        // 3. Verify that load_summary_counts with source filter "antigravity" also aggregates them
+        let (msg_cnt, session_cnt) = store
+            .load_summary_counts(None, &["antigravity".to_string()])
+            .unwrap();
+        assert_eq!(msg_cnt, 3);
+        assert_eq!(session_cnt, 3);
+
+        // 4. Verify that duplicate message keys on the same platform and session are deduplicated in aggregation
+        let mut msg4 = sample_message("2026-05-22", "dup_key");
+        msg4.client = "antigravity".to_string();
+        msg4.client_detail = Some("antigravity-cli".to_string());
+        msg4.session_id = "session-dup".to_string();
+        msg4.tokens.input = 100;
+
+        let mut msg5 = sample_message("2026-05-22", "dup_key");
+        msg5.client = "antigravity".to_string();
+        msg5.client_detail = Some("antigravity-desktop".to_string());
+        msg5.session_id = "session-dup".to_string();
+        msg5.tokens.input = 100;
+
+        store.ingest_messages(&[msg4, msg5], false).unwrap();
+
+        let total_db_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_messages WHERE message_key = 'dup_key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total_db_count, 2);
+
+        let (msg_cnt_dedup, session_cnt_dedup) = store
+            .load_summary_counts(None, &["antigravity".to_string()])
+            .unwrap();
+        assert_eq!(msg_cnt_dedup, 4);
+        assert_eq!(session_cnt_dedup, 4);
+        assert_eq!(msg_cnt, 3);
+        assert_eq!(session_cnt, 3);
     }
 }

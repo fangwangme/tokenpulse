@@ -176,6 +176,7 @@ mod tests {
         QuotaSnapshot {
             provider: provider.to_string(),
             plan: Some("Pro".to_string()),
+            account: None,
             windows: vec![RateWindow {
                 label: "Session".to_string(),
                 used_percent: 25.0,

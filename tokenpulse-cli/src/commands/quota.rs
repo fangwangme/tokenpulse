@@ -5,7 +5,7 @@ use tokenpulse_core::config::{ConfigManager, QuotaDisplayMode};
 use tokenpulse_core::{
     quota::{
         fetch_all, AntigravityQuotaFetcher, ClaudeQuotaFetcher, CodexQuotaFetcher,
-        CopilotQuotaFetcher, GeminiQuotaFetcher, QuotaCacheStore,
+        CopilotQuotaFetcher, QuotaCacheStore,
     },
     QuotaFetcher,
 };
@@ -213,6 +213,20 @@ fn format_provider_content(
     display_mode: &QuotaDisplayMode,
 ) -> Vec<String> {
     let mut lines = vec![quota_display_name(&snapshot.provider).to_string()];
+
+    if snapshot.plan.is_some() || snapshot.account.is_some() {
+        let mut plan_line = String::new();
+        if let Some(account) = &snapshot.account {
+            plan_line.push_str(account);
+            if snapshot.plan.is_some() {
+                plan_line.push_str(" | ");
+            }
+        }
+        if let Some(plan) = &snapshot.plan {
+            plan_line.push_str(&format!("Plan: {}", plan));
+        }
+        lines.push(plan_line);
+    }
 
     for window in &snapshot.windows {
         lines.push(String::new());
@@ -457,12 +471,6 @@ const QUOTA_PROVIDERS: &[QuotaProviderEntry] = &[
         display_name: "GITHUB COPILOT",
         url: "https://github.com/features/copilot",
         make_fetcher: || Box::new(CopilotQuotaFetcher::new()),
-    },
-    QuotaProviderEntry {
-        id: "gemini",
-        display_name: "GEMINI CLI",
-        url: "https://github.com/google-gemini/gemini-cli",
-        make_fetcher: || Box::new(GeminiQuotaFetcher::new()),
     },
     QuotaProviderEntry {
         id: "antigravity",

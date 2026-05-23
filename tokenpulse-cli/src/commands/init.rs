@@ -11,7 +11,6 @@ use tokenpulse_core::config::{
 const SUPPORTED_PROVIDERS: &[(&str, &str)] = &[
     ("claude", "Claude Code"),
     ("codex", "Codex"),
-    ("gemini", "Gemini"),
     ("antigravity", "Antigravity"),
 ];
 

@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub struct QuotaSnapshot {
     pub provider: String,
     pub plan: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
     pub windows: Vec<RateWindow>,
     pub credits: Option<CreditInfo>,
     pub fetched_at: DateTime<Utc>,
@@ -63,6 +65,8 @@ impl Default for TokenBreakdown {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedMessage {
     pub client: String,
+    #[serde(default)]
+    pub client_detail: Option<String>,
     pub model_id: String,
     pub provider_id: String,
     pub session_id: String,
@@ -89,6 +93,7 @@ impl UnifiedMessage {
 
         Self {
             client: client.into(),
+            client_detail: None,
             model_id: model_id.into(),
             provider_id: provider_id.into(),
             session_id: session_id.into(),
@@ -100,6 +105,11 @@ impl UnifiedMessage {
             pricing_day: date,
             parser_version: "v1".to_string(),
         }
+    }
+
+    pub fn with_client_detail(mut self, client_detail: impl Into<String>) -> Self {
+        self.client_detail = Some(client_detail.into());
+        self
     }
 
     pub fn with_cost(mut self, cost: f64) -> Self {
@@ -220,6 +230,7 @@ mod tests {
         let snapshot = QuotaSnapshot {
             provider: "claude".to_string(),
             plan: Some("Pro".to_string()),
+            account: None,
             windows: vec![
                 RateWindow {
                     label: "Session".to_string(),
@@ -252,6 +263,7 @@ mod tests {
     fn test_unified_message_creation() {
         let msg = UnifiedMessage {
             client: "claude".to_string(),
+            client_detail: None,
             model_id: "claude-opus-4".to_string(),
             provider_id: "anthropic".to_string(),
             session_id: "session-123".to_string(),
@@ -284,6 +296,7 @@ mod tests {
     fn test_unified_message_different_providers() {
         let claude_msg = UnifiedMessage {
             client: "claude".to_string(),
+            client_detail: None,
             model_id: "claude-3-opus".to_string(),
             provider_id: "anthropic".to_string(),
             session_id: "s1".to_string(),
@@ -304,6 +317,7 @@ mod tests {
 
         let codex_msg = UnifiedMessage {
             client: "codex".to_string(),
+            client_detail: None,
             model_id: "gpt-4".to_string(),
             provider_id: "openai".to_string(),
             session_id: "s2".to_string(),
@@ -331,6 +345,7 @@ mod tests {
         let snapshot = QuotaSnapshot {
             provider: "claude".to_string(),
             plan: Some("Pro".to_string()),
+            account: None,
             windows: vec![],
             credits: None,
             fetched_at: Utc::now(),
@@ -347,6 +362,7 @@ mod tests {
     fn test_unified_message_serialization() {
         let msg = UnifiedMessage {
             client: "claude".to_string(),
+            client_detail: None,
             model_id: "claude-3".to_string(),
             provider_id: "anthropic".to_string(),
             session_id: "s1".to_string(),
