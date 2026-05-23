@@ -7,6 +7,9 @@
 # Fallback Rust output if CARGO_TARGET_DIR is overridden
 target/
 
+# macOS
+.DS_Store
+
 # Local Antigravity data directories
 .antigravity/
 .antigravitycli/
