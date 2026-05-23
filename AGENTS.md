@@ -22,4 +22,4 @@
 - **Workspace**: `tokenpulse-core` (library) + `tokenpulse-cli` (binary)
 - **TUI**: ratatui 0.29 + crossterm 0.28 (with mouse capture)
 - **Data**: SQLite via rusqlite (bundled)
-- **Tests**: 218 passing
+- **Tests**: 220 passing

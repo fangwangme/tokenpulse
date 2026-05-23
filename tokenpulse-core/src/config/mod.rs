@@ -38,6 +38,8 @@ pub struct DisplayConfig {
     /// Supported values: 0, 60, 120, 300, 600, 900.
     #[serde(default = "default_quota_auto_refresh_secs")]
     pub quota_auto_refresh_secs: u32,
+    #[serde(default = "default_true")]
+    pub show_account: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,6 +120,7 @@ impl Default for DisplayConfig {
             theme: ThemePreference::default(),
             quota_display_mode: QuotaDisplayMode::default(),
             quota_auto_refresh_secs: default_quota_auto_refresh_secs(),
+            show_account: true,
         }
     }
 }
@@ -280,6 +283,7 @@ enabled = true
             QuotaDisplayMode::Remaining
         );
         assert_eq!(config.display.quota_auto_refresh_secs, 300);
+        assert!(config.display.show_account);
     }
 
     #[test]

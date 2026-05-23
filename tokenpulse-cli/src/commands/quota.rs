@@ -211,13 +211,19 @@ fn format_window_block(
 fn format_provider_content(
     snapshot: &tokenpulse_core::QuotaSnapshot,
     display_mode: &QuotaDisplayMode,
+    show_account: bool,
 ) -> Vec<String> {
     let mut lines = vec![quota_display_name(&snapshot.provider).to_string()];
 
     if snapshot.plan.is_some() || snapshot.account.is_some() {
         let mut plan_line = String::new();
         if let Some(account) = &snapshot.account {
-            plan_line.push_str(account);
+            let display_account = if show_account {
+                account.clone()
+            } else {
+                mask_account(account)
+            };
+            plan_line.push_str(&display_account);
             if snapshot.plan.is_some() {
                 plan_line.push_str(" | ");
             }
@@ -250,9 +256,10 @@ fn format_provider_card(
     snapshot: &tokenpulse_core::QuotaSnapshot,
     display_mode: &QuotaDisplayMode,
     width: usize,
+    show_account: bool,
 ) -> Vec<String> {
     let inner_width = width.saturating_sub(2).max(1);
-    let content = format_provider_content(snapshot, display_mode);
+    let content = format_provider_content(snapshot, display_mode, show_account);
     let title = pad_line(
         &format!(" {} ", quota_display_name(&snapshot.provider)),
         inner_width,
@@ -270,10 +277,11 @@ fn format_provider_card(
 fn print_provider_block(
     snapshot: &tokenpulse_core::QuotaSnapshot,
     display_mode: &QuotaDisplayMode,
+    show_account: bool,
 ) {
     let width = terminal_width().clamp(MIN_CARD_WIDTH, MAX_CARD_WIDTH);
     println!();
-    for line in format_provider_card(snapshot, display_mode, width) {
+    for line in format_provider_card(snapshot, display_mode, width, show_account) {
         println!("{}", line);
     }
 }
@@ -295,6 +303,7 @@ fn provider_grid_columns(total_width: usize, count: usize) -> usize {
 fn print_provider_grid(
     snapshots: &[tokenpulse_core::QuotaSnapshot],
     display_mode: &QuotaDisplayMode,
+    show_account: bool,
 ) {
     let total_width = terminal_width();
     let cols = provider_grid_columns(total_width, snapshots.len());
@@ -302,7 +311,7 @@ fn print_provider_grid(
         .clamp(MIN_CARD_WIDTH, MAX_CARD_WIDTH);
     let blocks: Vec<Vec<String>> = snapshots
         .iter()
-        .map(|snapshot| format_provider_card(snapshot, display_mode, col_width))
+        .map(|snapshot| format_provider_card(snapshot, display_mode, col_width, show_account))
         .collect();
 
     println!();
@@ -418,10 +427,10 @@ pub async fn run(provider: Option<String>, refresh: bool, use_tui: bool) -> Resu
         .collect();
 
     if snapshots.len() > 1 && provider.is_none() {
-        print_provider_grid(&snapshots, display_mode);
+        print_provider_grid(&snapshots, display_mode, config.display.show_account);
     } else {
         for snapshot in &snapshots {
-            print_provider_block(snapshot, display_mode);
+            print_provider_block(snapshot, display_mode, config.display.show_account);
         }
     }
 
@@ -527,5 +536,40 @@ pub fn build_quota_fetchers(
             .filter(|e| enabled_providers.contains(&e.id.to_string()))
             .map(|e| (e.make_fetcher)())
             .collect(),
+    }
+}
+
+fn mask_account(account: &str) -> String {
+    if let Some((username, domain)) = account.split_once('@') {
+        if username.len() <= 2 {
+            format!("*@{}", domain)
+        } else {
+            let mut masked = String::new();
+            masked.push(username.chars().next().unwrap());
+            masked.push_str("***");
+            masked.push(username.chars().last().unwrap());
+            format!("{}@{}", masked, domain)
+        }
+    } else if account.len() <= 4 {
+        "***".to_string()
+    } else {
+        let mut masked = String::new();
+        masked.push(account.chars().next().unwrap());
+        masked.push_str("***");
+        masked.push(account.chars().last().unwrap());
+        masked
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mask_account() {
+        assert_eq!(mask_account("john.doe@example.com"), "j***e@example.com");
+        assert_eq!(mask_account("ab@example.com"), "*@example.com");
+        assert_eq!(mask_account("myaccount"), "m***t");
+        assert_eq!(mask_account("abc"), "***");
     }
 }

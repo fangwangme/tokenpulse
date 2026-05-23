@@ -25,6 +25,7 @@ pub fn run(action: ConfigAction) -> Result<()> {
                 "  show_empty_providers: {}",
                 config.display.show_empty_providers
             );
+            println!("  show_account: {}", config.display.show_account);
             println!("  theme: {}", config.display.theme.label());
             let mode_str = match config.display.quota_display_mode {
                 QuotaDisplayMode::Used => "used",
@@ -85,6 +86,20 @@ pub fn run(action: ConfigAction) -> Result<()> {
                     manager.save(&config)?;
                     println!("show_empty_providers = {value}");
                 }
+                "show_account" => {
+                    config.display.show_account = match value {
+                        "true" | "1" | "yes" => true,
+                        "false" | "0" | "no" => false,
+                        _ => {
+                            anyhow::bail!(
+                                "Invalid value '{}' for show_account. Expected: true, false",
+                                value
+                            );
+                        }
+                    };
+                    manager.save(&config)?;
+                    println!("show_account = {value}");
+                }
                 "theme" => {
                     config.display.theme = match value {
                         "auto" => ThemePreference::Auto,
@@ -132,7 +147,7 @@ pub fn run(action: ConfigAction) -> Result<()> {
                 }
                 _ => {
                     anyhow::bail!(
-                        "Unknown setting '{}'. Available settings:\n  quota_display_mode           (used | remaining)\n  show_empty_providers         (true | false)\n  theme                        (auto | dark | light)\n  quota_auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)",
+                        "Unknown setting '{}'. Available settings:\n  quota_display_mode           (used | remaining)\n  show_empty_providers         (true | false)\n  show_account                 (true | false)\n  theme                        (auto | dark | light)\n  quota_auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)",
                         key
                     );
                 }
