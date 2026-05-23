@@ -152,7 +152,7 @@ impl UsageStore {
         }
 
         let pricing_cache = PricingCache::new();
-        let pricing = match pricing_cache.get_pricing_sync() {
+        let pricing = match load_pricing_for_usage(&pricing_cache, refresh_pricing) {
             Ok(pricing) => Some(pricing),
             Err(error) if !refresh_pricing => {
                 warn!(
@@ -245,7 +245,7 @@ impl UsageStore {
         }
 
         let pricing_cache = PricingCache::new();
-        let pricing = match pricing_cache.get_pricing_sync() {
+        let pricing = match load_pricing_for_usage(&pricing_cache, refresh_pricing) {
             Ok(pricing) => Some(pricing),
             Err(error) if !refresh_pricing => {
                 warn!(
@@ -383,7 +383,7 @@ impl UsageStore {
         }
 
         let pricing_cache = PricingCache::new();
-        let pricing = match pricing_cache.get_pricing_sync() {
+        let pricing = match load_pricing_for_usage(&pricing_cache, refresh_pricing) {
             Ok(pricing) => Some(pricing),
             Err(error) if !refresh_pricing => {
                 warn!(
@@ -527,7 +527,7 @@ impl UsageStore {
         if !has_zero_cost_repairs_pending(&conn, since, sources)? {
             return Ok(0);
         }
-        let pricing = PricingCache::new().get_pricing_sync()?;
+        let pricing = PricingCache::new().get_pricing_allow_stale_sync()?;
         let tx = conn.transaction()?;
 
         let mut sql = String::from(
@@ -595,7 +595,9 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<(usize, usize)> {
         let conn = self.open()?;
-        let mut sql = format!(
+        let mut subquery_filters = String::new();
+        let params = append_common_filters(&mut subquery_filters, since, sources);
+        let sql = format!(
             r#"
             SELECT COUNT(*),
                    COUNT(DISTINCT source || '::' || session_id)
@@ -606,12 +608,11 @@ impl UsageStore {
                     session_id,
                     message_key
                 FROM usage_messages
+                WHERE 1=1 {subquery_filters}
                 GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
             )
-            WHERE 1=1
             "#,
         );
-        let params = append_common_filters(&mut sql, since, sources);
 
         conn.query_row(&sql, params_from_iter(params), |row| {
             Ok((
@@ -677,24 +678,9 @@ impl UsageStore {
                    SUM(reasoning_tokens),
                    SUM(total_tokens),
                    SUM(cost_usd),
-                   COUNT(*),
-                   COUNT(DISTINCT source || '::' || session_id)
-            FROM (
-                SELECT
-                    date,
-                    {CANONICAL_SOURCE_SQL} AS source,
-                    session_id,
-                    message_key,
-                    MAX(input_tokens) AS input_tokens,
-                    MAX(output_tokens) AS output_tokens,
-                    MAX(cache_read_tokens) AS cache_read_tokens,
-                    MAX(cache_write_tokens) AS cache_write_tokens,
-                    MAX(reasoning_tokens) AS reasoning_tokens,
-                    MAX(total_tokens) AS total_tokens,
-                    MAX(cost_usd) AS cost_usd
-                FROM usage_messages
-                GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
-            )
+                   SUM(message_count),
+                   SUM(session_count)
+            FROM daily_model_usage
             WHERE 1=1
             "#,
         );
@@ -753,19 +739,9 @@ impl UsageStore {
             SELECT source,
                    SUM(cost_usd),
                    SUM(total_tokens),
-                   COUNT(*),
-                   COUNT(DISTINCT source || '::' || session_id)
-            FROM (
-                SELECT
-                    date,
-                    {CANONICAL_SOURCE_SQL} AS source,
-                    session_id,
-                    message_key,
-                    MAX(cost_usd) AS cost_usd,
-                    MAX(total_tokens) AS total_tokens
-                FROM usage_messages
-                GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
-            )
+                   SUM(message_count),
+                   SUM(session_count)
+            FROM daily_model_usage
             WHERE 1=1
             "#,
         );
@@ -783,7 +759,9 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<ModelSummary>> {
         let conn = self.open()?;
-        let mut sql = format!(
+        let mut subquery_filters = String::new();
+        let params = append_common_filters(&mut subquery_filters, since, sources);
+        let sql = format!(
             r#"
             SELECT model_id,
                    provider_id,
@@ -803,14 +781,11 @@ impl UsageStore {
                     MAX(cost_usd) AS cost_usd,
                     MAX(total_tokens) AS total_tokens
                 FROM usage_messages
+                WHERE 1=1 {subquery_filters}
                 GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
             )
-            WHERE 1=1
+            GROUP BY source, provider_id, model_id, session_id ORDER BY SUM(total_tokens) DESC, model_id ASC
             "#,
-        );
-        let params = append_common_filters(&mut sql, since, sources);
-        sql.push_str(
-            " GROUP BY source, provider_id, model_id, session_id ORDER BY SUM(total_tokens) DESC, model_id ASC",
         );
 
         let mut stmt = conn.prepare(&sql)?;
@@ -1257,6 +1232,17 @@ fn ensure_pricing_snapshot(
         Ok(None)
     } else {
         Ok(Some(snapshot))
+    }
+}
+
+fn load_pricing_for_usage(
+    pricing_cache: &PricingCache,
+    refresh_pricing: bool,
+) -> Result<PricingCatalog> {
+    if refresh_pricing {
+        pricing_cache.get_pricing_sync()
+    } else {
+        pricing_cache.get_pricing_allow_stale_sync()
     }
 }
 

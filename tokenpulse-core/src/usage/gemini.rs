@@ -206,8 +206,8 @@ impl SessionParser for GeminiSessionParser {
             if !root.exists() {
                 continue;
             }
-            let mut files = scanner::discover_files(&root, "json", since);
-            files.extend(scanner::discover_files(&root, "jsonl", since));
+            let mut files =
+                scanner::discover_files_with_extensions(&root, &["json", "jsonl"], since);
             files.retain(|file| {
                 file.file_name()
                     .and_then(|name| name.to_str())

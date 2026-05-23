@@ -208,9 +208,12 @@ tokenpulse usage -p claude,codex,opencode
 tokenpulse usage --refresh-days 2026-03-01:2026-03-07
 tokenpulse usage --refresh-pricing
 tokenpulse usage --rebuild-all
+tokenpulse usage --log
 ```
 
 `tokenpulse usage` now opens the interactive dashboard automatically when both stdin/stdout are attached to a terminal. Use `--no-tui` to force the plain-text summary for scripts, pipes, or quick dumps.
+
+`--log` writes startup timing for the current run to a new timestamped file under `~/.local/share/tokenpulse/log/`. The log records provider parsing, ingest, aggregate queries, and the point where the TUI starts, so slow dashboard startup can be traced without enabling logs by default.
 
 Antigravity usage sync maintains a local cache database in `~/.local/share/tokenpulse/antigravity-cache/cache.db`. Regular runs rebuild sessions whose Antigravity or Antigravity CLI conversation files were modified in the last two days. Running with `--rebuild-all` clears the database of parsed messages and fully rebuilds the local SQLite cache database by querying all discoverable sessions from a running Antigravity language server.
 

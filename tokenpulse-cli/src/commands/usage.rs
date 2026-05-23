@@ -1,7 +1,13 @@
 use crate::tui;
 use anyhow::{anyhow, Result};
-use chrono::NaiveDate;
-use std::collections::HashSet;
+use chrono::{NaiveDate, SecondsFormat, Utc};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fs::{File, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 use tokenpulse_core::{
     usage::{
         build_usage_summary_from_daily, AntigravitySessionParser, ClaudeSessionParser,
@@ -30,7 +36,9 @@ pub async fn run(
     use_tui: bool,
     json: bool,
     csv: Option<String>,
+    log: bool,
 ) -> Result<()> {
+    let mut perf = UsagePerfLog::new(log);
     let requested_since = since
         .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
         .transpose()?;
@@ -40,26 +48,86 @@ pub async fn run(
     let parsers = build_parsers(&provider_names, rebuild_all);
     let store = UsageStore::new();
     let mut stale_sources = HashSet::new();
+    perf.log(
+        "start",
+        format!(
+            "providers={} since={:?} refresh_range={:?} refresh_pricing={} rebuild_all={} use_tui={} json={} csv={:?} db={}",
+            provider_names.join(","),
+            requested_since,
+            refresh_range,
+            refresh_pricing,
+            rebuild_all,
+            use_tui,
+            json,
+            csv,
+            store.path().display()
+        ),
+    );
 
     if !rebuild_all && refresh_range.is_none() {
+        perf.log(
+            "stale_check_start",
+            format!("providers={}", provider_names.join(",")),
+        );
+        let stale_check_started = Instant::now();
         for parser in &parsers {
-            if store
-                .source_has_stale_parser_version(parser.provider_name(), parser.parser_version())?
-            {
+            let started = Instant::now();
+            let is_stale = store
+                .source_has_stale_parser_version(parser.provider_name(), parser.parser_version())?;
+            perf.log_duration(
+                "stale_check",
+                started.elapsed(),
+                format!(
+                    "provider={} parser_version={} stale={}",
+                    parser.provider_name(),
+                    parser.parser_version(),
+                    is_stale
+                ),
+            );
+            if is_stale {
                 stale_sources.insert(parser.provider_name().to_string());
             }
         }
+        perf.log_duration(
+            "stale_check_complete",
+            stale_check_started.elapsed(),
+            format!("stale_count={}", stale_sources.len()),
+        );
     }
 
     if rebuild_all {
+        let started = Instant::now();
         store.clear_sources(&provider_names, refresh_pricing)?;
+        perf.log_duration(
+            "clear_sources",
+            started.elapsed(),
+            format!("providers={}", provider_names.join(",")),
+        );
     } else if let Some(range) = refresh_range {
+        let started = Instant::now();
         store.delete_sources_in_date_range(range, &provider_names, refresh_pricing)?;
+        perf.log_duration(
+            "delete_sources_in_date_range",
+            started.elapsed(),
+            format!(
+                "providers={} start={} end={}",
+                provider_names.join(","),
+                range.start,
+                range.end
+            ),
+        );
     }
 
     let mut found_any_source = false;
 
     for parser in &parsers {
+        let provider_started = Instant::now();
+        perf.log(
+            "provider_start",
+            format!("provider={}", parser.provider_name()),
+        );
+
+        let since_started = Instant::now();
         let effective_since = if rebuild_all
             || refresh_range.is_some()
             || stale_sources.contains(parser.provider_name())
@@ -68,22 +136,59 @@ pub async fn run(
         } else {
             store.default_since(parser.provider_name(), requested_since)?
         };
+        perf.log_duration(
+            "default_since",
+            since_started.elapsed(),
+            format!(
+                "provider={} effective_since={:?}",
+                parser.provider_name(),
+                effective_since
+            ),
+        );
 
+        let parse_started = Instant::now();
         match parser.parse_sessions(effective_since) {
             Ok(messages) => {
+                let parse_elapsed = parse_started.elapsed();
+                let parsed_count = messages.len();
+                let parsed_sessions = message_session_count(&messages);
                 let scoped = match refresh_range {
                     Some(range) => filter_messages_to_range(messages, range),
                     None => messages,
                 };
+                perf.log_duration(
+                    "parse_sessions",
+                    parse_elapsed,
+                    format!(
+                        "provider={} messages={} sessions={} scoped_messages={} effective_since={:?} mode={:?}",
+                        parser.provider_name(),
+                        parsed_count,
+                        parsed_sessions,
+                        scoped.len(),
+                        effective_since,
+                        parser.incremental_ingest_mode()
+                    ),
+                );
 
                 if stale_sources.contains(parser.provider_name()) {
                     if !scoped.is_empty() {
                         found_any_source = true;
+                        let started = Instant::now();
                         store.replace_source_messages(
                             parser.provider_name(),
                             &scoped,
                             refresh_pricing,
                         )?;
+                        perf.log_duration(
+                            "ingest_replace_source",
+                            started.elapsed(),
+                            format!(
+                                "provider={} messages={} sessions={}",
+                                parser.provider_name(),
+                                scoped.len(),
+                                message_session_count(&scoped)
+                            ),
+                        );
                     }
                 } else if !scoped.is_empty() {
                     found_any_source = true;
@@ -92,13 +197,40 @@ pub async fn run(
                         && parser.incremental_ingest_mode()
                             == IncrementalIngestMode::ReplaceChangedSessions
                     {
+                        let started = Instant::now();
                         store.replace_sessions_messages(&scoped, refresh_pricing)?;
+                        perf.log_duration(
+                            "ingest_replace_sessions",
+                            started.elapsed(),
+                            format!(
+                                "provider={} messages={} sessions={}",
+                                parser.provider_name(),
+                                scoped.len(),
+                                message_session_count(&scoped)
+                            ),
+                        );
                     } else {
+                        let started = Instant::now();
                         store.ingest_messages(&scoped, refresh_pricing)?;
+                        perf.log_duration(
+                            "ingest_upsert_messages",
+                            started.elapsed(),
+                            format!(
+                                "provider={} messages={} sessions={}",
+                                parser.provider_name(),
+                                scoped.len(),
+                                message_session_count(&scoped)
+                            ),
+                        );
                     }
                 }
             }
             Err(error) => {
+                perf.log_duration(
+                    "parse_sessions_error",
+                    parse_started.elapsed(),
+                    format!("provider={} error={}", parser.provider_name(), error),
+                );
                 eprintln!(
                     "Warning: Failed to parse {} usage: {}",
                     parser.provider_name(),
@@ -106,18 +238,36 @@ pub async fn run(
                 );
             }
         }
+        perf.log_duration(
+            "provider_complete",
+            provider_started.elapsed(),
+            format!("provider={}", parser.provider_name()),
+        );
     }
 
-    store.repair_zero_costs(
-        output_since_hint(requested_since, refresh_range),
-        &provider_names,
-    )?;
-
     let output_since = output_since_hint(requested_since, refresh_range);
+    let started = Instant::now();
+    let repaired = store.repair_zero_costs(output_since, &provider_names)?;
+    perf.log_duration(
+        "repair_zero_costs",
+        started.elapsed(),
+        format!("repaired={} output_since={:?}", repaired, output_since),
+    );
+
+    let started = Instant::now();
     let (message_count, session_count) =
         store.load_summary_counts(output_since, &provider_names)?;
+    perf.log_duration(
+        "load_summary_counts",
+        started.elapsed(),
+        format!(
+            "messages={} sessions={} output_since={:?}",
+            message_count, session_count, output_since
+        ),
+    );
 
     if message_count == 0 {
+        perf.log("no_data", "message_count=0");
         if json {
             print_json_summary(&build_usage_summary_from_daily(
                 Vec::new(),
@@ -152,27 +302,90 @@ pub async fn run(
         return Ok(());
     }
 
+    let started = Instant::now();
+    let dashboard_days = store.load_dashboard_days(output_since, &provider_names)?;
+    perf.log_duration(
+        "load_dashboard_days",
+        started.elapsed(),
+        format!("days={}", dashboard_days.len()),
+    );
+    let started = Instant::now();
+    let provider_summaries = store.load_provider_summaries(output_since, &provider_names)?;
+    perf.log_duration(
+        "load_provider_summaries",
+        started.elapsed(),
+        format!("providers={}", provider_summaries.len()),
+    );
+    let started = Instant::now();
+    let model_summaries = store.load_model_summaries(output_since, &provider_names)?;
+    perf.log_duration(
+        "load_model_summaries",
+        started.elapsed(),
+        format!("models={}", model_summaries.len()),
+    );
+    let started = Instant::now();
     let summary = build_usage_summary_from_daily(
-        store.load_dashboard_days(output_since, &provider_names)?,
-        store.load_provider_summaries(output_since, &provider_names)?,
-        store.load_model_summaries(output_since, &provider_names)?,
+        dashboard_days,
+        provider_summaries,
+        model_summaries,
         message_count,
         session_count,
     );
+    perf.log_duration(
+        "build_summary",
+        started.elapsed(),
+        format!(
+            "messages={} sessions={} active_days={}",
+            summary.message_count, summary.session_count, summary.active_days
+        ),
+    );
 
     if json {
+        perf.log(
+            "output_json",
+            format!("total_elapsed_ms={}", perf.elapsed_ms()),
+        );
         print_json_summary(&summary)?;
     } else if let Some(csv_type) = csv {
+        let started = Instant::now();
         let daily_breakdown = store.load_daily_rows(output_since, &provider_names)?;
+        perf.log_duration(
+            "load_daily_rows",
+            started.elapsed(),
+            format!("rows={} output=csv", daily_breakdown.len()),
+        );
+        perf.log(
+            "output_csv",
+            format!("kind={csv_type} total_elapsed_ms={}", perf.elapsed_ms()),
+        );
         match csv_type.as_str() {
             "models" => print_models_csv(&summary),
             _ => print_daily_csv(&daily_breakdown),
         }
     } else if use_tui {
+        let started = Instant::now();
         let daily_breakdown = store.load_daily_rows(output_since, &provider_names)?;
-        let reload_fn = build_reload_fn(provider_names, output_since);
-        return tui::usage::run(summary, daily_breakdown, reload_fn);
+        perf.log_duration(
+            "load_daily_rows",
+            started.elapsed(),
+            format!("rows={} output=tui", daily_breakdown.len()),
+        );
+        let reload_fn = build_reload_fn(provider_names, output_since, perf.path().cloned());
+        perf.log(
+            "tui_start",
+            format!("total_elapsed_ms={}", perf.elapsed_ms()),
+        );
+        let result = tui::usage::run(summary, daily_breakdown, reload_fn);
+        perf.log(
+            "tui_exit",
+            format!("total_elapsed_ms={}", perf.elapsed_ms()),
+        );
+        return result;
     } else {
+        perf.log(
+            "output_text",
+            format!("total_elapsed_ms={}", perf.elapsed_ms()),
+        );
         print_summary(&summary);
     }
 
@@ -189,46 +402,153 @@ fn output_since_hint(
 fn build_reload_fn(
     provider_names: Vec<String>,
     output_since: Option<NaiveDate>,
+    log_path: Option<PathBuf>,
 ) -> impl FnMut() -> Result<(
     tokenpulse_core::usage::UsageSummary,
     Vec<tokenpulse_core::usage::DailyUsageRow>,
 )> {
     move || {
+        let mut perf = UsagePerfLog::from_path(log_path.clone());
+        perf.log(
+            "reload_start",
+            format!(
+                "providers={} output_since={:?}",
+                provider_names.join(","),
+                output_since
+            ),
+        );
         let store = UsageStore::new();
         let parsers = build_parsers(&provider_names, false);
 
         for parser in &parsers {
+            let provider_started = Instant::now();
+            perf.log(
+                "reload_provider_start",
+                format!("provider={}", parser.provider_name()),
+            );
+
+            let started = Instant::now();
             let since = store.default_since(parser.provider_name(), output_since)?;
+            perf.log_duration(
+                "reload_default_since",
+                started.elapsed(),
+                format!("provider={} since={:?}", parser.provider_name(), since),
+            );
+            let started = Instant::now();
             match parser.parse_sessions(since) {
                 Ok(messages) => {
+                    perf.log_duration(
+                        "reload_parse_sessions",
+                        started.elapsed(),
+                        format!(
+                            "provider={} messages={} sessions={}",
+                            parser.provider_name(),
+                            messages.len(),
+                            message_session_count(&messages)
+                        ),
+                    );
                     if !messages.is_empty() {
                         if parser.incremental_ingest_mode()
                             == IncrementalIngestMode::ReplaceChangedSessions
                         {
+                            let started = Instant::now();
                             store.replace_sessions_messages(&messages, false)?;
+                            perf.log_duration(
+                                "reload_ingest_replace_sessions",
+                                started.elapsed(),
+                                format!(
+                                    "provider={} messages={}",
+                                    parser.provider_name(),
+                                    messages.len()
+                                ),
+                            );
                         } else {
+                            let started = Instant::now();
                             store.ingest_messages(&messages, false)?;
+                            perf.log_duration(
+                                "reload_ingest_upsert_messages",
+                                started.elapsed(),
+                                format!(
+                                    "provider={} messages={}",
+                                    parser.provider_name(),
+                                    messages.len()
+                                ),
+                            );
                         }
                     }
                 }
-                Err(_) => {} // tolerate per-provider errors during reload
+                Err(error) => {
+                    perf.log_duration(
+                        "reload_parse_sessions_error",
+                        started.elapsed(),
+                        format!("provider={} error={}", parser.provider_name(), error),
+                    );
+                } // tolerate per-provider errors during reload
             }
+            perf.log_duration(
+                "reload_provider_complete",
+                provider_started.elapsed(),
+                format!("provider={}", parser.provider_name()),
+            );
         }
 
-        store.repair_zero_costs(output_since, &provider_names)?;
+        let started = Instant::now();
+        let repaired = store.repair_zero_costs(output_since, &provider_names)?;
+        perf.log_duration(
+            "reload_repair_zero_costs",
+            started.elapsed(),
+            format!("repaired={repaired}"),
+        );
 
+        let started = Instant::now();
         let (message_count, session_count) =
             store.load_summary_counts(output_since, &provider_names)?;
+        perf.log_duration(
+            "reload_load_summary_counts",
+            started.elapsed(),
+            format!("messages={message_count} sessions={session_count}"),
+        );
 
+        let started = Instant::now();
+        let dashboard_days = store.load_dashboard_days(output_since, &provider_names)?;
+        perf.log_duration(
+            "reload_load_dashboard_days",
+            started.elapsed(),
+            format!("days={}", dashboard_days.len()),
+        );
+        let started = Instant::now();
+        let provider_summaries = store.load_provider_summaries(output_since, &provider_names)?;
+        perf.log_duration(
+            "reload_load_provider_summaries",
+            started.elapsed(),
+            format!("providers={}", provider_summaries.len()),
+        );
+        let started = Instant::now();
+        let model_summaries = store.load_model_summaries(output_since, &provider_names)?;
+        perf.log_duration(
+            "reload_load_model_summaries",
+            started.elapsed(),
+            format!("models={}", model_summaries.len()),
+        );
         let summary = build_usage_summary_from_daily(
-            store.load_dashboard_days(output_since, &provider_names)?,
-            store.load_provider_summaries(output_since, &provider_names)?,
-            store.load_model_summaries(output_since, &provider_names)?,
+            dashboard_days,
+            provider_summaries,
+            model_summaries,
             message_count,
             session_count,
         );
 
+        let started = Instant::now();
         let daily_rows = store.load_daily_rows(output_since, &provider_names)?;
+        perf.log_duration(
+            "reload_load_daily_rows",
+            started.elapsed(),
+            format!("rows={}", daily_rows.len()),
+        );
+        perf.log(
+            "reload_complete",
+            format!("total_elapsed_ms={}", perf.elapsed_ms()),
+        );
         Ok((summary, daily_rows))
     }
 }
@@ -290,6 +610,106 @@ fn filter_messages_to_range(
                 .unwrap_or(false)
         })
         .collect()
+}
+
+fn message_session_count(messages: &[UnifiedMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| (message.client.as_str(), message.session_id.as_str()))
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+struct UsagePerfLog {
+    file: Option<File>,
+    started: Instant,
+    run_id: String,
+    path: Option<PathBuf>,
+}
+
+impl UsagePerfLog {
+    fn new(enabled: bool) -> Self {
+        let started = Instant::now();
+        let run_id = Utc::now()
+            .to_rfc3339_opts(SecondsFormat::Millis, true)
+            .replace(':', "-");
+        let path = enabled.then(usage_perf_log_path);
+        Self::from_parts(started, run_id, path)
+    }
+
+    fn from_path(path: Option<PathBuf>) -> Self {
+        let started = Instant::now();
+        let run_id = Utc::now()
+            .to_rfc3339_opts(SecondsFormat::Millis, true)
+            .replace(':', "-");
+        Self::from_parts(started, run_id, path)
+    }
+
+    fn from_parts(started: Instant, run_id: String, path: Option<PathBuf>) -> Self {
+        let file = path
+            .as_ref()
+            .and_then(|path| open_usage_perf_log(path).ok());
+        let mut log = Self {
+            file,
+            started,
+            run_id,
+            path,
+        };
+        if let Some(path) = log.path.as_ref() {
+            let detail = format!("path={}", path.display());
+            log.log("log_open", detail);
+        }
+        log
+    }
+
+    fn path(&self) -> Option<&PathBuf> {
+        self.path.as_ref()
+    }
+
+    fn elapsed_ms(&self) -> u128 {
+        self.started.elapsed().as_millis()
+    }
+
+    fn log(&mut self, event: &str, detail: impl AsRef<str>) {
+        let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let elapsed_ms = self.elapsed_ms();
+        let run_id = self.run_id.clone();
+        let detail = detail.as_ref().replace('\n', " ");
+        let Some(file) = &mut self.file else {
+            return;
+        };
+        let _ = writeln!(
+            file,
+            "{} run_id={} elapsed_ms={} event={} {}",
+            timestamp, run_id, elapsed_ms, event, detail
+        );
+    }
+
+    fn log_duration(&mut self, event: &str, duration: Duration, detail: impl AsRef<str>) {
+        self.log(
+            event,
+            format!("duration_ms={} {}", duration.as_millis(), detail.as_ref()),
+        );
+    }
+}
+
+fn open_usage_perf_log(path: &PathBuf) -> std::io::Result<File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new().create(true).append(true).open(path)
+}
+
+fn usage_perf_log_path() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let filename = format!("usage-{}.log", Utc::now().format("%Y-%m-%d"));
+    home.join(".local")
+        .join("share")
+        .join("tokenpulse")
+        .join("log")
+        .join(filename)
 }
 
 fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {

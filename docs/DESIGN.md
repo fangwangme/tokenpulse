@@ -135,6 +135,7 @@ tokenpulse usage -p claude,codex          # filter by provider
 tokenpulse usage --refresh-days 2026-03-01:2026-03-07
 tokenpulse usage --refresh-pricing
 tokenpulse usage --rebuild-all
+tokenpulse usage --log                   # write a timestamped startup timing log
 ```
 
 ---

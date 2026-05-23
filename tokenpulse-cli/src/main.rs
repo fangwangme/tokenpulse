@@ -74,6 +74,10 @@ enum Commands {
         /// Force plain-text output instead of the interactive dashboard.
         #[clap(long, conflicts_with = "tui")]
         no_tui: bool,
+
+        /// Write usage startup timing to a new log file under ~/.local/share/tokenpulse/log/.
+        #[clap(long)]
+        log: bool,
     },
     Config {
         #[clap(subcommand)]
@@ -129,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
             json,
             tui,
             no_tui,
+            log,
         } => {
             check_config_exists();
             commands::usage::run(
@@ -147,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
                     CsvFormat::Daily => "daily".to_string(),
                     CsvFormat::Models => "models".to_string(),
                 }),
+                log,
             )
             .await?;
         }

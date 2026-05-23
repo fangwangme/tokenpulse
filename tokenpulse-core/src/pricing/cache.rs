@@ -39,6 +39,27 @@ impl PricingCache {
         self.fetch_and_cache_sync()
     }
 
+    pub fn get_pricing_allow_stale_sync(&self) -> Result<PricingCatalog> {
+        if let Some(cached) = self.load_memory_cached_any()? {
+            debug!("Using in-memory pricing catalog");
+            return Ok(cached.pricing);
+        }
+
+        if let Some(cached) = self.load_cached()? {
+            debug!("Using cached pricing catalog");
+            self.store_memory_cache(&cached)?;
+            return Ok(cached.pricing);
+        }
+
+        if let Some(cached) = self.load_stale_cached()? {
+            debug!("Using stale pricing catalog to avoid blocking usage startup");
+            self.store_memory_cache(&cached)?;
+            return Ok(cached.pricing);
+        }
+
+        self.fetch_and_cache_sync()
+    }
+
     fn load_cached(&self) -> Result<Option<CachedPricing>> {
         if !self.cache_path.exists() {
             return Ok(None);
@@ -163,6 +184,13 @@ impl PricingCache {
 
         cache.remove(&self.cache_path);
         Ok(None)
+    }
+
+    fn load_memory_cached_any(&self) -> Result<Option<CachedPricing>> {
+        let cache = memory_cache()
+            .lock()
+            .map_err(|_| anyhow!("Pricing cache mutex poisoned"))?;
+        Ok(cache.get(&self.cache_path).cloned())
     }
 
     fn store_memory_cache(&self, cached: &CachedPricing) -> Result<()> {
