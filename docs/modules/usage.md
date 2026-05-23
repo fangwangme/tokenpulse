@@ -149,7 +149,10 @@ Important rule:
 - reads assistant messages from SQLite
 - uses stored tokens and pricing-based cost estimation when available
 
-### Gemini CLI
+### Gemini CLI (Historical Only)
+
+> [!NOTE]
+> Gemini support has been deprecated/removed. The Gemini CLI parser is retained for historical data analytics only.
 
 - source path:
   - `~/.gemini/tmp/**/session-*.json`

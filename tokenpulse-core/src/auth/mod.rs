@@ -1,9 +1,7 @@
-pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
 
-pub use antigravity::AntigravityAuth;
 pub use claude::ClaudeAuth;
 pub use codex::CodexAuth;
 pub use copilot::CopilotAuth;
@@ -48,11 +46,24 @@ pub fn detect_providers() -> Vec<DetectedProvider> {
         DetectedProvider {
             name: "antigravity".to_string(),
             display_name: "Antigravity".to_string(),
-            detected: AntigravityAuth::detect(),
-            credential_hint: if AntigravityAuth::detect() {
-                "state.vscdb found".to_string()
-            } else {
-                "not detected".to_string()
+            detected: {
+                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
+                home.join("Library")
+                    .join("Application Support")
+                    .join("Antigravity")
+                    .exists()
+            },
+            credential_hint: {
+                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
+                if home.join("Library")
+                    .join("Application Support")
+                    .join("Antigravity")
+                    .exists()
+                {
+                    "installed".to_string()
+                } else {
+                    "not detected".to_string()
+                }
             },
         },
         DetectedProvider {

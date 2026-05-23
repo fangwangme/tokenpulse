@@ -453,6 +453,7 @@ mod tests {
 
         UnifiedMessage {
             client: client.to_string(),
+            client_detail: None,
             model_id: model.to_string(),
             provider_id: provider_id.to_string(),
             session_id: session_id.to_string(),

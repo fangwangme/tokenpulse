@@ -591,8 +591,10 @@ fn render_snapshot_card(
     if snapshot.plan.is_some() || snapshot.account.is_some() {
         let mut spans = Vec::new();
         if let Some(account) = &snapshot.account {
+            let max_acc_len = (inner.width as usize).saturating_sub(25).max(15);
+            let truncated_acc = truncate(account, max_acc_len);
             spans.push(Span::styled(
-                account.clone(),
+                truncated_acc,
                 Style::default().fg(theme.fg).bold(),
             ));
             if snapshot.plan.is_some() {
@@ -600,9 +602,11 @@ fn render_snapshot_card(
             }
         }
         if let Some(plan) = &snapshot.plan {
-            spans.push(Span::styled("Plan ", Style::default().fg(theme.dim)));
+            spans.push(Span::styled("Plan: ", Style::default().fg(theme.dim)));
+            let max_plan_len = (inner.width as usize).saturating_sub(30).max(10);
+            let truncated_plan = truncate(plan, max_plan_len);
             spans.push(Span::styled(
-                plan.clone(),
+                truncated_plan,
                 Style::default().fg(theme.fg).bold(),
             ));
         }

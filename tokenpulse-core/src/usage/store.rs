@@ -174,17 +174,17 @@ impl UsageStore {
             tx.execute(
                 r#"
                 INSERT INTO usage_messages (
-                    source, provider_id, model_id, session_id, message_key,
+                    source, client, provider_id, model_id, session_id, message_key,
                     timestamp_ms, date, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, reasoning_tokens,
                     total_tokens, cost_usd, pricing_day, parser_version
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5,
-                    ?6, ?7, ?8, ?9,
-                    ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16
+                    ?1, ?2, ?3, ?4, ?5, ?6,
+                    ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?17
                 )
-                ON CONFLICT(source, message_key) DO UPDATE SET
+                ON CONFLICT(source, client, message_key) DO UPDATE SET
                     provider_id = excluded.provider_id,
                     model_id = excluded.model_id,
                     session_id = excluded.session_id,
@@ -202,6 +202,7 @@ impl UsageStore {
                 "#,
                 params![
                     message.client,
+                    message.client_detail.as_deref().unwrap_or(&message.client),
                     message.provider_id,
                     message.model_id,
                     message.session_id,
@@ -287,17 +288,17 @@ impl UsageStore {
             tx.execute(
                 r#"
                 INSERT INTO usage_messages (
-                    source, provider_id, model_id, session_id, message_key,
+                    source, client, provider_id, model_id, session_id, message_key,
                     timestamp_ms, date, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, reasoning_tokens,
                     total_tokens, cost_usd, pricing_day, parser_version
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5,
-                    ?6, ?7, ?8, ?9,
-                    ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16
+                    ?1, ?2, ?3, ?4, ?5, ?6,
+                    ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?17
                 )
-                ON CONFLICT(source, message_key) DO UPDATE SET
+                ON CONFLICT(source, client, message_key) DO UPDATE SET
                     provider_id = excluded.provider_id,
                     model_id = excluded.model_id,
                     session_id = excluded.session_id,
@@ -315,6 +316,7 @@ impl UsageStore {
                 "#,
                 params![
                     message.client,
+                    message.client_detail.as_deref().unwrap_or(&message.client),
                     message.provider_id,
                     message.model_id,
                     message.session_id,
@@ -468,8 +470,16 @@ impl UsageStore {
         let mut sql = String::from(
             r#"
             SELECT COUNT(*),
-                   COUNT(DISTINCT CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END || '::' || session_id)
-            FROM usage_messages
+                   COUNT(DISTINCT source || '::' || session_id)
+            FROM (
+                SELECT
+                    date,
+                    source,
+                    session_id,
+                    message_key
+                FROM usage_messages
+                GROUP BY date, source, session_id, message_key
+            )
             WHERE 1=1
             "#,
         );
@@ -492,11 +502,22 @@ impl UsageStore {
         let conn = self.open()?;
         let mut sql = String::from(
             r#"
-            SELECT CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END AS source,
-                   provider_id, model_id, session_id, message_key,
-                   timestamp_ms, date, input_tokens, output_tokens,
-                   cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                   cost_usd, pricing_day, parser_version
+            SELECT source,
+                   client,
+                   provider_id,
+                   model_id,
+                   session_id,
+                   message_key,
+                   timestamp_ms,
+                   date,
+                   input_tokens,
+                   output_tokens,
+                   cache_read_tokens,
+                   cache_write_tokens,
+                   reasoning_tokens,
+                   cost_usd,
+                   pricing_day,
+                   parser_version
             FROM usage_messages
             WHERE 1=1
             "#,
@@ -529,8 +550,23 @@ impl UsageStore {
                    SUM(total_tokens),
                    SUM(cost_usd),
                    COUNT(*),
-                   COUNT(DISTINCT CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END || '::' || session_id)
-            FROM usage_messages
+                   COUNT(DISTINCT source || '::' || session_id)
+            FROM (
+                SELECT
+                    date,
+                    source,
+                    session_id,
+                    message_key,
+                    MAX(input_tokens) AS input_tokens,
+                    MAX(output_tokens) AS output_tokens,
+                    MAX(cache_read_tokens) AS cache_read_tokens,
+                    MAX(cache_write_tokens) AS cache_write_tokens,
+                    MAX(reasoning_tokens) AS reasoning_tokens,
+                    MAX(total_tokens) AS total_tokens,
+                    MAX(cost_usd) AS cost_usd
+                FROM usage_messages
+                GROUP BY date, source, session_id, message_key
+            )
             WHERE 1=1
             "#,
         );
@@ -551,7 +587,7 @@ impl UsageStore {
         let mut sql = String::from(
             r#"
             SELECT date,
-                   CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END AS source,
+                   source,
                    provider_id,
                    model_id,
                    SUM(input_tokens),
@@ -568,7 +604,7 @@ impl UsageStore {
             "#,
         );
         let params = append_common_filters(&mut sql, since, sources);
-        sql.push_str(" GROUP BY date, CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END, provider_id, model_id ORDER BY date ASC, SUM(cost_usd) DESC");
+        sql.push_str(" GROUP BY date, source, provider_id, model_id ORDER BY date ASC, SUM(cost_usd) DESC");
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params), row_to_daily)?;
@@ -584,17 +620,27 @@ impl UsageStore {
         let conn = self.open()?;
         let mut sql = String::from(
             r#"
-            SELECT CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END AS source,
+            SELECT source,
                    SUM(cost_usd),
                    SUM(total_tokens),
                    COUNT(*),
-                   COUNT(DISTINCT CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END || '::' || session_id)
-            FROM usage_messages
+                   COUNT(DISTINCT source || '::' || session_id)
+            FROM (
+                SELECT
+                    date,
+                    source,
+                    session_id,
+                    message_key,
+                    MAX(cost_usd) AS cost_usd,
+                    MAX(total_tokens) AS total_tokens
+                FROM usage_messages
+                GROUP BY date, source, session_id, message_key
+            )
             WHERE 1=1
             "#,
         );
         let params = append_common_filters(&mut sql, since, sources);
-        sql.push_str(" GROUP BY CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END ORDER BY SUM(total_tokens) DESC, source ASC");
+        sql.push_str(" GROUP BY source ORDER BY SUM(total_tokens) DESC, source ASC");
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params), row_to_provider_summary)?;
@@ -611,18 +657,30 @@ impl UsageStore {
             r#"
             SELECT model_id,
                    provider_id,
-                   CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END AS source,
+                   source,
                    session_id,
                    SUM(cost_usd),
                    SUM(total_tokens),
                    COUNT(*)
-            FROM usage_messages
+            FROM (
+                SELECT
+                    date,
+                    source,
+                    provider_id,
+                    model_id,
+                    session_id,
+                    message_key,
+                    MAX(cost_usd) AS cost_usd,
+                    MAX(total_tokens) AS total_tokens
+                FROM usage_messages
+                GROUP BY date, source, provider_id, model_id, session_id, message_key
+            )
             WHERE 1=1
             "#,
         );
         let params = append_common_filters(&mut sql, since, sources);
         sql.push_str(
-            " GROUP BY CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END, provider_id, model_id, session_id ORDER BY SUM(total_tokens) DESC, model_id ASC",
+            " GROUP BY source, provider_id, model_id, session_id ORDER BY SUM(total_tokens) DESC, model_id ASC",
         );
 
         let mut stmt = conn.prepare(&sql)?;
@@ -764,7 +822,7 @@ fn append_range_and_source_filters(
         sql.push_str(" AND source IN (");
         let mut first = true;
         for source in sources {
-            if source == "antigravity" {
+            if source == "antigravity" || source == "antigravity-cli" || source == "antigravity-desktop" {
                 for s in &["antigravity", "antigravity-cli", "antigravity-desktop"] {
                     if !first {
                         sql.push_str(", ");
@@ -860,19 +918,20 @@ fn delete_scoped_tx(
 }
 
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnifiedMessage> {
-    let input: i64 = row.get(7)?;
-    let output: i64 = row.get(8)?;
-    let cache_read: i64 = row.get(9)?;
-    let cache_write: i64 = row.get(10)?;
-    let reasoning: i64 = row.get(11)?;
+    let input: i64 = row.get(8)?;
+    let output: i64 = row.get(9)?;
+    let cache_read: i64 = row.get(10)?;
+    let cache_write: i64 = row.get(11)?;
+    let reasoning: i64 = row.get(12)?;
     Ok(UnifiedMessage {
         client: row.get(0)?,
-        provider_id: row.get(1)?,
-        model_id: row.get(2)?,
-        session_id: row.get(3)?,
-        message_key: row.get(4)?,
-        timestamp: row.get(5)?,
-        date: row.get(6)?,
+        client_detail: row.get(1)?,
+        provider_id: row.get(2)?,
+        model_id: row.get(3)?,
+        session_id: row.get(4)?,
+        message_key: row.get(5)?,
+        timestamp: row.get(6)?,
+        date: row.get(7)?,
         tokens: TokenBreakdown {
             input,
             output,
@@ -880,9 +939,9 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnifiedMessage> {
             cache_write,
             reasoning,
         },
-        cost: row.get(12)?,
-        pricing_day: row.get(13)?,
-        parser_version: row.get(14)?,
+        cost: row.get(13)?,
+        pricing_day: row.get(14)?,
+        parser_version: row.get(15)?,
     })
 }
 
@@ -959,8 +1018,25 @@ fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<
             COUNT(*),
             COUNT(DISTINCT session_id),
             ?2
-        FROM usage_messages
-        WHERE date = ?1
+        FROM (
+            SELECT
+                date,
+                source,
+                provider_id,
+                model_id,
+                session_id,
+                message_key,
+                MAX(input_tokens) AS input_tokens,
+                MAX(output_tokens) AS output_tokens,
+                MAX(cache_read_tokens) AS cache_read_tokens,
+                MAX(cache_write_tokens) AS cache_write_tokens,
+                MAX(reasoning_tokens) AS reasoning_tokens,
+                MAX(total_tokens) AS total_tokens,
+                MAX(cost_usd) AS cost_usd
+            FROM usage_messages
+            WHERE date = ?1
+            GROUP BY date, source, provider_id, model_id, session_id, message_key
+        )
         GROUP BY date, source, provider_id, model_id
         "#,
         params![date, now],
@@ -1097,6 +1173,84 @@ fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()
 
     conn.execute_batch(USAGE_SCHEMA_SQL)?;
 
+    let client_is_pk: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('usage_messages') WHERE name = 'client' AND pk > 0",
+        [],
+        |row| {
+            let count: i64 = row.get(0)?;
+            Ok(count > 0)
+        },
+    )?;
+
+    if !client_is_pk {
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys=OFF;
+            BEGIN TRANSACTION;
+            
+            ALTER TABLE usage_messages RENAME TO usage_messages_old;
+            
+            CREATE TABLE usage_messages (
+                source TEXT NOT NULL,
+                client TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                message_key TEXT NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                cache_read_tokens INTEGER NOT NULL,
+                cache_write_tokens INTEGER NOT NULL,
+                reasoning_tokens INTEGER NOT NULL,
+                total_tokens INTEGER NOT NULL,
+                cost_usd REAL NOT NULL,
+                pricing_day TEXT NOT NULL,
+                parser_version TEXT NOT NULL,
+                PRIMARY KEY (source, client, message_key)
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_usage_messages_date ON usage_messages(date);
+            CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date ON usage_messages(source, date);
+            CREATE INDEX IF NOT EXISTS idx_usage_messages_zero_cost
+                ON usage_messages(date, source)
+                WHERE cost_usd <= 0 AND total_tokens > 0;
+            
+            INSERT INTO usage_messages (
+                source, client, provider_id, model_id, session_id, message_key,
+                timestamp_ms, date, input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                total_tokens, cost_usd, pricing_day, parser_version
+            )
+            SELECT
+                source,
+                COALESCE(client, source) AS client,
+                provider_id,
+                model_id,
+                session_id,
+                message_key,
+                timestamp_ms,
+                date,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                reasoning_tokens,
+                total_tokens,
+                cost_usd,
+                pricing_day,
+                parser_version
+            FROM usage_messages_old;
+            
+            DROP TABLE usage_messages_old;
+            
+            COMMIT;
+            PRAGMA foreign_keys=ON;
+            "#,
+        )?;
+    }
+
     initialized_paths()
         .lock()
         .map_err(|_| anyhow!("Usage store schema mutex poisoned"))?
@@ -1133,6 +1287,7 @@ fn has_zero_cost_repairs_pending(
 const USAGE_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS usage_messages (
     source TEXT NOT NULL,
+    client TEXT NOT NULL,
     provider_id TEXT NOT NULL,
     model_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
@@ -1148,7 +1303,7 @@ CREATE TABLE IF NOT EXISTS usage_messages (
     cost_usd REAL NOT NULL,
     pricing_day TEXT NOT NULL,
     parser_version TEXT NOT NULL,
-    PRIMARY KEY (source, message_key)
+    PRIMARY KEY (source, client, message_key)
 );
 CREATE INDEX IF NOT EXISTS idx_usage_messages_date ON usage_messages(date);
 CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date ON usage_messages(source, date);
@@ -1443,36 +1598,39 @@ mod tests {
 
         // Ingest three messages with distinct antigravity source kinds and distinct session IDs
         let mut msg1 = sample_message("2026-05-22", "key1");
-        msg1.client = "antigravity-cli".to_string();
+        msg1.client = "antigravity".to_string();
+        msg1.client_detail = Some("antigravity-cli".to_string());
         msg1.session_id = "session-1".to_string();
         let mut msg2 = sample_message("2026-05-22", "key2");
-        msg2.client = "antigravity-desktop".to_string();
+        msg2.client = "antigravity".to_string();
+        msg2.client_detail = Some("antigravity-desktop".to_string());
         msg2.session_id = "session-2".to_string();
         let mut msg3 = sample_message("2026-05-22", "key3");
         msg3.client = "antigravity".to_string();
+        msg3.client_detail = Some("antigravity".to_string());
         msg3.session_id = "session-3".to_string();
 
         store.ingest_messages(&[msg1, msg2, msg3], false).unwrap();
 
-        // 1. Verify that they remain distinct in the database
+        // 1. Verify that they remain distinct in the database under client detail
         let conn = store.open().unwrap();
         let count_cli: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM usage_messages WHERE source = 'antigravity-cli'",
+                "SELECT COUNT(*) FROM usage_messages WHERE client = 'antigravity-cli'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         let count_desktop: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM usage_messages WHERE source = 'antigravity-desktop'",
+                "SELECT COUNT(*) FROM usage_messages WHERE client = 'antigravity-desktop'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         let count_antigravity: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM usage_messages WHERE source = 'antigravity'",
+                "SELECT COUNT(*) FROM usage_messages WHERE client = 'antigravity'",
                 [],
                 |r| r.get(0),
             )
@@ -1494,6 +1652,38 @@ mod tests {
         let (msg_cnt, session_cnt) = store
             .load_summary_counts(None, &["antigravity".to_string()])
             .unwrap();
+        assert_eq!(msg_cnt, 3);
+        assert_eq!(session_cnt, 3);
+
+        // 4. Verify that duplicate message keys on the same platform and session are deduplicated in aggregation
+        let mut msg4 = sample_message("2026-05-22", "dup_key");
+        msg4.client = "antigravity".to_string();
+        msg4.client_detail = Some("antigravity-cli".to_string());
+        msg4.session_id = "session-dup".to_string();
+        msg4.tokens.input = 100;
+        
+        let mut msg5 = sample_message("2026-05-22", "dup_key");
+        msg5.client = "antigravity".to_string();
+        msg5.client_detail = Some("antigravity-desktop".to_string());
+        msg5.session_id = "session-dup".to_string();
+        msg5.tokens.input = 100;
+
+        store.ingest_messages(&[msg4, msg5], false).unwrap();
+
+        let total_db_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_messages WHERE message_key = 'dup_key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total_db_count, 2);
+
+        let (msg_cnt_dedup, session_cnt_dedup) = store
+            .load_summary_counts(None, &["antigravity".to_string()])
+            .unwrap();
+        assert_eq!(msg_cnt_dedup, 4);
+        assert_eq!(session_cnt_dedup, 4);
         assert_eq!(msg_cnt, 3);
         assert_eq!(session_cnt, 3);
     }

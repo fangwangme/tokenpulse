@@ -6,9 +6,9 @@ A Rust CLI tool with two core features:
 1. **Quota** - On-demand check of remaining usage quota for coding agents
 2. **Usage** - Ledger-backed historical usage dashboard with cost estimation
 
-**Current Usage Scope:** Claude Code, Codex, OpenCode, Gemini CLI, PI, Copilot CLI, Antigravity
-**Current Quota Scope:** Claude Code, Codex, Gemini CLI, GitHub Copilot, Antigravity
-**Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI still has lighter sample coverage, though streamed JSONL deduplication and cache-inclusive input normalization are now handled.
+**Current Usage Scope:** Claude Code, Codex, OpenCode, Gemini CLI (historical only), PI, Copilot CLI, Antigravity
+**Current Quota Scope:** Claude Code, Codex, GitHub Copilot, Antigravity
+**Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI has been deprecated and is retained for historical data analytics only.
 
 **Language:** Rust
 **Key Principle:** On-demand by default, with optional auto-refresh for quota TUI. Run command → see results → exit. Use `a` key in quota TUI to cycle live auto-refresh intervals (1/2/5/10/15 min).
