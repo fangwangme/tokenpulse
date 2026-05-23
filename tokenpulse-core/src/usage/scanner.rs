@@ -4,17 +4,30 @@ use std::path::PathBuf;
 use walkdir::WalkDir;
 
 pub fn discover_files(root: &PathBuf, extension: &str, since: Option<NaiveDate>) -> Vec<PathBuf> {
-    WalkDir::new(root)
+    discover_files_with_extensions(root, &[extension], since)
+}
+
+pub fn discover_files_with_extensions(
+    root: &PathBuf,
+    extensions: &[&str],
+    since: Option<NaiveDate>,
+) -> Vec<PathBuf> {
+    let entries: Vec<walkdir::DirEntry> = WalkDir::new(root)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| {
             e.path()
                 .extension()
-                .map(|ext| ext == extension)
+                .and_then(|ext| ext.to_str())
+                .map(|ext| extensions.contains(&ext))
                 .unwrap_or(false)
         })
-        .filter(|e| {
-            if let Some(since_date) = since {
+        .collect();
+
+    if let Some(since_date) = since {
+        entries
+            .into_par_iter()
+            .filter(|e| {
                 if let Ok(metadata) = e.metadata() {
                     if let Ok(modified) = metadata.modified() {
                         let modified_date =
@@ -22,11 +35,16 @@ pub fn discover_files(root: &PathBuf, extension: &str, since: Option<NaiveDate>)
                         return modified_date >= since_date;
                     }
                 }
-            }
-            true
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect()
+                false
+            })
+            .map(|e| e.path().to_path_buf())
+            .collect()
+    } else {
+        entries
+            .into_iter()
+            .map(|e| e.path().to_path_buf())
+            .collect()
+    }
 }
 
 pub fn parse_files_parallel<F, T>(files: Vec<PathBuf>, parser: F) -> Vec<T>

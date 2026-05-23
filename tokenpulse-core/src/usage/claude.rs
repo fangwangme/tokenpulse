@@ -1,4 +1,4 @@
-use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
+use crate::provider::{IncrementalIngestMode, SessionParser, TokenBreakdown, UnifiedMessage};
 use crate::usage::scanner;
 use crate::usage::utils::detect_provider_from_model;
 
@@ -159,10 +159,9 @@ impl SessionParser for ClaudeSessionParser {
                 continue;
             }
             let files = scanner::discover_files(&root, "jsonl", since);
-            for file in files {
-                for message in self.parse_file(file) {
-                    upsert_message(&mut all_messages, &mut message_positions, message);
-                }
+            let messages = scanner::parse_files_parallel(files, |file| self.parse_file(file));
+            for message in messages {
+                upsert_message(&mut all_messages, &mut message_positions, message);
             }
         }
         all_messages.sort_by_key(|message| message.timestamp);
@@ -171,6 +170,10 @@ impl SessionParser for ClaudeSessionParser {
 
     fn parser_version(&self) -> &str {
         PARSER_VERSION
+    }
+
+    fn incremental_ingest_mode(&self) -> IncrementalIngestMode {
+        IncrementalIngestMode::ReplaceChangedSessions
     }
 }
 

@@ -73,7 +73,7 @@ impl SessionParser for AntigravitySessionParser {
         }
     }
 
-    fn parse_sessions(&self, _since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
+    fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
         let mut all_messages = Vec::new();
 
         for root in self.session_paths() {
@@ -102,15 +102,23 @@ impl SessionParser for AntigravitySessionParser {
 
             // Now read from SQLite
             let conn = open_cache_db(&root)?;
-            let mut stmt = conn.prepare(
+            let query = if since.is_some() {
+                "SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
+                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                        pricing_day, parser_version
+                 FROM session_usage
+                 WHERE pricing_day >= ?1
+                 ORDER BY timestamp ASC"
+            } else {
                 "SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
                         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
                         pricing_day, parser_version
                  FROM session_usage
                  ORDER BY timestamp ASC"
-            )?;
+            };
+            let mut stmt = conn.prepare(query)?;
 
-            let rows = stmt.query_map([], |row| {
+            let map_row = |row: &rusqlite::Row<'_>| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -126,7 +134,14 @@ impl SessionParser for AntigravitySessionParser {
                     row.get::<_, String>(11)?,
                     row.get::<_, String>(12)?,
                 ))
-            })?;
+            };
+
+            let rows = if let Some(since_date) = since {
+                let date_str = since_date.to_string();
+                stmt.query_map(rusqlite::params![date_str], map_row)?
+            } else {
+                stmt.query_map([], map_row)?
+            };
 
             for row in rows {
                 let (
@@ -335,6 +350,7 @@ fn sync_antigravity_with_options(
     sessions_dir: &Path,
     options: AntigravitySyncOptions,
 ) -> Result<()> {
+    let sync_start = std::time::Instant::now();
     std::fs::create_dir_all(sessions_dir)?;
 
     let connections = match detect_antigravity_connections() {
@@ -792,13 +808,14 @@ fn sync_antigravity_with_options(
 
     let cached_rows_after = count_antigravity_session_cache_rows(&db_conn);
 
-    info!("Antigravity sync: Synced local Antigravity cache from running language servers.");
-    info!("detected connections: {}", connections.len());
-    info!("total detected sessions: {}", total_detected_sessions);
-    info!("synced sessions this run: {}", synced_sessions_count);
     info!(
-        "cached sessions: {} -> {}",
-        cached_rows_before, cached_rows_after
+        "Antigravity sync: Synced local Antigravity cache in {} ms. Connections: {}, sessions: (total: {}, synced: {}), cache rows: {} -> {}",
+        sync_start.elapsed().as_millis(),
+        connections.len(),
+        total_detected_sessions,
+        synced_sessions_count,
+        cached_rows_before,
+        cached_rows_after
     );
 
     Ok(())
@@ -1527,17 +1544,44 @@ fn normalize_cached_antigravity_artifacts(
         all_aliases.insert(k.clone(), v.clone());
     }
 
+    let db_models = {
+        let mut db_models = std::collections::HashSet::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT DISTINCT model_id FROM sessions") {
+            if let Ok(mut rows) = stmt.query([]) {
+                while let Ok(Some(row)) = rows.next() {
+                    if let Ok(m) = row.get::<_, String>(0) {
+                        db_models.insert(m.to_lowercase());
+                    }
+                }
+            }
+        }
+        if let Ok(mut stmt) = conn.prepare("SELECT DISTINCT model_id FROM session_usage") {
+            if let Ok(mut rows) = stmt.query([]) {
+                while let Ok(Some(row)) = rows.next() {
+                    if let Ok(m) = row.get::<_, String>(0) {
+                        db_models.insert(m.to_lowercase());
+                    }
+                }
+            }
+        }
+        db_models
+    };
+
     let tx = conn.transaction()?;
 
     for (alias_key, alias) in &all_aliases {
-        tx.execute(
-            "UPDATE sessions SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
-            rusqlite::params![&alias.model_id, &alias.raw_model_id, alias_key],
-        )?;
-        tx.execute(
-            "UPDATE session_usage SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
-            rusqlite::params![&alias.model_id, &alias.raw_model_id, alias_key],
-        )?;
+        let key_lower = alias_key.to_lowercase();
+        let raw_lower = alias.raw_model_id.to_lowercase();
+        if db_models.contains(&key_lower) || db_models.contains(&raw_lower) {
+            tx.execute(
+                "UPDATE sessions SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
+                rusqlite::params![&alias.model_id, &alias.raw_model_id, alias_key],
+            )?;
+            tx.execute(
+                "UPDATE session_usage SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
+                rusqlite::params![&alias.model_id, &alias.raw_model_id, alias_key],
+            )?;
+        }
     }
 
     tx.commit()?;

@@ -189,7 +189,14 @@ pub fn run(
             let settings_tab = tab_titles.len().saturating_sub(1);
 
             if selected_tab == 0 {
-                render_overview(f, chunks[2], &snapshots, &display_mode, &theme);
+                render_overview(
+                    f,
+                    chunks[2],
+                    &snapshots,
+                    &display_mode,
+                    &theme,
+                    config.display.show_account,
+                );
             } else if selected_tab == settings_tab {
                 render_settings(
                     f,
@@ -203,7 +210,16 @@ pub fn run(
                     &theme,
                 );
             } else if let Some(snapshot) = snapshots.get(selected_tab - 1) {
-                render_snapshot_card(f, chunks[2], snapshot, &display_mode, &theme, false, false);
+                render_snapshot_card(
+                    f,
+                    chunks[2],
+                    snapshot,
+                    &display_mode,
+                    &theme,
+                    false,
+                    false,
+                    config.display.show_account,
+                );
             }
 
             let auto_hint = match refresh_countdown {
@@ -211,7 +227,7 @@ pub fn run(
                 Some(remaining) => format_countdown(remaining),
             };
             let footer_text = format!(
-                " q quit | r refresh | a auto ({}) | b theme ({}) | m mode | e empty | space toggle | ←→ tab | {} provider{} | ? help",
+                " q quit | r refresh | s account | a auto ({}) | b theme ({}) | m mode | e empty | space toggle | ←→ tab | {} provider{} | ? help",
                 auto_hint,
                 theme_status_label(theme_preference, theme.mode),
                 snapshots.len(),
@@ -272,6 +288,10 @@ pub fn run(
                         config.display.show_empty_providers = !config.display.show_empty_providers;
                         config_manager.save(&config)?;
                     }
+                    KeyCode::Char('s') => {
+                        config.display.show_account = !config.display.show_account;
+                        config_manager.save(&config)?;
+                    }
                     KeyCode::Up | KeyCode::Char('k') => {
                         let snapshots: Vec<&QuotaSnapshot> =
                             results.iter().filter_map(|r| r.as_ref().ok()).collect();
@@ -301,6 +321,9 @@ pub fn run(
                                 provider_config.enabled = next_enabled;
                                 config_manager.save(&config)?;
                                 enabled_providers = enabled_provider_ids(&config);
+                            } else if settings_row == 2 {
+                                config.display.show_account = !config.display.show_account;
+                                config_manager.save(&config)?;
                             }
                         }
                     }
@@ -370,11 +393,11 @@ fn toggle_display_mode(display_mode: &QuotaDisplayMode) -> QuotaDisplayMode {
 }
 
 fn settings_row_count() -> usize {
-    4 + quota_provider_info_list().len()
+    5 + quota_provider_info_list().len()
 }
 
 fn settings_provider_id(row: usize) -> Option<&'static str> {
-    row.checked_sub(4)
+    row.checked_sub(5)
         .and_then(|idx| quota_provider_info_list().get(idx).map(|info| info.id))
 }
 
@@ -479,6 +502,7 @@ fn render_overview(
     snapshots: &[&QuotaSnapshot],
     display_mode: &QuotaDisplayMode,
     theme: &Theme,
+    show_account: bool,
 ) {
     if snapshots.is_empty() {
         let msg = Paragraph::new("No quota data available")
@@ -489,7 +513,16 @@ fn render_overview(
     }
 
     if snapshots.len() == 1 {
-        render_snapshot_card(f, area, snapshots[0], display_mode, theme, false, true);
+        render_snapshot_card(
+            f,
+            area,
+            snapshots[0],
+            display_mode,
+            theme,
+            false,
+            true,
+            show_account,
+        );
         return;
     }
 
@@ -519,6 +552,7 @@ fn render_overview(
                     theme,
                     true,
                     true,
+                    show_account,
                 );
             }
         }
@@ -533,6 +567,7 @@ fn render_snapshot_card(
     theme: &Theme,
     compact: bool,
     overview: bool,
+    show_account: bool,
 ) {
     let provider_color = theme.provider_color(&snapshot.provider);
     let block = Block::default()
@@ -570,8 +605,9 @@ fn render_snapshot_card(
         .unwrap_or(10);
     let fixed_label_width = max_label_len.min(inner.width.saturating_sub(30) as usize);
 
+    let has_account_display = snapshot.account.is_some() && show_account;
     let mut constraints = Vec::new();
-    if snapshot.plan.is_some() || snapshot.account.is_some() {
+    if snapshot.plan.is_some() || has_account_display {
         constraints.push(Constraint::Length(1));
     }
     for _ in &windows {
@@ -588,20 +624,22 @@ fn render_snapshot_card(
         .split(inner);
 
     let mut cursor = 0usize;
-    if snapshot.plan.is_some() || snapshot.account.is_some() {
+    if snapshot.plan.is_some() || has_account_display {
         let mut spans = Vec::new();
-        if let Some(account) = &snapshot.account {
-            let max_acc_len = (inner.width as usize).saturating_sub(25).max(15);
-            let truncated_acc = truncate(account, max_acc_len);
-            spans.push(Span::styled(
-                truncated_acc,
-                Style::default().fg(theme.fg).bold(),
-            ));
-            if snapshot.plan.is_some() {
-                spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
+        if has_account_display {
+            if let Some(account) = &snapshot.account {
+                let max_acc_len = (inner.width as usize).saturating_sub(25).max(15);
+                let truncated_acc = truncate(account, max_acc_len);
+                spans.push(Span::styled(
+                    truncated_acc,
+                    Style::default().fg(theme.fg).bold(),
+                ));
             }
         }
         if let Some(plan) = &snapshot.plan {
+            if has_account_display {
+                spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
+            }
             spans.push(Span::styled("Plan: ", Style::default().fg(theme.dim)));
             let max_plan_len = (inner.width as usize).saturating_sub(30).max(10);
             let truncated_plan = truncate(plan, max_plan_len);
@@ -610,9 +648,11 @@ fn render_snapshot_card(
                 Style::default().fg(theme.fg).bold(),
             ));
         }
-        let line = Paragraph::new(Line::from(spans));
-        f.render_widget(line, sections[cursor]);
-        cursor += 1;
+        if !spans.is_empty() {
+            let line = Paragraph::new(Line::from(spans));
+            f.render_widget(line, sections[cursor]);
+            cursor += 1;
+        }
     }
 
     for window in &windows {
@@ -827,6 +867,18 @@ fn render_settings(
     ));
     lines.push(settings_line(
         selected_row == 2,
+        "show_account",
+        if config.display.show_account {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        },
+        "s",
+        theme,
+        theme.claude,
+    ));
+    lines.push(settings_line(
+        selected_row == 3,
         "quota_auto_refresh_interval",
         auto_value,
         "a",
@@ -834,7 +886,7 @@ fn render_settings(
         theme.accent_soft,
     ));
     lines.push(settings_line(
-        selected_row == 3,
+        selected_row == 4,
         "theme",
         theme_status_label(config.display.theme, theme.mode),
         "b",
@@ -848,7 +900,7 @@ fn render_settings(
     )));
 
     for (idx, info) in quota_provider_info_list().iter().enumerate() {
-        let row = idx + 4;
+        let row = idx + 5;
         let enabled = is_provider_enabled(config, info.id);
         let fetched = fetched_provider_ids.contains(info.id);
         let marker = if selected_row == row { ">" } else { " " };
@@ -952,6 +1004,7 @@ fn render_quota_help_overlay(f: &mut ratatui::Frame, area: Rect, theme: &Theme) 
         ("↑↓ / j k", "navigate settings"),
         ("Space", "toggle provider"),
         ("r", "refresh quota"),
+        ("s", "toggle show account"),
         ("a", "cycle auto-refresh interval"),
         ("m", "toggle used/remaining mode"),
         ("e", "show/hide empty providers"),

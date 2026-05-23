@@ -52,9 +52,9 @@ impl OpenCodeSessionParser {
         since_timestamp_ms: Option<i64>,
     ) -> Option<Vec<OpenCodeRow>> {
         let sql = if since_timestamp_ms.is_some() {
-            "SELECT id, session_id, data, timestamp FROM message WHERE timestamp >= ?1 ORDER BY timestamp"
+            "SELECT id, session_id, data, time_created FROM message WHERE time_created >= ?1 ORDER BY time_created"
         } else {
-            "SELECT id, session_id, data, timestamp FROM message ORDER BY timestamp"
+            "SELECT id, session_id, data, time_created FROM message ORDER BY time_created"
         };
         let mut stmt = conn.prepare(sql).ok()?;
 
