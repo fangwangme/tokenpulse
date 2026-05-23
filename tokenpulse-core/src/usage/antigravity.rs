@@ -17,7 +17,6 @@ const MODEL_ALIAS_HISTORY_VERSION: u32 = 1;
 const MODEL_ALIAS_HISTORY_FILE_NAME: &str = "model-aliases.json";
 const ANTIGRAVITY_LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
 const ANTIGRAVITY_RPC_BODY_CAP: usize = 16 * 1024 * 1024;
-const ANTIGRAVITY_DEFAULT_CACHE_REBUILD_WINDOW_MS: i64 = 2 * 24 * 3600 * 1000;
 
 pub struct AntigravitySessionParser {
     rebuild_cache: bool,
@@ -103,17 +102,15 @@ impl SessionParser for AntigravitySessionParser {
 
             // Now read from SQLite
             let conn = open_cache_db(&root)?;
-            let since_str = since.map(|d| d.format("%Y-%m-%d").to_string());
             let mut stmt = conn.prepare(
                 "SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
                         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
                         pricing_day, parser_version
                  FROM session_usage
-                 WHERE (?1 IS NULL OR pricing_day >= ?1)
                  ORDER BY timestamp ASC"
             )?;
 
-            let rows = stmt.query_map(rusqlite::params![since_str], |row| {
+            let rows = stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -581,7 +578,6 @@ fn sync_antigravity_with_options(
 
     let total_detected_sessions = unique_summaries.len();
     let now_ms = Local::now().timestamp_millis();
-    let sync_threshold_ms = now_ms - ANTIGRAVITY_DEFAULT_CACHE_REBUILD_WINDOW_MS;
 
     for (cache_key, summary) in unique_summaries {
         let session_id = cache_key.session_id;
@@ -598,10 +594,6 @@ fn sync_antigravity_with_options(
                     continue;
                 }
             }
-        }
-
-        if !options.rebuild_all_cache && lm < sync_threshold_ms {
-            continue;
         }
 
         let mut metadata_response = None;
