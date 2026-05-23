@@ -408,7 +408,7 @@ impl UsageStore {
 
         let mut sql = String::from(
             r#"
-            SELECT source, message_key, provider_id, model_id, date,
+            SELECT source, client, message_key, provider_id, model_id, date,
                    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens
             FROM usage_messages
             WHERE cost_usd <= 0 AND total_tokens > 0
@@ -423,12 +423,13 @@ impl UsageStore {
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
                 TokenBreakdown {
-                    input: row.get(5)?,
-                    output: row.get(6)?,
-                    cache_read: row.get(7)?,
-                    cache_write: row.get(8)?,
-                    reasoning: row.get(9)?,
+                    input: row.get(6)?,
+                    output: row.get(7)?,
+                    cache_read: row.get(8)?,
+                    cache_write: row.get(9)?,
+                    reasoning: row.get(10)?,
                 },
             ))
         })?;
@@ -437,7 +438,7 @@ impl UsageStore {
         let mut repaired = 0usize;
 
         for row in rows.flatten() {
-            let (source, message_key, provider_id, model_id, date, tokens) = row;
+            let (source, client, message_key, provider_id, model_id, date, tokens) = row;
             let Some(pricing_row) = pricing.lookup(&model_id, Some(provider_id.as_str())) else {
                 continue;
             };
@@ -447,8 +448,8 @@ impl UsageStore {
             }
 
             tx.execute(
-                "UPDATE usage_messages SET cost_usd = ?1 WHERE source = ?2 AND message_key = ?3",
-                params![cost, source, message_key],
+                "UPDATE usage_messages SET cost_usd = ?1 WHERE source = ?2 AND client = ?3 AND message_key = ?4",
+                params![cost, source, client, message_key],
             )?;
             affected_dates.insert(date);
             repaired += 1;
@@ -827,10 +828,7 @@ fn append_range_and_source_filters(
         sql.push_str(" AND source IN (");
         let mut first = true;
         for source in sources {
-            if source == "antigravity"
-                || source == "antigravity-cli"
-                || source == "antigravity-desktop"
-            {
+            if source == "antigravity" {
                 for s in &["antigravity", "antigravity-cli", "antigravity-desktop"] {
                     if !first {
                         sql.push_str(", ");
@@ -1179,6 +1177,36 @@ fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()
         .contains(path)
     {
         return Ok(());
+    }
+
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usage_messages'",
+            [],
+            |row| {
+                let count: i64 = row.get(0)?;
+                Ok(count > 0)
+            },
+        )
+        .unwrap_or(false);
+
+    if table_exists {
+        let client_is_pk: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('usage_messages') WHERE name = 'client' AND pk > 0",
+                [],
+                |row| {
+                    let count: i64 = row.get(0)?;
+                    Ok(count > 0)
+                },
+            )
+            .unwrap_or(false);
+
+        if !client_is_pk {
+            let _ = conn.execute("DROP TABLE IF EXISTS usage_messages;", []);
+            let _ = conn.execute("DROP TABLE IF EXISTS daily_model_usage;", []);
+            let _ = conn.execute("DROP TABLE IF EXISTS daily_pricing_snapshots;", []);
+        }
     }
 
     conn.execute_batch(USAGE_SCHEMA_SQL)?;

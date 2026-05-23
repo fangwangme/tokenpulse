@@ -252,9 +252,22 @@ fn open_cache_db(sessions_dir: &Path) -> Result<rusqlite::Connection> {
     let conn = rusqlite::Connection::open(db_path)?;
     conn.execute("PRAGMA foreign_keys = ON;", [])?;
 
+    let sessions_pk_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE pk > 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if sessions_pk_count > 0 && sessions_pk_count != 2 {
+        let _ = conn.execute("DROP TABLE IF EXISTS session_usage;", []);
+        let _ = conn.execute("DROP TABLE IF EXISTS sessions;", []);
+    }
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sessions (
-            session_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
             trajectory_id TEXT,
             client TEXT NOT NULL,
             title TEXT,
@@ -272,7 +285,8 @@ fn open_cache_db(sessions_dir: &Path) -> Result<rusqlite::Connection> {
             branch_name TEXT,
             parent_conversation_id TEXT,
             mendel_experiment_ids TEXT,
-            synced_at INTEGER NOT NULL
+            synced_at INTEGER NOT NULL,
+            PRIMARY KEY (session_id, client)
         );",
         [],
     )?;
@@ -294,7 +308,7 @@ fn open_cache_db(sessions_dir: &Path) -> Result<rusqlite::Connection> {
             response_id TEXT,
             pricing_day TEXT NOT NULL,
             parser_version TEXT NOT NULL,
-            FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+            FOREIGN KEY(session_id, client) REFERENCES sessions(session_id, client) ON DELETE CASCADE
         );",
         [],
     )?;
@@ -659,7 +673,7 @@ fn sync_antigravity_with_options(
                 workspace_path, git_root, repository, git_origin_url, branch_name,
                 parent_conversation_id, mendel_experiment_ids, synced_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_id) DO UPDATE SET
+            ON CONFLICT(session_id, client) DO UPDATE SET
                 trajectory_id = excluded.trajectory_id,
                 client = excluded.client,
                 title = excluded.title,
@@ -2439,11 +2453,13 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
         let conn = open_cache_db(&sessions_dir).unwrap();
-        conn.execute(
-            "INSERT INTO sessions (session_id, trajectory_id, client, title, model_id, status, step_count, created_time_ms, last_modified_ms, last_user_input_time_ms, synced_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["sess-dup", "traj-dup", "antigravity-cli", "title", "gemini-3-pro-preview", "status", 1_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64],
-        ).unwrap();
+        for client in ["antigravity-cli", "antigravity-desktop"] {
+            conn.execute(
+                "INSERT INTO sessions (session_id, trajectory_id, client, title, model_id, status, step_count, created_time_ms, last_modified_ms, last_user_input_time_ms, synced_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params!["sess-dup", "traj-dup", client, "title", "gemini-3-pro-preview", "status", 1_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64],
+            ).unwrap();
+        }
 
         let logical_key = antigravity_logical_message_key("sess-dup", "resp-dup");
         for client in ["antigravity-cli", "antigravity-desktop"] {
