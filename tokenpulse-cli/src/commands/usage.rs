@@ -353,7 +353,7 @@ pub async fn run(
             .filter(|(_, p)| p.enabled)
             .map(|(k, _)| k.clone())
             .collect();
-        let fetchers = crate::commands::quota::build_quota_fetchers(None, &enabled_providers);
+        let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
         let results = tokenpulse_core::quota::fetch_all(fetchers).await;
         let mut quota_snapshots = Vec::new();
         let observed_at = chrono::Utc::now();
@@ -412,7 +412,7 @@ pub async fn run(
             "tui_start",
             format!("total_elapsed_ms={}", perf.elapsed_ms()),
         );
-        let result = tui::usage::run(summary, daily_breakdown, quota_snapshots, None, reload_fn);
+        let result = tui::usage::run(summary, daily_breakdown, quota_snapshots, reload_fn);
         perf.log(
             "tui_exit",
             format!("total_elapsed_ms={}", perf.elapsed_ms()),
@@ -433,7 +433,7 @@ pub async fn run(
             .filter(|(_, p)| p.enabled)
             .map(|(k, _)| k.clone())
             .collect();
-        let fetchers = crate::commands::quota::build_quota_fetchers(None, &enabled_providers);
+        let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
         let results = tokenpulse_core::quota::fetch_all(fetchers).await;
         let mut quota_snapshots = Vec::new();
         let observed_at = chrono::Utc::now();

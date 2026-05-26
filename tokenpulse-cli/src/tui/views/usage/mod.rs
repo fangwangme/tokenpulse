@@ -687,7 +687,6 @@ pub struct UsageState {
     pub refresh_status: Option<RefreshStatus>,
     pub data_date_range: Option<(NaiveDate, NaiveDate)>,
     // Quota and Provider filter state
-    pub provider_filter: Option<String>,
     pub quota_snapshots: Vec<tokenpulse_core::QuotaSnapshot>,
     pub last_usage_refresh: Instant,
     pub last_quota_refresh: Instant,
@@ -712,7 +711,6 @@ pub enum RefreshStatusLevel {
 impl UsageState {
     pub fn new(
         dashboard: &UsageDashboard,
-        provider_filter: Option<String>,
         quota_snapshots: Vec<tokenpulse_core::QuotaSnapshot>,
     ) -> Self {
         let all_sources = dashboard.all_sources();
@@ -744,7 +742,6 @@ impl UsageState {
             last_refreshed: Some(Local::now()),
             refresh_status: None,
             data_date_range: compute_data_date_range(dashboard),
-            provider_filter,
             quota_snapshots,
             last_usage_refresh: Instant::now(),
             last_quota_refresh: Instant::now(),
@@ -934,7 +931,6 @@ pub fn run<F>(
     mut summary: UsageSummary,
     daily_rows: Vec<DailyUsageRow>,
     quota_snapshots: Vec<tokenpulse_core::QuotaSnapshot>,
-    provider_filter: Option<String>,
     reload: F,
 ) -> Result<()>
 where
@@ -956,7 +952,7 @@ where
     terminal.hide_cursor()?;
 
     let mut dashboard = UsageDashboard::build(&summary, &daily_rows);
-    let mut state = UsageState::new(&dashboard, provider_filter, quota_snapshots);
+    let mut state = UsageState::new(&dashboard, quota_snapshots);
 
     // Initial background reload on startup
     state.set_refresh_status("Refreshing...", RefreshStatusLevel::Info);
@@ -986,14 +982,10 @@ where
             .filter(|(_, p)| p.enabled)
             .map(|(k, _)| k.clone())
             .collect();
-        let provider_filter_str = state.provider_filter.clone();
         let tx_quota = msg_tx.clone();
 
         tokio::spawn(async move {
-            let fetchers = crate::commands::quota::build_quota_fetchers(
-                provider_filter_str.as_deref(),
-                &enabled_providers,
-            );
+            let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
             let total_fetchers = fetchers.len();
             let observed_at = chrono::Utc::now();
             let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
@@ -1040,12 +1032,10 @@ where
                     summary = new_summary;
                     dashboard = new_dashboard;
                     let saved_quota_snapshots = state.quota_snapshots.clone();
-                    let saved_provider_filter = state.provider_filter.clone();
                     let saved_last_quota_refresh = state.last_quota_refresh;
                     let saved_quota_refresh_in_progress = state.quota_refresh_in_progress;
 
-                    state =
-                        UsageState::new(&dashboard, saved_provider_filter, saved_quota_snapshots);
+                    state = UsageState::new(&dashboard, saved_quota_snapshots);
                     state.last_quota_refresh = saved_last_quota_refresh;
                     state.quota_refresh_in_progress = saved_quota_refresh_in_progress;
                     state.usage_refresh_in_progress = false;
@@ -1173,14 +1163,10 @@ where
                 .filter(|(_, p)| p.enabled)
                 .map(|(k, _)| k.clone())
                 .collect();
-            let provider_filter_str = state.provider_filter.clone();
             let tx = msg_tx.clone();
 
             tokio::spawn(async move {
-                let fetchers = crate::commands::quota::build_quota_fetchers(
-                    provider_filter_str.as_deref(),
-                    &enabled_providers,
-                );
+                let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
                 let total_fetchers = fetchers.len();
                 let observed_at = chrono::Utc::now();
                 let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
@@ -1323,14 +1309,11 @@ where
                             .filter(|(_, p)| p.enabled)
                             .map(|(k, _)| k.clone())
                             .collect();
-                        let provider_filter_str = state.provider_filter.clone();
                         let tx_quota = msg_tx.clone();
 
                         tokio::spawn(async move {
-                            let fetchers = crate::commands::quota::build_quota_fetchers(
-                                provider_filter_str.as_deref(),
-                                &enabled_providers,
-                            );
+                            let fetchers =
+                                crate::commands::quota::build_quota_fetchers(&enabled_providers);
                             let total_fetchers = fetchers.len();
                             let observed_at = chrono::Utc::now();
                             let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();

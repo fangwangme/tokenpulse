@@ -88,16 +88,7 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
     ];
 
     // Add provider checkboxes!
-    let providers: Vec<&str> = if let Some(ref filter) = state.provider_filter {
-        let filter_list: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
-        ALL_PROVIDERS
-            .iter()
-            .copied()
-            .filter(|p| filter_list.contains(p))
-            .collect()
-    } else {
-        ALL_PROVIDERS.to_vec()
-    };
+    let providers = ALL_PROVIDERS.to_vec();
 
     for provider in providers {
         let enabled = config
@@ -152,17 +143,8 @@ fn next_usage_interval(curr: u32) -> u32 {
     USAGE_INTERVALS[(pos + 1) % USAGE_INTERVALS.len()]
 }
 
-pub fn settings_row_count(state: &UsageState) -> usize {
-    let providers_count = if let Some(ref filter) = state.provider_filter {
-        let filter_list: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
-        ALL_PROVIDERS
-            .iter()
-            .copied()
-            .filter(|p| filter_list.contains(p))
-            .count()
-    } else {
-        ALL_PROVIDERS.len()
-    };
+pub fn settings_row_count(_state: &UsageState) -> usize {
+    let providers_count = ALL_PROVIDERS.len();
     6 + providers_count
 }
 
@@ -194,16 +176,7 @@ pub fn handle_settings_action(
         *theme = Theme::from_preference(config.display.theme);
     } else {
         let provider_idx = idx - 6;
-        let providers: Vec<&str> = if let Some(ref filter) = state.provider_filter {
-            let filter_list: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
-            ALL_PROVIDERS
-                .iter()
-                .copied()
-                .filter(|p| filter_list.contains(p))
-                .collect()
-        } else {
-            ALL_PROVIDERS.to_vec()
-        };
+        let providers = ALL_PROVIDERS.to_vec();
 
         if provider_idx < providers.len() {
             if let Some(&provider) = providers.get(provider_idx) {

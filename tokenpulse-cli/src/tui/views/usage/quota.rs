@@ -27,20 +27,11 @@ pub fn render_quota_tab(
         .quota_snapshots
         .iter()
         .filter(|s| {
-            let enabled = config
+            config
                 .providers
                 .get(&s.provider)
                 .map(|p| p.enabled)
-                .unwrap_or(false);
-            if !enabled {
-                return false;
-            }
-            if let Some(ref filter) = state.provider_filter {
-                let filter_list: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
-                filter_list.contains(&s.provider.as_str())
-            } else {
-                true
-            }
+                .unwrap_or(false)
         })
         .collect();
 

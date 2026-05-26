@@ -82,20 +82,10 @@ pub fn quota_provider_info_list() -> Vec<QuotaProviderInfo> {
 ///
 /// When `provider` is Some, only that single provider is built (if known).
 /// When `provider` is None, all enabled providers are built.
-pub fn build_quota_fetchers(
-    provider: Option<&str>,
-    enabled_providers: &[String],
-) -> Vec<Box<dyn QuotaFetcher>> {
-    match provider {
-        Some(name) => QUOTA_PROVIDERS
-            .iter()
-            .filter(|e| e.id == name)
-            .map(|e| (e.make_fetcher)())
-            .collect(),
-        None => QUOTA_PROVIDERS
-            .iter()
-            .filter(|e| enabled_providers.contains(&e.id.to_string()))
-            .map(|e| (e.make_fetcher)())
-            .collect(),
-    }
+pub fn build_quota_fetchers(enabled_providers: &[String]) -> Vec<Box<dyn QuotaFetcher>> {
+    QUOTA_PROVIDERS
+        .iter()
+        .filter(|e| enabled_providers.contains(&e.id.to_string()))
+        .map(|e| (e.make_fetcher)())
+        .collect()
 }
