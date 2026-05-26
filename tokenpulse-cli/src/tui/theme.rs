@@ -630,17 +630,15 @@ mod tests {
     #[test]
     fn heatmap_levels_increase_contrast_in_light_and_dark_themes() {
         for theme in [Theme::new(ThemeMode::Dark), Theme::new(ThemeMode::Light)] {
-            if theme.mode == ThemeMode::Light {
-                for palette in heatmap_palettes(&theme) {
-                    let contrasts = palette.map(|color| contrast_ratio(color, theme.heatmap_bg));
-                    for pair in contrasts.windows(2) {
-                        assert!(
-                            pair[1] > pair[0],
-                            "{} heatmap levels should progress visually: {:?}",
-                            theme.mode.label(),
-                            contrasts
-                        );
-                    }
+            for palette in heatmap_palettes(&theme) {
+                let contrasts = palette.map(|color| contrast_ratio(color, theme.heatmap_bg));
+                for pair in contrasts.windows(2) {
+                    assert!(
+                        pair[1] > pair[0],
+                        "{} heatmap levels should progress visually: {:?}",
+                        theme.mode.label(),
+                        contrasts
+                    );
                 }
             }
         }

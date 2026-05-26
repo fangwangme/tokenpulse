@@ -201,10 +201,8 @@ Current command shape:
 
 ```bash
 tokenpulse
-tokenpulse --tui
 tokenpulse --no-tui
 tokenpulse --since 2026-03-01
-tokenpulse -p claude,codex,opencode
 tokenpulse --refresh-days 2026-03-01:2026-03-07
 tokenpulse --refresh-pricing
 tokenpulse --rebuild-all

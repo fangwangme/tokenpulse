@@ -13,9 +13,6 @@ struct Cli {
     #[clap(long)]
     since: Option<String>,
 
-    #[clap(short, long)]
-    provider: Option<String>,
-
     #[clap(long)]
     refresh_days: Option<String>,
 
@@ -26,19 +23,15 @@ struct Cli {
     rebuild_all: bool,
 
     /// Emit CSV output (daily or models). Example: --csv daily
-    #[clap(long, value_enum, conflicts_with = "json", conflicts_with = "tui")]
+    #[clap(long, value_enum, conflicts_with = "json")]
     csv: Option<CsvFormat>,
 
     /// Emit JSON output instead of text or the interactive dashboard.
-    #[clap(long, conflicts_with = "tui")]
+    #[clap(long)]
     json: bool,
 
-    /// Force the interactive dashboard even if auto-detection would stay in text mode.
-    #[clap(long, conflicts_with = "no_tui")]
-    tui: bool,
-
     /// Force plain-text output instead of the interactive dashboard.
-    #[clap(long, conflicts_with = "tui")]
+    #[clap(long)]
     no_tui: bool,
 
     /// Write usage startup timing to a new log file under ~/.local/share/tokenpulse/log/.
@@ -104,14 +97,13 @@ async fn main() -> anyhow::Result<()> {
             check_config_exists();
             commands::usage::run(
                 cli.since,
-                cli.provider,
                 cli.refresh_days,
                 cli.refresh_pricing,
                 cli.rebuild_all,
                 if cli.json || cli.csv.is_some() {
                     false
                 } else {
-                    resolve_tui_mode(cli.tui, cli.no_tui)?
+                    resolve_tui_mode(cli.no_tui)?
                 },
                 cli.json,
                 cli.csv.map(|format| match format {
@@ -137,24 +129,12 @@ fn check_config_exists() {
     }
 }
 
-fn resolve_tui_mode(tui: bool, no_tui: bool) -> anyhow::Result<bool> {
+fn resolve_tui_mode(no_tui: bool) -> anyhow::Result<bool> {
     let interactive_tui = std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
         && std::env::var("TERM")
             .map(|term| term != "dumb")
             .unwrap_or(true);
 
-    if tui && !interactive_tui {
-        anyhow::bail!(
-            "--tui requires an interactive terminal; run in a terminal or use `--no-tui` for plain-text output"
-        );
-    }
-
-    Ok(if no_tui {
-        false
-    } else if tui {
-        true
-    } else {
-        interactive_tui
-    })
+    Ok(if no_tui { false } else { interactive_tui })
 }

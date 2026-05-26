@@ -176,7 +176,9 @@ impl ConfigManager {
         if !self.config_path.exists() {
             let config = Config::default();
             // Write default config so users can discover and edit it
-            let _ = self.save(&config);
+            if let Err(e) = self.save(&config) {
+                tracing::warn!("Failed to save default config: {}", e);
+            }
             return Ok(config);
         }
 
@@ -188,7 +190,9 @@ impl ConfigManager {
             if config.display.usage_auto_refresh_secs == 300 {
                 config.display.usage_auto_refresh_secs = 600;
             }
-            let _ = self.save(&config);
+            if let Err(e) = self.save(&config) {
+                tracing::warn!("Failed to save migrated config: {}", e);
+            }
         }
 
         Ok(config)

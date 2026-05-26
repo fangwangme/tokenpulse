@@ -124,7 +124,6 @@ tokenpulse/
 tokenpulse
 
 # Formatting and output mode options
-tokenpulse --tui                          # force the interactive TUI dashboard
 tokenpulse --no-tui                       # plain-text summary of both quota and usage
 tokenpulse --json                         # JSON summary for scripts
 tokenpulse --csv daily                    # CSV daily usage table
@@ -132,7 +131,6 @@ tokenpulse --csv models                   # CSV models usage table
 
 # Filters
 tokenpulse --since 2026-03-01             # filter by date
-tokenpulse -p claude,codex                # filter by provider
 
 # Ingest and rebuild options
 tokenpulse --refresh-days 2026-03-01:2026-03-07

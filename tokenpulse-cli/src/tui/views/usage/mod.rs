@@ -926,7 +926,7 @@ pub fn move_table_selection_for_frame(
 pub enum TuiMessage {
     UsageReloadSuccess(UsageSummary, Vec<DailyUsageRow>),
     UsageReloadFailed(String),
-    QuotaReloadSuccess(Vec<tokenpulse_core::QuotaSnapshot>),
+    QuotaReloadSuccess(Vec<tokenpulse_core::QuotaSnapshot>, Vec<String>),
     QuotaReloadFailed(String),
 }
 
@@ -994,20 +994,33 @@ where
                 provider_filter_str.as_deref(),
                 &enabled_providers,
             );
+            let total_fetchers = fetchers.len();
             let observed_at = chrono::Utc::now();
             let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
             let results = tokenpulse_core::quota::fetch_all(fetchers).await;
 
             let mut snapshots = Vec::new();
+            let mut errors = Vec::new();
             for result in results {
-                if let Ok(snapshot) = result {
-                    let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
-                    snapshots.push(snapshot);
+                match result {
+                    Ok(snapshot) => {
+                        let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
+                        snapshots.push(snapshot);
+                    }
+                    Err(e) => {
+                        errors.push(e.to_string());
+                    }
                 }
             }
-            let _ = tx_quota
-                .send(TuiMessage::QuotaReloadSuccess(snapshots))
-                .await;
+            if snapshots.is_empty() && total_fetchers > 0 {
+                let _ = tx_quota
+                    .send(TuiMessage::QuotaReloadFailed(errors.join(", ")))
+                    .await;
+            } else {
+                let _ = tx_quota
+                    .send(TuiMessage::QuotaReloadSuccess(snapshots, errors))
+                    .await;
+            }
         });
     }
 
@@ -1066,11 +1079,26 @@ where
                         RefreshStatusLevel::Error,
                     );
                 }
-                TuiMessage::QuotaReloadSuccess(new_snapshots) => {
-                    state.quota_snapshots = new_snapshots;
+                TuiMessage::QuotaReloadSuccess(new_snapshots, errors) => {
+                    for snap in new_snapshots {
+                        if let Some(existing) = state
+                            .quota_snapshots
+                            .iter_mut()
+                            .find(|s| s.provider == snap.provider)
+                        {
+                            *existing = snap;
+                        } else {
+                            state.quota_snapshots.push(snap);
+                        }
+                    }
                     state.quota_refresh_in_progress = false;
                     state.last_quota_refresh = Instant::now();
-                    if !state.is_refreshing() {
+                    if !errors.is_empty() {
+                        state.set_refresh_status(
+                            format!("Refresh failed: {}", errors.join(", ")),
+                            RefreshStatusLevel::Error,
+                        );
+                    } else if !state.is_refreshing() {
                         state.set_refresh_status("Refresh complete", RefreshStatusLevel::Success);
                     }
                 }
@@ -1153,18 +1181,33 @@ where
                     provider_filter_str.as_deref(),
                     &enabled_providers,
                 );
+                let total_fetchers = fetchers.len();
                 let observed_at = chrono::Utc::now();
                 let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
                 let results = tokenpulse_core::quota::fetch_all(fetchers).await;
 
                 let mut snapshots = Vec::new();
+                let mut errors = Vec::new();
                 for result in results {
-                    if let Ok(snapshot) = result {
-                        let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
-                        snapshots.push(snapshot);
+                    match result {
+                        Ok(snapshot) => {
+                            let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
+                            snapshots.push(snapshot);
+                        }
+                        Err(e) => {
+                            errors.push(e.to_string());
+                        }
                     }
                 }
-                let _ = tx.send(TuiMessage::QuotaReloadSuccess(snapshots)).await;
+                if snapshots.is_empty() && total_fetchers > 0 {
+                    let _ = tx
+                        .send(TuiMessage::QuotaReloadFailed(errors.join(", ")))
+                        .await;
+                } else {
+                    let _ = tx
+                        .send(TuiMessage::QuotaReloadSuccess(snapshots, errors))
+                        .await;
+                }
             });
         }
 
@@ -1288,24 +1331,37 @@ where
                                 provider_filter_str.as_deref(),
                                 &enabled_providers,
                             );
+                            let total_fetchers = fetchers.len();
                             let observed_at = chrono::Utc::now();
                             let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
                             let results = tokenpulse_core::quota::fetch_all(fetchers).await;
 
                             let mut snapshots = Vec::new();
+                            let mut errors = Vec::new();
                             for result in results {
-                                if let Ok(snapshot) = result {
-                                    let _ = cache_store.save(
-                                        &snapshot.provider,
-                                        observed_at,
-                                        &snapshot,
-                                    );
-                                    snapshots.push(snapshot);
+                                match result {
+                                    Ok(snapshot) => {
+                                        let _ = cache_store.save(
+                                            &snapshot.provider,
+                                            observed_at,
+                                            &snapshot,
+                                        );
+                                        snapshots.push(snapshot);
+                                    }
+                                    Err(e) => {
+                                        errors.push(e.to_string());
+                                    }
                                 }
                             }
-                            let _ = tx_quota
-                                .send(TuiMessage::QuotaReloadSuccess(snapshots))
-                                .await;
+                            if snapshots.is_empty() && total_fetchers > 0 {
+                                let _ = tx_quota
+                                    .send(TuiMessage::QuotaReloadFailed(errors.join(", ")))
+                                    .await;
+                            } else {
+                                let _ = tx_quota
+                                    .send(TuiMessage::QuotaReloadSuccess(snapshots, errors))
+                                    .await;
+                            }
                         });
 
                         continue;

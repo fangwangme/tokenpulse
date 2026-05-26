@@ -8,6 +8,8 @@ use ratatui::{
 };
 use tokenpulse_core::config::{Config, ConfigManager, QuotaDisplayMode};
 
+const ALL_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "antigravity", "copilot"];
+
 pub struct SettingItem {
     pub key: &'static str,
     pub label: String,
@@ -86,15 +88,15 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
     ];
 
     // Add provider checkboxes!
-    let all_providers = vec!["claude", "codex", "gemini", "antigravity", "copilot"];
     let providers: Vec<&str> = if let Some(ref filter) = state.provider_filter {
         let filter_list: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
-        all_providers
-            .into_iter()
+        ALL_PROVIDERS
+            .iter()
+            .copied()
             .filter(|p| filter_list.contains(p))
             .collect()
     } else {
-        all_providers
+        ALL_PROVIDERS.to_vec()
     };
 
     for provider in providers {
@@ -151,15 +153,15 @@ fn next_usage_interval(curr: u32) -> u32 {
 }
 
 pub fn settings_row_count(state: &UsageState) -> usize {
-    let all_providers = vec!["claude", "codex", "gemini", "antigravity", "copilot"];
     let providers_count = if let Some(ref filter) = state.provider_filter {
         let filter_list: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
-        all_providers
-            .into_iter()
+        ALL_PROVIDERS
+            .iter()
+            .copied()
             .filter(|p| filter_list.contains(p))
             .count()
     } else {
-        all_providers.len()
+        ALL_PROVIDERS.len()
     };
     6 + providers_count
 }
@@ -192,26 +194,28 @@ pub fn handle_settings_action(
         *theme = Theme::from_preference(config.display.theme);
     } else {
         let provider_idx = idx - 6;
-        let all_providers = vec!["claude", "codex", "gemini", "antigravity", "copilot"];
         let providers: Vec<&str> = if let Some(ref filter) = state.provider_filter {
             let filter_list: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
-            all_providers
-                .into_iter()
+            ALL_PROVIDERS
+                .iter()
+                .copied()
                 .filter(|p| filter_list.contains(p))
                 .collect()
         } else {
-            all_providers
+            ALL_PROVIDERS.to_vec()
         };
 
-        if let Some(&provider) = providers.get(provider_idx) {
-            let p_config = config.providers.entry(provider.to_string()).or_default();
-            p_config.enabled = !p_config.enabled;
+        if provider_idx < providers.len() {
+            if let Some(&provider) = providers.get(provider_idx) {
+                let p_config = config.providers.entry(provider.to_string()).or_default();
+                p_config.enabled = !p_config.enabled;
 
-            if p_config.enabled {
-                state.enabled_sources.insert(provider.to_string());
-            } else {
-                if state.enabled_sources.len() > 1 {
-                    state.enabled_sources.remove(provider);
+                if p_config.enabled {
+                    state.enabled_sources.insert(provider.to_string());
+                } else {
+                    if state.enabled_sources.len() > 1 {
+                        state.enabled_sources.remove(provider);
+                    }
                 }
             }
         }
