@@ -73,16 +73,16 @@ Requirements:
 - Rust toolchain
 - local agent/session data on the same machine
 
-Build the workspace (in release mode for optimal performance):
+Build and install the binary (registers `tokenpulse` into your cargo bin path):
+
+```bash
+cargo install --path tokenpulse-cli
+```
+
+Or build the workspace manually:
 
 ```bash
 cargo build --release --workspace
-```
-
-Run the CLI (use `--release` for optimal TUI rendering and quick database aggregations):
-
-```bash
-cargo run --release -p tokenpulse-cli -- --help
 ```
 
 ## Quick Start
