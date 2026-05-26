@@ -43,9 +43,9 @@ Notes:
 |---|---|
 | ![Models](docs/images/models.png) | ![Daily](docs/images/daily.png) |
 
-| Activity |
-|---|
-| ![Activity](docs/images/activity.png) |
+| Activity | Settings |
+|---|---|
+| ![Activity](docs/images/activity.png) | ![Settings](docs/images/settings.png) |
 
 ## Features
 
