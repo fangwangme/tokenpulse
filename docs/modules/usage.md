@@ -164,7 +164,7 @@ Important rule:
   - streamed JSONL records are deduplicated by message `id`, keeping the last chunk per response
   - cache-inclusive `input` values are normalized when `total` indicates that `cached` tokens are already included in the prompt count
 - timestamp fallback behavior still needs broader validation against real samples
-- parser version changes can invalidate previously ingested Gemini rows; `tokenpulse usage` will automatically clear and rebuild stale Gemini ledger entries on the next run
+- parser version changes can invalidate previously ingested Gemini rows; `tokenpulse` will automatically clear and rebuild stale Gemini ledger entries on the next run
 
 ### PI
 
@@ -200,18 +200,18 @@ Important rule:
 Current command shape:
 
 ```bash
-tokenpulse usage
-tokenpulse usage --tui
-tokenpulse usage --no-tui
-tokenpulse usage --since 2026-03-01
-tokenpulse usage -p claude,codex,opencode
-tokenpulse usage --refresh-days 2026-03-01:2026-03-07
-tokenpulse usage --refresh-pricing
-tokenpulse usage --rebuild-all
-tokenpulse usage --log
+tokenpulse
+tokenpulse --tui
+tokenpulse --no-tui
+tokenpulse --since 2026-03-01
+tokenpulse -p claude,codex,opencode
+tokenpulse --refresh-days 2026-03-01:2026-03-07
+tokenpulse --refresh-pricing
+tokenpulse --rebuild-all
+tokenpulse --log
 ```
 
-`tokenpulse usage` now opens the interactive dashboard automatically when both stdin/stdout are attached to a terminal. Use `--no-tui` to force the plain-text summary for scripts, pipes, or quick dumps.
+`tokenpulse` now opens the interactive dashboard automatically when both stdin/stdout are attached to a terminal. Use `--no-tui` to force the plain-text summary for scripts, pipes, or quick dumps.
 
 `--log` writes startup timing for the current run to a new timestamped file under `~/.local/share/tokenpulse/log/`. The log records provider parsing, ingest, aggregate queries, and the point where the TUI starts, so slow dashboard startup can be traced without enabling logs by default.
 

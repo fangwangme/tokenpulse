@@ -2278,7 +2278,7 @@ pub fn empty_data_message(state: &UsageState, fallback: &str) -> String {
         "No data for selected sources".to_string()
     } else if state.all_sources.is_empty() {
         format!(
-            "{}\n\nNo sessions found. Run:\n  tokenpulse usage --reload\nto parse usage data.",
+            "{}\n\nNo sessions found. Run:\n  tokenpulse\nto parse usage data.",
             fallback
         )
     } else {

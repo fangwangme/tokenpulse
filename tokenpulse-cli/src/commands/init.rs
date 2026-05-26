@@ -115,7 +115,7 @@ pub fn run(use_defaults: bool) -> Result<()> {
     }
 
     let config = Config {
-        version: 1,
+        version: 2,
         providers,
         display: DisplayConfig {
             show_empty_providers: false,
@@ -130,7 +130,7 @@ pub fn run(use_defaults: bool) -> Result<()> {
         "\nConfiguration saved to {}\n",
         config_manager.config_path().display()
     );
-    println!("Run `tokenpulse quota` to check your usage!");
+    println!("Run `tokenpulse` to check your usage!");
 
     Ok(())
 }

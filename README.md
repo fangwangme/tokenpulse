@@ -93,12 +93,12 @@ Initialize config:
 tokenpulse init
 ```
 
-Check quota:
+Run the unified dashboard:
 
 ```bash
-tokenpulse quota
-tokenpulse quota -p claude
-tokenpulse quota --no-tui
+tokenpulse
+tokenpulse --no-tui                                    # plain text format
+tokenpulse --json                                      # JSON format
 ```
 
 Configure auto-refresh intervals (0=disabled):
@@ -112,24 +112,20 @@ tokenpulse config set usage_auto_refresh_interval=10
 
 Or toggle these intervals directly inside the Settings tab of the TUI.
 
-Inspect usage:
+Inspect and filter dashboard data:
 
 ```bash
-tokenpulse usage
-tokenpulse usage --tui
-tokenpulse usage --no-tui
-tokenpulse usage --json
-tokenpulse usage --since 2026-04-01
-tokenpulse usage -p claude,codex,copilot
-tokenpulse usage --refresh-days 2026-04-01:2026-04-09
-tokenpulse usage --refresh-pricing
-tokenpulse usage --rebuild-all
-tokenpulse usage --log
+tokenpulse --since 2026-04-01
+tokenpulse -p claude,codex,copilot
+tokenpulse --refresh-days 2026-04-01:2026-04-09
+tokenpulse --refresh-pricing
+tokenpulse --rebuild-all
+tokenpulse --log
 ```
 
-If you previously ingested Gemini usage before the parser fix, the next `tokenpulse usage` run will automatically rebuild stored Gemini rows when it sees an older parser version. You can also force a one-shot refresh with `tokenpulse usage -p gemini --rebuild-all`.
+If you previously ingested Gemini usage before the parser fix, the next `tokenpulse` run will automatically rebuild stored Gemini rows when it sees an older parser version. You can also force a one-shot refresh with `tokenpulse -p gemini --rebuild-all`.
 
-Antigravity keeps a TokenPulse-managed raw cache under `~/.local/share/tokenpulse/antigravity-cache/`. Normal usage runs refresh Antigravity sessions whose local CLI/Desktop conversation files changed in the last two days. CLI and Desktop copies are stored separately but roll up under one `antigravity` source and are deduplicated by `session_id + message_id`. Use `tokenpulse usage --rebuild-all` to rebuild all discoverable Antigravity raw cache files from a running Antigravity language server.
+Antigravity keeps a TokenPulse-managed raw cache under `~/.local/share/tokenpulse/antigravity-cache/`. Normal runs refresh Antigravity sessions whose local CLI/Desktop conversation files changed in the last two days. CLI and Desktop copies are stored separately but roll up under one `antigravity` source and are deduplicated by `session_id + message_id`. Use `tokenpulse --rebuild-all` to rebuild all discoverable Antigravity raw cache files from a running Antigravity language server.
 
 For file-backed agents such as Claude Code, Codex, Copilot, Gemini CLI, and PI, normal usage runs parse changed session files in parallel and replace the ledger rows for those changed sessions. OpenCode keeps its direct SQLite timestamp scan because it can read only recent database rows without reparsing whole session files.
 

@@ -120,31 +120,34 @@ tokenpulse/
 ## CLI Interface
 
 ```bash
-# Quota checking - one-shot, pretty output
-tokenpulse quota                          # all providers
-tokenpulse quota -p claude                # single provider
-tokenpulse quota --json                   # JSON output for scripting
+# Unified dashboard - interactive TUI on a terminal
+tokenpulse
 
-# Usage summary / dashboard
-tokenpulse usage                          # interactive TUI on a terminal, plain text when piped
-tokenpulse usage --tui                    # force the interactive TUI dashboard
-tokenpulse usage --no-tui                 # plain-text summary
-tokenpulse usage --json                   # JSON summary for scripts
-tokenpulse usage --since 2026-03-01       # filter by date
-tokenpulse usage -p claude,codex          # filter by provider
-tokenpulse usage --refresh-days 2026-03-01:2026-03-07
-tokenpulse usage --refresh-pricing
-tokenpulse usage --rebuild-all
-tokenpulse usage --log                   # write a timestamped startup timing log
+# Formatting and output mode options
+tokenpulse --tui                          # force the interactive TUI dashboard
+tokenpulse --no-tui                       # plain-text summary of both quota and usage
+tokenpulse --json                         # JSON summary for scripts
+tokenpulse --csv daily                    # CSV daily usage table
+tokenpulse --csv models                   # CSV models usage table
+
+# Filters
+tokenpulse --since 2026-03-01             # filter by date
+tokenpulse -p claude,codex                # filter by provider
+
+# Ingest and rebuild options
+tokenpulse --refresh-days 2026-03-01:2026-03-07
+tokenpulse --refresh-pricing
+tokenpulse --rebuild-all
+tokenpulse --log                          # write a timestamped startup timing log
 ```
 
 ---
 
 ## TUI Dashboard Design
 
-### Quota View (`tokenpulse quota`)
+### Quota Tab
 
-The quota TUI has two modes:
+The quota view has two modes:
 - **Overview tab** shows only the top 3 most-used windows per provider for a compact summary
 - **Detail tabs** (per provider) show all available rate windows
 
@@ -174,11 +177,11 @@ Each gauge includes:
   ╰─────────────────────────────────────────────────────────────────╯
 ```
 
-### Usage Dashboard (`tokenpulse usage`)
+### Dashboard TUI Layout
 
 ```
 ╭─────────────────────────────────────────────────────────────────────╮
-│                   📊 TokenPulse - Usage Dashboard                    │
+│                   📊 TokenPulse - TUI Dashboard                     │
 ╰─────────────────────────────────────────────────────────────────────╯
 
   ╭─ Token Usage (60 days) ───────────────────────────────────────────╮
@@ -366,11 +369,11 @@ Cache: ~/.local/share/tokenpulse/pricing.json (24h TTL)
 - [x] Cargo workspace setup
 - [x] Claude Code: auth + quota fetching
 - [x] Codex: auth + quota fetching
-- [x] `tokenpulse quota` with TUI gauge display
+- [x] Quota TUI gauge display
 - [x] Claude Code: session JSONL parser
 - [x] Codex: session JSONL parser
 - [x] Pricing module (LiteLLM fetch + cache)
-- [x] `tokenpulse usage` with TUI dashboard
+- [x] Usage TUI dashboard
 
 ### Phase 2 - More Providers
 - [x] OpenCode: SQLite session parser
