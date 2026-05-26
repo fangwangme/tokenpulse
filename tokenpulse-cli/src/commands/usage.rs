@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokenpulse_core::{
+    config::{ConfigManager, QuotaDisplayMode},
     usage::{
         build_usage_summary_from_daily, AntigravitySessionParser, ClaudeSessionParser,
         CodexSessionParser, CopilotSessionParser, DateRange, GeminiSessionParser,
@@ -29,7 +30,6 @@ const SUPPORTED_USAGE_PROVIDERS: &[&str] = &[
 
 pub async fn run(
     since: Option<String>,
-    provider: Option<String>,
     refresh_days: Option<String>,
     refresh_pricing: bool,
     rebuild_all: bool,
@@ -44,7 +44,7 @@ pub async fn run(
         .transpose()?;
     let refresh_range = refresh_days.as_deref().map(parse_date_range).transpose()?;
 
-    let provider_names = parse_provider_names(provider.as_deref());
+    let provider_names = parse_provider_names(None);
     let parsers = build_parsers(&provider_names, rebuild_all);
     let store = UsageStore::new();
     let mut stale_sources = HashSet::new();
@@ -345,7 +345,34 @@ pub async fn run(
             "output_json",
             format!("total_elapsed_ms={}", perf.elapsed_ms()),
         );
-        print_json_summary(&summary)?;
+        let config_manager = ConfigManager::new();
+        let config = config_manager.load().unwrap_or_default();
+        let enabled_providers: Vec<String> = config
+            .providers
+            .iter()
+            .filter(|(_, p)| p.enabled)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
+        let results = tokenpulse_core::quota::fetch_all(fetchers).await;
+        let mut quota_snapshots = Vec::new();
+        let observed_at = chrono::Utc::now();
+        let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
+        for result in results {
+            if let Ok(snapshot) = result {
+                let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
+                quota_snapshots.push(snapshot);
+            }
+        }
+        for provider in &enabled_providers {
+            if !quota_snapshots.iter().any(|s| &s.provider == provider) {
+                if let Ok(Some(cached)) = cache_store.load_valid(provider, observed_at) {
+                    quota_snapshots.push(cached.snapshot);
+                }
+            }
+        }
+
+        print_json_unified(&summary, quota_snapshots)?;
     } else if let Some(csv_type) = csv {
         let started = Instant::now();
         let daily_breakdown = store.load_daily_rows(output_since, &provider_names)?;
@@ -370,12 +397,22 @@ pub async fn run(
             started.elapsed(),
             format!("rows={} output=tui", daily_breakdown.len()),
         );
+
+        let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
+        let mut quota_snapshots = Vec::new();
+        let now = chrono::Utc::now();
+        for info in crate::commands::quota::quota_provider_info_list() {
+            if let Ok(Some(cached)) = cache_store.load_valid(info.id, now) {
+                quota_snapshots.push(cached.snapshot);
+            }
+        }
+
         let reload_fn = build_reload_fn(provider_names, output_since, perf.path().cloned());
         perf.log(
             "tui_start",
             format!("total_elapsed_ms={}", perf.elapsed_ms()),
         );
-        let result = tui::usage::run(summary, daily_breakdown, reload_fn);
+        let result = tui::usage::run(summary, daily_breakdown, quota_snapshots, reload_fn);
         perf.log(
             "tui_exit",
             format!("total_elapsed_ms={}", perf.elapsed_ms()),
@@ -387,6 +424,35 @@ pub async fn run(
             format!("total_elapsed_ms={}", perf.elapsed_ms()),
         );
         print_summary(&summary);
+
+        let config_manager = ConfigManager::new();
+        let config = config_manager.load().unwrap_or_default();
+        let enabled_providers: Vec<String> = config
+            .providers
+            .iter()
+            .filter(|(_, p)| p.enabled)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
+        let results = tokenpulse_core::quota::fetch_all(fetchers).await;
+        let mut quota_snapshots = Vec::new();
+        let observed_at = chrono::Utc::now();
+        let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
+        for result in results {
+            if let Ok(snapshot) = result {
+                let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
+                quota_snapshots.push(snapshot);
+            }
+        }
+        for provider in &enabled_providers {
+            if !quota_snapshots.iter().any(|s| &s.provider == provider) {
+                if let Ok(Some(cached)) = cache_store.load_valid(provider, observed_at) {
+                    quota_snapshots.push(cached.snapshot);
+                }
+            }
+        }
+
+        print_quota_summary(&quota_snapshots, &config.display.quota_display_mode);
     }
 
     Ok(())
@@ -796,6 +862,71 @@ fn print_json_summary(summary: &tokenpulse_core::usage::UsageSummary) -> Result<
     serde_json::to_writer_pretty(std::io::stdout(), summary)?;
     println!();
     Ok(())
+}
+
+fn print_json_unified(
+    summary: &tokenpulse_core::usage::UsageSummary,
+    quota: Vec<tokenpulse_core::QuotaSnapshot>,
+) -> Result<()> {
+    let output = serde_json::json!({
+        "usage": summary,
+        "quota": quota,
+    });
+    serde_json::to_writer_pretty(std::io::stdout(), &output)?;
+    println!();
+    Ok(())
+}
+
+fn print_quota_summary(
+    snapshots: &[tokenpulse_core::QuotaSnapshot],
+    display_mode: &QuotaDisplayMode,
+) {
+    if snapshots.is_empty() {
+        return;
+    }
+    println!("\n=== Quota Status ===");
+    for snapshot in snapshots {
+        let plan_str = snapshot.plan.as_deref().unwrap_or("None");
+        let account_str = snapshot.account.as_deref().unwrap_or("None");
+        println!("\nProvider: {}", snapshot.provider.to_uppercase());
+        println!("  Plan: {}", plan_str);
+        println!("  Account: {}", account_str);
+
+        for window in &snapshot.windows {
+            let used = window.used_percent;
+            let remaining = (100.0 - used).max(0.0);
+            let display_percent = match display_mode {
+                QuotaDisplayMode::Used => used,
+                QuotaDisplayMode::Remaining => remaining,
+            };
+            let mode_label = match display_mode {
+                QuotaDisplayMode::Used => "used",
+                QuotaDisplayMode::Remaining => "remaining",
+            };
+            print!(
+                "  - {}: {:.1}% {}",
+                window.label, display_percent, mode_label
+            );
+            if let Some(ref resets_at) = window.resets_at {
+                let now = chrono::Utc::now();
+                let duration = resets_at.signed_duration_since(now);
+                if duration.num_seconds() > 0 {
+                    let total_minutes = duration.num_minutes();
+                    let hours = total_minutes / 60;
+                    let mins = total_minutes % 60;
+                    print!(" (resets in {}h {}m)", hours, mins);
+                }
+            }
+            println!();
+        }
+        if let Some(ref credits) = snapshot.credits {
+            print!("  Credits: ${:.2} {}", credits.used, credits.currency);
+            if let Some(limit) = credits.limit {
+                print!(" / ${:.2}", limit);
+            }
+            println!();
+        }
+    }
 }
 
 fn format_int<T: ToString>(value: T) -> String {

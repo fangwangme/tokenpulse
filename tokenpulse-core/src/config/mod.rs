@@ -15,7 +15,7 @@ pub struct Config {
 }
 
 fn default_version() -> u32 {
-    1
+    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +38,10 @@ pub struct DisplayConfig {
     /// Supported values: 0, 60, 120, 300, 600, 900.
     #[serde(default = "default_quota_auto_refresh_secs")]
     pub quota_auto_refresh_secs: u32,
+    /// Auto-refresh interval for usage TUI in seconds. 0 = disabled.
+    /// Supported values: 0, 300, 600, 900, 1800.
+    #[serde(default = "default_usage_auto_refresh_secs")]
+    pub usage_auto_refresh_secs: u32,
     #[serde(default = "default_true")]
     pub show_account: bool,
 }
@@ -56,6 +60,14 @@ impl ThemePreference {
             Self::Auto => Self::Dark,
             Self::Dark => Self::Light,
             Self::Light => Self::Auto,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Auto => Self::Light,
+            Self::Dark => Self::Auto,
+            Self::Light => Self::Dark,
         }
     }
 
@@ -97,7 +109,7 @@ impl Default for Config {
         providers.insert("copilot".to_string(), ProviderConfig::default());
 
         Self {
-            version: 1,
+            version: 2,
             providers,
             display: DisplayConfig::default(),
         }
@@ -120,6 +132,7 @@ impl Default for DisplayConfig {
             theme: ThemePreference::default(),
             quota_display_mode: QuotaDisplayMode::default(),
             quota_auto_refresh_secs: default_quota_auto_refresh_secs(),
+            usage_auto_refresh_secs: default_usage_auto_refresh_secs(),
             show_account: true,
         }
     }
@@ -131,6 +144,10 @@ fn default_true() -> bool {
 
 fn default_quota_auto_refresh_secs() -> u32 {
     300
+}
+
+fn default_usage_auto_refresh_secs() -> u32 {
+    600
 }
 
 pub struct ConfigManager {
@@ -159,12 +176,25 @@ impl ConfigManager {
         if !self.config_path.exists() {
             let config = Config::default();
             // Write default config so users can discover and edit it
-            let _ = self.save(&config);
+            if let Err(e) = self.save(&config) {
+                tracing::warn!("Failed to save default config: {}", e);
+            }
             return Ok(config);
         }
 
         let content = fs::read_to_string(&self.config_path)?;
-        let config: Config = toml::from_str(&content)?;
+        let mut config: Config = toml::from_str(&content)?;
+
+        if config.version < 2 {
+            config.version = 2;
+            if config.display.usage_auto_refresh_secs == 300 {
+                config.display.usage_auto_refresh_secs = 600;
+            }
+            if let Err(e) = self.save(&config) {
+                tracing::warn!("Failed to save migrated config: {}", e);
+            }
+        }
+
         Ok(config)
     }
 
@@ -283,6 +313,7 @@ enabled = true
             QuotaDisplayMode::Remaining
         );
         assert_eq!(config.display.quota_auto_refresh_secs, 300);
+        assert_eq!(config.display.usage_auto_refresh_secs, 600);
         assert!(config.display.show_account);
     }
 
@@ -315,6 +346,35 @@ version = 1
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.display.quota_auto_refresh_secs, 300);
+        assert_eq!(config.display.usage_auto_refresh_secs, 600);
         assert_eq!(config.display.theme, ThemePreference::Auto);
+    }
+
+    #[test]
+    fn test_config_version_migration() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+
+        // Write a version 1 config with 300s (5m) usage refresh
+        let v1_toml = r#"
+version = 1
+[display]
+quota_auto_refresh_secs = 300
+usage_auto_refresh_secs = 300
+"#;
+        fs::write(&config_path, v1_toml).unwrap();
+
+        let manager = ConfigManager { config_path };
+        let loaded = manager.load().unwrap();
+
+        // Should be migrated to version 2 and 600s
+        assert_eq!(loaded.version, 2);
+        assert_eq!(loaded.display.usage_auto_refresh_secs, 600);
+        assert_eq!(loaded.display.quota_auto_refresh_secs, 300);
+
+        // Verify the file was written back
+        let written_content = fs::read_to_string(&manager.config_path).unwrap();
+        assert!(written_content.contains("version = 2"));
+        assert!(written_content.contains("usage_auto_refresh_secs = 600"));
     }
 }

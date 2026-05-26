@@ -43,21 +43,21 @@ Notes:
 |---|---|
 | ![Models](docs/images/models.png) | ![Daily](docs/images/daily.png) |
 
-| Activity |
-|---|
-| ![Activity](docs/images/activity.png) |
+| Activity | Settings |
+|---|---|
+| ![Activity](docs/images/activity.png) | ![Settings](docs/images/settings.png) |
 
 ## Features
 
 - ledger-backed usage history stored in local SQLite
 - per-day pricing snapshots so historical cost does not silently drift
 - quota overview (top 3 windows) plus per-provider detail tabs with pace ETA and expected-progress marker
-- **auto-refresh in quota TUI** — configurable intervals (1/2/5/10/15 min, default 5 min); cycle with `a`, shows countdown in footer
+- **auto-refresh in TUI** — configurable intervals for quota TUI (1/2/5/10/15 min, default 5 min) and usage TUI (5/10/15/30 min, default 10 min); cycle/toggle in Settings tab, shows countdown in footer
 - **`r` to refresh** in both quota and usage TUI without restarting (shown in footer for all tabs)
 - usage dashboard with `Overview`, `Models`, `Daily`, and `Activity` tabs
 - 60-day stacked bar chart switchable between token and cost views
 - solid-cell heatmap coloring for value levels
-- **Platform-inspired heatmap coloring** — cost uses a GitHub-green palette, tokens use a Kaggle-blue palette, and five intensity levels scale at 20/40/60/80% of the visible window peak
+- **Theme-invariant heatmap** — cost uses a GitHub-green palette, tokens use a Kaggle-blue palette, with soft gray backgrounds/borders that stay consistent in both dark and light modes, and five intensity levels scale at 20/40/60/80% of the visible window peak
 - mouse-selectable activity heatmap with clickable legend ranges, agent/model drill-down, and scrollable selected-day detail
 - **models table `%` column** — share of the active sort metric for the filtered set (cost when sorted by cost/date, token share when sorted by tokens)
 - **overview space reclaimed** — removed summary cards; freed rows show more models; Today/Week/Month cost shown in Daily and Activity tabs
@@ -73,16 +73,22 @@ Requirements:
 - Rust toolchain
 - local agent/session data on the same machine
 
-Build the workspace (in release mode for optimal performance):
+Install directly from crates.io:
+
+```bash
+cargo install tokenpulse
+```
+
+Or install from the local source repository:
+
+```bash
+cargo install --path tokenpulse-cli
+```
+
+Or build the workspace manually:
 
 ```bash
 cargo build --release --workspace
-```
-
-Run the CLI (use `--release` for optimal TUI rendering and quick database aggregations):
-
-```bash
-cargo run --release -p tokenpulse-cli -- --help
 ```
 
 ## Quick Start
@@ -93,41 +99,38 @@ Initialize config:
 tokenpulse init
 ```
 
-Check quota:
+Run the unified dashboard:
 
 ```bash
-tokenpulse quota
-tokenpulse quota -p claude
-tokenpulse quota --no-tui
+tokenpulse
+tokenpulse --no-tui                                    # plain text format
+tokenpulse --json                                      # JSON format
 ```
 
-Configure quota auto-refresh interval (0=disabled, 1/2/5/10/15 minutes):
+Configure auto-refresh intervals (0=disabled):
 
 ```bash
+# Quota TUI (default 5 min, supported: 0, 1, 2, 5, 10, 15)
 tokenpulse config set quota_auto_refresh_interval=5
-tokenpulse config set quota_auto_refresh_interval=0   # disable
+# Usage TUI (default 10 min, supported: 0, 5, 10, 15, 30)
+tokenpulse config set usage_auto_refresh_interval=10
 ```
 
-Or press `a` in the quota TUI to cycle through intervals live.
+Or toggle these intervals directly inside the Settings tab of the TUI.
 
-Inspect usage:
+Inspect and filter dashboard data:
 
 ```bash
-tokenpulse usage
-tokenpulse usage --tui
-tokenpulse usage --no-tui
-tokenpulse usage --json
-tokenpulse usage --since 2026-04-01
-tokenpulse usage -p claude,codex,copilot
-tokenpulse usage --refresh-days 2026-04-01:2026-04-09
-tokenpulse usage --refresh-pricing
-tokenpulse usage --rebuild-all
-tokenpulse usage --log
+tokenpulse --since 2026-04-01
+tokenpulse --refresh-days 2026-04-01:2026-04-09
+tokenpulse --refresh-pricing
+tokenpulse --rebuild-all
+tokenpulse --log
 ```
 
-If you previously ingested Gemini usage before the parser fix, the next `tokenpulse usage` run will automatically rebuild stored Gemini rows when it sees an older parser version. You can also force a one-shot refresh with `tokenpulse usage -p gemini --rebuild-all`.
+If you previously ingested Gemini usage before the parser fix, the next `tokenpulse` run will automatically rebuild stored Gemini rows when it sees an older parser version. You can also force a one-shot refresh with `tokenpulse --rebuild-all`.
 
-Antigravity keeps a TokenPulse-managed raw cache under `~/.local/share/tokenpulse/antigravity-cache/`. Normal usage runs refresh Antigravity sessions whose local CLI/Desktop conversation files changed in the last two days. CLI and Desktop copies are stored separately but roll up under one `antigravity` source and are deduplicated by `session_id + message_id`. Use `tokenpulse usage --rebuild-all` to rebuild all discoverable Antigravity raw cache files from a running Antigravity language server.
+Antigravity keeps a TokenPulse-managed raw cache under `~/.local/share/tokenpulse/antigravity-cache/`. Normal runs refresh Antigravity sessions whose local CLI/Desktop conversation files changed in the last two days. CLI and Desktop copies are stored separately but roll up under one `antigravity` source and are deduplicated by `session_id + message_id`. Use `tokenpulse --rebuild-all` to rebuild all discoverable Antigravity raw cache files from a running Antigravity language server.
 
 For file-backed agents such as Claude Code, Codex, Copilot, Gemini CLI, and PI, normal usage runs parse changed session files in parallel and replace the ledger rows for those changed sessions. OpenCode keeps its direct SQLite timestamp scan because it can read only recent database rows without reparsing whole session files.
 

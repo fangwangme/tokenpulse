@@ -28,3 +28,11 @@
 - Integrated Antigravity usage and session data parsing.
 - Corrected the cascade/conversation ID mapping in the Antigravity local sync process.
 
+### 2026-05-26
+
+- Completed unified settings panel and quota overview integration in the interactive TUI.
+- Redesigned Daily page to render the breakdown table in the full area, removing legacy summaries.
+- Consolidated range summary overview (active days and streak stats) in the Heatmap tab.
+- Set the `antigravity` agent theme color to Google Blue (dark: `Color::Rgb(96, 165, 250)`, light: `Color::Rgb(29, 78, 216)`).
+- Eliminated all unused imports and code warnings, formatted codebase, and ran test suite.
+
