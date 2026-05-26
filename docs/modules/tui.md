@@ -93,7 +93,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 
 ## Usage View Layout
 
-4 tabs switchable with ←/→:
+6 tabs switchable with ←/→:
 
 ### Tab 1: Overview
 - Top: stacked bar chart switchable between daily tokens and daily cost, last 60 days, colored by model company
@@ -122,10 +122,27 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 - Narrow terminals clip to the most recent visible weeks instead of merging multiple dates into one cell
 - Mouse-clickable cells — click any day to select it and see drill-down
 - Clickable legend cells — click an intensity level to show its current value range
-- The heatmap surface stays light in both app themes so low activity levels remain visible and intensity direction stays consistent
+- The heatmap surface is theme-invariant, using soft gray background and cell border colors in both app themes so low activity levels remain visible and intensity direction stays consistent
 - Drill-down: select any day to see token summary, agent totals, and per-agent model cost breakdown
 - Selected-day panel supports scroll when the detail list is taller than the viewport, with a dedicated bottom-row scroll hint so the final token-detail line is not overwritten
 - Streak tracking: current streak and longest streak
+
+### Tab 5: Quota
+- Live quota usage monitoring.
+- Displays rate limits (e.g. Session 5h, Weekly 7d) with progress gauges, expected progress indicators, and time to reset/limit.
+- Displays remaining balance or used credits depending on the active display mode.
+
+### Tab 6: Settings
+- Live settings configuration panel for the application.
+- Configurable settings include:
+  - `quota_display_mode` (toggle between `used` and `remaining` credit balance)
+  - `show_empty_providers` (true / false)
+  - `show_account` (true / false)
+  - `quota_auto_refresh_interval` (toggle auto-refresh interval for Quota: 0, 1, 2, 5, 10, 15 min)
+  - `usage_auto_refresh_interval` (toggle auto-refresh interval for Usage: 0, 5, 10, 15, 30 min)
+  - `theme` (cycle through auto / dark / light)
+  - Individual provider enabled/disabled switches
+- Controls: use Up/Down (`j`/`k`) to navigate settings, and Space or Enter to cycle/toggle the selected setting.
 
 ### Source Filter Overlay
 - Press `s` on any tab to open provider filter popup

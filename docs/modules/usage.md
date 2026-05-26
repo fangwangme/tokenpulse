@@ -232,12 +232,14 @@ Non-TUI output includes:
 
 ## TUI Model
 
-The usage TUI is organized into four tabs:
+The usage TUI is organized into six tabs:
 
 - `Overview` - 60-day stacked bar chart by model company + scrollable top models table
 - `Models` - Full searchable/sortable model table with company-colored model names, sort-aware share percentage, and colored numeric columns
 - `Daily` - Daily summary bar and table with sorting and 7-day token trends on wide terminals
 - `Activity` - GitHub-style calendar heatmap with range stats and selected-day drill-down
+- `Quota` - Live quota monitoring dashboard with expected-progress markers, reset times, and credits/balance tracking
+- `Settings` - Interactive settings panel to toggle refresh intervals, theme preference, and configure provider visibility
 
 ### Source Filtering
 
@@ -293,7 +295,7 @@ Activity calendar heatmap:
 - 3 window modes (past 26 weeks, past 52 weeks, past 365 days)
 - GitHub-style calendar layout; intensity uses visible-window peak scaling, not equal-count quantiles
 - `<= 0` renders as empty, and positive values use five buckets at 20/40/60/80% of the visible window max
-- Cost uses a GitHub-green palette, tokens use a Kaggle-blue palette, and the heatmap surface stays light in both app themes for consistent low-level readability
+- Cost uses a GitHub-green palette, tokens use a Kaggle-blue palette, and the heatmap surface is theme-invariant (with soft gray background and cell border colors) for consistent low-level readability across both light and dark themes
 - Narrow terminals clip to the most recent visible weeks instead of merging multiple dates into one cell
 - Clickable legend levels show the current token/cost range for that intensity bucket
 - Range overview includes Today, This Week, This Month, and all-time cost
@@ -302,7 +304,24 @@ Activity calendar heatmap:
   - Token summary (total/input/output/cache/reasoning/messages/sessions)
   - Per-agent model list with per-model cost
   - Scrollable selected-day detail panel when content exceeds the viewport, with the scroll hint rendered separately so the last model token line stays visible
-- Streak tracking
+### `Quota`
+
+Quota usage monitoring view:
+
+- Displays rate limits (e.g. Session 5h, Weekly 7d) with progress gauges, expected progress indicators, and time to reset/limit.
+- Displays remaining balance or used credits depending on the active display mode.
+
+### `Settings`
+
+Settings and configuration view:
+
+- Toggle quota display mode (`used` or `remaining` credit balance)
+- Enable/disable individual providers
+- Set and save `quota_auto_refresh_interval` (0, 1, 2, 5, 10, 15 min)
+- Set and save `usage_auto_refresh_interval` (0, 5, 10, 15, 30 min)
+- Cycle through theme preference (`auto`, `dark`, `light`)
+- Space or Enter keys cycle or toggle the active setting, and Up/Down (`j`/`k`) keys move selection.
+
 
 ## Known Limits
 

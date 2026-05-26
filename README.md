@@ -52,12 +52,12 @@ Notes:
 - ledger-backed usage history stored in local SQLite
 - per-day pricing snapshots so historical cost does not silently drift
 - quota overview (top 3 windows) plus per-provider detail tabs with pace ETA and expected-progress marker
-- **auto-refresh in quota TUI** — configurable intervals (1/2/5/10/15 min, default 5 min); cycle with `a`, shows countdown in footer
+- **auto-refresh in TUI** — configurable intervals for quota TUI (1/2/5/10/15 min, default 5 min) and usage TUI (5/10/15/30 min, default 10 min); cycle/toggle in Settings tab, shows countdown in footer
 - **`r` to refresh** in both quota and usage TUI without restarting (shown in footer for all tabs)
 - usage dashboard with `Overview`, `Models`, `Daily`, and `Activity` tabs
 - 60-day stacked bar chart switchable between token and cost views
 - solid-cell heatmap coloring for value levels
-- **Platform-inspired heatmap coloring** — cost uses a GitHub-green palette, tokens use a Kaggle-blue palette, and five intensity levels scale at 20/40/60/80% of the visible window peak
+- **Theme-invariant heatmap** — cost uses a GitHub-green palette, tokens use a Kaggle-blue palette, with soft gray backgrounds/borders that stay consistent in both dark and light modes, and five intensity levels scale at 20/40/60/80% of the visible window peak
 - mouse-selectable activity heatmap with clickable legend ranges, agent/model drill-down, and scrollable selected-day detail
 - **models table `%` column** — share of the active sort metric for the filtered set (cost when sorted by cost/date, token share when sorted by tokens)
 - **overview space reclaimed** — removed summary cards; freed rows show more models; Today/Week/Month cost shown in Daily and Activity tabs
@@ -101,14 +101,16 @@ tokenpulse quota -p claude
 tokenpulse quota --no-tui
 ```
 
-Configure quota auto-refresh interval (0=disabled, 1/2/5/10/15 minutes):
+Configure auto-refresh intervals (0=disabled):
 
 ```bash
+# Quota TUI (default 5 min, supported: 0, 1, 2, 5, 10, 15)
 tokenpulse config set quota_auto_refresh_interval=5
-tokenpulse config set quota_auto_refresh_interval=0   # disable
+# Usage TUI (default 10 min, supported: 0, 5, 10, 15, 30)
+tokenpulse config set usage_auto_refresh_interval=10
 ```
 
-Or press `a` in the quota TUI to cycle through intervals live.
+Or toggle these intervals directly inside the Settings tab of the TUI.
 
 Inspect usage:
 

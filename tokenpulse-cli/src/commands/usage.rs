@@ -370,12 +370,28 @@ pub async fn run(
             started.elapsed(),
             format!("rows={} output=tui", daily_breakdown.len()),
         );
+
+        let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
+        let mut quota_snapshots = Vec::new();
+        let now = chrono::Utc::now();
+        for info in crate::commands::quota::quota_provider_info_list() {
+            if let Ok(Some(cached)) = cache_store.load_valid(info.id, now) {
+                quota_snapshots.push(cached.snapshot);
+            }
+        }
+
         let reload_fn = build_reload_fn(provider_names, output_since, perf.path().cloned());
         perf.log(
             "tui_start",
             format!("total_elapsed_ms={}", perf.elapsed_ms()),
         );
-        let result = tui::usage::run(summary, daily_breakdown, reload_fn);
+        let result = tui::usage::run(
+            summary,
+            daily_breakdown,
+            quota_snapshots,
+            provider,
+            reload_fn,
+        );
         perf.log(
             "tui_exit",
             format!("total_elapsed_ms={}", perf.elapsed_ms()),

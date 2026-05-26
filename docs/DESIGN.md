@@ -11,7 +11,7 @@ A Rust CLI tool with two core features:
 **Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI has been deprecated and is retained for historical data analytics only.
 
 **Language:** Rust
-**Key Principle:** On-demand by default, with optional auto-refresh for quota TUI. Run command → see results → exit. Use `a` key in quota TUI to cycle live auto-refresh intervals (1/2/5/10/15 min).
+**Key Principle:** On-demand by default, with optional auto-refresh. Run command → see results → exit. Configure quota auto-refresh interval (default 5m) and usage auto-refresh interval (default 10m) in the CLI or live in the TUI Settings tab.
 
 ---
 
@@ -21,12 +21,12 @@ As of 2026-04-25:
 
 - usage parsing writes normalized messages into a local SQLite ledger
 - the dashboard reads daily aggregates from the ledger, not from raw files in the TUI layer
-- the usage TUI is organized around `Overview`, `Models`, `Daily`, and `Activity`
+- the usage TUI is organized around `Overview`, `Models`, `Daily`, `Activity`, `Quota`, and `Settings`
 - CLI usage output includes daily, weekly, and monthly summaries
 - pricing snapshots are stored per day/model so historical cost does not silently drift
 - quota view shows top 3 windows per provider in Overview tab; all windows in per-provider detail tabs
 - each quota gauge shows an expected-progress marker (`▏`) and ETA to limit
-- activity heatmap uses solid colored cells scaled to value intensity
+- activity heatmap uses solid colored cells scaled to value intensity, with a theme-invariant background/border
 
 Known gaps:
 
@@ -226,7 +226,7 @@ Each gauge includes:
   │  other          █░░░░░░░░░░░░░░░░░░░░░░░░░   3%    $2.30         │
   ╰───────────────────────────────────────────────────────────────────╯
 
-  Tab: [Overview] [Models] [Daily] [Activity]
+  Tab: [Overview] [Models] [Daily] [Activity] [Quota] [Settings]
   Press q to quit │ ←/→ switch tabs │ ↑/↓ move selected row/day
 ```
 
@@ -237,7 +237,10 @@ Current usage TUI notes:
 - `Models` shows a searchable (`/`), sortable table with a sort-aware `%` share column and per-column semantic colors (`Model`=company color, `Tokens`=green, `Cost`=gold, `Msgs`=blue)
 - `Daily` shows Today/This Week/This Month cost, period totals, and daily rows as a colored table (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`) with a 7-day token trend column on wide terminals
 - `Activity` shows range cost stats, a GitHub-style calendar heatmap with solid colored cells split at 20/40/60/80% of the visible window peak, GitHub-green cost cells, Kaggle-blue token cells, mouse-clickable cells, clickable legend ranges, and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
+- `Activity` heatmap surface is theme-invariant, using soft gray background and cell border colors in both light and dark themes
 - `Activity` selected-day panel includes total/input/output/cache/reasoning/message/session summary and supports detail scrolling when the agent/model list exceeds the viewport, with the scroll hint rendered on its own bottom row
+- `Quota` displays rate limits (e.g. Session 5h, Weekly 7d) with progress gauges, expected progress indicators, and remaining balance or used credits
+- `Settings` provides a live configuration view to toggle display modes, provider visibility, theme preferences, and adjust Quota and Usage TUI auto-refresh intervals
 - Press `s` on any tab to open a source filter overlay (toggle providers on/off)
 
 **Company vs Agent Distinction:**

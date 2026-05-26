@@ -10,8 +10,43 @@ use tokenpulse_core::config::ConfigManager;
 #[clap(about = "Token usage and quota dashboard for coding agents")]
 #[clap(version)]
 struct Cli {
+    #[clap(long)]
+    since: Option<String>,
+
+    #[clap(short, long)]
+    provider: Option<String>,
+
+    #[clap(long)]
+    refresh_days: Option<String>,
+
+    #[clap(long)]
+    refresh_pricing: bool,
+
+    #[clap(long)]
+    rebuild_all: bool,
+
+    /// Emit CSV output (daily or models). Example: --csv daily
+    #[clap(long, value_enum, conflicts_with = "json", conflicts_with = "tui")]
+    csv: Option<CsvFormat>,
+
+    /// Emit JSON output instead of text or the interactive dashboard.
+    #[clap(long, conflicts_with = "tui")]
+    json: bool,
+
+    /// Force the interactive dashboard even if auto-detection would stay in text mode.
+    #[clap(long, conflicts_with = "no_tui")]
+    tui: bool,
+
+    /// Force plain-text output instead of the interactive dashboard.
+    #[clap(long, conflicts_with = "tui")]
+    no_tui: bool,
+
+    /// Write usage startup timing to a new log file under ~/.local/share/tokenpulse/log/.
+    #[clap(long)]
+    log: bool,
+
     #[clap(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -27,57 +62,6 @@ enum Commands {
         /// Skip interactive prompts, auto-detect and enable found providers
         #[clap(long)]
         default: bool,
-    },
-    Quota {
-        #[clap(short, long)]
-        provider: Option<String>,
-
-        #[clap(long)]
-        refresh: bool,
-
-        /// Force the interactive quota dashboard even if auto-detection would stay in text mode.
-        #[clap(long, conflicts_with = "no_tui")]
-        tui: bool,
-
-        /// Force plain-text output instead of the interactive dashboard.
-        #[clap(long, conflicts_with = "tui")]
-        no_tui: bool,
-    },
-    Usage {
-        #[clap(long)]
-        since: Option<String>,
-
-        #[clap(short, long)]
-        provider: Option<String>,
-
-        #[clap(long)]
-        refresh_days: Option<String>,
-
-        #[clap(long)]
-        refresh_pricing: bool,
-
-        #[clap(long)]
-        rebuild_all: bool,
-
-        /// Emit CSV output (daily or models). Example: --csv daily
-        #[clap(long, value_enum, conflicts_with = "json", conflicts_with = "tui")]
-        csv: Option<CsvFormat>,
-
-        /// Emit JSON output instead of text or the interactive dashboard.
-        #[clap(long, conflicts_with = "tui")]
-        json: bool,
-
-        /// Force the interactive usage dashboard even if auto-detection would stay in text mode.
-        #[clap(long, conflicts_with = "no_tui")]
-        tui: bool,
-
-        /// Force plain-text output instead of the interactive dashboard.
-        #[clap(long, conflicts_with = "tui")]
-        no_tui: bool,
-
-        /// Write usage startup timing to a new log file under ~/.local/share/tokenpulse/log/.
-        #[clap(long)]
-        log: bool,
     },
     Config {
         #[clap(subcommand)]
@@ -110,54 +94,33 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { default } => {
+        Some(Commands::Init { default }) => {
             commands::init::run(default)?;
         }
-        Commands::Quota {
-            provider,
-            refresh,
-            tui,
-            no_tui,
-        } => {
-            check_config_exists();
-            commands::quota::run(provider, refresh, resolve_tui_mode("quota", tui, no_tui)?)
-                .await?;
+        Some(Commands::Config { action }) => {
+            commands::config::run(action)?;
         }
-        Commands::Usage {
-            since,
-            provider,
-            refresh_days,
-            refresh_pricing,
-            rebuild_all,
-            csv,
-            json,
-            tui,
-            no_tui,
-            log,
-        } => {
+        None => {
             check_config_exists();
             commands::usage::run(
-                since,
-                provider,
-                refresh_days,
-                refresh_pricing,
-                rebuild_all,
-                if json || csv.is_some() {
+                cli.since,
+                cli.provider,
+                cli.refresh_days,
+                cli.refresh_pricing,
+                cli.rebuild_all,
+                if cli.json || cli.csv.is_some() {
                     false
                 } else {
-                    resolve_tui_mode("usage", tui, no_tui)?
+                    resolve_tui_mode(cli.tui, cli.no_tui)?
                 },
-                json,
-                csv.map(|format| match format {
+                cli.json,
+                cli.csv.map(|format| match format {
                     CsvFormat::Daily => "daily".to_string(),
                     CsvFormat::Models => "models".to_string(),
                 }),
-                log,
+                cli.log,
             )
             .await?;
-        }
-        Commands::Config { action } => {
-            commands::config::run(action)?;
         }
     }
 
@@ -174,7 +137,7 @@ fn check_config_exists() {
     }
 }
 
-fn resolve_tui_mode(command: &str, tui: bool, no_tui: bool) -> anyhow::Result<bool> {
+fn resolve_tui_mode(tui: bool, no_tui: bool) -> anyhow::Result<bool> {
     let interactive_tui = std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
         && std::env::var("TERM")
@@ -183,8 +146,7 @@ fn resolve_tui_mode(command: &str, tui: bool, no_tui: bool) -> anyhow::Result<bo
 
     if tui && !interactive_tui {
         anyhow::bail!(
-            "--tui requires an interactive terminal; use `tokenpulse {}` in a terminal or `--no-tui` for plain-text output",
-            command
+            "--tui requires an interactive terminal; run in a terminal or use `--no-tui` for plain-text output"
         );
     }
 

@@ -37,6 +37,7 @@ struct WindowUsage {
 #[derive(Debug, Deserialize)]
 struct ExtraUsage {
     #[serde(default)]
+    #[allow(dead_code)]
     is_enabled: bool,
     #[serde(default)]
     monthly_limit: Option<f64>,
@@ -175,16 +176,10 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
             });
         }
 
-        let credits = quota.extra_usage.and_then(|e| {
-            if e.is_enabled {
-                Some(CreditInfo {
-                    used: e.used_credits.unwrap_or(0.0),
-                    limit: e.monthly_limit,
-                    currency: "USD".to_string(),
-                })
-            } else {
-                None
-            }
+        let credits = quota.extra_usage.map(|e| CreditInfo {
+            used: e.used_credits.unwrap_or(0.0),
+            limit: e.monthly_limit,
+            currency: "USD".to_string(),
         });
 
         Ok(QuotaSnapshot {
