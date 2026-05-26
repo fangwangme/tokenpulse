@@ -178,10 +178,7 @@ fn render_snapshot_card(
 
     let max_label_len = windows
         .iter()
-        .map(|w| {
-            let label_text = format!("{} {}", w.label, quota_suffix(display_mode));
-            label_text.chars().count()
-        })
+        .map(|w| w.label.chars().count())
         .max()
         .unwrap_or(10);
     let fixed_label_width = max_label_len.min(inner.width.saturating_sub(30) as usize);
@@ -336,10 +333,7 @@ fn render_window_block(
     }
 
     let shown_percent = quota_percent(display_mode, window.used_percent);
-    let label = super::truncate(
-        &format!("{} {}", window.label, quota_suffix(display_mode)),
-        area.width.saturating_sub(18) as usize,
-    );
+    let label = super::truncate(&window.label, area.width.saturating_sub(18) as usize);
     let reset_str = window
         .resets_at
         .as_ref()
@@ -437,13 +431,6 @@ fn quota_percent(display_mode: &QuotaDisplayMode, used_percent: f64) -> f64 {
     match display_mode {
         QuotaDisplayMode::Used => used_percent,
         QuotaDisplayMode::Remaining => (100.0 - used_percent).max(0.0),
-    }
-}
-
-fn quota_suffix(display_mode: &QuotaDisplayMode) -> &'static str {
-    match display_mode {
-        QuotaDisplayMode::Used => "used",
-        QuotaDisplayMode::Remaining => "left",
     }
 }
 
