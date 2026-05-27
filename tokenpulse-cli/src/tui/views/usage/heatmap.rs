@@ -4,7 +4,7 @@ use super::{
 };
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{
-    date_at_position, heatmap_scale, HeatmapMetric, HeatmapScale, YearHeatmap,
+    date_at_position, HeatmapMetric, YearHeatmap,
 };
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use ratatui::{
@@ -15,10 +15,6 @@ use ratatui::{
 };
 use std::collections::BTreeSet;
 
-const HEATMAP_LEGEND_LOW_LABEL: &str = "low";
-const HEATMAP_LEGEND_HIGH_LABEL: &str = "high";
-const HEATMAP_LEGEND_GAP: &str = "  ";
-const HEATMAP_LEGEND_CELL: &str = "██";
 const HEATMAP_LEGEND_BUCKETS: usize = 5;
 
 pub fn render_heatmap_page(
@@ -35,10 +31,7 @@ pub fn render_heatmap_page(
     let sections = heatmap_sections(area);
 
     // Heatmap grid
-    let heat_title = format!(
-        " Usage Activity - Past 365 Days / {} ",
-        state.heatmap_metric.label()
-    );
+    let heat_title = " Usage Activity - Past 365 Days ";
     let heat_block = Block::default()
         .title(Span::styled(
             heat_title,
@@ -51,7 +44,6 @@ pub fn render_heatmap_page(
 
     let palette = heatmap_palette(theme, state.heatmap_metric);
     let points = dashboard.points_in_fixed_window(state.heatmap_metric, &state.enabled_sources);
-    let scale = heatmap_scale(&points, heat_inner, bounds);
     if points.is_empty() {
         f.render_widget(
             Paragraph::new(empty_data_message(state, "No activity data"))
@@ -65,31 +57,13 @@ pub fn render_heatmap_page(
             .background(theme.heatmap_bg)
             .border(Some(theme.heatmap_border))
             .selected(selected_day.as_ref().map(|day| day.date))
+            .selected_bucket(state.selected_heatmap_legend_bucket)
             .range_opt(bounds);
         f.render_widget(heatmap, heat_inner);
     }
 
-    // Legend bar
-    let range_label = bounds
-        .map(|(s, e)| format!("{} → {}", s.format("%Y-%m-%d"), e.format("%Y-%m-%d")))
-        .unwrap_or_else(|| "no range".to_string());
-    let legend = Paragraph::new(heatmap_legend_line(
-        palette,
-        theme,
-        range_label,
-        state.heatmap_metric,
-        scale,
-        state.selected_heatmap_legend_bucket,
-    ))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border)),
-    );
-    f.render_widget(legend, sections[1]);
-
     // Bottom panels: range summary and selected day detail
-    let info = heatmap_info_sections(sections[2]);
+    let info = heatmap_info_sections(sections[1]);
 
     render_heatmap_summary_card(f, info[0], dashboard, &state.enabled_sources, theme);
     render_heatmap_day_detail(
@@ -107,7 +81,6 @@ pub fn heatmap_sections(area: Rect) -> std::rc::Rc<[Rect]> {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(12),
-            Constraint::Length(3),
             Constraint::Min(10),
         ])
         .split(area)
@@ -132,27 +105,20 @@ pub fn heatmap_grid_area(area: Rect) -> Rect {
     Block::default().borders(Borders::ALL).inner(sections[0])
 }
 
-pub fn heatmap_legend_inner_area(area: Rect) -> Rect {
+pub fn heatmap_legend_bucket_at_position(
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
     let sections = heatmap_sections(area);
-    Block::default().borders(Borders::ALL).inner(sections[1])
-}
-
-pub fn heatmap_legend_blocks_start(inner: Rect) -> u16 {
-    inner.x + 3 + 2 // width of "low" label is 3, gap is 2
-}
-
-pub fn heatmap_legend_bucket_width() -> u16 {
-    2 // width of "██" is 2
-}
-
-pub fn heatmap_legend_bucket_at_position(area: Rect, column: u16, row: u16) -> Option<usize> {
-    let inner = heatmap_legend_inner_area(area);
-    if row != inner.y {
+    let heat_inner = Block::default().borders(Borders::ALL).inner(sections[0]);
+    let footer_y = heat_inner.y + heat_inner.height.saturating_sub(1);
+    if row != footer_y {
         return None;
     }
 
-    let bucket_width = heatmap_legend_bucket_width();
-    let blocks_start = heatmap_legend_blocks_start(inner);
+    let blocks_start = heat_inner.x + 43;
+    let bucket_width = 2; // width of "██" is 2
     let blocks_width = HEATMAP_LEGEND_BUCKETS as u16 * bucket_width;
     if column < blocks_start || column >= blocks_start + blocks_width {
         return None;
@@ -163,7 +129,7 @@ pub fn heatmap_legend_bucket_at_position(area: Rect, column: u16, row: u16) -> O
 
 pub fn heatmap_day_panel_area(area: Rect) -> Rect {
     let sections = heatmap_sections(area);
-    let info = heatmap_info_sections(sections[2]);
+    let info = heatmap_info_sections(sections[1]);
     info[1]
 }
 
@@ -202,69 +168,6 @@ pub fn heatmap_date_at_position(
     let grid_area = heatmap_grid_area(body);
     let bounds = dashboard.bounds_for_fixed_window();
     date_at_position(grid_area, bounds, column, row)
-}
-
-fn heatmap_legend_line(
-    palette: [Color; 5],
-    theme: &Theme,
-    range_label: String,
-    metric: HeatmapMetric,
-    scale: Option<HeatmapScale>,
-    selected_bucket: Option<usize>,
-) -> Line<'static> {
-    let mut legend_spans = vec![Span::styled(
-        HEATMAP_LEGEND_LOW_LABEL,
-        Style::default().fg(theme.dim),
-    )];
-    legend_spans.push(Span::raw(HEATMAP_LEGEND_GAP));
-    for color in palette {
-        legend_spans.push(Span::styled(
-            HEATMAP_LEGEND_CELL,
-            Style::default().fg(color),
-        ));
-    }
-    legend_spans.push(Span::raw(HEATMAP_LEGEND_GAP));
-    legend_spans.push(Span::styled(
-        HEATMAP_LEGEND_HIGH_LABEL,
-        Style::default().fg(theme.dim),
-    ));
-    if let Some(label) = heatmap_bucket_range_label(metric, scale, selected_bucket) {
-        legend_spans.push(Span::raw(HEATMAP_LEGEND_GAP));
-        legend_spans.push(Span::styled(
-            label,
-            Style::default().fg(theme.accent).bold(),
-        ));
-    }
-    legend_spans.push(Span::raw(HEATMAP_LEGEND_GAP));
-    legend_spans.push(Span::styled(range_label, Style::default().fg(theme.fg)));
-    Line::from(legend_spans)
-}
-
-fn heatmap_bucket_range_label(
-    metric: HeatmapMetric,
-    scale: Option<HeatmapScale>,
-    selected_bucket: Option<usize>,
-) -> Option<String> {
-    let bucket = selected_bucket?;
-    let (low, high) = scale?.bucket_range(bucket)?;
-    let unit = match metric {
-        HeatmapMetric::TotalTokens => " tokens",
-        HeatmapMetric::Cost => "",
-    };
-    Some(format!(
-        "Level {}: {} - {}{}",
-        bucket + 1,
-        format_metric(metric, low),
-        format_metric(metric, high),
-        unit
-    ))
-}
-
-fn format_metric(metric: HeatmapMetric, value: f64) -> String {
-    match metric {
-        HeatmapMetric::Cost => format_cost_compact(value),
-        HeatmapMetric::TotalTokens => format_compact(value.round() as i64),
-    }
 }
 
 fn render_heatmap_summary_card(
@@ -736,4 +639,11 @@ pub fn heatmap_detail_scroll_max(
     let total_lines = heatmap_day_panel_line_count(selected_day.as_ref());
     let visible_lines = selected_day_detail_body_visible_rows(detail_area, total_lines);
     total_lines.saturating_sub(visible_lines)
+}
+
+fn format_metric(metric: HeatmapMetric, value: f64) -> String {
+    match metric {
+        HeatmapMetric::Cost => format_cost_compact(value),
+        HeatmapMetric::TotalTokens => format_compact(value.round() as i64),
+    }
 }
