@@ -39,12 +39,32 @@ pub async fn run(
     log: bool,
 ) -> Result<()> {
     let mut perf = UsagePerfLog::new(log);
+    let provider_names = parse_provider_names(None);
+    let config_manager = ConfigManager::new();
+    let config = config_manager.load().unwrap_or_default();
+
+    // Active trigger for Antigravity model aliases synchronization
+    if provider_names.contains(&"antigravity".to_string()) && config.display.scan_antigravity {
+        if let Err(e) = tokenpulse_core::usage::sync_active_antigravity_aliases() {
+            tracing::debug!("Active Antigravity alias synchronization failed: {}", e);
+        }
+    }
+
     let requested_since = since
         .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
         .transpose()?;
     let refresh_range = refresh_days.as_deref().map(parse_date_range).transpose()?;
 
-    let provider_names = parse_provider_names(None);
+    if !use_tui
+        && provider_names.contains(&"antigravity".to_string())
+        && config.display.scan_antigravity
+    {
+        if let Ok(conns) = tokenpulse_core::usage::detect_antigravity_connections() {
+            if conns.is_empty() {
+                eprintln!("Warning: No running Antigravity language servers detected. New sessions will not be synced.");
+            }
+        }
+    }
     let parsers = build_parsers(&provider_names, rebuild_all);
     let store = UsageStore::new();
     let mut stale_sources = HashSet::new();
@@ -407,7 +427,7 @@ pub async fn run(
             }
         }
 
-        let reload_fn = build_reload_fn(provider_names, output_since, perf.path().cloned());
+        let reload_fn = build_reload_fn(output_since, perf.path().cloned());
         perf.log(
             "tui_start",
             format!("total_elapsed_ms={}", perf.elapsed_ms()),
@@ -466,7 +486,6 @@ fn output_since_hint(
 }
 
 fn build_reload_fn(
-    provider_names: Vec<String>,
     output_since: Option<NaiveDate>,
     log_path: Option<PathBuf>,
 ) -> impl FnMut() -> Result<(
@@ -475,16 +494,17 @@ fn build_reload_fn(
 )> {
     move || {
         let mut perf = UsagePerfLog::from_path(log_path.clone());
+        let current_provider_names = parse_provider_names(None);
         perf.log(
             "reload_start",
             format!(
                 "providers={} output_since={:?}",
-                provider_names.join(","),
+                current_provider_names.join(","),
                 output_since
             ),
         );
         let store = UsageStore::new();
-        let parsers = build_parsers(&provider_names, false);
+        let parsers = build_parsers(&current_provider_names, false);
 
         for parser in &parsers {
             let provider_started = Instant::now();
@@ -559,7 +579,7 @@ fn build_reload_fn(
         }
 
         let started = Instant::now();
-        let repaired = store.repair_zero_costs(output_since, &provider_names)?;
+        let repaired = store.repair_zero_costs(output_since, &current_provider_names)?;
         perf.log_duration(
             "reload_repair_zero_costs",
             started.elapsed(),
@@ -568,7 +588,7 @@ fn build_reload_fn(
 
         let started = Instant::now();
         let (message_count, session_count) =
-            store.load_summary_counts(output_since, &provider_names)?;
+            store.load_summary_counts(output_since, &current_provider_names)?;
         perf.log_duration(
             "reload_load_summary_counts",
             started.elapsed(),
@@ -576,21 +596,22 @@ fn build_reload_fn(
         );
 
         let started = Instant::now();
-        let dashboard_days = store.load_dashboard_days(output_since, &provider_names)?;
+        let dashboard_days = store.load_dashboard_days(output_since, &current_provider_names)?;
         perf.log_duration(
             "reload_load_dashboard_days",
             started.elapsed(),
             format!("days={}", dashboard_days.len()),
         );
         let started = Instant::now();
-        let provider_summaries = store.load_provider_summaries(output_since, &provider_names)?;
+        let provider_summaries =
+            store.load_provider_summaries(output_since, &current_provider_names)?;
         perf.log_duration(
             "reload_load_provider_summaries",
             started.elapsed(),
             format!("providers={}", provider_summaries.len()),
         );
         let started = Instant::now();
-        let model_summaries = store.load_model_summaries(output_since, &provider_names)?;
+        let model_summaries = store.load_model_summaries(output_since, &current_provider_names)?;
         perf.log_duration(
             "reload_load_model_summaries",
             started.elapsed(),
@@ -605,7 +626,7 @@ fn build_reload_fn(
         );
 
         let started = Instant::now();
-        let daily_rows = store.load_daily_rows(output_since, &provider_names)?;
+        let daily_rows = store.load_daily_rows(output_since, &current_provider_names)?;
         perf.log_duration(
             "reload_load_daily_rows",
             started.elapsed(),
@@ -635,6 +656,9 @@ fn parse_provider_names(provider: Option<&str>) -> Vec<String> {
 }
 
 fn build_parsers(provider_names: &[String], rebuild_all: bool) -> Vec<Box<dyn SessionParser>> {
+    let config_manager = ConfigManager::new();
+    let config = config_manager.load().unwrap_or_default();
+
     provider_names
         .iter()
         .filter_map(|provider| match provider.as_str() {
@@ -644,9 +668,16 @@ fn build_parsers(provider_names: &[String], rebuild_all: bool) -> Vec<Box<dyn Se
             "opencode" => Some(Box::new(OpenCodeSessionParser::new()) as Box<dyn SessionParser>),
             "gemini" => Some(Box::new(GeminiSessionParser::new()) as Box<dyn SessionParser>),
             "pi" => Some(Box::new(PiSessionParser::new()) as Box<dyn SessionParser>),
-            "antigravity" => Some(Box::new(
-                AntigravitySessionParser::new().with_rebuild_cache(rebuild_all),
-            ) as Box<dyn SessionParser>),
+            "antigravity" => {
+                if config.display.scan_antigravity {
+                    Some(
+                        Box::new(AntigravitySessionParser::new().with_rebuild_cache(rebuild_all))
+                            as Box<dyn SessionParser>,
+                    )
+                } else {
+                    None
+                }
+            }
             _ => None,
         })
         .collect()

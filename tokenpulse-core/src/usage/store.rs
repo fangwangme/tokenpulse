@@ -769,7 +769,10 @@ impl UsageStore {
                    session_id,
                    SUM(cost_usd),
                    SUM(total_tokens),
-                   COUNT(*)
+                   COUNT(*),
+                   SUM(input_tokens),
+                   SUM(output_tokens),
+                   SUM(cache_read_tokens + cache_write_tokens)
             FROM (
                 SELECT
                     date,
@@ -779,7 +782,11 @@ impl UsageStore {
                     MAX(provider_id) AS provider_id,
                     MAX(model_id) AS model_id,
                     MAX(cost_usd) AS cost_usd,
-                    MAX(total_tokens) AS total_tokens
+                    MAX(total_tokens) AS total_tokens,
+                    MAX(input_tokens) AS input_tokens,
+                    MAX(output_tokens) AS output_tokens,
+                    MAX(cache_read_tokens) AS cache_read_tokens,
+                    MAX(cache_write_tokens) AS cache_write_tokens
                 FROM usage_messages
                 WHERE 1=1 {subquery_filters}
                 GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
@@ -798,12 +805,26 @@ impl UsageStore {
                 row.get::<_, f64>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
             ))
         })?;
 
         let mut grouped: BTreeMap<String, AggregatedModelSummary> = BTreeMap::new();
         for row in rows.flatten() {
-            let (model_id, provider_id, source, session_id, cost, tokens, message_count) = row;
+            let (
+                model_id,
+                provider_id,
+                source,
+                session_id,
+                cost,
+                tokens,
+                message_count,
+                input_tokens,
+                output_tokens,
+                cache_tokens,
+            ) = row;
             let normalized = normalize_model_name(&model_id);
             let entry = grouped.entry(normalized).or_default();
             entry.providers.insert(provider_id);
@@ -812,6 +833,9 @@ impl UsageStore {
             entry.cost += cost;
             entry.tokens += tokens;
             entry.message_count += message_count as usize;
+            entry.input_tokens += input_tokens;
+            entry.output_tokens += output_tokens;
+            entry.cache_tokens += cache_tokens;
         }
 
         let mut summaries: Vec<ModelSummary> = grouped
@@ -822,6 +846,9 @@ impl UsageStore {
                 source: summary.sources.into_iter().collect::<Vec<_>>().join(","),
                 cost: summary.cost,
                 tokens: summary.tokens,
+                input_tokens: summary.input_tokens,
+                output_tokens: summary.output_tokens,
+                cache_tokens: summary.cache_tokens,
                 message_count: summary.message_count,
                 session_count: summary.sessions.len(),
                 percent: 0.0,
@@ -836,6 +863,7 @@ impl UsageStore {
             std::fs::create_dir_all(parent)?;
         }
         let mut conn = Connection::open(&self.path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
         ensure_schema_initialized(&self.path, &mut conn)?;
         Ok(conn)
@@ -1278,6 +1306,9 @@ struct AggregatedModelSummary {
     cost: f64,
     tokens: i64,
     message_count: usize,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_tokens: i64,
 }
 
 fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()> {

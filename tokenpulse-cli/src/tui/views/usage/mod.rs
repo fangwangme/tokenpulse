@@ -292,6 +292,9 @@ pub struct AggregatedModelSummary {
     pub sources: BTreeSet<String>,
     pub cost: f64,
     pub tokens: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_tokens: i64,
     pub message_count: usize,
     pub session_count: usize,
 }
@@ -546,6 +549,9 @@ impl UsageDashboard {
                 entry.sources.insert(source.to_string());
                 entry.cost += stats.cost_usd;
                 entry.tokens += stats.tokens;
+                entry.input_tokens += stats.input_tokens;
+                entry.output_tokens += stats.output_tokens;
+                entry.cache_tokens += stats.cache_read_tokens + stats.cache_write_tokens;
                 entry.message_count += stats.messages.max(0) as usize;
                 entry.session_count += stats.sessions.max(0) as usize;
             }
@@ -564,6 +570,9 @@ impl UsageDashboard {
                 source: aggregated.sources.into_iter().collect::<Vec<_>>().join(","),
                 cost: aggregated.cost,
                 tokens: aggregated.tokens,
+                input_tokens: aggregated.input_tokens,
+                output_tokens: aggregated.output_tokens,
+                cache_tokens: aggregated.cache_tokens,
                 message_count: aggregated.message_count,
                 session_count: aggregated.session_count,
                 percent: if total_cost > 0.0 {
@@ -927,6 +936,55 @@ pub enum TuiMessage {
     QuotaReloadFailed(String),
 }
 
+fn spawn_quota_reload(
+    msg_tx: tokio::sync::mpsc::Sender<TuiMessage>,
+    enabled_providers: Vec<String>,
+) {
+    tokio::spawn(async move {
+        let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
+        let total_fetchers = fetchers.len();
+        let observed_at = chrono::Utc::now();
+        let results = tokenpulse_core::quota::fetch_all(fetchers).await;
+
+        let mut snapshots = Vec::new();
+        let mut errors = Vec::new();
+        for result in results {
+            match result {
+                Ok(snapshot) => {
+                    snapshots.push(snapshot);
+                }
+                Err(e) => {
+                    errors.push(e.to_string());
+                }
+            }
+        }
+
+        if !snapshots.is_empty() {
+            let snapshots_to_save = snapshots.clone();
+            let save_res = tokio::task::spawn_blocking(move || {
+                let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
+                for snap in &snapshots_to_save {
+                    let _ = cache_store.save(&snap.provider, observed_at, snap);
+                }
+            })
+            .await;
+            if let Err(_e) = save_res {
+                // Ignore join error
+            }
+        }
+
+        if snapshots.is_empty() && total_fetchers > 0 {
+            let _ = msg_tx
+                .send(TuiMessage::QuotaReloadFailed(errors.join(", ")))
+                .await;
+        } else {
+            let _ = msg_tx
+                .send(TuiMessage::QuotaReloadSuccess(snapshots, errors))
+                .await;
+        }
+    });
+}
+
 pub fn run<F>(
     mut summary: UsageSummary,
     daily_rows: Vec<DailyUsageRow>,
@@ -982,38 +1040,7 @@ where
             .filter(|(_, p)| p.enabled)
             .map(|(k, _)| k.clone())
             .collect();
-        let tx_quota = msg_tx.clone();
-
-        tokio::spawn(async move {
-            let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
-            let total_fetchers = fetchers.len();
-            let observed_at = chrono::Utc::now();
-            let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
-            let results = tokenpulse_core::quota::fetch_all(fetchers).await;
-
-            let mut snapshots = Vec::new();
-            let mut errors = Vec::new();
-            for result in results {
-                match result {
-                    Ok(snapshot) => {
-                        let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
-                        snapshots.push(snapshot);
-                    }
-                    Err(e) => {
-                        errors.push(e.to_string());
-                    }
-                }
-            }
-            if snapshots.is_empty() && total_fetchers > 0 {
-                let _ = tx_quota
-                    .send(TuiMessage::QuotaReloadFailed(errors.join(", ")))
-                    .await;
-            } else {
-                let _ = tx_quota
-                    .send(TuiMessage::QuotaReloadSuccess(snapshots, errors))
-                    .await;
-            }
-        });
+        spawn_quota_reload(msg_tx.clone(), enabled_providers);
     }
 
     loop {
@@ -1163,38 +1190,7 @@ where
                 .filter(|(_, p)| p.enabled)
                 .map(|(k, _)| k.clone())
                 .collect();
-            let tx = msg_tx.clone();
-
-            tokio::spawn(async move {
-                let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
-                let total_fetchers = fetchers.len();
-                let observed_at = chrono::Utc::now();
-                let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
-                let results = tokenpulse_core::quota::fetch_all(fetchers).await;
-
-                let mut snapshots = Vec::new();
-                let mut errors = Vec::new();
-                for result in results {
-                    match result {
-                        Ok(snapshot) => {
-                            let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
-                            snapshots.push(snapshot);
-                        }
-                        Err(e) => {
-                            errors.push(e.to_string());
-                        }
-                    }
-                }
-                if snapshots.is_empty() && total_fetchers > 0 {
-                    let _ = tx
-                        .send(TuiMessage::QuotaReloadFailed(errors.join(", ")))
-                        .await;
-                } else {
-                    let _ = tx
-                        .send(TuiMessage::QuotaReloadSuccess(snapshots, errors))
-                        .await;
-                }
-            });
+            spawn_quota_reload(msg_tx.clone(), enabled_providers);
         }
 
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -1309,43 +1305,7 @@ where
                             .filter(|(_, p)| p.enabled)
                             .map(|(k, _)| k.clone())
                             .collect();
-                        let tx_quota = msg_tx.clone();
-
-                        tokio::spawn(async move {
-                            let fetchers =
-                                crate::commands::quota::build_quota_fetchers(&enabled_providers);
-                            let total_fetchers = fetchers.len();
-                            let observed_at = chrono::Utc::now();
-                            let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
-                            let results = tokenpulse_core::quota::fetch_all(fetchers).await;
-
-                            let mut snapshots = Vec::new();
-                            let mut errors = Vec::new();
-                            for result in results {
-                                match result {
-                                    Ok(snapshot) => {
-                                        let _ = cache_store.save(
-                                            &snapshot.provider,
-                                            observed_at,
-                                            &snapshot,
-                                        );
-                                        snapshots.push(snapshot);
-                                    }
-                                    Err(e) => {
-                                        errors.push(e.to_string());
-                                    }
-                                }
-                            }
-                            if snapshots.is_empty() && total_fetchers > 0 {
-                                let _ = tx_quota
-                                    .send(TuiMessage::QuotaReloadFailed(errors.join(", ")))
-                                    .await;
-                            } else {
-                                let _ = tx_quota
-                                    .send(TuiMessage::QuotaReloadSuccess(snapshots, errors))
-                                    .await;
-                            }
-                        });
+                        spawn_quota_reload(msg_tx.clone(), enabled_providers);
 
                         continue;
                     }
@@ -1842,6 +1802,22 @@ fn render_tabs(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: &T
     }
 }
 
+fn key_help(key: &'static str, desc: impl Into<String>, theme: &Theme) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(
+            format!(" {key} "),
+            Style::default()
+                .bg(theme.accent_soft)
+                .fg(theme.on_accent)
+                .bold(),
+        ),
+        Span::styled(
+            format!(" {}  ", desc.into()),
+            Style::default().fg(theme.dim),
+        ),
+    ]
+}
+
 fn render_footer(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -1849,70 +1825,172 @@ fn render_footer(
     theme: &Theme,
     config: &Config,
 ) {
-    let filter_hint = if state.enabled_sources.len() < state.all_sources.len() {
-        format!(
-            " | s filter ({}/{})",
-            state.enabled_sources.len(),
-            state.all_sources.len()
-        )
-    } else {
-        " | s filter".to_string()
-    };
-    let help = if state.is_refreshing() {
-        " [LOCKED] Refreshing in progress... Please wait. Actions disabled. ".to_string()
+    let help_line = if state.is_refreshing() {
+        Line::from(vec![Span::styled(
+            " [LOCKED] Refreshing in progress... Please wait. Actions disabled. ",
+            Style::default().fg(Color::Rgb(248, 113, 113)).bold(),
+        )])
     } else {
         match state.page {
-            UsagePage::Overview => format!(
-                " q quit | r refresh | ←→ tab | ↑↓ select | t/c metric ({}) | ? help{}",
-                match state.overview_metric {
-                    OverviewMetric::Tokens => "tokens",
-                    OverviewMetric::Cost => "cost",
-                },
-                filter_hint
-            ),
+            UsagePage::Overview => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("↑↓", "select", theme));
+                spans.extend(key_help(
+                    "t/c",
+                    format!(
+                        "metric ({})",
+                        match state.overview_metric {
+                            OverviewMetric::Tokens => "tokens",
+                            OverviewMetric::Cost => "cost",
+                        }
+                    ),
+                    theme,
+                ));
+                spans.extend(key_help(
+                    "s",
+                    if state.enabled_sources.len() < state.all_sources.len() {
+                        format!(
+                            "filter ({}/{})",
+                            state.enabled_sources.len(),
+                            state.all_sources.len()
+                        )
+                    } else {
+                        "filter".to_string()
+                    },
+                    theme,
+                ));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
+            }
             UsagePage::Models => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("↑↓", "select", theme));
+
+                let filter_desc = if state.model_filter.is_empty() {
+                    "filter".to_string()
+                } else {
+                    format!("filter ({})", state.model_filter)
+                };
+                spans.extend(key_help("/", filter_desc, theme));
+
                 let dir = if state.sort_ascending { "↑" } else { "↓" };
                 let field = match state.sort_field {
                     SortField::Cost => "cost",
                     SortField::Tokens => "tokens",
                     SortField::Date => "date",
                 };
-                let filter = if state.model_filter.is_empty() {
-                    String::new()
-                } else {
-                    format!(" | / filter ({})", state.model_filter)
-                };
-                format!(
-                    " q quit | r refresh | ←→ tab | ↑↓ select | / filter | ctrl+l clear | c/t/d sort ({} {}) | ? help{}{}",
-                    field, dir, filter, filter_hint
-                )
+                spans.extend(key_help("c/t/d", format!("sort ({field} {dir})"), theme));
+
+                spans.extend(key_help(
+                    "s",
+                    if state.enabled_sources.len() < state.all_sources.len() {
+                        format!(
+                            "filter ({}/{})",
+                            state.enabled_sources.len(),
+                            state.all_sources.len()
+                        )
+                    } else {
+                        "filter".to_string()
+                    },
+                    theme,
+                ));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
             }
             UsagePage::Daily => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("↑↓", "select", theme));
+                spans.extend(key_help("T", "today", theme));
+
                 let dir = if state.sort_ascending { "↑" } else { "↓" };
                 let field = match state.sort_field {
                     SortField::Cost => "cost",
                     SortField::Tokens => "tokens",
                     SortField::Date => "date",
                 };
-                format!(
-                    " q quit | r refresh | ←→ tab | ↑↓ select | T today | c/t/d sort ({} {}) | vs7d {} | ? help{}",
-                    field,
-                    dir,
-                    state.daily_metric.short_label(),
-                    filter_hint
-                )
+                spans.extend(key_help("c/t/d", format!("sort ({field} {dir})"), theme));
+
+                spans.extend(key_help(
+                    "v",
+                    format!("metric ({})", state.daily_metric.short_label()),
+                    theme,
+                ));
+
+                spans.extend(key_help(
+                    "s",
+                    if state.enabled_sources.len() < state.all_sources.len() {
+                        format!(
+                            "filter ({}/{})",
+                            state.enabled_sources.len(),
+                            state.all_sources.len()
+                        )
+                    } else {
+                        "filter".to_string()
+                    },
+                    theme,
+                ));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
             }
-            UsagePage::Heatmap => format!(
-                " q quit | r refresh | ←→ tab | T today | pgup/pgdn detail | t/c metric ({}) | ? help{}",
-                state.heatmap_metric.short_label(),
-                filter_hint
-            ),
-            UsagePage::Quota => format!(
-                " q quit | r refresh | ←→ tab | ? help"
-            ),
-            UsagePage::Settings => format!(
-                " q quit | r refresh | ←→ tab | ? help"
-            ),
+            UsagePage::Heatmap => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("T", "today", theme));
+                spans.extend(key_help("pgup/pgdn", "detail", theme));
+                spans.extend(key_help(
+                    "t/c",
+                    format!("metric ({})", state.heatmap_metric.short_label()),
+                    theme,
+                ));
+                spans.extend(key_help(
+                    "s",
+                    if state.enabled_sources.len() < state.all_sources.len() {
+                        format!(
+                            "filter ({}/{})",
+                            state.enabled_sources.len(),
+                            state.all_sources.len()
+                        )
+                    } else {
+                        "filter".to_string()
+                    },
+                    theme,
+                ));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
+            }
+            UsagePage::Quota => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
+            }
+            UsagePage::Settings => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
+            }
         }
     };
 
@@ -2003,10 +2081,7 @@ fn render_footer(
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(footer_inner);
 
-    f.render_widget(
-        Paragraph::new(help).style(Style::default().fg(theme.dim)),
-        footer_layout[0],
-    );
+    f.render_widget(Paragraph::new(help_line), footer_layout[0]);
 
     f.render_widget(
         Paragraph::new(info_line).style(Style::default().fg(theme.dim)),

@@ -103,7 +103,7 @@ fn render_overview(
                     snapshot,
                     display_mode,
                     theme,
-                    true,
+                    false,
                     true,
                     show_account,
                 );
@@ -133,8 +133,6 @@ fn render_snapshot_card(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let compact = compact || inner.height < 8;
-
     let has_account_display = snapshot.account.is_some() && show_account;
     let has_plan_display = snapshot.plan.is_some() && show_account;
     let show_account_row = has_account_display || has_plan_display;
@@ -151,12 +149,14 @@ fn render_snapshot_card(
         snapshot.windows.iter().collect()
     };
 
+    let compact = compact
+        || inner.height < (base_windows.len() * 2 + if show_account_row { 1 } else { 0 }) as u16;
+
     let reserved_lines =
         if show_account_row { 1 } else { 0 } + if snapshot.credits.is_some() { 1 } else { 0 };
     let available_for_windows = inner.height.saturating_sub(reserved_lines as u16);
     let lines_per_window = if compact { 1 } else { 2 };
-    let divisor = lines_per_window + 1;
-    let max_allowed_windows = (((available_for_windows as usize) + 1) / divisor).max(1);
+    let max_allowed_windows = (available_for_windows as usize / lines_per_window).max(1);
 
     let windows = if max_allowed_windows < base_windows.len() {
         base_windows
@@ -178,10 +178,7 @@ fn render_snapshot_card(
     if show_account_row {
         constraints.push(Constraint::Length(1));
     }
-    for (i, _) in windows.iter().enumerate() {
-        if i > 0 {
-            constraints.push(Constraint::Length(1)); // Spacer line
-        }
+    for _ in &windows {
         constraints.push(Constraint::Length(if compact { 1 } else { 2 }));
     }
     if snapshot.credits.is_some() {
@@ -230,10 +227,7 @@ fn render_snapshot_card(
         }
     }
 
-    for (i, window) in windows.iter().enumerate() {
-        if i > 0 {
-            cursor += 1; // skip spacer constraint
-        }
+    for window in &windows {
         if cursor < sections.len() {
             let gauge_area = sections[cursor];
             cursor += 1;

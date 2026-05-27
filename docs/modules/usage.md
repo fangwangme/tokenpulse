@@ -318,6 +318,7 @@ Settings and configuration view:
 - Set and save `quota_auto_refresh_interval` (0, 1, 2, 5, 10, 15 min)
 - Set and save `usage_auto_refresh_interval` (0, 5, 10, 15, 30 min)
 - Cycle through theme preference (`auto`, `dark`, `light`)
+- Toggle active Antigravity session scanning and alias synchronization (`scan_antigravity`: true / false)
 - Space or Enter keys cycle or toggle the active setting, and Up/Down (`j`/`k`) keys move selection.
 
 

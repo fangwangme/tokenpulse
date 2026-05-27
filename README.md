@@ -89,7 +89,7 @@ cargo install tokenpulse
 Or build from source:
 
 ```bash
-git clone https://github.com/YOUR_USER/tokenpulse
+git clone https://github.com/fangwangme/tokenpulse
 cd tokenpulse
 cargo install --path tokenpulse-cli
 ```
