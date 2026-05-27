@@ -1802,6 +1802,22 @@ fn render_tabs(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: &T
     }
 }
 
+fn key_help(key: &'static str, desc: impl Into<String>, theme: &Theme) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(
+            format!(" {key} "),
+            Style::default()
+                .bg(theme.accent_soft)
+                .fg(theme.on_accent)
+                .bold(),
+        ),
+        Span::styled(
+            format!(" {}  ", desc.into()),
+            Style::default().fg(theme.dim),
+        ),
+    ]
+}
+
 fn render_footer(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -1809,70 +1825,172 @@ fn render_footer(
     theme: &Theme,
     config: &Config,
 ) {
-    let filter_hint = if state.enabled_sources.len() < state.all_sources.len() {
-        format!(
-            " | s filter ({}/{})",
-            state.enabled_sources.len(),
-            state.all_sources.len()
-        )
-    } else {
-        " | s filter".to_string()
-    };
-    let help = if state.is_refreshing() {
-        " [LOCKED] Refreshing in progress... Please wait. Actions disabled. ".to_string()
+    let help_line = if state.is_refreshing() {
+        Line::from(vec![Span::styled(
+            " [LOCKED] Refreshing in progress... Please wait. Actions disabled. ",
+            Style::default().fg(Color::Rgb(248, 113, 113)).bold(),
+        )])
     } else {
         match state.page {
-            UsagePage::Overview => format!(
-                " q quit | r refresh | ←→ tab | ↑↓ select | t/c metric ({}) | ? help{}",
-                match state.overview_metric {
-                    OverviewMetric::Tokens => "tokens",
-                    OverviewMetric::Cost => "cost",
-                },
-                filter_hint
-            ),
+            UsagePage::Overview => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("↑↓", "select", theme));
+                spans.extend(key_help(
+                    "t/c",
+                    format!(
+                        "metric ({})",
+                        match state.overview_metric {
+                            OverviewMetric::Tokens => "tokens",
+                            OverviewMetric::Cost => "cost",
+                        }
+                    ),
+                    theme,
+                ));
+                spans.extend(key_help(
+                    "s",
+                    if state.enabled_sources.len() < state.all_sources.len() {
+                        format!(
+                            "filter ({}/{})",
+                            state.enabled_sources.len(),
+                            state.all_sources.len()
+                        )
+                    } else {
+                        "filter".to_string()
+                    },
+                    theme,
+                ));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
+            }
             UsagePage::Models => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("↑↓", "select", theme));
+
+                let filter_desc = if state.model_filter.is_empty() {
+                    "filter".to_string()
+                } else {
+                    format!("filter ({})", state.model_filter)
+                };
+                spans.extend(key_help("/", filter_desc, theme));
+
                 let dir = if state.sort_ascending { "↑" } else { "↓" };
                 let field = match state.sort_field {
                     SortField::Cost => "cost",
                     SortField::Tokens => "tokens",
                     SortField::Date => "date",
                 };
-                let filter = if state.model_filter.is_empty() {
-                    String::new()
-                } else {
-                    format!(" | / filter ({})", state.model_filter)
-                };
-                format!(
-                    " q quit | r refresh | ←→ tab | ↑↓ select | / filter | ctrl+l clear | c/t/d sort ({} {}) | ? help{}{}",
-                    field, dir, filter, filter_hint
-                )
+                spans.extend(key_help("c/t/d", format!("sort ({field} {dir})"), theme));
+
+                spans.extend(key_help(
+                    "s",
+                    if state.enabled_sources.len() < state.all_sources.len() {
+                        format!(
+                            "filter ({}/{})",
+                            state.enabled_sources.len(),
+                            state.all_sources.len()
+                        )
+                    } else {
+                        "filter".to_string()
+                    },
+                    theme,
+                ));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
             }
             UsagePage::Daily => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("↑↓", "select", theme));
+                spans.extend(key_help("T", "today", theme));
+
                 let dir = if state.sort_ascending { "↑" } else { "↓" };
                 let field = match state.sort_field {
                     SortField::Cost => "cost",
                     SortField::Tokens => "tokens",
                     SortField::Date => "date",
                 };
-                format!(
-                    " q quit | r refresh | ←→ tab | ↑↓ select | T today | c/t/d sort ({} {}) | vs7d {} | ? help{}",
-                    field,
-                    dir,
-                    state.daily_metric.short_label(),
-                    filter_hint
-                )
+                spans.extend(key_help("c/t/d", format!("sort ({field} {dir})"), theme));
+
+                spans.extend(key_help(
+                    "v",
+                    format!("metric ({})", state.daily_metric.short_label()),
+                    theme,
+                ));
+
+                spans.extend(key_help(
+                    "s",
+                    if state.enabled_sources.len() < state.all_sources.len() {
+                        format!(
+                            "filter ({}/{})",
+                            state.enabled_sources.len(),
+                            state.all_sources.len()
+                        )
+                    } else {
+                        "filter".to_string()
+                    },
+                    theme,
+                ));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
             }
-            UsagePage::Heatmap => format!(
-                " q quit | r refresh | ←→ tab | T today | pgup/pgdn detail | t/c metric ({}) | ? help{}",
-                state.heatmap_metric.short_label(),
-                filter_hint
-            ),
-            UsagePage::Quota => format!(
-                " q quit | r refresh | ←→ tab | ? help"
-            ),
-            UsagePage::Settings => format!(
-                " q quit | r refresh | ←→ tab | ? help"
-            ),
+            UsagePage::Heatmap => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("T", "today", theme));
+                spans.extend(key_help("pgup/pgdn", "detail", theme));
+                spans.extend(key_help(
+                    "t/c",
+                    format!("metric ({})", state.heatmap_metric.short_label()),
+                    theme,
+                ));
+                spans.extend(key_help(
+                    "s",
+                    if state.enabled_sources.len() < state.all_sources.len() {
+                        format!(
+                            "filter ({}/{})",
+                            state.enabled_sources.len(),
+                            state.all_sources.len()
+                        )
+                    } else {
+                        "filter".to_string()
+                    },
+                    theme,
+                ));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
+            }
+            UsagePage::Quota => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
+            }
+            UsagePage::Settings => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("r", "refresh", theme));
+                spans.extend(key_help("←→", "tab", theme));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
+            }
         }
     };
 
@@ -1963,10 +2081,7 @@ fn render_footer(
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(footer_inner);
 
-    f.render_widget(
-        Paragraph::new(help).style(Style::default().fg(theme.dim)),
-        footer_layout[0],
-    );
+    f.render_widget(Paragraph::new(help_line), footer_layout[0]);
 
     f.render_widget(
         Paragraph::new(info_line).style(Style::default().fg(theme.dim)),
