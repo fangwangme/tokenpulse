@@ -44,6 +44,8 @@ pub struct DisplayConfig {
     pub usage_auto_refresh_secs: u32,
     #[serde(default = "default_true")]
     pub show_account: bool,
+    #[serde(default = "default_true")]
+    pub scan_antigravity: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,6 +136,7 @@ impl Default for DisplayConfig {
             quota_auto_refresh_secs: default_quota_auto_refresh_secs(),
             usage_auto_refresh_secs: default_usage_auto_refresh_secs(),
             show_account: true,
+            scan_antigravity: true,
         }
     }
 }
@@ -156,6 +159,11 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     pub fn new() -> Self {
+        if let Some(path_str) = std::env::var_os("TOKENPULSE_CONFIG_PATH") {
+            return Self {
+                config_path: PathBuf::from(path_str),
+            };
+        }
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let config_dir = home.join(".local").join("share").join("tokenpulse");
 

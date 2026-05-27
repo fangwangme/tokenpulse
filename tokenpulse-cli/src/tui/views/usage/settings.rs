@@ -85,6 +85,11 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
             label: theme_label,
             value_color: theme.antigravity,
         },
+        SettingItem {
+            key: "scan_antigravity",
+            label: config.display.scan_antigravity.to_string(),
+            value_color: theme.antigravity,
+        },
     ];
 
     // Add provider checkboxes!
@@ -145,7 +150,7 @@ fn next_usage_interval(curr: u32) -> u32 {
 
 pub fn settings_row_count(_state: &UsageState) -> usize {
     let providers_count = ALL_PROVIDERS.len();
-    6 + providers_count
+    7 + providers_count
 }
 
 pub fn handle_settings_action(
@@ -174,8 +179,10 @@ pub fn handle_settings_action(
     } else if idx == 5 {
         config.display.theme = config.display.theme.next();
         *theme = Theme::from_preference(config.display.theme);
+    } else if idx == 6 {
+        config.display.scan_antigravity = !config.display.scan_antigravity;
     } else {
-        let provider_idx = idx - 6;
+        let provider_idx = idx - 7;
         let providers = ALL_PROVIDERS.to_vec();
 
         if provider_idx < providers.len() {

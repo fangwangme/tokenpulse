@@ -1,3 +1,4 @@
+use crate::tui::views::usage::{format_compact, format_cost_compact};
 use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use ratatui::{
     buffer::Buffer,
@@ -6,7 +7,6 @@ use ratatui::{
     widgets::{Block, Borders, Widget},
 };
 use std::collections::BTreeMap;
-use crate::tui::views::usage::{format_compact, format_cost_compact};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeatmapMetric {
@@ -524,38 +524,43 @@ impl<'a> Widget for YearHeatmap<'a> {
         let visible_start = (start + Duration::days((first_week_idx * 7) as i64)).max(window_start);
         let visible_end =
             (start + Duration::days(((first_week_idx + display_cols) * 7 - 1) as i64)).min(end);
-        
+
         let footer_y = area.y + area.height.saturating_sub(1);
         if footer_y > area.y + 7 {
             let mut x = area.x;
-            
+
             // 1. Metric + Date Range
             let date_range_text = format!(
                 "Date Range  {} → {}    ",
                 visible_start.format("%Y-%m-%d"),
                 visible_end.format("%Y-%m-%d")
             );
-            buf.set_string(x, footer_y, &date_range_text, Style::default().fg(Color::DarkGray));
+            buf.set_string(
+                x,
+                footer_y,
+                &date_range_text,
+                Style::default().fg(Color::DarkGray),
+            );
             x += date_range_text.chars().count() as u16;
-            
+
             // 2. Legend Label "low"
             buf.set_string(x, footer_y, "low", Style::default().fg(Color::DarkGray));
             x += 3;
             buf.set_string(x, footer_y, " ", Style::default());
             x += 1;
-            
+
             // 3. Colors
             for color in self.palette {
                 buf.set_string(x, footer_y, "██", Style::default().fg(color));
                 x += 2;
             }
-            
+
             // 4. Legend Label "high"
             buf.set_string(x, footer_y, " ", Style::default());
             x += 1;
             buf.set_string(x, footer_y, "high", Style::default().fg(Color::DarkGray));
             x += 4;
-            
+
             // 5. If a bucket is selected and we can compute bucket range description:
             if let Some(bucket) = self.selected_bucket {
                 if let Some((low, high)) = scale.bucket_range(bucket) {

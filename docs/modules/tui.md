@@ -141,6 +141,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
   - `quota_auto_refresh_interval` (toggle auto-refresh interval for Quota: 0, 1, 2, 5, 10, 15 min)
   - `usage_auto_refresh_interval` (toggle auto-refresh interval for Usage: 0, 5, 10, 15, 30 min)
   - `theme` (cycle through auto / dark / light)
+  - `scan_antigravity` (toggle active Antigravity session scanning and alias synchronization: true / false)
   - Individual provider enabled/disabled switches
 - Controls: use Up/Down (`j`/`k`) to navigate settings, and Space or Enter to cycle/toggle the selected setting.
 

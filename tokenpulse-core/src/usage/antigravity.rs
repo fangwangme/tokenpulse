@@ -1214,20 +1214,26 @@ fn load_model_alias_history_map(sessions_dir: &Path) -> Result<HashMap<String, M
 
     let content = std::fs::read_to_string(&path)?;
     let history: ModelAliasHistory = serde_json::from_str(&content)?;
-    aliases.extend(history.aliases.into_iter().filter(|(key, entry)| {
-        key.to_ascii_lowercase().starts_with("model")
-            && entry.raw_model_id.to_ascii_lowercase().starts_with("model")
-    }).map(|(key, entry)| {
-        (
-            key,
-            ModelAlias {
-                raw_model_id: entry.raw_model_id,
-                model_id: entry.model_id,
-                label: entry.label,
-                source: entry.source,
-            },
-        )
-    }));
+    aliases.extend(
+        history
+            .aliases
+            .into_iter()
+            .filter(|(key, entry)| {
+                key.to_ascii_lowercase().starts_with("model")
+                    && entry.raw_model_id.to_ascii_lowercase().starts_with("model")
+            })
+            .map(|(key, entry)| {
+                (
+                    key,
+                    ModelAlias {
+                        raw_model_id: entry.raw_model_id,
+                        model_id: entry.model_id,
+                        label: entry.label,
+                        source: entry.source,
+                    },
+                )
+            }),
+    );
     Ok(aliases)
 }
 
@@ -1242,10 +1248,12 @@ fn merge_and_save_model_alias_history(
 
     let mut history = if path.exists() {
         let content = std::fs::read_to_string(&path)?;
-        let mut loaded = serde_json::from_str::<ModelAliasHistory>(&content).unwrap_or_else(|_| ModelAliasHistory {
-            version: MODEL_ALIAS_HISTORY_VERSION,
-            updated_at: now.clone(),
-            aliases: BTreeMap::new(),
+        let mut loaded = serde_json::from_str::<ModelAliasHistory>(&content).unwrap_or_else(|_| {
+            ModelAliasHistory {
+                version: MODEL_ALIAS_HISTORY_VERSION,
+                updated_at: now.clone(),
+                aliases: BTreeMap::new(),
+            }
         });
         loaded.aliases.retain(|key, entry| {
             key.to_ascii_lowercase().starts_with("model")
@@ -1371,11 +1379,12 @@ fn normalize_cached_antigravity_artifacts(
         let key_lower = alias_key.to_lowercase();
         let raw_lower = alias.raw_model_id.to_lowercase();
         if db_models.contains(&key_lower) || db_models.contains(&raw_lower) {
-            let target_model_id = if let Some(normalized) = format_normalization_fallback(&alias.model_id) {
-                normalized
-            } else {
-                alias.model_id.clone()
-            };
+            let target_model_id =
+                if let Some(normalized) = format_normalization_fallback(&alias.model_id) {
+                    normalized
+                } else {
+                    alias.model_id.clone()
+                };
             tx.execute(
                 "UPDATE sessions SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
                 rusqlite::params![&target_model_id, &alias.raw_model_id, alias_key],
@@ -1474,7 +1483,9 @@ fn format_normalization_fallback(model_id: &str) -> Option<String> {
 
     // 2. Replace dots, underscores, and spaces with hyphens
     let mut chars_replaced = false;
-    if !flash_a_normalized && (normalized.contains('.') || normalized.contains('_') || normalized.contains(' ')) {
+    if !flash_a_normalized
+        && (normalized.contains('.') || normalized.contains('_') || normalized.contains(' '))
+    {
         normalized = normalized.replace(['.', '_', ' '], "-");
         chars_replaced = true;
     }
@@ -1500,10 +1511,11 @@ fn format_normalization_fallback(model_id: &str) -> Option<String> {
 
     // 4. Uniformly strip thinking/performance level tokens (high, low, medium, thinking)
     let mut tier_stripped = false;
-    if !flash_a_normalized && (normalized.contains("-high")
-        || normalized.contains("-low")
-        || normalized.contains("-medium")
-        || normalized.contains("-thinking"))
+    if !flash_a_normalized
+        && (normalized.contains("-high")
+            || normalized.contains("-low")
+            || normalized.contains("-medium")
+            || normalized.contains("-thinking"))
     {
         let tokens: Vec<&str> = normalized.split('-').collect();
         let filtered: Vec<&str> = tokens
@@ -1565,7 +1577,12 @@ fn format_normalization_fallback(model_id: &str) -> Option<String> {
         }
     }
 
-    if prefix_stripped || chars_replaced || tier_stripped || version_formatted || preview_processed || flash_a_normalized
+    if prefix_stripped
+        || chars_replaced
+        || tier_stripped
+        || version_formatted
+        || preview_processed
+        || flash_a_normalized
     {
         Some(normalized)
     } else {

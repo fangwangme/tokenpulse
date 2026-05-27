@@ -3,9 +3,7 @@ use super::{
     DailyStats, UsageDashboard, UsageState,
 };
 use crate::tui::theme::Theme;
-use crate::tui::widgets::{
-    date_at_position, HeatmapMetric, YearHeatmap,
-};
+use crate::tui::widgets::{date_at_position, HeatmapMetric, YearHeatmap};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -16,6 +14,7 @@ use ratatui::{
 use std::collections::BTreeSet;
 
 const HEATMAP_LEGEND_BUCKETS: usize = 5;
+const LEGEND_COLOR_BLOCKS_OFFSET: u16 = 43;
 
 pub fn render_heatmap_page(
     f: &mut ratatui::Frame,
@@ -79,10 +78,7 @@ pub fn render_heatmap_page(
 pub fn heatmap_sections(area: Rect) -> std::rc::Rc<[Rect]> {
     Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(12),
-            Constraint::Min(10),
-        ])
+        .constraints([Constraint::Length(12), Constraint::Min(10)])
         .split(area)
 }
 
@@ -105,11 +101,7 @@ pub fn heatmap_grid_area(area: Rect) -> Rect {
     Block::default().borders(Borders::ALL).inner(sections[0])
 }
 
-pub fn heatmap_legend_bucket_at_position(
-    area: Rect,
-    column: u16,
-    row: u16,
-) -> Option<usize> {
+pub fn heatmap_legend_bucket_at_position(area: Rect, column: u16, row: u16) -> Option<usize> {
     let sections = heatmap_sections(area);
     let heat_inner = Block::default().borders(Borders::ALL).inner(sections[0]);
     let footer_y = heat_inner.y + heat_inner.height.saturating_sub(1);
@@ -117,7 +109,7 @@ pub fn heatmap_legend_bucket_at_position(
         return None;
     }
 
-    let blocks_start = heat_inner.x + 43;
+    let blocks_start = heat_inner.x + LEGEND_COLOR_BLOCKS_OFFSET;
     let bucket_width = 2; // width of "██" is 2
     let blocks_width = HEATMAP_LEGEND_BUCKETS as u16 * bucket_width;
     if column < blocks_start || column >= blocks_start + blocks_width {
