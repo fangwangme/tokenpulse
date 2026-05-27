@@ -39,12 +39,25 @@ pub async fn run(
     log: bool,
 ) -> Result<()> {
     let mut perf = UsagePerfLog::new(log);
+
+    // Active trigger for Antigravity model aliases synchronization
+    if let Err(e) = tokenpulse_core::usage::sync_active_antigravity_aliases() {
+        tracing::debug!("Active Antigravity alias synchronization failed: {}", e);
+    }
+
     let requested_since = since
         .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
         .transpose()?;
     let refresh_range = refresh_days.as_deref().map(parse_date_range).transpose()?;
 
     let provider_names = parse_provider_names(None);
+    if !use_tui && provider_names.contains(&"antigravity".to_string()) {
+        if let Ok(conns) = tokenpulse_core::usage::detect_antigravity_connections() {
+            if conns.is_empty() {
+                eprintln!("Warning: No running Antigravity language servers detected. New sessions will not be synced.");
+            }
+        }
+    }
     let parsers = build_parsers(&provider_names, rebuild_all);
     let store = UsageStore::new();
     let mut stale_sources = HashSet::new();

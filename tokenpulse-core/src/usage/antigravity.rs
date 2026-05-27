@@ -73,7 +73,7 @@ impl SessionParser for AntigravitySessionParser {
         }
     }
 
-    fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
+    fn parse_sessions(&self, _since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
         let mut all_messages = Vec::new();
 
         for root in self.session_paths() {
@@ -102,20 +102,11 @@ impl SessionParser for AntigravitySessionParser {
 
             // Now read from SQLite
             let conn = open_cache_db(&root)?;
-            let query = if since.is_some() {
-                "SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
-                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                        pricing_day, parser_version
-                 FROM session_usage
-                 WHERE pricing_day >= ?1
-                 ORDER BY timestamp ASC"
-            } else {
-                "SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
-                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                        pricing_day, parser_version
-                 FROM session_usage
-                 ORDER BY timestamp ASC"
-            };
+            let query = "SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
+                                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                                pricing_day, parser_version
+                         FROM session_usage
+                         ORDER BY timestamp ASC";
             let mut stmt = conn.prepare(query)?;
 
             let map_row = |row: &rusqlite::Row<'_>| {
@@ -136,12 +127,7 @@ impl SessionParser for AntigravitySessionParser {
                 ))
             };
 
-            let rows = if let Some(since_date) = since {
-                let date_str = since_date.to_string();
-                stmt.query_map(rusqlite::params![date_str], map_row)?
-            } else {
-                stmt.query_map([], map_row)?
-            };
+            let rows = stmt.query_map([], map_row)?;
 
             for row in rows {
                 let (
@@ -346,6 +332,21 @@ pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
     sync_antigravity_with_options(sessions_dir, AntigravitySyncOptions::default())
 }
 
+pub fn sync_active_antigravity_aliases() -> Result<()> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cache_dir = home
+        .join(".local")
+        .join("share")
+        .join("tokenpulse")
+        .join("antigravity-cache");
+    let connections = detect_antigravity_connections()?;
+    if !connections.is_empty() {
+        let dynamic_model_aliases = fetch_dynamic_model_aliases(&connections);
+        merge_and_save_model_alias_history(&cache_dir, &dynamic_model_aliases)?;
+    }
+    Ok(())
+}
+
 fn sync_antigravity_with_options(
     sessions_dir: &Path,
     options: AntigravitySyncOptions,
@@ -370,7 +371,7 @@ fn sync_antigravity_with_options(
                 debug!("Failed to seed Antigravity model alias history: {}", e);
             }
         }
-        debug!("No running Antigravity language servers detected; skipping sync and reading cache");
+        warn!("No running Antigravity language servers detected; skipping sync and reading cache");
         return Ok(());
     }
 
@@ -983,316 +984,101 @@ struct StaticModelAlias {
 
 const STATIC_MODEL_ALIASES: &[StaticModelAlias] = &[
     StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M37",
+        model_id: "gemini-3.1-pro-preview",
+        label: Some("Gemini 3.1 Pro (High)"),
+        source: "user-initial-mapping;tokscale",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M36",
+        model_id: "gemini-3.1-pro-preview",
+        label: Some("Gemini 3.1 Pro (Low)"),
+        source: "user-initial-mapping;tokscale",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M18",
+        model_id: "gemini-3-flash-preview",
+        label: Some("Gemini 3 Flash"),
+        source: "user-initial-mapping",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M8",
+        model_id: "gemini-3-pro-preview",
+        label: Some("Gemini 3 Pro (High)"),
+        source: "user-initial-mapping",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M7",
+        model_id: "gemini-3-pro-preview",
+        label: Some("Gemini 3 Pro (Low)"),
+        source: "user-initial-mapping",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M9",
+        model_id: "gemini-3-pro-preview-image",
+        label: Some("Gemini 3 Pro (Image)"),
+        source: "user-initial-mapping",
+    },
+    StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M26",
         model_id: "claude-opus-4-6-thinking",
         label: Some("Claude Opus 4.6 (Thinking)"),
-        source: "captured-antigravity-get-user-status;tokscale",
+        source: "user-initial-mapping;openusage",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M35",
         model_id: "claude-sonnet-4-6-thinking",
         label: Some("Claude Sonnet 4.6 (Thinking)"),
-        source: "captured-antigravity-get-user-status;tokscale",
+        source: "user-initial-mapping;antigravity-mobility-cli",
     },
     StaticModelAlias {
-        raw_model_id: "MODEL_PLACEHOLDER_M36",
-        model_id: "gemini-3.1-pro-preview-low",
-        label: Some("Gemini 3.1 Pro Preview (Low)"),
-        source: "captured-antigravity-get-user-status;tokscale",
+        raw_model_id: "MODEL_PLACEHOLDER_M12",
+        model_id: "claude-opus-4-5-thinking",
+        label: Some("Claude Opus 4.5 (Thinking)"),
+        source: "user-initial-mapping",
     },
     StaticModelAlias {
-        raw_model_id: "MODEL_PLACEHOLDER_M37",
-        model_id: "gemini-3.1-pro-preview-high",
-        label: Some("Gemini 3.1 Pro Preview (High)"),
-        source: "tokscale;antigravity-mobility-cli",
+        raw_model_id: "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
+        model_id: "gpt-oss-120b-medium",
+        label: Some("GPT-OSS 120B (Medium)"),
+        source: "user-initial-mapping;tokscale",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_CLAUDE_4_5_SONNET",
+        model_id: "claude-sonnet-4-5",
+        label: Some("Claude Sonnet 4.5"),
+        source: "user-initial-mapping",
+    },
+    // Additional placeholders from dynamic JSON:
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M132",
+        model_id: "gemini-3.5-flash",
+        label: Some("Gemini 3.5 Flash (High)"),
+        source: "captured-antigravity-get-user-status",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M16",
+        model_id: "gemini-3.1-pro-preview",
+        label: Some("Gemini 3.1 Pro (High)"),
+        source: "captured-antigravity-get-user-status",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M187",
+        model_id: "gemini-3.5-flash",
+        label: Some("Gemini 3.5 Flash (Low)"),
+        source: "captured-antigravity-get-user-status",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M20",
+        model_id: "gemini-3.5-flash",
+        label: Some("Gemini 3.5 Flash (Medium)"),
+        source: "captured-antigravity-get-user-status",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M47",
         model_id: "gemini-3-flash-preview",
         label: Some("Gemini 3 Flash"),
         source: "tokscale;antigravity-mobility-cli",
-    },
-    StaticModelAlias {
-        raw_model_id: "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
-        model_id: "gpt-oss-120b-medium",
-        label: Some("GPT-OSS 120B (Medium)"),
-        source: "captured-antigravity-get-user-status;tokscale",
-    },
-    StaticModelAlias {
-        raw_model_id: "MODEL_PLACEHOLDER_M132",
-        model_id: "gemini-3.5-flash-high",
-        label: Some("Gemini 3.5 Flash (High)"),
-        source: "captured-antigravity-get-user-status",
-    },
-    StaticModelAlias {
-        raw_model_id: "MODEL_PLACEHOLDER_M20",
-        model_id: "gemini-3.5-flash-medium",
-        label: Some("Gemini 3.5 Flash (Medium)"),
-        source: "captured-antigravity-get-user-status",
-    },
-    StaticModelAlias {
-        raw_model_id: "MODEL_PLACEHOLDER_M16",
-        model_id: "gemini-3.1-pro-preview-high",
-        label: Some("Gemini 3.1 Pro Preview (High)"),
-        source: "captured-antigravity-get-user-status",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-claude-opus-4-6-thinking",
-        model_id: "claude-opus-4-6-thinking",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "claude-opus-4.6-thinking",
-        model_id: "claude-opus-4-6-thinking",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-claude-sonnet-4-6-thinking",
-        model_id: "claude-sonnet-4-6-thinking",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "claude-sonnet-4.6-thinking",
-        model_id: "claude-sonnet-4-6-thinking",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-claude-opus-4-5-thinking",
-        model_id: "claude-opus-4-5-thinking",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-claude-opus-4-5-thinking-high",
-        model_id: "claude-opus-4-5-thinking-high",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-claude-opus-4-5-thinking-medium",
-        model_id: "claude-opus-4-5-thinking-medium",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-claude-sonnet-4-5-thinking",
-        model_id: "claude-sonnet-4-5-thinking",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-claude-sonnet-4-5-thinking-high",
-        model_id: "claude-sonnet-4-5-thinking-high",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-claude-sonnet-4-5-thinking-medium",
-        model_id: "claude-sonnet-4-5-thinking-medium",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "claude-opus-4.6",
-        model_id: "claude-opus-4-6",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "claude-sonnet-4.6",
-        model_id: "claude-sonnet-4-6",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "claude-haiku-4.6",
-        model_id: "claude-haiku-4-6",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "claude-opus-4.5",
-        model_id: "claude-opus-4-5",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "claude-sonnet-4.5",
-        model_id: "claude-sonnet-4-5",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "claude-haiku-4.5",
-        model_id: "claude-haiku-4-5",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "claude-opus-4.5-thinking",
-        model_id: "claude-opus-4-5-thinking",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "claude-sonnet-4.5-thinking",
-        model_id: "claude-sonnet-4-5-thinking",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-flash-c",
-        model_id: "gemini-3-flash-preview",
-        label: None,
-        source: "tokscale;format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-gemini-3-pro",
-        model_id: "gemini-3-pro-preview",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-gemini-3-pro-high",
-        model_id: "gemini-3-pro-preview-high",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-gemini-3-pro-low",
-        model_id: "gemini-3-pro-preview-low",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-pro",
-        model_id: "gemini-3-pro-preview",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-pro-high",
-        model_id: "gemini-3-pro-preview-high",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-pro-low",
-        model_id: "gemini-3-pro-preview-low",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3.0-pro",
-        model_id: "gemini-3-pro-preview",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3.0-pro-high",
-        model_id: "gemini-3-pro-preview-high",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3.0-pro-low",
-        model_id: "gemini-3-pro-preview-low",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-pro-preview-high",
-        model_id: "gemini-3-pro-preview-high",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-pro-preview-low",
-        model_id: "gemini-3-pro-preview-low",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3.1-pro",
-        model_id: "gemini-3.1-pro-preview",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3.1-pro-high",
-        model_id: "gemini-3.1-pro-preview-high",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3.1-pro-low",
-        model_id: "gemini-3.1-pro-preview-low",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-1-pro",
-        model_id: "gemini-3.1-pro-preview",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-1-pro-high",
-        model_id: "gemini-3.1-pro-preview-high",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-1-pro-low",
-        model_id: "gemini-3.1-pro-preview-low",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-1-pro-preview",
-        model_id: "gemini-3.1-pro-preview",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-1-pro-preview-high",
-        model_id: "gemini-3.1-pro-preview-high",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-1-pro-preview-low",
-        model_id: "gemini-3.1-pro-preview-low",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3.0-pro-preview-high",
-        model_id: "gemini-3-pro-preview-high",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3.0-pro-preview-low",
-        model_id: "gemini-3-pro-preview-low",
-        label: None,
-        source: "format-normalization",
-    },
-    StaticModelAlias {
-        raw_model_id: "gemini-3-flash-a",
-        model_id: "gemini-3.5-flash",
-        label: Some("Gemini 3.5 Flash"),
-        source: "captured-antigravity-runtime",
-    },
-    StaticModelAlias {
-        raw_model_id: "antigravity-gemini-3-flash-a",
-        model_id: "gemini-3.5-flash",
-        label: Some("Gemini 3.5 Flash"),
-        source: "captured-antigravity-runtime",
     },
 ];
 
@@ -1379,6 +1165,7 @@ fn collect_model_aliases_from_configs(
             .and_then(|model| model.get("model"))
             .and_then(Value::as_str)
             .filter(|model| !model.trim().is_empty())
+            .filter(|model| model.to_ascii_lowercase().starts_with("model"))
         else {
             continue;
         };
@@ -1427,7 +1214,10 @@ fn load_model_alias_history_map(sessions_dir: &Path) -> Result<HashMap<String, M
 
     let content = std::fs::read_to_string(&path)?;
     let history: ModelAliasHistory = serde_json::from_str(&content)?;
-    aliases.extend(history.aliases.into_iter().map(|(key, entry)| {
+    aliases.extend(history.aliases.into_iter().filter(|(key, entry)| {
+        key.to_ascii_lowercase().starts_with("model")
+            && entry.raw_model_id.to_ascii_lowercase().starts_with("model")
+    }).map(|(key, entry)| {
         (
             key,
             ModelAlias {
@@ -1452,11 +1242,16 @@ fn merge_and_save_model_alias_history(
 
     let mut history = if path.exists() {
         let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str::<ModelAliasHistory>(&content).unwrap_or_else(|_| ModelAliasHistory {
+        let mut loaded = serde_json::from_str::<ModelAliasHistory>(&content).unwrap_or_else(|_| ModelAliasHistory {
             version: MODEL_ALIAS_HISTORY_VERSION,
             updated_at: now.clone(),
             aliases: BTreeMap::new(),
-        })
+        });
+        loaded.aliases.retain(|key, entry| {
+            key.to_ascii_lowercase().starts_with("model")
+                && entry.raw_model_id.to_ascii_lowercase().starts_with("model")
+        });
+        loaded
     } else {
         ModelAliasHistory {
             version: MODEL_ALIAS_HISTORY_VERSION,
@@ -1485,6 +1280,9 @@ fn merge_and_save_model_alias_history(
     }
 
     for (key, alias) in &merged_aliases {
+        if !alias.raw_model_id.to_ascii_lowercase().starts_with("model") {
+            continue;
+        }
         let entry = history
             .aliases
             .entry(key.clone())
@@ -1573,13 +1371,31 @@ fn normalize_cached_antigravity_artifacts(
         let key_lower = alias_key.to_lowercase();
         let raw_lower = alias.raw_model_id.to_lowercase();
         if db_models.contains(&key_lower) || db_models.contains(&raw_lower) {
+            let target_model_id = if let Some(normalized) = format_normalization_fallback(&alias.model_id) {
+                normalized
+            } else {
+                alias.model_id.clone()
+            };
             tx.execute(
                 "UPDATE sessions SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
-                rusqlite::params![&alias.model_id, &alias.raw_model_id, alias_key],
+                rusqlite::params![&target_model_id, &alias.raw_model_id, alias_key],
             )?;
             tx.execute(
                 "UPDATE session_usage SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
-                rusqlite::params![&alias.model_id, &alias.raw_model_id, alias_key],
+                rusqlite::params![&target_model_id, &alias.raw_model_id, alias_key],
+            )?;
+        }
+    }
+
+    for db_model in &db_models {
+        if let Some(normalized) = format_normalization_fallback(db_model) {
+            tx.execute(
+                "UPDATE sessions SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
+                rusqlite::params![&normalized, db_model, db_model.to_lowercase()],
+            )?;
+            tx.execute(
+                "UPDATE session_usage SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
+                rusqlite::params![&normalized, db_model, db_model.to_lowercase()],
             )?;
         }
     }
@@ -1605,16 +1421,156 @@ fn resolve_antigravity_model_id_with_aliases(
     model_id: &str,
     dynamic_aliases: &HashMap<String, ModelAlias>,
 ) -> String {
+    let resolved = if let Some(alias) = resolve_direct(model_id, dynamic_aliases) {
+        alias
+    } else if let Some(normalized) = format_normalization_fallback(model_id) {
+        if let Some(alias) = resolve_direct(&normalized, dynamic_aliases) {
+            alias
+        } else {
+            normalized
+        }
+    } else {
+        model_id.to_string()
+    };
+
+    if let Some(normalized_resolved) = format_normalization_fallback(&resolved) {
+        normalized_resolved
+    } else {
+        resolved
+    }
+}
+
+fn resolve_direct(model_id: &str, dynamic_aliases: &HashMap<String, ModelAlias>) -> Option<String> {
     alias_key_candidates(model_id)
         .iter()
-        .find_map(|key| {
-            dynamic_aliases
-                .get(key)
-                .map(|alias| alias.model_id.as_str())
-        })
-        .or_else(|| antigravity_model_alias(model_id))
-        .unwrap_or(model_id)
-        .to_string()
+        .find_map(|key| dynamic_aliases.get(key).map(|alias| alias.model_id.clone()))
+        .or_else(|| antigravity_model_alias(model_id).map(|s| s.to_string()))
+}
+
+fn format_normalization_fallback(model_id: &str) -> Option<String> {
+    let mut normalized = model_id.trim().to_ascii_lowercase();
+
+    // 0. Handle raw gemini-3-flash-a mapping
+    let mut flash_a_normalized = false;
+    if normalized == "gemini-3-flash-a"
+        || normalized == "antigravity-gemini-3-flash-a"
+        || normalized == "gemini-3-flash-preview-a"
+    {
+        normalized = "gemini-3.5-flash".to_string();
+        flash_a_normalized = true;
+    }
+
+    // 1. Strip antigravity- or anti-gravity- prefix
+    let mut prefix_stripped = false;
+    if !flash_a_normalized {
+        for prefix in ["antigravity-", "anti-gravity-"] {
+            if let Some(stripped) = normalized.strip_prefix(prefix) {
+                normalized = stripped.to_string();
+                prefix_stripped = true;
+                break;
+            }
+        }
+    }
+
+    // 2. Replace dots, underscores, and spaces with hyphens
+    let mut chars_replaced = false;
+    if !flash_a_normalized && (normalized.contains('.') || normalized.contains('_') || normalized.contains(' ')) {
+        normalized = normalized.replace(['.', '_', ' '], "-");
+        chars_replaced = true;
+    }
+
+    // 3. Collapse repeated hyphens
+    if !flash_a_normalized && normalized.contains("--") {
+        let mut out = String::with_capacity(normalized.len());
+        let mut last_was_hyphen = false;
+        for ch in normalized.chars() {
+            if ch == '-' {
+                if !last_was_hyphen {
+                    out.push(ch);
+                }
+                last_was_hyphen = true;
+            } else {
+                out.push(ch);
+                last_was_hyphen = false;
+            }
+        }
+        normalized = out;
+        chars_replaced = true;
+    }
+
+    // 4. Uniformly strip thinking/performance level tokens (high, low, medium, thinking)
+    let mut tier_stripped = false;
+    if !flash_a_normalized && (normalized.contains("-high")
+        || normalized.contains("-low")
+        || normalized.contains("-medium")
+        || normalized.contains("-thinking"))
+    {
+        let tokens: Vec<&str> = normalized.split('-').collect();
+        let filtered: Vec<&str> = tokens
+            .into_iter()
+            .filter(|&t| t != "high" && t != "low" && t != "medium" && t != "thinking")
+            .collect();
+        normalized = filtered.join("-");
+        tier_stripped = true;
+    }
+
+    // 5. Version formatting rule (converting hyphens back to dots for Gemini versions):
+    // e.g. gemini-3-0 -> gemini-3, gemini-3-1 -> gemini-3.1, gemini-3-5 -> gemini-3.5
+    let mut version_formatted = false;
+    if !flash_a_normalized {
+        if normalized.contains("gemini-3-0-pro") {
+            normalized = normalized.replace("gemini-3-0-pro", "gemini-3-pro");
+            version_formatted = true;
+        } else if normalized.contains("gemini-3-1-pro") {
+            normalized = normalized.replace("gemini-3-1-pro", "gemini-3.1-pro");
+            version_formatted = true;
+        } else if normalized.contains("gemini-3-0-flash") {
+            normalized = normalized.replace("gemini-3-0-flash", "gemini-3-flash");
+            version_formatted = true;
+        } else if normalized.contains("gemini-3-5-flash") {
+            normalized = normalized.replace("gemini-3-5-flash", "gemini-3.5-flash");
+            version_formatted = true;
+        }
+    }
+
+    // 6. Preview ruleset logic:
+    // Models in this list must have "-preview".
+    // Models not in this list must NOT have "-preview".
+    let mut preview_processed = false;
+    if !flash_a_normalized && normalized.contains("gemini") {
+        const GEMINI_PREVIEW_MODELS: &[&str] =
+            &["gemini-3-pro", "gemini-3.1-pro", "gemini-3-flash"];
+
+        let belongs_to_preview = GEMINI_PREVIEW_MODELS
+            .iter()
+            .any(|&m| normalized.contains(m));
+
+        if belongs_to_preview {
+            if !normalized.contains("preview") {
+                for base in GEMINI_PREVIEW_MODELS {
+                    if normalized.contains(base) {
+                        let target = format!("{}-preview", base);
+                        normalized = normalized.replace(base, &target);
+                        preview_processed = true;
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Must NOT have preview
+            if normalized.contains("-preview") {
+                normalized = normalized.replace("-preview", "");
+                preview_processed = true;
+            }
+        }
+    }
+
+    if prefix_stripped || chars_replaced || tier_stripped || version_formatted || preview_processed || flash_a_normalized
+    {
+        Some(normalized)
+    } else {
+        None
+    }
 }
 
 fn normalize_alias_key(model_id: &str) -> String {
@@ -1649,7 +1605,7 @@ fn antigravity_label_to_model_id(label: &str) -> Option<String> {
         return None;
     }
 
-    let normalized = lower.replace("(", " ").replace(")", " ");
+    let normalized = lower.replace('(', " ").replace(')', " ");
     let tokens = normalized
         .split_whitespace()
         .filter(|token| !token.is_empty())
@@ -1660,20 +1616,10 @@ fn antigravity_label_to_model_id(label: &str) -> Option<String> {
     }
 
     let model_id = tokens.join("-");
-    match model_id.as_str() {
-        "gemini-3-0-pro-high" => Some("gemini-3-pro-preview-high".to_string()),
-        "gemini-3-0-pro-low" => Some("gemini-3-pro-preview-low".to_string()),
-        "gemini-3-0-pro" => Some("gemini-3-pro-preview".to_string()),
-        "gemini-3-0-pro-preview-high" => Some("gemini-3-pro-preview-high".to_string()),
-        "gemini-3-0-pro-preview-low" => Some("gemini-3-pro-preview-low".to_string()),
-        "gemini-3-0-pro-preview" => Some("gemini-3-pro-preview".to_string()),
-        "gemini-3-1-pro-high" => Some("gemini-3.1-pro-preview-high".to_string()),
-        "gemini-3-1-pro-low" => Some("gemini-3.1-pro-preview-low".to_string()),
-        "gemini-3-1-pro" => Some("gemini-3.1-pro-preview".to_string()),
-        "gemini-3-1-pro-preview-high" => Some("gemini-3.1-pro-preview-high".to_string()),
-        "gemini-3-1-pro-preview-low" => Some("gemini-3.1-pro-preview-low".to_string()),
-        "gemini-3-1-pro-preview" => Some("gemini-3.1-pro-preview".to_string()),
-        _ => Some(model_id),
+    if let Some(normalized) = format_normalization_fallback(&model_id) {
+        Some(normalized)
+    } else {
+        Some(model_id)
     }
 }
 
@@ -2235,7 +2181,7 @@ fn identity_probe_request(
     )
     .ok()?;
 
-    (status == 200).then_some(text)
+    (status == 200 || (status == 500 && text.contains("trajectory not found"))).then_some(text)
 }
 
 fn response_contains_antigravity_marker(method: &str, body: &str) -> bool {
@@ -2289,6 +2235,9 @@ fn contains_antigravity_marker(value: &Value) -> bool {
         "generatorMetadata",
         "serverInfo",
         "serverCapabilities",
+        "trajectoryId",
+        "trajectoryMetadata",
+        "trajectoryType",
     ];
     match value {
         Value::Object(map) => {
@@ -2303,6 +2252,10 @@ fn contains_antigravity_marker(value: &Value) -> bool {
             false
         }
         Value::Array(items) => items.iter().any(contains_antigravity_marker),
+        Value::String(s) => {
+            let lower = s.to_lowercase();
+            lower.contains("trajectory") || lower.contains("generatormetadata")
+        }
         _ => false,
     }
 }
@@ -2559,7 +2512,7 @@ mod tests {
             rusqlite::params![
                 "sess-2",
                 "antigravity-cli",
-                "gemini-3-flash-a",
+                "MODEL_PLACEHOLDER_M20",
                 1672531200000_i64
             ],
         )
@@ -2567,7 +2520,7 @@ mod tests {
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["msg-2", "sess-2", "antigravity-cli", "gemini-3-flash-a", "google", 1672531202000_i64, 0_i64, 200_i64, 60_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
+            rusqlite::params!["msg-2", "sess-2", "antigravity-cli", "MODEL_PLACEHOLDER_M20", "google", 1672531202000_i64, 0_i64, 200_i64, 60_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
         ).unwrap();
 
         conn.execute(
@@ -2595,11 +2548,11 @@ mod tests {
         let messages = parser.parse_sessions(None).unwrap();
 
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].model_id, "claude-opus-4-6-thinking");
+        assert_eq!(messages[0].model_id, "claude-opus-4-6");
         assert_eq!(messages[0].provider_id, "anthropic");
         assert_eq!(messages[1].model_id, "gemini-3.5-flash");
         assert_eq!(messages[1].provider_id, "google");
-        assert_eq!(messages[2].model_id, "claude-opus-4-6-thinking");
+        assert_eq!(messages[2].model_id, "claude-opus-4-6");
         assert_eq!(messages[2].provider_id, "anthropic");
     }
 
@@ -2624,7 +2577,7 @@ mod tests {
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["msg-1", "sess-1", "antigravity-cli", "gemini-3-flash-a", "google", 1672531201000_i64, 0_i64, 1_i64, 2_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
+            rusqlite::params!["msg-1", "sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M20", "google", 1672531201000_i64, 0_i64, 1_i64, 2_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
         ).unwrap();
 
         normalize_cached_antigravity_artifacts(&sessions_dir, &HashMap::new()).unwrap();
@@ -2633,7 +2586,7 @@ mod tests {
             .prepare("SELECT model_id FROM sessions WHERE session_id = 'sess-1'")
             .unwrap();
         let session_model: String = stmt.query_row([], |row| row.get(0)).unwrap();
-        assert_eq!(session_model, "gemini-3.1-pro-preview-high");
+        assert_eq!(session_model, "gemini-3.1-pro-preview");
 
         let mut stmt2 = conn
             .prepare("SELECT model_id FROM session_usage WHERE id = 'msg-1'")
@@ -2662,13 +2615,13 @@ mod tests {
         let saved = merge_and_save_model_alias_history(&sessions_dir, &dynamic_aliases).unwrap();
         assert_eq!(
             resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M132", &saved),
-            "gemini-3.5-flash-high"
+            "gemini-3.5-flash"
         );
 
         let loaded = load_model_alias_history_map(&sessions_dir).unwrap();
         assert_eq!(
             resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M132", &loaded),
-            "gemini-3.5-flash-high"
+            "gemini-3.5-flash"
         );
 
         let history_path = model_alias_history_path(&sessions_dir).unwrap();
@@ -2688,17 +2641,17 @@ mod tests {
         let saved = merge_and_save_model_alias_history(&sessions_dir, &HashMap::new()).unwrap();
         assert_eq!(
             resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M26", &saved),
-            "claude-opus-4-6-thinking"
+            "claude-opus-4-6"
         );
         assert_eq!(
             resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M37", &saved),
-            "gemini-3.1-pro-preview-high"
+            "gemini-3.1-pro-preview"
         );
 
         let history_path = model_alias_history_path(&sessions_dir).unwrap();
         let content = std::fs::read_to_string(history_path).unwrap();
         assert!(content.contains("MODEL_PLACEHOLDER_M26"));
-        assert!(content.contains("captured-antigravity-get-user-status;tokscale"));
+        assert!(content.contains("user-initial-mapping;tokscale"));
     }
 
     #[test]
@@ -2712,8 +2665,8 @@ mod tests {
             normalize_alias_key("MODEL_PLACEHOLDER_M37"),
             ModelAlias {
                 raw_model_id: "MODEL_PLACEHOLDER_M37".to_string(),
-                model_id: "gemini-3.1-pro-thinking-high".to_string(),
-                label: Some("Gemini 3.1 Pro Thinking High".to_string()),
+                model_id: "gemini-3.5-flash".to_string(),
+                label: Some("Gemini 3.5 Flash".to_string()),
                 source: "antigravity-get-user-status".to_string(),
             },
         );
@@ -2721,13 +2674,13 @@ mod tests {
         let saved = merge_and_save_model_alias_history(&sessions_dir, &dynamic_aliases).unwrap();
         assert_eq!(
             resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M37", &saved),
-            "gemini-3.1-pro-thinking-high"
+            "gemini-3.5-flash"
         );
 
         let loaded = load_model_alias_history_map(&sessions_dir).unwrap();
         assert_eq!(
             resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M37", &loaded),
-            "gemini-3.1-pro-thinking-high"
+            "gemini-3.5-flash"
         );
     }
 
@@ -2771,23 +2724,27 @@ mod tests {
         );
         assert_eq!(
             resolve_antigravity_model_id("antigravity-gemini-3-pro-high"),
-            "gemini-3-pro-preview-high"
+            "gemini-3-pro-preview"
         );
         assert_eq!(
             resolve_antigravity_model_id("antigravity-gemini-3-pro-low"),
-            "gemini-3-pro-preview-low"
+            "gemini-3-pro-preview"
         );
         assert_eq!(
             resolve_antigravity_model_id("gemini-3.0-pro-high"),
-            "gemini-3-pro-preview-high"
+            "gemini-3-pro-preview"
         );
         assert_eq!(
             resolve_antigravity_model_id("gemini-3.1-pro-high"),
-            "gemini-3.1-pro-preview-high"
+            "gemini-3.1-pro-preview"
         );
         assert_eq!(
             resolve_antigravity_model_id("gemini-3-1-pro-preview-low"),
-            "gemini-3.1-pro-preview-low"
+            "gemini-3.1-pro-preview"
+        );
+        assert_eq!(
+            resolve_antigravity_model_id("gemini-3-pro-image"),
+            "gemini-3-pro-preview-image"
         );
     }
 
@@ -2795,31 +2752,35 @@ mod tests {
     fn test_antigravity_label_to_model_id_handles_future_label_shapes() {
         assert_eq!(
             antigravity_label_to_model_id("Claude Opus 4.5 (Thinking)").as_deref(),
-            Some("claude-opus-4-5-thinking")
+            Some("claude-opus-4-5")
         );
         assert_eq!(
             antigravity_label_to_model_id("Claude Sonnet 4.5 (Thinking)").as_deref(),
-            Some("claude-sonnet-4-5-thinking")
+            Some("claude-sonnet-4-5")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3.0 Pro Preview (High)").as_deref(),
-            Some("gemini-3-pro-preview-high")
+            Some("gemini-3-pro-preview")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3.0 Pro (High)").as_deref(),
-            Some("gemini-3-pro-preview-high")
+            Some("gemini-3-pro-preview")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3.1 Pro (High)").as_deref(),
-            Some("gemini-3.1-pro-preview-high")
+            Some("gemini-3.1-pro-preview")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3.1 Pro Preview (Low)").as_deref(),
-            Some("gemini-3.1-pro-preview-low")
+            Some("gemini-3.1-pro-preview")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3 Pro Preview (Low)").as_deref(),
-            Some("gemini-3-pro-preview-low")
+            Some("gemini-3-pro-preview")
+        );
+        assert_eq!(
+            antigravity_label_to_model_id("Gemini 3 Pro (Image)").as_deref(),
+            Some("gemini-3-pro-preview-image")
         );
         assert_eq!(antigravity_label_to_model_id("Unknown Beta"), None);
     }

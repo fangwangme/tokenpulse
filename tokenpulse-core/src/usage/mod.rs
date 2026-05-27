@@ -9,7 +9,7 @@ pub mod scanner;
 pub mod store;
 pub(crate) mod utils;
 
-pub use antigravity::AntigravitySessionParser;
+pub use antigravity::{detect_antigravity_connections, sync_active_antigravity_aliases, AntigravitySessionParser};
 pub use claude::ClaudeSessionParser;
 pub use codex::CodexSessionParser;
 pub use copilot::CopilotSessionParser;
