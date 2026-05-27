@@ -424,10 +424,13 @@ impl QuotaFetcher for AntigravityQuotaFetcher {
     }
 
     async fn fetch_quota(&self) -> Result<QuotaSnapshot> {
-        let connections = detect_antigravity_connections().unwrap_or_else(|e| {
-            debug!("Antigravity language server discovery failed: {}", e);
-            Vec::new()
-        });
+        let connections = tokio::task::spawn_blocking(detect_antigravity_connections)
+            .await
+            .unwrap_or_else(|e| Err(anyhow!("Spawn blocking failed: {}", e)))
+            .unwrap_or_else(|e| {
+                debug!("Antigravity language server discovery failed: {}", e);
+                Vec::new()
+            });
 
         if let Some(pool_data) = self
             .probe_ls_connections(&connections, AntigravityRuntimeKind::Cli)

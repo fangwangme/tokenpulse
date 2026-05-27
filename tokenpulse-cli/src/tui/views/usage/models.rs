@@ -95,12 +95,15 @@ pub fn render_models_page(
     let total_width = inner.width as usize;
     let rank_width = 4usize;
     let cost_width = 8usize;
+    let input_width = 9usize;
+    let output_width = 9usize;
+    let cache_width = 9usize;
     let pct_width = 7usize;
     let msg_width = 8usize;
     let tokens_width = 9usize;
-    let show_last = total_width >= 92;
+    let show_last = total_width >= 120;
     let last_width = if show_last { 11usize } else { 0usize };
-    let show_sparkline = total_width >= 116;
+    let show_sparkline = total_width >= 144;
     let sparkline_width = if show_sparkline { 15usize } else { 0usize };
     let raw_agent_width = (total_width / 4).clamp(22, 36);
     let raw_model_width = total_width
@@ -109,6 +112,9 @@ pub fn render_models_page(
                 + raw_agent_width
                 + tokens_width
                 + cost_width
+                + input_width
+                + output_width
+                + cache_width
                 + 1
                 + pct_width
                 + 1
@@ -148,7 +154,8 @@ pub fn render_models_page(
     };
 
     let headers = [
-        "#", "Model", "Agent", "Tokens", "Cost", "%", "Msgs", "Last", "Trend",
+        "#", "Model", "Agent", "Tokens", "Cost", "Input", "Output", "Cache", "%", "Msgs", "Last",
+        "Trend",
     ];
     let sort_indicator = |field: SortField| -> &str {
         if state.sort_field == field {
@@ -189,14 +196,26 @@ pub fn render_models_page(
             ),
             Style::default().fg(Color::Rgb(250, 204, 21)).bold(),
         ),
+        Span::styled(
+            format!("{:<input_width$}", headers[5]),
+            Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
+        ),
+        Span::styled(
+            format!("{:<output_width$}", headers[6]),
+            Style::default().fg(Color::Rgb(167, 139, 250)).bold(),
+        ),
+        Span::styled(
+            format!("{:<cache_width$}", headers[7]),
+            Style::default().fg(Color::Rgb(251, 146, 60)).bold(),
+        ),
         Span::raw(" "),
         Span::styled(
-            format!("{:<pct_width$}", headers[5]),
+            format!("{:<pct_width$}", headers[8]),
             Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:<msg_width$}", headers[6]),
+            format!("{:<msg_width$}", headers[9]),
             Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
         ),
     ];
@@ -204,7 +223,7 @@ pub fn render_models_page(
         header_spans.push(Span::styled(
             format!(
                 "{:<last_width$}",
-                format!("{}{}", headers[7], sort_indicator(SortField::Date))
+                format!("{}{}", headers[10], sort_indicator(SortField::Date))
             ),
             Style::default().fg(theme.dim).bold(),
         ));
@@ -212,7 +231,7 @@ pub fn render_models_page(
     if show_sparkline {
         header_spans.push(Span::raw("  "));
         header_spans.push(Span::styled(
-            format!("{:<sparkline_width$}", headers[8]),
+            format!("{:<sparkline_width$}", headers[11]),
             Style::default().fg(Color::Rgb(52, 211, 153)).bold(),
         ));
     }
@@ -271,6 +290,30 @@ pub fn render_models_page(
                 format!("{:<cost_width$}", format_cost_compact(model.cost)),
                 selected_row_style(
                     Style::default().fg(Color::Rgb(250, 204, 21)),
+                    selected,
+                    theme,
+                ),
+            ),
+            Span::styled(
+                format!("{:<input_width$}", format_compact(model.input_tokens)),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(96, 165, 250)),
+                    selected,
+                    theme,
+                ),
+            ),
+            Span::styled(
+                format!("{:<output_width$}", format_compact(model.output_tokens)),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(167, 139, 250)),
+                    selected,
+                    theme,
+                ),
+            ),
+            Span::styled(
+                format!("{:<cache_width$}", format_compact(model.cache_tokens)),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(251, 146, 60)),
                     selected,
                     theme,
                 ),

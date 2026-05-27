@@ -248,6 +248,7 @@ fn open_cache_db(sessions_dir: &Path) -> Result<rusqlite::Connection> {
     std::fs::create_dir_all(sessions_dir)?;
     let db_path = sessions_dir.join("cache.db");
     let conn = rusqlite::Connection::open(db_path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute("PRAGMA foreign_keys = ON;", [])?;
 
     let sessions_pk_count: i64 = conn

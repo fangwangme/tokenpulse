@@ -292,6 +292,9 @@ pub struct AggregatedModelSummary {
     pub sources: BTreeSet<String>,
     pub cost: f64,
     pub tokens: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_tokens: i64,
     pub message_count: usize,
     pub session_count: usize,
 }
@@ -546,6 +549,9 @@ impl UsageDashboard {
                 entry.sources.insert(source.to_string());
                 entry.cost += stats.cost_usd;
                 entry.tokens += stats.tokens;
+                entry.input_tokens += stats.input_tokens;
+                entry.output_tokens += stats.output_tokens;
+                entry.cache_tokens += stats.cache_read_tokens + stats.cache_write_tokens;
                 entry.message_count += stats.messages.max(0) as usize;
                 entry.session_count += stats.sessions.max(0) as usize;
             }
@@ -564,6 +570,9 @@ impl UsageDashboard {
                 source: aggregated.sources.into_iter().collect::<Vec<_>>().join(","),
                 cost: aggregated.cost,
                 tokens: aggregated.tokens,
+                input_tokens: aggregated.input_tokens,
+                output_tokens: aggregated.output_tokens,
+                cache_tokens: aggregated.cache_tokens,
                 message_count: aggregated.message_count,
                 session_count: aggregated.session_count,
                 percent: if total_cost > 0.0 {
@@ -927,6 +936,54 @@ pub enum TuiMessage {
     QuotaReloadFailed(String),
 }
 
+fn spawn_quota_reload(
+    msg_tx: tokio::sync::mpsc::Sender<TuiMessage>,
+    enabled_providers: Vec<String>,
+) {
+    tokio::spawn(async move {
+        let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
+        let total_fetchers = fetchers.len();
+        let observed_at = chrono::Utc::now();
+        let results = tokenpulse_core::quota::fetch_all(fetchers).await;
+
+        let mut snapshots = Vec::new();
+        let mut errors = Vec::new();
+        for result in results {
+            match result {
+                Ok(snapshot) => {
+                    snapshots.push(snapshot);
+                }
+                Err(e) => {
+                    errors.push(e.to_string());
+                }
+            }
+        }
+
+        if !snapshots.is_empty() {
+            let snapshots_to_save = snapshots.clone();
+            let save_res = tokio::task::spawn_blocking(move || {
+                let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
+                for snap in &snapshots_to_save {
+                    let _ = cache_store.save(&snap.provider, observed_at, snap);
+                }
+            }).await;
+            if let Err(_e) = save_res {
+                // Ignore join error
+            }
+        }
+
+        if snapshots.is_empty() && total_fetchers > 0 {
+            let _ = msg_tx
+                .send(TuiMessage::QuotaReloadFailed(errors.join(", ")))
+                .await;
+        } else {
+            let _ = msg_tx
+                .send(TuiMessage::QuotaReloadSuccess(snapshots, errors))
+                .await;
+        }
+    });
+}
+
 pub fn run<F>(
     mut summary: UsageSummary,
     daily_rows: Vec<DailyUsageRow>,
@@ -982,38 +1039,7 @@ where
             .filter(|(_, p)| p.enabled)
             .map(|(k, _)| k.clone())
             .collect();
-        let tx_quota = msg_tx.clone();
-
-        tokio::spawn(async move {
-            let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
-            let total_fetchers = fetchers.len();
-            let observed_at = chrono::Utc::now();
-            let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
-            let results = tokenpulse_core::quota::fetch_all(fetchers).await;
-
-            let mut snapshots = Vec::new();
-            let mut errors = Vec::new();
-            for result in results {
-                match result {
-                    Ok(snapshot) => {
-                        let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
-                        snapshots.push(snapshot);
-                    }
-                    Err(e) => {
-                        errors.push(e.to_string());
-                    }
-                }
-            }
-            if snapshots.is_empty() && total_fetchers > 0 {
-                let _ = tx_quota
-                    .send(TuiMessage::QuotaReloadFailed(errors.join(", ")))
-                    .await;
-            } else {
-                let _ = tx_quota
-                    .send(TuiMessage::QuotaReloadSuccess(snapshots, errors))
-                    .await;
-            }
-        });
+        spawn_quota_reload(msg_tx.clone(), enabled_providers);
     }
 
     loop {
@@ -1163,38 +1189,7 @@ where
                 .filter(|(_, p)| p.enabled)
                 .map(|(k, _)| k.clone())
                 .collect();
-            let tx = msg_tx.clone();
-
-            tokio::spawn(async move {
-                let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
-                let total_fetchers = fetchers.len();
-                let observed_at = chrono::Utc::now();
-                let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
-                let results = tokenpulse_core::quota::fetch_all(fetchers).await;
-
-                let mut snapshots = Vec::new();
-                let mut errors = Vec::new();
-                for result in results {
-                    match result {
-                        Ok(snapshot) => {
-                            let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
-                            snapshots.push(snapshot);
-                        }
-                        Err(e) => {
-                            errors.push(e.to_string());
-                        }
-                    }
-                }
-                if snapshots.is_empty() && total_fetchers > 0 {
-                    let _ = tx
-                        .send(TuiMessage::QuotaReloadFailed(errors.join(", ")))
-                        .await;
-                } else {
-                    let _ = tx
-                        .send(TuiMessage::QuotaReloadSuccess(snapshots, errors))
-                        .await;
-                }
-            });
+            spawn_quota_reload(msg_tx.clone(), enabled_providers);
         }
 
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -1309,43 +1304,7 @@ where
                             .filter(|(_, p)| p.enabled)
                             .map(|(k, _)| k.clone())
                             .collect();
-                        let tx_quota = msg_tx.clone();
-
-                        tokio::spawn(async move {
-                            let fetchers =
-                                crate::commands::quota::build_quota_fetchers(&enabled_providers);
-                            let total_fetchers = fetchers.len();
-                            let observed_at = chrono::Utc::now();
-                            let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
-                            let results = tokenpulse_core::quota::fetch_all(fetchers).await;
-
-                            let mut snapshots = Vec::new();
-                            let mut errors = Vec::new();
-                            for result in results {
-                                match result {
-                                    Ok(snapshot) => {
-                                        let _ = cache_store.save(
-                                            &snapshot.provider,
-                                            observed_at,
-                                            &snapshot,
-                                        );
-                                        snapshots.push(snapshot);
-                                    }
-                                    Err(e) => {
-                                        errors.push(e.to_string());
-                                    }
-                                }
-                            }
-                            if snapshots.is_empty() && total_fetchers > 0 {
-                                let _ = tx_quota
-                                    .send(TuiMessage::QuotaReloadFailed(errors.join(", ")))
-                                    .await;
-                            } else {
-                                let _ = tx_quota
-                                    .send(TuiMessage::QuotaReloadSuccess(snapshots, errors))
-                                    .await;
-                            }
-                        });
+                        spawn_quota_reload(msg_tx.clone(), enabled_providers);
 
                         continue;
                     }
