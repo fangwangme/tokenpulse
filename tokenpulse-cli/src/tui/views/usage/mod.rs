@@ -966,7 +966,8 @@ fn spawn_quota_reload(
                 for snap in &snapshots_to_save {
                     let _ = cache_store.save(&snap.provider, observed_at, snap);
                 }
-            }).await;
+            })
+            .await;
             if let Err(_e) = save_res {
                 // Ignore join error
             }
