@@ -14,3 +14,7 @@ target/
 .antigravity/
 .antigravitycli/
 
+# Agent plans, notes, and local status
+.agents/
+
+
