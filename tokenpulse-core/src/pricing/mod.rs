@@ -367,6 +367,95 @@ fn push_generalized_candidates(
         push_candidate(candidates, seen, format!("openrouter/z-ai/{}", glm_model));
     }
 
+    if let Some(minimax_model) = canonicalize_minimax_model(&normalized) {
+        push_candidate(candidates, seen, minimax_model.clone());
+        push_candidate(candidates, seen, format!("minimax/{}", minimax_model));
+        push_candidate(
+            candidates,
+            seen,
+            format!("openrouter/minimax/{}", minimax_model),
+        );
+        push_candidate(candidates, seen, format!("minimaxai/{}", minimax_model));
+    }
+
+    if let Some(kimi_model) = canonicalize_kimi_model(&normalized) {
+        push_candidate(candidates, seen, kimi_model.clone());
+        push_candidate(candidates, seen, format!("moonshot/{}", kimi_model));
+        push_candidate(candidates, seen, format!("moonshotai/{}", kimi_model));
+        push_candidate(
+            candidates,
+            seen,
+            format!("openrouter/moonshot/{}", kimi_model),
+        );
+    }
+
+    if let Some(deepseek_model) = canonicalize_deepseek_model(&normalized) {
+        push_candidate(candidates, seen, deepseek_model.clone());
+        push_candidate(candidates, seen, format!("deepseek/{}", deepseek_model));
+        push_candidate(candidates, seen, format!("deepseek-ai/{}", deepseek_model));
+        push_candidate(
+            candidates,
+            seen,
+            format!("openrouter/deepseek/{}", deepseek_model),
+        );
+    }
+
+    if let Some(qwen_model) = canonicalize_qwen_model(&normalized) {
+        push_candidate(candidates, seen, qwen_model.clone());
+        push_candidate(candidates, seen, format!("qwen/{}", qwen_model));
+        push_candidate(candidates, seen, format!("openrouter/qwen/{}", qwen_model));
+    }
+
+    if let Some(claude_model) = canonicalize_claude_model(&normalized) {
+        let dot_version = normalize_claude_version(&claude_model);
+        push_candidate(candidates, seen, claude_model.clone());
+        push_candidate(candidates, seen, format!("anthropic/{}", claude_model));
+        push_candidate(
+            candidates,
+            seen,
+            format!("openrouter/anthropic/{}", claude_model),
+        );
+
+        if dot_version != claude_model {
+            push_candidate(candidates, seen, dot_version.clone());
+            push_candidate(candidates, seen, format!("anthropic/{}", dot_version));
+            push_candidate(
+                candidates,
+                seen,
+                format!("openrouter/anthropic/{}", dot_version),
+            );
+        }
+    }
+
+    if let Some(gemini_model) = canonicalize_gemini_model(&normalized) {
+        let dot_version = normalize_claude_version(&gemini_model);
+        for m in [&gemini_model, &dot_version] {
+            if m.is_empty() {
+                continue;
+            }
+            push_candidate(candidates, seen, m.clone());
+            push_candidate(candidates, seen, format!("google/{}", m));
+            push_candidate(candidates, seen, format!("openrouter/google/{}", m));
+        }
+    }
+
+    if let Some(gpt_model) = canonicalize_gpt_model(&normalized) {
+        let dot_version = normalize_claude_version(&gpt_model);
+        push_candidate(candidates, seen, gpt_model.clone());
+        push_candidate(candidates, seen, format!("openai/{}", gpt_model));
+        push_candidate(candidates, seen, format!("openrouter/openai/{}", gpt_model));
+
+        if dot_version != gpt_model {
+            push_candidate(candidates, seen, dot_version.clone());
+            push_candidate(candidates, seen, format!("openai/{}", dot_version));
+            push_candidate(
+                candidates,
+                seen,
+                format!("openrouter/openai/{}", dot_version),
+            );
+        }
+    }
+
     let lower = normalized.to_ascii_lowercase();
     if lower.contains("z-ai/") {
         push_candidate(candidates, seen, lower.replace("z-ai/", "zai/"));
@@ -397,6 +486,85 @@ fn canonicalize_glm_model(model_id: &str) -> Option<String> {
         return None;
     }
     Some(format!("glm-{}", rest))
+}
+
+fn canonicalize_minimax_model(model_id: &str) -> Option<String> {
+    let lower = model_id.trim().to_ascii_lowercase().replace('_', "-");
+    let model = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if let Some(rest) = model.strip_prefix("minimax-m") {
+        if rest.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            return Some(format!("minimax-m{}", rest));
+        }
+    }
+    None
+}
+
+fn canonicalize_kimi_model(model_id: &str) -> Option<String> {
+    let lower = model_id.trim().to_ascii_lowercase().replace('_', "-");
+    let model = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if let Some(rest) = model.strip_prefix("kimi-") {
+        return Some(format!("kimi-{}", rest));
+    }
+    None
+}
+
+fn canonicalize_deepseek_model(model_id: &str) -> Option<String> {
+    let lower = model_id.trim().to_ascii_lowercase().replace('_', "-");
+    let model = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if let Some(rest) = model.strip_prefix("deepseek-") {
+        return Some(format!("deepseek-{}", rest));
+    }
+    None
+}
+
+fn canonicalize_qwen_model(model_id: &str) -> Option<String> {
+    let lower = model_id.trim().to_ascii_lowercase().replace('_', "-");
+    let model = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if model.starts_with("qwen") {
+        return Some(model.to_string());
+    }
+    None
+}
+
+fn canonicalize_claude_model(model_id: &str) -> Option<String> {
+    let lower = model_id.trim().to_ascii_lowercase().replace('_', "-");
+    let model = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if model.starts_with("claude-") {
+        return Some(model.to_string());
+    }
+    None
+}
+
+fn canonicalize_gemini_model(model_id: &str) -> Option<String> {
+    let lower = model_id.trim().to_ascii_lowercase().replace('_', "-");
+    let model = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if model.starts_with("gemini-") {
+        return Some(model.to_string());
+    }
+    None
+}
+
+fn canonicalize_gpt_model(model_id: &str) -> Option<String> {
+    let lower = model_id.trim().to_ascii_lowercase().replace('_', "-");
+    let model = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if model.starts_with("gpt-") {
+        return Some(model.to_string());
+    }
+    None
+}
+
+fn normalize_claude_version(model: &str) -> String {
+    let bytes = model.as_bytes();
+    if bytes.len() >= 3 {
+        for i in (1..bytes.len() - 1).rev() {
+            if bytes[i] == b'-' && bytes[i - 1].is_ascii_digit() && bytes[i + 1].is_ascii_digit() {
+                let mut res = model.to_string();
+                res.replace_range(i..i + 1, ".");
+                return res;
+            }
+        }
+    }
+    model.to_string()
 }
 
 fn push_candidate(candidates: &mut Vec<String>, seen: &mut HashSet<String>, candidate: String) {
@@ -447,16 +615,9 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
             Some("openrouter/anthropic/claude-opus-4.6")
         }
 
-        "claude-opus-4.6" => Some("openrouter/anthropic/claude-opus-4.6"),
-        "claude-opus-4.5" => Some("openrouter/anthropic/claude-opus-4.5"),
-
-        "antigravity-claude-sonnet-4-6-thinking"
-        | "claude-sonnet-4-6-thinking"
-        | "claude-sonnet-4.6"
-        | "claude-sonnet-4-6" => Some("openrouter/anthropic/claude-sonnet-4.6"),
-        "claude-sonnet-4.5" => Some("openrouter/anthropic/claude-sonnet-4.5"),
-        "claude-haiku-4.5" => Some("openrouter/anthropic/claude-haiku-4.5"),
-        "claude-haiku-4.6" | "claude-haiku-4-6" => Some("openrouter/anthropic/claude-haiku-4.6"),
+        "antigravity-claude-sonnet-4-6-thinking" | "claude-sonnet-4-6-thinking" => {
+            Some("openrouter/anthropic/claude-sonnet-4.6")
+        }
 
         // Antigravity placeholders retained for legacy cache rows that were not
         // normalized before pricing. These must resolve to the same real model.
@@ -480,22 +641,8 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
         }
 
         // Bare model names (often from -free stripping) → LiteLLM keys
-        "kimi-k2.5" => Some("moonshot/kimi-k2.5"),
-        "minimax-m2.5" => Some("minimax/MiniMax-M2.5"),
-        "minimax-m2.1" => Some("minimax/MiniMax-M2.1"),
         "grok-code" => Some("xai/grok-code-fast-1"),
-        "deepseek-v4-flash" => Some("deepseek/deepseek-v4-flash"),
-        "deepseek-v4-pro" => Some("deepseek/deepseek-v4-pro"),
 
-        // Provider-prefixed aliases
-        "moonshotai/kimi-k2.5" => Some("moonshot/kimi-k2.5"),
-        "moonshotai/kimi-k2.6" => Some("moonshot/kimi-k2.6"),
-        "minimaxai/minimax-m2.1" => Some("minimax/MiniMax-M2.1"),
-        "minimaxai/minimax-m2.5" => Some("minimax/MiniMax-M2.5"),
-        "qwen/qwen3.5-397b-a17b" => Some("openrouter/qwen/qwen3.5-397b-a17b"),
-        "deepseek-ai/deepseek-v3.2" => Some("deepseek/deepseek-v3.2"),
-        "deepseek-ai/deepseek-v4-flash" => Some("deepseek/deepseek-v4-flash"),
-        "deepseek-ai/deepseek-v4-pro" => Some("deepseek/deepseek-v4-pro"),
         "nvidia/llama-3.3-nemotron-super-49b-v1.5" => {
             Some("deepinfra/nvidia/Llama-3.3-Nemotron-Super-49B-v1.5")
         }
@@ -827,6 +974,41 @@ mod tests {
     }
 
     #[test]
+    fn test_lookup_model_pricing_uses_rule_based_minimax_m3_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "minimax/MiniMax-M3".to_string(),
+            make_pricing(0.0000003, 0.0000012),
+        );
+
+        let result = lookup_model_pricing("minimax-m3", &map);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().input_cost_per_token, 0.0000003);
+
+        let result_free =
+            lookup_model_pricing_with_provider("minimax-m3-free", Some("opencode"), &map);
+        assert!(result_free.is_some());
+        assert_eq!(result_free.unwrap().input_cost_per_token, 0.0000003);
+    }
+
+    #[test]
+    fn test_lookup_model_pricing_uses_rule_based_deepseek_alias() {
+        let mut map = HashMap::new();
+        map.insert(
+            "deepseek/deepseek-v4-flash".to_string(),
+            make_pricing(0.0000001, 0.0000002),
+        );
+
+        let result = lookup_model_pricing("deepseek-ai/deepseek-v4-flash", &map);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().input_cost_per_token, 0.0000001);
+
+        let result_bare = lookup_model_pricing("deepseek-v4-flash", &map);
+        assert!(result_bare.is_some());
+        assert_eq!(result_bare.unwrap().input_cost_per_token, 0.0000001);
+    }
+
+    #[test]
     fn test_lookup_model_pricing_uses_explicit_glm_alias() {
         let mut map = HashMap::new();
         map.insert("zai/glm-5".to_string(), make_pricing(0.0000005, 0.000002));
@@ -1048,6 +1230,63 @@ mod tests {
 
         let result = lookup_model_pricing("claude-opus-4.6", &map);
         assert!(result.is_some(), "claude-opus-4.6 should resolve via alias");
+    }
+
+    #[test]
+    fn test_lookup_claude_future_version_rule() {
+        let mut map = HashMap::new();
+        map.insert(
+            "openrouter/anthropic/claude-sonnet-4.7".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+
+        let result_dot = lookup_model_pricing("claude-sonnet-4.7", &map);
+        assert!(
+            result_dot.is_some(),
+            "claude-sonnet-4.7 should resolve via rule"
+        );
+
+        let result_hyphen = lookup_model_pricing("claude-sonnet-4-7", &map);
+        assert!(
+            result_hyphen.is_some(),
+            "claude-sonnet-4-7 should resolve via rule"
+        );
+    }
+
+    #[test]
+    fn test_lookup_gemini_future_version_rule() {
+        let mut map = HashMap::new();
+        map.insert(
+            "google/gemini-3.2-pro".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+
+        let result_dot = lookup_model_pricing("gemini-3.2-pro", &map);
+        assert!(
+            result_dot.is_some(),
+            "gemini-3.2-pro should resolve via rule"
+        );
+
+        let result_hyphen = lookup_model_pricing("gemini-3-2-pro", &map);
+        assert!(
+            result_hyphen.is_some(),
+            "gemini-3-2-pro should resolve via rule"
+        );
+    }
+
+    #[test]
+    fn test_lookup_gpt_future_version_rule() {
+        let mut map = HashMap::new();
+        map.insert(
+            "openai/gpt-5.5".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+
+        let result_dot = lookup_model_pricing("gpt-5.5", &map);
+        assert!(result_dot.is_some(), "gpt-5.5 should resolve via rule");
+
+        let result_hyphen = lookup_model_pricing("gpt-5-5", &map);
+        assert!(result_hyphen.is_some(), "gpt-5-5 should resolve via rule");
     }
 
     #[test]

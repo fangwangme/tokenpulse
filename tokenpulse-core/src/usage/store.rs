@@ -840,6 +840,7 @@ impl UsageStore {
 
         let mut summaries: Vec<ModelSummary> = grouped
             .into_iter()
+            .filter(|(_, summary)| summary.tokens > 0)
             .map(|(model, summary)| ModelSummary {
                 model,
                 provider: summary.providers.into_iter().collect::<Vec<_>>().join(","),
@@ -1713,6 +1714,40 @@ mod tests {
         assert_eq!(summaries[0].session_count, 1);
         assert_eq!(summaries[0].message_count, 2);
         assert!(summaries[0].cost >= 0.0);
+    }
+
+    #[test]
+    fn test_load_model_summaries_filters_out_zero_tokens() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        // Message with tokens > 0
+        let mut first = sample_message("2024-03-10", "m1");
+        first.model_id = "claude-3-opus".to_string();
+        first.tokens = TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        // Message with tokens = 0
+        let mut second = sample_message("2024-03-10", "m2");
+        second.model_id = "gpt-4".to_string();
+        second.tokens = TokenBreakdown {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+
+        store.ingest_messages(&[first, second], false).unwrap();
+
+        let summaries = store.load_model_summaries(None, &[]).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].model, "claude-3-opus");
     }
 
     #[test]
