@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Fixed model pricing reload issue by implementing on-demand lazy refresh for missing or zero-priced models.
+- Rate-limited the on-demand refresh: it is skipped when the pricing cache was fetched within the last hour, so unknown or misparsed model ids cannot trigger repeated network fetches across reloads.
 - Prevented database daily snapshot pollution by only saving snapshots with valid, non-zero pricing.
 - Implemented mtime-based cache invalidation for the in-memory pricing cache, ensuring long-running processes (like the TUI) automatically detect updates on disk.
 - Integrated pricing cache clearing and lazy-refresh state resetting during TUI reload operations.

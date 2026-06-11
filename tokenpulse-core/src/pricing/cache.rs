@@ -5,11 +5,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use tracing::{debug, info, warn};
 
 const CACHE_TTL_HOURS: i64 = 24;
+const LAZY_REFRESH_MIN_INTERVAL_SECS: u64 = 60 * 60;
 
 static HAS_REFRESHED_THIS_RUN: AtomicBool = AtomicBool::new(false);
 
@@ -26,8 +27,25 @@ impl PricingCache {
         HAS_REFRESHED_THIS_RUN.store(val, Ordering::Relaxed);
     }
 
-    pub fn force_refresh_sync(&self) -> Result<PricingCatalog> {
-        self.fetch_and_cache_sync()
+    /// On-demand refresh for missing-model lookups. Attempted at most once
+    /// per run, and skipped when the on-disk cache was fetched recently:
+    /// a model absent from a fresh catalog is unlikely to appear upstream
+    /// within the hour, so unknown or misparsed model ids cannot trigger
+    /// repeated network fetches across reloads.
+    pub fn lazy_refresh_sync(&self) -> Result<Option<PricingCatalog>> {
+        Self::set_refreshed_this_run(true);
+
+        let recently_fetched = fs::metadata(&self.cache_path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|mtime| mtime.elapsed().ok())
+            .is_some_and(|age| age.as_secs() < LAZY_REFRESH_MIN_INTERVAL_SECS);
+        if recently_fetched {
+            debug!("Skipping on-demand pricing refresh; cache was fetched recently");
+            return Ok(None);
+        }
+
+        self.fetch_and_cache_sync().map(Some)
     }
 
     pub fn clear_memory_cache() -> Result<()> {
@@ -239,10 +257,13 @@ impl PricingCache {
         memory_cache()
             .lock()
             .map_err(|_| anyhow!("Pricing cache mutex poisoned"))?
-            .insert(self.cache_path.clone(), MemoryCachedPricing {
-                cached: cached.clone(),
-                loaded_mtime: mtime,
-            });
+            .insert(
+                self.cache_path.clone(),
+                MemoryCachedPricing {
+                    cached: cached.clone(),
+                    loaded_mtime: mtime,
+                },
+            );
         Ok(())
     }
 }

@@ -170,8 +170,13 @@ impl UsageStore {
         let mut affected_dates = BTreeSet::new();
 
         for message in messages {
-            let snapshot =
-                ensure_pricing_snapshot(&tx, &pricing_cache, &mut pricing, message, refresh_pricing)?;
+            let snapshot = ensure_pricing_snapshot(
+                &tx,
+                &pricing_cache,
+                &mut pricing,
+                message,
+                refresh_pricing,
+            )?;
             let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
 
             tx.execute(
@@ -294,8 +299,13 @@ impl UsageStore {
         }
 
         for message in messages {
-            let snapshot =
-                ensure_pricing_snapshot(&tx, &pricing_cache, &mut pricing, message, refresh_pricing)?;
+            let snapshot = ensure_pricing_snapshot(
+                &tx,
+                &pricing_cache,
+                &mut pricing,
+                message,
+                refresh_pricing,
+            )?;
             let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
 
             tx.execute(
@@ -408,8 +418,13 @@ impl UsageStore {
         delete_scoped_tx(&tx, None, &[source.to_string()], refresh_pricing)?;
 
         for message in messages {
-            let snapshot =
-                ensure_pricing_snapshot(&tx, &pricing_cache, &mut pricing, message, refresh_pricing)?;
+            let snapshot = ensure_pricing_snapshot(
+                &tx,
+                &pricing_cache,
+                &mut pricing,
+                message,
+                refresh_pricing,
+            )?;
             let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
 
             tx.execute(
@@ -1256,17 +1271,18 @@ fn ensure_pricing_snapshot(
         .and_then(|p| p.lookup(&message.model_id, Some(message.provider_id.as_str())));
 
     if looked_up.is_none() && !PricingCache::has_refreshed_this_run() {
-        info!(
-            "Pricing for model {} is missing or zero-cost. Triggering on-demand refresh of pricing cache.",
-            message.model_id
-        );
-        match pricing_cache.force_refresh_sync() {
-            Ok(new_catalog) => {
+        match pricing_cache.lazy_refresh_sync() {
+            Ok(Some(new_catalog)) => {
+                info!(
+                    "Pricing for model {} was missing or zero-cost; refreshed pricing catalog on demand",
+                    message.model_id
+                );
                 *pricing = Some(new_catalog);
                 looked_up = pricing
                     .as_ref()
                     .and_then(|p| p.lookup(&message.model_id, Some(message.provider_id.as_str())));
             }
+            Ok(None) => {}
             Err(error) => {
                 warn!("Failed to lazy-refresh pricing cache: {}", error);
             }
@@ -1918,13 +1934,14 @@ mod tests {
         // Query daily_pricing_snapshots to ensure it remains empty
         let conn = store.open().unwrap();
         let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM daily_pricing_snapshots",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM daily_pricing_snapshots", [], |row| {
+                row.get(0)
+            })
             .unwrap();
 
-        assert_eq!(count, 0, "No snapshots should be saved for missing/zero-cost models");
+        assert_eq!(
+            count, 0,
+            "No snapshots should be saved for missing/zero-cost models"
+        );
     }
 }
