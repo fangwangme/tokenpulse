@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-06-12
+
+### Fixed
+- Fixed model pricing reload issue by implementing on-demand lazy refresh for missing or zero-priced models.
+- Prevented database daily snapshot pollution by only saving snapshots with valid, non-zero pricing.
+- Implemented mtime-based cache invalidation for the in-memory pricing cache, ensuring long-running processes (like the TUI) automatically detect updates on disk.
+- Integrated pricing cache clearing and lazy-refresh state resetting during TUI reload operations.
+
 ## [0.3.2] - 2026-06-04
 
 ### Changed
