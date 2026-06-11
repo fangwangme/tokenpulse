@@ -10,7 +10,7 @@ use rusqlite::{
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use tracing::warn;
+use tracing::{info, warn};
 
 const CANONICAL_SOURCE_SQL: &str =
     "CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END";
@@ -152,7 +152,7 @@ impl UsageStore {
         }
 
         let pricing_cache = PricingCache::new();
-        let pricing = match load_pricing_for_usage(&pricing_cache, refresh_pricing) {
+        let mut pricing = match load_pricing_for_usage(&pricing_cache, refresh_pricing) {
             Ok(pricing) => Some(pricing),
             Err(error) if !refresh_pricing => {
                 warn!(
@@ -171,7 +171,7 @@ impl UsageStore {
 
         for message in messages {
             let snapshot =
-                ensure_pricing_snapshot(&tx, pricing.as_ref(), message, refresh_pricing)?;
+                ensure_pricing_snapshot(&tx, &pricing_cache, &mut pricing, message, refresh_pricing)?;
             let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
 
             tx.execute(
@@ -245,7 +245,7 @@ impl UsageStore {
         }
 
         let pricing_cache = PricingCache::new();
-        let pricing = match load_pricing_for_usage(&pricing_cache, refresh_pricing) {
+        let mut pricing = match load_pricing_for_usage(&pricing_cache, refresh_pricing) {
             Ok(pricing) => Some(pricing),
             Err(error) if !refresh_pricing => {
                 warn!(
@@ -295,7 +295,7 @@ impl UsageStore {
 
         for message in messages {
             let snapshot =
-                ensure_pricing_snapshot(&tx, pricing.as_ref(), message, refresh_pricing)?;
+                ensure_pricing_snapshot(&tx, &pricing_cache, &mut pricing, message, refresh_pricing)?;
             let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
 
             tx.execute(
@@ -383,7 +383,7 @@ impl UsageStore {
         }
 
         let pricing_cache = PricingCache::new();
-        let pricing = match load_pricing_for_usage(&pricing_cache, refresh_pricing) {
+        let mut pricing = match load_pricing_for_usage(&pricing_cache, refresh_pricing) {
             Ok(pricing) => Some(pricing),
             Err(error) if !refresh_pricing => {
                 warn!(
@@ -409,7 +409,7 @@ impl UsageStore {
 
         for message in messages {
             let snapshot =
-                ensure_pricing_snapshot(&tx, pricing.as_ref(), message, refresh_pricing)?;
+                ensure_pricing_snapshot(&tx, &pricing_cache, &mut pricing, message, refresh_pricing)?;
             let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
 
             tx.execute(
@@ -575,6 +575,39 @@ impl UsageStore {
                 "UPDATE usage_messages SET cost_usd = ?1 WHERE source = ?2 AND client = ?3 AND message_key = ?4",
                 params![cost, source, client, message_key],
             )?;
+
+            // Save the newly found valid non-zero snapshot for this date/model
+            let snapshot = pricing_row.pricing;
+            tx.execute(
+                r#"
+                INSERT INTO daily_pricing_snapshots (
+                    date, provider_id, model_id, input_cost_per_token,
+                    output_cost_per_token, cache_read_input_token_cost,
+                    cache_creation_input_token_cost, captured_at, pricing_source, pricing_version
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                ON CONFLICT(date, provider_id, model_id) DO UPDATE SET
+                    input_cost_per_token = excluded.input_cost_per_token,
+                    output_cost_per_token = excluded.output_cost_per_token,
+                    cache_read_input_token_cost = excluded.cache_read_input_token_cost,
+                    cache_creation_input_token_cost = excluded.cache_creation_input_token_cost,
+                    captured_at = excluded.captured_at,
+                    pricing_source = excluded.pricing_source,
+                    pricing_version = excluded.pricing_version
+                "#,
+                params![
+                    date,
+                    provider_id,
+                    model_id,
+                    snapshot.input_cost_per_token,
+                    snapshot.output_cost_per_token,
+                    snapshot.cache_read_input_token_cost,
+                    snapshot.cache_creation_input_token_cost,
+                    Utc::now().timestamp_millis(),
+                    pricing_row.source,
+                    pricing_row.version,
+                ],
+            )?;
+
             affected_dates.insert(date);
             repaired += 1;
         }
@@ -1182,7 +1215,8 @@ fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<
 
 fn ensure_pricing_snapshot(
     tx: &Transaction<'_>,
-    pricing: Option<&PricingCatalog>,
+    pricing_cache: &PricingCache,
+    pricing: &mut Option<PricingCatalog>,
     message: &UnifiedMessage,
     replace_existing: bool,
 ) -> Result<Option<ModelPricing>> {
@@ -1217,50 +1251,54 @@ fn ensure_pricing_snapshot(
         return Ok(existing);
     }
 
-    let Some(pricing) = pricing else {
-        return Ok(None);
-    };
-
-    let looked_up = pricing.lookup(&message.model_id, Some(message.provider_id.as_str()));
-    let snapshot = looked_up
+    let mut looked_up = pricing
         .as_ref()
-        .map(|resolved| resolved.pricing.clone())
-        .unwrap_or_else(|| ModelPricing::simple(0.0, 0.0));
-    let pricing_source = looked_up
-        .as_ref()
-        .map(|resolved| resolved.source)
-        .unwrap_or("missing");
-    let pricing_version = looked_up
-        .as_ref()
-        .map(|resolved| resolved.version)
-        .unwrap_or("missing");
+        .and_then(|p| p.lookup(&message.model_id, Some(message.provider_id.as_str())));
 
-    tx.execute(
-        r#"
-        INSERT INTO daily_pricing_snapshots (
-            date, provider_id, model_id, input_cost_per_token,
-            output_cost_per_token, cache_read_input_token_cost,
-            cache_creation_input_token_cost, captured_at, pricing_source, pricing_version
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-        "#,
-        params![
-            message.date,
-            message.provider_id,
-            message.model_id,
-            snapshot.input_cost_per_token,
-            snapshot.output_cost_per_token,
-            snapshot.cache_read_input_token_cost,
-            snapshot.cache_creation_input_token_cost,
-            Utc::now().timestamp_millis(),
-            pricing_source,
-            pricing_version,
-        ],
-    )?;
+    if looked_up.is_none() && !PricingCache::has_refreshed_this_run() {
+        info!(
+            "Pricing for model {} is missing or zero-cost. Triggering on-demand refresh of pricing cache.",
+            message.model_id
+        );
+        match pricing_cache.force_refresh_sync() {
+            Ok(new_catalog) => {
+                *pricing = Some(new_catalog);
+                looked_up = pricing
+                    .as_ref()
+                    .and_then(|p| p.lookup(&message.model_id, Some(message.provider_id.as_str())));
+            }
+            Err(error) => {
+                warn!("Failed to lazy-refresh pricing cache: {}", error);
+            }
+        }
+    }
 
-    if pricing_source == "missing" {
-        Ok(None)
-    } else {
+    if let Some(resolved) = looked_up {
+        let snapshot = resolved.pricing.clone();
+        tx.execute(
+            r#"
+            INSERT INTO daily_pricing_snapshots (
+                date, provider_id, model_id, input_cost_per_token,
+                output_cost_per_token, cache_read_input_token_cost,
+                cache_creation_input_token_cost, captured_at, pricing_source, pricing_version
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                message.date,
+                message.provider_id,
+                message.model_id,
+                snapshot.input_cost_per_token,
+                snapshot.output_cost_per_token,
+                snapshot.cache_read_input_token_cost,
+                snapshot.cache_creation_input_token_cost,
+                Utc::now().timestamp_millis(),
+                resolved.source,
+                resolved.version,
+            ],
+        )?;
         Ok(Some(snapshot))
+    } else {
+        Ok(None)
     }
 }
 
@@ -1864,5 +1902,29 @@ mod tests {
         assert_eq!(session_cnt_dedup, 4);
         assert_eq!(msg_cnt, 3);
         assert_eq!(session_cnt, 3);
+    }
+
+    #[test]
+    fn test_zero_cost_not_saved_in_pricing_snapshots() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        // Ingest a message with a model that is missing/zero-priced
+        let mut message = sample_message("2024-03-10", "m1");
+        message.model_id = "completely-nonexistent-model-id-xyz".to_string();
+
+        store.ingest_messages(&[message], false).unwrap();
+
+        // Query daily_pricing_snapshots to ensure it remains empty
+        let conn = store.open().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM daily_pricing_snapshots",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(count, 0, "No snapshots should be saved for missing/zero-cost models");
     }
 }

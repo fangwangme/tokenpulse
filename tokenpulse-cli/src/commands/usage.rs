@@ -503,6 +503,8 @@ fn build_reload_fn(
                 output_since
             ),
         );
+        let _ = tokenpulse_core::pricing::PricingCache::clear_memory_cache();
+        tokenpulse_core::pricing::PricingCache::set_refreshed_this_run(false);
         let store = UsageStore::new();
         let parsers = build_parsers(&current_provider_names, false);
 
