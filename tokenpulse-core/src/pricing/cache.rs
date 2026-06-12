@@ -5,16 +5,57 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tracing::{debug, info, warn};
 
 const CACHE_TTL_HOURS: i64 = 24;
+const LAZY_REFRESH_MIN_INTERVAL_SECS: u64 = 60 * 60;
+
+static HAS_REFRESHED_THIS_RUN: AtomicBool = AtomicBool::new(false);
 
 pub struct PricingCache {
     cache_path: PathBuf,
 }
 
 impl PricingCache {
+    pub fn has_refreshed_this_run() -> bool {
+        HAS_REFRESHED_THIS_RUN.load(Ordering::Relaxed)
+    }
+
+    pub fn set_refreshed_this_run(val: bool) {
+        HAS_REFRESHED_THIS_RUN.store(val, Ordering::Relaxed);
+    }
+
+    /// On-demand refresh for missing-model lookups. Attempted at most once
+    /// per run, and skipped when the on-disk cache was fetched recently:
+    /// a model absent from a fresh catalog is unlikely to appear upstream
+    /// within the hour, so unknown or misparsed model ids cannot trigger
+    /// repeated network fetches across reloads.
+    pub fn lazy_refresh_sync(&self) -> Result<Option<PricingCatalog>> {
+        Self::set_refreshed_this_run(true);
+
+        let recently_fetched = fs::metadata(&self.cache_path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|mtime| mtime.elapsed().ok())
+            .is_some_and(|age| age.as_secs() < LAZY_REFRESH_MIN_INTERVAL_SECS);
+        if recently_fetched {
+            debug!("Skipping on-demand pricing refresh; cache was fetched recently");
+            return Ok(None);
+        }
+
+        self.fetch_and_cache_sync().map(Some)
+    }
+
+    pub fn clear_memory_cache() -> Result<()> {
+        let mut cache = memory_cache()
+            .lock()
+            .map_err(|_| anyhow!("Pricing cache mutex poisoned"))?;
+        cache.clear();
+        Ok(())
+    }
+
     pub fn new() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let data_dir = home.join(".local").join("share").join("tokenpulse");
@@ -109,6 +150,7 @@ impl PricingCache {
 
     fn fetch_and_cache_sync(&self) -> Result<PricingCatalog> {
         info!("Refreshing pricing catalog from LiteLLM, OpenRouter, and models.dev");
+        Self::set_refreshed_this_run(true);
 
         let mut failures = Vec::new();
         let mut catalog = PricingCatalog::default();
@@ -176,9 +218,12 @@ impl PricingCache {
             .lock()
             .map_err(|_| anyhow!("Pricing cache mutex poisoned"))?;
 
-        if let Some(cached) = cache.get(&self.cache_path) {
-            if cache_is_fresh(cached.fetched_at) {
-                return Ok(Some(cached.clone()));
+        if let Some(mem_cached) = cache.get(&self.cache_path) {
+            let mtime = fs::metadata(&self.cache_path)
+                .and_then(|meta| meta.modified())
+                .ok();
+            if mem_cached.loaded_mtime == mtime && cache_is_fresh(mem_cached.cached.fetched_at) {
+                return Ok(Some(mem_cached.cached.clone()));
             }
         }
 
@@ -187,17 +232,38 @@ impl PricingCache {
     }
 
     fn load_memory_cached_any(&self) -> Result<Option<CachedPricing>> {
-        let cache = memory_cache()
+        let mut cache = memory_cache()
             .lock()
             .map_err(|_| anyhow!("Pricing cache mutex poisoned"))?;
-        Ok(cache.get(&self.cache_path).cloned())
+
+        if let Some(mem_cached) = cache.get(&self.cache_path) {
+            let mtime = fs::metadata(&self.cache_path)
+                .and_then(|meta| meta.modified())
+                .ok();
+            if mem_cached.loaded_mtime == mtime {
+                return Ok(Some(mem_cached.cached.clone()));
+            }
+        }
+
+        cache.remove(&self.cache_path);
+        Ok(None)
     }
 
     fn store_memory_cache(&self, cached: &CachedPricing) -> Result<()> {
+        let mtime = fs::metadata(&self.cache_path)
+            .and_then(|meta| meta.modified())
+            .ok();
+
         memory_cache()
             .lock()
             .map_err(|_| anyhow!("Pricing cache mutex poisoned"))?
-            .insert(self.cache_path.clone(), cached.clone());
+            .insert(
+                self.cache_path.clone(),
+                MemoryCachedPricing {
+                    cached: cached.clone(),
+                    loaded_mtime: mtime,
+                },
+            );
         Ok(())
     }
 }
@@ -214,8 +280,14 @@ struct CachedPricing {
     fetched_at: DateTime<Utc>,
 }
 
-fn memory_cache() -> &'static Mutex<std::collections::HashMap<PathBuf, CachedPricing>> {
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, CachedPricing>>> =
+#[derive(Debug, Clone)]
+struct MemoryCachedPricing {
+    cached: CachedPricing,
+    loaded_mtime: Option<std::time::SystemTime>,
+}
+
+fn memory_cache() -> &'static Mutex<std::collections::HashMap<PathBuf, MemoryCachedPricing>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, MemoryCachedPricing>>> =
         OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
