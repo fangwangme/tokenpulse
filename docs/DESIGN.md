@@ -149,17 +149,18 @@ The quota view has two modes:
 - **Overview tab** shows up to the top 4 windows per provider for a compact summary
 - **Detail tabs** (per provider) show all available rate windows
 
-Each quota window renders on two lines when there is vertical room (and falls
-back to a single line in compact cards):
+Each quota window renders as a bar plus a detail line (separated by a blank
+spacer row for breathing room) when there is vertical room, and falls back to a
+single line in compact cards:
 - **Top line** — the gradient progress bar with an expected-progress marker
   (`▏`) showing where theoretical usage should be at this point in time. The
   fill respects the active display mode (used vs remaining); no number or time
   is printed on the bar itself.
-- **Detail line** — `resets <countdown>   used X.XX%   remaining Y.YY%   <pace>`.
+- **Detail line** — `<reset countdown>   used X.XX%   remaining Y.YY%   <pace>`.
   The reset countdown and the used/remaining percentages are colored by the
   balance amount (green/yellow/red); the pace text keeps its own pace color and
   carries the at-current-rate ETA when behind pace ("on track" / "N% under pace"
-  / "+N% pace | eta …").
+  / "+N% pace | eta …"), and is omitted entirely once the window is exhausted.
 - Fixed-width label columns keep multiple windows aligned (especially Antigravity's
   per-group 5h/weekly pairs).
 - Compact cards collapse to one line: bar + percentage + reset countdown.
@@ -174,9 +175,11 @@ back to a single line in compact cards):
   │  Plan: Pro                                                          │
   │                                                                     │
   │  Gemini (5h)  ████████████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
-  │    resets 3h 12m   used 42.10%   remaining 57.90%   On track        │
+  │                                                                     │
+  │    3h 12m   used 42.10%   remaining 57.90%   On track               │
   │  Gemini (7d)  █████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
-  │    resets 4d 6h    used 18.30%   remaining 81.70%   12% under pace   │
+  │                                                                     │
+  │    4d 6h    used 18.30%   remaining 81.70%   12% under pace          │
   ╰─────────────────────────────────────────────────────────────────────╯
 ```
 

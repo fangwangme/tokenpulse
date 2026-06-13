@@ -150,12 +150,12 @@ fn render_snapshot_card(
     };
 
     let compact = compact
-        || inner.height < (base_windows.len() * 2 + if show_account_row { 1 } else { 0 }) as u16;
+        || inner.height < (base_windows.len() * 3 + if show_account_row { 1 } else { 0 }) as u16;
 
     let reserved_lines =
         if show_account_row { 1 } else { 0 } + if snapshot.credits.is_some() { 1 } else { 0 };
     let available_for_windows = inner.height.saturating_sub(reserved_lines as u16);
-    let lines_per_window = if compact { 1 } else { 2 };
+    let lines_per_window = if compact { 1 } else { 3 };
     let max_allowed_windows = (available_for_windows as usize / lines_per_window).max(1);
 
     let windows = if max_allowed_windows < base_windows.len() {
@@ -179,7 +179,7 @@ fn render_snapshot_card(
         constraints.push(Constraint::Length(1));
     }
     for _ in &windows {
-        constraints.push(Constraint::Length(if compact { 1 } else { 2 }));
+        constraints.push(Constraint::Length(if compact { 1 } else { 3 }));
     }
     if snapshot.credits.is_some() {
         constraints.push(Constraint::Length(1));
@@ -354,7 +354,11 @@ fn render_window_block(
 
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(1), // progress bar
+            Constraint::Length(1), // spacer for breathing room
+            Constraint::Min(0),    // detail line
+        ])
         .split(area);
 
     // Top line: pure progress bar (no trailing number); every figure lives on
@@ -364,26 +368,20 @@ fn render_window_block(
         .show_percent(false);
     f.render_widget(gauge, split[0]);
 
-    if split[1].height == 0 {
+    let detail_area = split[2];
+    if detail_area.height == 0 {
         return;
     }
 
     // Detail line: reset countdown + used/remaining colored by the balance
     // amount (same green/yellow/red rule as the gauge), then the pacer (which
-    // carries its own at-current-rate ETA) in its pace color.
+    // carries its own at-current-rate ETA) in its pace color. When the window
+    // is exhausted there is no pace to project, so the pacer is omitted.
     let balance_color = theme.gauge_color(window.used_percent);
     let remaining_percent = (100.0 - window.used_percent).max(0.0);
-    let pace = pace_result
-        .map(|(status, text, _)| Span::styled(text, Style::default().fg(theme.pace_color(status))))
-        .unwrap_or_else(|| {
-            Span::styled("No pace data".to_string(), Style::default().fg(theme.dim))
-        });
 
-    let detail = Line::from(vec![
-        Span::styled(
-            format!("resets {}", reset_str),
-            Style::default().fg(balance_color),
-        ),
+    let mut detail_spans = vec![
+        Span::styled(reset_str, Style::default().fg(balance_color)),
         Span::raw("   "),
         Span::styled(
             format!("used {:.2}%", window.used_percent),
@@ -394,11 +392,16 @@ fn render_window_block(
             format!("remaining {:.2}%", remaining_percent),
             Style::default().fg(balance_color),
         ),
-        Span::raw("   "),
-        pace,
-    ]);
+    ];
+    if let Some((status, text, _)) = pace_result {
+        detail_spans.push(Span::raw("   "));
+        detail_spans.push(Span::styled(
+            text,
+            Style::default().fg(theme.pace_color(status)),
+        ));
+    }
 
-    f.render_widget(Paragraph::new(detail), split[1]);
+    f.render_widget(Paragraph::new(Line::from(detail_spans)), detail_area);
 }
 
 fn format_reset_duration(diff: chrono::Duration) -> String {
