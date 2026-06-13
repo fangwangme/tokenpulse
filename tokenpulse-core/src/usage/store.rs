@@ -820,7 +820,8 @@ impl UsageStore {
                    COUNT(*),
                    SUM(input_tokens),
                    SUM(output_tokens),
-                   SUM(cache_read_tokens + cache_write_tokens)
+                   SUM(cache_read_tokens),
+                   SUM(cache_write_tokens)
             FROM (
                 SELECT
                     date,
@@ -856,6 +857,7 @@ impl UsageStore {
                 row.get::<_, i64>(7)?,
                 row.get::<_, i64>(8)?,
                 row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
             ))
         })?;
 
@@ -871,7 +873,8 @@ impl UsageStore {
                 message_count,
                 input_tokens,
                 output_tokens,
-                cache_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
             ) = row;
             let normalized = normalize_model_name(&model_id);
             let entry = grouped.entry(normalized).or_default();
@@ -883,7 +886,8 @@ impl UsageStore {
             entry.message_count += message_count as usize;
             entry.input_tokens += input_tokens;
             entry.output_tokens += output_tokens;
-            entry.cache_tokens += cache_tokens;
+            entry.cache_read_tokens += cache_read_tokens;
+            entry.cache_write_tokens += cache_write_tokens;
         }
 
         let mut summaries: Vec<ModelSummary> = grouped
@@ -897,7 +901,9 @@ impl UsageStore {
                 tokens: summary.tokens,
                 input_tokens: summary.input_tokens,
                 output_tokens: summary.output_tokens,
-                cache_tokens: summary.cache_tokens,
+                cache_tokens: summary.cache_read_tokens + summary.cache_write_tokens,
+                cache_read_tokens: summary.cache_read_tokens,
+                cache_write_tokens: summary.cache_write_tokens,
                 message_count: summary.message_count,
                 session_count: summary.sessions.len(),
                 percent: 0.0,
@@ -1317,6 +1323,12 @@ fn ensure_pricing_snapshot(
         )?;
         Ok(Some(snapshot))
     } else {
+        if !is_pseudo_model_id(&message.model_id) {
+            warn!(
+                "No pricing catalog entry found for model {} (provider: {}). Using zero-cost fallback.",
+                message.model_id, message.provider_id
+            );
+        }
         Ok(None)
     }
 }
@@ -1366,7 +1378,8 @@ struct AggregatedModelSummary {
     message_count: usize,
     input_tokens: i64,
     output_tokens: i64,
-    cache_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
 }
 
 fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()> {

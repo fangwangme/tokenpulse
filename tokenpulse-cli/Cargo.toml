@@ -16,6 +16,7 @@ anyhow.workspace = true
 clap.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+rayon.workspace = true
 humantime.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

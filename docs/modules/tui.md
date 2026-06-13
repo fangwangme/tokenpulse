@@ -72,23 +72,29 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 
 ## Quota View Layout
 
+Each window uses a progress bar on top and a detail line
+`<countdown> … used … remaining … <pace>` directly below it, with a blank row
+between consecutive windows. Compact cards collapse to a single bar + percentage
++ reset countdown.
+
 ```
-┌─────────────────────────────────────────────────────┐
-│  Header: "TokenPulse - Quota" + timestamp           │
-├─────────────────────────────────────────────────────┤
-│  ┌─ Claude ──────────────────────────────────────┐  │
-│  │  [gauge] Session   ████████░░░░ 42%  3h 12m   │  │
-│  │  [gauge] Weekly    ███░░░░░░░░░ 18%  4d 6h    │  │
-│  │  [gauge] Sonnet    ██████░░░░░░ 48%  4d 6h    │  │
-│  │  [text]  Credits   $12.40 / $100.00            │  │
-│  └───────────────────────────────────────────────┘  │
-│  ┌─ Copilot ────────────────────────────────────┐  │
-│  │  [gauge] Completions ███████░░░ 25%  29d      │  │
-│  │  [gauge] Premium     ██░░░░░░░░ 10%  29d      │  │
-│  └───────────────────────────────────────────────┘  │
-├─────────────────────────────────────────────────────┤
-│  Footer: q quit │ r refresh │ j/k scroll            │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Header: "TokenPulse - Quota" + timestamp                        │
+├──────────────────────────────────────────────────────────────────┤
+│  ┌─ Antigravity ────────────────────────────────────────────┐    │
+│  │  Gemini (5h)  ████████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │    │
+│  │    3h 12m   used 42.00%  remaining 58.00%  On track      │    │
+│  │                                                          │    │
+│  │  Gemini (7d)  ███▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │    │
+│  │    4d 6h    used 18.00%  remaining 82.00%  12% under pace │    │
+│  └──────────────────────────────────────────────────────────┘    │
+│  ┌─ Copilot ────────────────────────────────────────────────┐    │
+│  │  Completions  ███████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │    │
+│  │    29d      used 25.00%  remaining 75.00%  On track      │    │
+│  └──────────────────────────────────────────────────────────┘    │
+├──────────────────────────────────────────────────────────────────┤
+│  Footer: q quit │ r refresh │ j/k scroll                         │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Usage View Layout
@@ -110,7 +116,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 ### Tab 3: Daily
 - Top: summary bar with Today, This Week, This Month, period cost, tokens, messages, and sessions
 - Bottom: daily table with today highlighted
-- Daily numeric columns use distinct colors (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`)
+- Daily numeric columns use distinct colors (`Tokens`, `Cost`, `Input`, `Output`, `Cache R`, `Cache W`, `Msgs`); cache read/write headers abbreviate to `CR`/`CW` on narrow terminals
 - Wide terminals include a 7-day token trend column
 - Sorted by date (most recent first) or cost/tokens
 
@@ -123,14 +129,14 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 - Mouse-clickable cells — click any day to select it and see drill-down
 - Clickable legend cells — click an intensity level to show its current value range
 - The heatmap surface is theme-invariant, using soft gray background and cell border colors in both app themes so low activity levels remain visible and intensity direction stays consistent
-- Drill-down: select any day to see token summary, agent totals, and per-agent model cost breakdown
+- Drill-down: select any day to see token summary (with cache read/write split as `CR`/`CW`), agent totals, and per-agent model cost breakdown
 - Selected-day panel supports scroll when the detail list is taller than the viewport, with a dedicated bottom-row scroll hint so the final token-detail line is not overwritten
 - Streak tracking: current streak and longest streak
 
 ### Tab 5: Quota
 - Live quota usage monitoring.
-- Displays rate limits (e.g. Session 5h, Weekly 7d) with progress gauges, expected progress indicators, and time to reset/limit.
-- Displays remaining balance or used credits depending on the active display mode.
+- Displays rate limits (e.g. Session 5h, Weekly 7d) as a progress bar with an expected-progress marker on top and a detail line directly below it (reset countdown, used/remaining percentages colored by the remaining balance, and an at-current-rate pace indicator that is omitted once the window is exhausted), with a blank row separating consecutive windows. Compact cards collapse to a single bar + percentage + reset countdown.
+- The bar fill reflects remaining balance or used amount depending on the active display mode.
 
 ### Tab 6: Settings
 - Live settings configuration panel for the application.
@@ -138,8 +144,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
   - `quota_display_mode` (toggle between `used` and `remaining` credit balance)
   - `show_empty_providers` (true / false)
   - `show_account` (true / false)
-  - `quota_auto_refresh_interval` (toggle auto-refresh interval for Quota: 0, 1, 2, 5, 10, 15 min)
-  - `usage_auto_refresh_interval` (toggle auto-refresh interval for Usage: 0, 5, 10, 15, 30 min)
+  - `auto_refresh_interval` (unified auto-refresh interval for quota + usage: 0, 1, 2, 5, 10, 15 min; 0 = disabled)
   - `theme` (cycle through auto / dark / light)
   - `scan_antigravity` (toggle active Antigravity session scanning and alias synchronization: true / false)
   - Individual provider enabled/disabled switches
@@ -168,7 +173,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 | `Ctrl+L`              | Clear Models quick filter                |
 | `s`                   | Open/close source filter overlay         |
 | `w`                   | Cycle activity window (26w/52w/365d)     |
-| `T`                   | Jump to today (Daily/Activity)           |
+| `n`                   | Jump to today/now (Daily/Activity)       |
 | `PgUp` / `PgDn`       | Scroll selected-day detail (Activity)    |
 | `a`                   | Toggle all sources (in filter overlay)   |
 | `Space` / `Enter`     | Toggle source (in filter overlay)        |

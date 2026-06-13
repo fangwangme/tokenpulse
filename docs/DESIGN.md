@@ -11,7 +11,7 @@ A Rust CLI tool with two core features:
 **Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI has been deprecated and is retained for historical data analytics only.
 
 **Language:** Rust
-**Key Principle:** On-demand by default, with optional auto-refresh. Run command → see results → exit. Configure quota auto-refresh interval (default 5m) and usage auto-refresh interval (default 10m) in the CLI or live in the TUI Settings tab.
+**Key Principle:** On-demand by default, with optional auto-refresh. Run command → see results → exit. Configure a single auto-refresh interval (default 5m, applies to both quota and usage) in the CLI or live in the TUI Settings tab.
 
 ---
 
@@ -24,8 +24,8 @@ As of 2026-04-25:
 - the usage TUI is organized around `Overview`, `Models`, `Daily`, `Activity`, `Quota`, and `Settings`
 - CLI usage output includes daily, weekly, and monthly summaries
 - pricing snapshots are stored per day/model so historical cost does not silently drift
-- quota view shows top 3 windows per provider in Overview tab; all windows in per-provider detail tabs
-- each quota gauge shows an expected-progress marker (`▏`) and ETA to limit
+- quota view shows up to the top 4 windows per provider in Overview tab; all windows in per-provider detail tabs
+- each quota window renders a progress bar (with an expected-progress marker `▏`) and, when height allows, a detail line below it with the reset countdown, used/remaining percentages, and an at-current-rate pace indicator
 - activity heatmap uses solid colored cells scaled to value intensity, with a theme-invariant background/border
 
 Known gaps:
@@ -146,33 +146,40 @@ tokenpulse --log                          # write a timestamped startup timing l
 ### Quota Tab
 
 The quota view has two modes:
-- **Overview tab** shows only the top 3 most-used windows per provider for a compact summary
+- **Overview tab** shows up to the top 4 windows per provider for a compact summary
 - **Detail tabs** (per provider) show all available rate windows
 
-Each gauge includes:
-- A gradient color progress bar
-- An expected-progress marker (`▏`) showing where theoretical usage should be at this point in time
-- Pace ETA: when ahead of pace, shows estimated time to limit; when behind, shows "under pace"
-- Fixed-width label columns for proper alignment (especially for Gemini CLI's multiple models)
-- GitHub Copilot uses dynamic calendar-month billing period calculation
+Each quota window renders as a bar with its detail line directly beneath it, and
+a blank row separating consecutive windows, when there is vertical room; it falls
+back to a single line in compact cards:
+- **Top line** — the gradient progress bar with an expected-progress marker
+  (`▏`) showing where theoretical usage should be at this point in time. The
+  fill respects the active display mode (used vs remaining); no number or time
+  is printed on the bar itself.
+- **Detail line** — `<reset countdown>   used X.XX%   remaining Y.YY%   <pace>`.
+  The reset countdown and the used/remaining percentages are colored by the
+  balance amount (green/yellow/red); the pace text keeps its own pace color and
+  carries the at-current-rate ETA when behind pace ("on track" / "N% under pace"
+  / "+N% pace | eta …"), and is omitted entirely once the window is exhausted.
+- Fixed-width label columns keep multiple windows aligned (especially Antigravity's
+  per-group 5h/weekly pairs).
+- Compact cards collapse to one line: bar + percentage + reset countdown.
+- GitHub Copilot uses dynamic calendar-month billing period calculation.
 
 ```
 ╭─────────────────────────────────────────────────────────────────────╮
 │                    ⚡ TokenPulse - Quota Overview                    │
 ╰─────────────────────────────────────────────────────────────────────╯
 
-  ╭─ CLAUDE CODE ───────────────────────────────────────────────────╮
-  │  Plan: Pro                                                      │
-  │                                                                 │
-  │  Session (5h)   ████████████▏░░░░░░░░░░░░░░░░░  42%  ⏳ 3h 12m │
-  │  Weekly (7d)    █████▏░░░░░░░░░░░░░░░░░░░░░░░░  18%  ⏳ 4d 6h  │
-  ╰─────────────────────────────────────────────────────────────────╯
-
-  ╭─ GITHUB COPILOT ────────────────────────────────────────────────╮
-  │  Plan: Pro                                                      │
-  │                                                                 │
-  │  Completions    ██████████████████▏░░░░░░░░░░░  67%  ⏳ 12d    │
-  ╰─────────────────────────────────────────────────────────────────╯
+  ╭─ ANTIGRAVITY ───────────────────────────────────────────────────────╮
+  │  Plan: Pro                                                          │
+  │                                                                     │
+  │  Gemini (5h)  ████████████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+  │    3h 12m   used 42.10%   remaining 57.90%   On track               │
+  │                                                                     │
+  │  Gemini (7d)  █████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+  │    4d 6h    used 18.30%   remaining 81.70%   12% under pace          │
+  ╰─────────────────────────────────────────────────────────────────────╯
 ```
 
 ### Dashboard TUI Layout
@@ -231,18 +238,9 @@ Each gauge includes:
   Press q to quit │ ←/→ switch tabs │ ↑/↓ move selected row/day
 ```
 
-Current usage TUI notes:
-
-- `Overview` shows a 60-day stacked chart switchable between token and cost views, plus a scrollable `Top Models` table
-- `Overview` top models use their own visible scroll hint, cost percentage, and wider model/agent columns so long model IDs and multi-agent attribution fit better
-- `Models` shows a searchable (`/`), sortable table with a sort-aware `%` share column and per-column semantic colors (`Model`=company color, `Tokens`=green, `Cost`=gold, `Msgs`=blue)
-- `Daily` shows Today/This Week/This Month cost, period totals, and daily rows as a colored table (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`) with a 7-day token trend column on wide terminals
-- `Activity` shows range cost stats, a GitHub-style calendar heatmap with solid colored cells split at 20/40/60/80% of the visible window peak, GitHub-green cost cells, Kaggle-blue token cells, mouse-clickable cells, clickable legend ranges, and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
-- `Activity` heatmap surface is theme-invariant, using soft gray background and cell border colors in both light and dark themes
-- `Activity` selected-day panel includes total/input/output/cache/reasoning/message/session summary and supports detail scrolling when the agent/model list exceeds the viewport, with the scroll hint rendered on its own bottom row
-- `Quota` displays rate limits (e.g. Session 5h, Weekly 7d) with progress gauges, expected progress indicators, and remaining balance or used credits
-- `Settings` provides a live configuration view to toggle display modes, provider visibility, theme preferences, and adjust Quota and Usage TUI auto-refresh intervals
-- Press `s` on any tab to open a source filter overlay (toggle providers on/off)
+The per-tab behaviour, columns, key bindings, and Settings options are
+documented authoritatively in [`modules/tui.md`](modules/tui.md); this section
+only sketches the conceptual layout.
 
 **Company vs Agent Distinction:**
 - **Company color** = model family owner (`OpenAI`, `Google`, `Anthropic`, `Others`)
@@ -254,57 +252,20 @@ The TUI uses company color for model names and chart segments, while agent/sourc
 
 ## Data Models
 
-### Quota
-
-```rust
-pub struct QuotaSnapshot {
-    pub provider: String,           // "claude", "codex"
-    pub plan: Option<String>,       // "Pro", "Plus"
-    pub windows: Vec<RateWindow>,
-    pub credits: Option<CreditInfo>,
-    pub fetched_at: DateTime<Utc>,
-}
-
-pub struct RateWindow {
-    pub label: String,              // "Session (5h)", "Weekly"
-    pub used_percent: f64,          // 0.0 - 100.0
-    pub resets_at: Option<DateTime<Utc>>,
-}
-
-pub struct CreditInfo {
-    pub used: f64,
-    pub limit: Option<f64>,         // None = unlimited
-    pub currency: String,           // "USD"
-}
-```
-
-### Usage
-
-```rust
-pub struct TokenBreakdown {
-    pub input: i64,
-    pub output: i64,
-    pub cache_read: i64,
-    pub cache_write: i64,
-    pub reasoning: i64,
-}
-
-pub struct UnifiedMessage {
-    pub client: String,             // "claude", "codex", "opencode", "pi"
-    pub client_detail: Option<String>,
-    pub model_id: String,           // "claude-opus-4", "o3"
-    pub provider_id: String,        // "anthropic", "openai"
-    pub session_id: String,
-    pub timestamp: i64,             // Unix ms
-    pub date: String,               // "YYYY-MM-DD"
-    pub tokens: TokenBreakdown,
-    pub cost: f64,                  // calculated USD
-}
-```
+The shared data contracts (`QuotaSnapshot`, `RateWindow`, `CreditInfo`,
+`TokenBreakdown`, `UnifiedMessage`, `ModelSummary`, …) live in
+[`tokenpulse-core/src/provider.rs`](../tokenpulse-core/src/provider.rs) and
+`tokenpulse-core/src/usage/mod.rs`. Those definitions are the source of truth —
+read them there rather than maintaining a second copy here.
 
 ---
 
 ## API Details
+
+> Per-provider endpoints, auth, and response mapping are documented
+> authoritatively in [`modules/quota.md`](modules/quota.md) (quota) and
+> [`modules/usage.md`](modules/usage.md) (session parsing). The notes below are a
+> quick reference.
 
 ### Claude Code Quota
 

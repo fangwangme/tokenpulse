@@ -1,5 +1,5 @@
 use crate::auth::claude::ClaudeAuth;
-use crate::provider::{CreditInfo, QuotaFetcher, QuotaSnapshot, RateWindow};
+use crate::provider::{QuotaFetcher, QuotaSnapshot, RateWindow};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -22,8 +22,6 @@ struct ClaudeQuotaResponse {
     seven_day_sonnet: Option<WindowUsage>,
     #[serde(default)]
     seven_day_opus: Option<WindowUsage>,
-    #[serde(default)]
-    extra_usage: Option<ExtraUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,17 +30,6 @@ struct WindowUsage {
     utilization: f64,
     #[serde(default)]
     resets_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExtraUsage {
-    #[serde(default)]
-    #[allow(dead_code)]
-    is_enabled: bool,
-    #[serde(default)]
-    monthly_limit: Option<f64>,
-    #[serde(default)]
-    used_credits: Option<f64>,
 }
 
 pub struct ClaudeQuotaFetcher {
@@ -176,18 +163,13 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
             });
         }
 
-        let credits = quota.extra_usage.map(|e| CreditInfo {
-            used: e.used_credits.unwrap_or(0.0),
-            limit: e.monthly_limit,
-            currency: "USD".to_string(),
-        });
-
         Ok(QuotaSnapshot {
             provider: "claude".to_string(),
             plan: Some("Pro".to_string()),
             account: None,
             windows,
-            credits,
+            // Claude Code credit usage is intentionally not surfaced.
+            credits: None,
             fetched_at: Utc::now(),
         })
     }
@@ -198,21 +180,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_quota_response_deserializes_usage_windows_and_credits() {
+    fn claude_quota_response_deserializes_usage_windows() {
         let quota: ClaudeQuotaResponse = serde_json::from_str(
             r#"{
                 "five_hour":{"utilization":42.5,"resets_at":"2026-04-10T10:00:00Z"},
-                "seven_day":{"utilization":18.0,"resets_at":"2026-04-14T00:00:00Z"},
-                "extra_usage":{"is_enabled":true,"monthly_limit":100.0,"used_credits":12.5}
+                "seven_day":{"utilization":18.0,"resets_at":"2026-04-14T00:00:00Z"}
             }"#,
         )
         .unwrap();
 
         assert_eq!(quota.five_hour.unwrap().utilization, 42.5);
         assert_eq!(quota.seven_day.unwrap().utilization, 18.0);
-        let extra = quota.extra_usage.unwrap();
-        assert!(extra.is_enabled);
-        assert_eq!(extra.monthly_limit, Some(100.0));
-        assert_eq!(extra.used_credits, Some(12.5));
     }
 }

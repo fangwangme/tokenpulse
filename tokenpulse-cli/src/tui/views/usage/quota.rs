@@ -137,25 +137,25 @@ fn render_snapshot_card(
     let has_plan_display = snapshot.plan.is_some() && show_account;
     let show_account_row = has_account_display || has_plan_display;
 
-    let base_windows: Vec<&RateWindow> = if overview && snapshot.windows.len() > 3 {
+    let base_windows: Vec<&RateWindow> = if overview && snapshot.windows.len() > 4 {
         let mut sorted: Vec<&RateWindow> = snapshot.windows.iter().collect();
         sorted.sort_by(|a, b| {
             b.used_percent
                 .partial_cmp(&a.used_percent)
                 .unwrap_or(Ordering::Equal)
         });
-        sorted.into_iter().take(3).collect()
+        sorted.into_iter().take(4).collect()
     } else {
         snapshot.windows.iter().collect()
     };
 
     let compact = compact
-        || inner.height < (base_windows.len() * 2 + if show_account_row { 1 } else { 0 }) as u16;
+        || inner.height < (base_windows.len() * 3 + if show_account_row { 1 } else { 0 }) as u16;
 
     let reserved_lines =
         if show_account_row { 1 } else { 0 } + if snapshot.credits.is_some() { 1 } else { 0 };
     let available_for_windows = inner.height.saturating_sub(reserved_lines as u16);
-    let lines_per_window = if compact { 1 } else { 2 };
+    let lines_per_window = if compact { 1 } else { 3 };
     let max_allowed_windows = (available_for_windows as usize / lines_per_window).max(1);
 
     let windows = if max_allowed_windows < base_windows.len() {
@@ -179,7 +179,7 @@ fn render_snapshot_card(
         constraints.push(Constraint::Length(1));
     }
     for _ in &windows {
-        constraints.push(Constraint::Length(if compact { 1 } else { 2 }));
+        constraints.push(Constraint::Length(if compact { 1 } else { 3 }));
     }
     if snapshot.credits.is_some() {
         constraints.push(Constraint::Length(1));
@@ -234,7 +234,6 @@ fn render_snapshot_card(
             render_window_block(
                 f,
                 gauge_area,
-                snapshot,
                 window,
                 display_mode,
                 theme,
@@ -296,7 +295,10 @@ fn render_snapshot_card(
     if !compact && cursor < sections.len() {
         let footer = Paragraph::new(format!(
             "Fetched {}",
-            snapshot.fetched_at.format("%Y-%m-%d %H:%M UTC")
+            snapshot
+                .fetched_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
         ))
         .style(Style::default().fg(theme.dim));
         f.render_widget(footer, sections[cursor]);
@@ -306,7 +308,6 @@ fn render_snapshot_card(
 fn render_window_block(
     f: &mut ratatui::Frame,
     area: Rect,
-    snapshot: &QuotaSnapshot,
     window: &RateWindow,
     display_mode: &QuotaDisplayMode,
     theme: &Theme,
@@ -336,14 +337,17 @@ fn render_window_block(
         QuotaDisplayMode::Remaining => (100.0 - *ep).clamp(0.0, 100.0),
     });
 
-    let gauge = GradientGauge::new(&label, shown_percent)
-        .width(area.width.saturating_sub(22) as usize)
+    let base_gauge = GradientGauge::new(&label, shown_percent)
         .color(gauge_color)
-        .time(&reset_str)
         .expected_percent(expected_pct)
         .label_width(fixed_label_width);
 
+    // Compact cards render a single line with no detail row, so keep the
+    // percentage and reset countdown on the bar itself.
     if compact {
+        let gauge = base_gauge
+            .width(area.width.saturating_sub(22) as usize)
+            .time(&reset_str);
         f.render_widget(gauge, area);
         return;
     }
@@ -353,49 +357,50 @@ fn render_window_block(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
 
+    // Top line: pure progress bar (no trailing number); every figure lives on
+    // the detail line below so nothing is duplicated.
+    let gauge = base_gauge
+        .width(split[0].width as usize)
+        .show_percent(false);
     f.render_widget(gauge, split[0]);
 
-    if split[1].height == 0 {
+    // The detail line sits directly under the bar. render_snapshot_card gives
+    // each window an extra row, so the leftover row below the detail becomes a
+    // blank gap between consecutive windows (not between the bar and the text).
+    let detail_area = split[1];
+    if detail_area.height == 0 {
         return;
     }
 
-    let pace = pace_result
-        .map(|(status, text, _)| Span::styled(text, Style::default().fg(theme.pace_color(status))))
-        .unwrap_or_else(|| Span::styled("No pace data", Style::default().fg(theme.dim)));
+    // Detail line: reset countdown + used/remaining colored by the balance
+    // amount (same green/yellow/red rule as the gauge), then the pacer (which
+    // carries its own at-current-rate ETA) in its pace color. When the window
+    // is exhausted there is no pace to project, so the pacer is omitted.
+    let balance_color = theme.gauge_color(window.used_percent);
+    let remaining_percent = (100.0 - window.used_percent).max(0.0);
 
-    let primary = match display_mode {
-        QuotaDisplayMode::Used => format!("{:.0}% used", window.used_percent),
-        QuotaDisplayMode::Remaining => format!("{:.0}% left", shown_percent),
-    };
-    let secondary = match display_mode {
-        QuotaDisplayMode::Used => format!("{:.0}% left", 100.0 - window.used_percent),
-        QuotaDisplayMode::Remaining => format!("{:.0}% used", window.used_percent),
-    };
+    let mut detail_spans = vec![
+        Span::styled(reset_str, Style::default().fg(balance_color)),
+        Span::raw("   "),
+        Span::styled(
+            format!("used {:.2}%", window.used_percent),
+            Style::default().fg(balance_color),
+        ),
+        Span::raw("   "),
+        Span::styled(
+            format!("remaining {:.2}%", remaining_percent),
+            Style::default().fg(balance_color),
+        ),
+    ];
+    if let Some((status, text, _)) = pace_result {
+        detail_spans.push(Span::raw("   "));
+        detail_spans.push(Span::styled(
+            text,
+            Style::default().fg(theme.pace_color(status)),
+        ));
+    }
 
-    let detail = if compact {
-        Line::from(vec![
-            Span::styled(
-                primary,
-                Style::default().fg(theme.provider_color(&snapshot.provider)),
-            ),
-            Span::raw("  "),
-            pace,
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(
-                primary,
-                Style::default().fg(theme.provider_color(&snapshot.provider)),
-            ),
-            Span::raw("  "),
-            Span::styled(secondary, Style::default().fg(theme.fg)),
-            Span::raw("  "),
-            pace,
-        ])
-    };
-
-    let paragraph = Paragraph::new(detail).style(Style::default().fg(theme.dim));
-    f.render_widget(paragraph, split[1]);
+    f.render_widget(Paragraph::new(Line::from(detail_spans)), detail_area);
 }
 
 fn format_reset_duration(diff: chrono::Duration) -> String {

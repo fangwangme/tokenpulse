@@ -11,10 +11,23 @@ pub use codex::CodexQuotaFetcher;
 pub use copilot::CopilotQuotaFetcher;
 
 use crate::{QuotaFetcher, QuotaSnapshot};
-use anyhow::Result;
-use futures::future::join_all;
+use anyhow::{anyhow, Result};
 
+/// Fetch quota for every provider concurrently, spawning one Tokio task per
+/// provider so a slow or blocking provider cannot stall the others. Results
+/// preserve the input provider order.
 pub async fn fetch_all(providers: Vec<Box<dyn QuotaFetcher>>) -> Vec<Result<QuotaSnapshot>> {
-    let futures: Vec<_> = providers.iter().map(|p| p.fetch_quota()).collect();
-    join_all(futures).await
+    let handles: Vec<_> = providers
+        .into_iter()
+        .map(|provider| tokio::spawn(async move { provider.fetch_quota().await }))
+        .collect();
+
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        results.push(match handle.await {
+            Ok(result) => result,
+            Err(join_err) => Err(anyhow!("Quota fetch task panicked: {}", join_err)),
+        });
+    }
+    results
 }

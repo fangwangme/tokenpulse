@@ -53,7 +53,8 @@ anthropic-beta: oauth-2025-04-20
 | `seven_day.utilization`                | Weekly (7d)                                    |
 | `seven_day_sonnet.utilization`         | Sonnet                                         |
 | `seven_day_opus.utilization`           | Opus                                           |
-| `extra_usage.used / extra_usage.limit` | Credits                                        |
+
+Extra-credit usage (`extra_usage`) is intentionally not surfaced for Claude Code.
 
 ## Codex
 
@@ -135,11 +136,20 @@ No external auth lookup. Antigravity quota is read from a running local Antigrav
 ### Quota Probe
 1. Discover running Antigravity CLI/Desktop language server processes
 2. Prefer CLI LS, then Desktop LS, then unknown Antigravity LS processes
-3. Send Connect-RPC `GetUserStatus` / model-config requests to the local language server
+3. Send a Connect-RPC `RetrieveUserQuotaSummary` request to the local language server; on success, make a best-effort `GetUserStatus` call for account email + plan name
 4. Do not use OAuth files, keyring lookups, or direct Cloud Code HTTP for Antigravity quota
 
 ### Response Mapping
-Quota windows are labeled per Antigravity model pool. Each pool maps to a `RateWindow` with a period duration inferred from the reset time or pool type.
+`RetrieveUserQuotaSummary` returns one group per model family, each with a `5h` and a `weekly` bucket. Each bucket maps to a `RateWindow`:
+
+| Bucket field                 | → RateWindow                                                    |
+| ---------------------------- | --------------------------------------------------------------- |
+| group `displayName`          | Label prefix (`Gemini Models` → `Gemini`, `Claude and GPT models` → `Claude`) |
+| `window` (`5h` / `weekly`)   | Label suffix `(5h)` / `(7d)` and period duration (5h / 7d)      |
+| `remainingFraction`          | `used_percent = round((1 - remainingFraction) * 100)`           |
+| `resetTime`                  | `resets_at`                                                     |
+
+Windows are sorted Gemini before Claude, and within each group the 5-hour limit before the weekly limit.
 
 ---
 

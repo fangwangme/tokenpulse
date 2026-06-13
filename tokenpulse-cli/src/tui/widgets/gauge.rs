@@ -13,6 +13,7 @@ pub struct GradientGauge<'a> {
     width: usize,
     color: Color,
     show_time: Option<&'a str>,
+    show_percent: bool,
     label_width: Option<usize>,
 }
 
@@ -25,8 +26,16 @@ impl<'a> GradientGauge<'a> {
             width: 30,
             color: Color::Green,
             show_time: None,
+            show_percent: true,
             label_width: None,
         }
+    }
+
+    /// Toggle the trailing percentage label after the bar. Disable it when the
+    /// percentage is rendered elsewhere (e.g. on a separate detail line).
+    pub fn show_percent(mut self, show: bool) -> Self {
+        self.show_percent = show;
+        self
     }
 
     pub fn width(mut self, width: usize) -> Self {
@@ -62,11 +71,18 @@ impl<'a> Widget for GradientGauge<'a> {
             return;
         }
 
-        let percent_text = format!("{:>3}%", self.percent.round() as i32);
-        let trailing = if let Some(time) = self.show_time {
-            format!(" {} {}", percent_text, truncate_display_width(time, 12))
+        let percent_text = if self.show_percent {
+            format!("{:>6.2}%", self.percent)
         } else {
-            format!(" {}", percent_text)
+            String::new()
+        };
+        let trailing = match (self.show_percent, self.show_time) {
+            (true, Some(time)) => {
+                format!(" {} {}", percent_text, truncate_display_width(time, 12))
+            }
+            (true, None) => format!(" {}", percent_text),
+            (false, Some(time)) => format!(" {}", truncate_display_width(time, 12)),
+            (false, None) => String::new(),
         };
         let trailing_width = UnicodeWidthStr::width(trailing.as_str());
         let total_width = area.width as usize;

@@ -22,29 +22,16 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
         QuotaDisplayMode::Remaining => "remaining",
     };
 
-    let quota_refresh = {
-        let base = quota_refresh_label(config.display.quota_auto_refresh_secs);
-        if config.display.quota_auto_refresh_secs > 0 {
-            let elapsed = state.last_quota_refresh.elapsed().as_secs() as u32;
-            let remaining = config
-                .display
-                .quota_auto_refresh_secs
-                .saturating_sub(elapsed);
-            let m = remaining / 60;
-            let s = remaining % 60;
-            format!("{} (next {}m {}s)", base, m, s)
-        } else {
-            base.to_string()
-        }
-    };
-    let usage_refresh = {
-        let base = usage_refresh_label(config.display.usage_auto_refresh_secs);
-        if config.display.usage_auto_refresh_secs > 0 {
-            let elapsed = state.last_usage_refresh.elapsed().as_secs() as u32;
-            let remaining = config
-                .display
-                .usage_auto_refresh_secs
-                .saturating_sub(elapsed);
+    let auto_refresh = {
+        let base = refresh_label(config.display.auto_refresh_secs);
+        if config.display.auto_refresh_secs > 0 {
+            // The next due refresh is whichever timer fires soonest.
+            let elapsed = state
+                .last_quota_refresh
+                .elapsed()
+                .min(state.last_usage_refresh.elapsed())
+                .as_secs() as u32;
+            let remaining = config.display.auto_refresh_secs.saturating_sub(elapsed);
             let m = remaining / 60;
             let s = remaining % 60;
             format!("{} (next {}m {}s)", base, m, s)
@@ -71,14 +58,9 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
             value_color: theme.claude,
         },
         SettingItem {
-            key: "quota_auto_refresh_interval",
-            label: quota_refresh.to_string(),
+            key: "auto_refresh_interval",
+            label: auto_refresh.to_string(),
             value_color: theme.accent_soft,
-        },
-        SettingItem {
-            key: "usage_auto_refresh_interval",
-            label: usage_refresh.to_string(),
-            value_color: theme.accent,
         },
         SettingItem {
             key: "theme",
@@ -114,7 +96,7 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
     items
 }
 
-fn quota_refresh_label(secs: u32) -> &'static str {
+fn refresh_label(secs: u32) -> &'static str {
     match secs {
         0 => "off",
         60 => "1m",
@@ -126,31 +108,18 @@ fn quota_refresh_label(secs: u32) -> &'static str {
     }
 }
 
-fn usage_refresh_label(secs: u32) -> &'static str {
-    match secs {
-        0 => "off",
-        300 => "5m",
-        600 => "10m",
-        900 => "15m",
-        1800 => "30m",
-        _ => "custom",
-    }
-}
-
-const QUOTA_INTERVALS: &[u32] = &[0, 60, 120, 300, 600, 900];
-fn next_quota_interval(curr: u32) -> u32 {
-    let pos = QUOTA_INTERVALS.iter().position(|&v| v == curr).unwrap_or(0);
-    QUOTA_INTERVALS[(pos + 1) % QUOTA_INTERVALS.len()]
-}
-const USAGE_INTERVALS: &[u32] = &[0, 300, 600, 900, 1800];
-fn next_usage_interval(curr: u32) -> u32 {
-    let pos = USAGE_INTERVALS.iter().position(|&v| v == curr).unwrap_or(0);
-    USAGE_INTERVALS[(pos + 1) % USAGE_INTERVALS.len()]
+const REFRESH_INTERVALS: &[u32] = &[0, 60, 120, 300, 600, 900];
+fn next_refresh_interval(curr: u32) -> u32 {
+    let pos = REFRESH_INTERVALS
+        .iter()
+        .position(|&v| v == curr)
+        .unwrap_or(0);
+    REFRESH_INTERVALS[(pos + 1) % REFRESH_INTERVALS.len()]
 }
 
 pub fn settings_row_count(_state: &UsageState) -> usize {
     let providers_count = ALL_PROVIDERS.len();
-    7 + providers_count
+    6 + providers_count
 }
 
 pub fn handle_settings_action(
@@ -171,18 +140,14 @@ pub fn handle_settings_action(
     } else if idx == 2 {
         config.display.show_account = !config.display.show_account;
     } else if idx == 3 {
-        config.display.quota_auto_refresh_secs =
-            next_quota_interval(config.display.quota_auto_refresh_secs);
+        config.display.auto_refresh_secs = next_refresh_interval(config.display.auto_refresh_secs);
     } else if idx == 4 {
-        config.display.usage_auto_refresh_secs =
-            next_usage_interval(config.display.usage_auto_refresh_secs);
-    } else if idx == 5 {
         config.display.theme = config.display.theme.next();
         *theme = Theme::from_preference(config.display.theme);
-    } else if idx == 6 {
+    } else if idx == 5 {
         config.display.scan_antigravity = !config.display.scan_antigravity;
     } else {
-        let provider_idx = idx - 7;
+        let provider_idx = idx - 6;
         let providers = ALL_PROVIDERS.to_vec();
 
         if provider_idx < providers.len() {

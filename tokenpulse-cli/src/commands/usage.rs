@@ -1,6 +1,7 @@
 use crate::tui;
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDate, SecondsFormat, Utc};
+use rayon::prelude::*;
 use std::{
     collections::{BTreeSet, HashSet},
     fs::{File, OpenOptions},
@@ -140,13 +141,9 @@ pub async fn run(
 
     let mut found_any_source = false;
 
+    // Resolve each provider's incremental window first (sequential store reads).
+    let mut effective_sinces: Vec<Option<NaiveDate>> = Vec::with_capacity(parsers.len());
     for parser in &parsers {
-        let provider_started = Instant::now();
-        perf.log(
-            "provider_start",
-            format!("provider={}", parser.provider_name()),
-        );
-
         let since_started = Instant::now();
         let effective_since = if rebuild_all
             || refresh_range.is_some()
@@ -165,11 +162,35 @@ pub async fn run(
                 effective_since
             ),
         );
+        effective_sinces.push(effective_since);
+    }
 
-        let parse_started = Instant::now();
-        match parser.parse_sessions(effective_since) {
+    // Parse every provider concurrently — parsing is independent and the
+    // heaviest step (Antigravity also syncs over the local network). Ingestion
+    // below stays sequential so SQLite writes remain serialized and ordered.
+    let parse_outcomes: Vec<(Duration, Result<Vec<UnifiedMessage>>)> = parsers
+        .par_iter()
+        .zip(effective_sinces.par_iter())
+        .map(|(parser, since)| {
+            let started = Instant::now();
+            let result = parser.parse_sessions(*since);
+            (started.elapsed(), result)
+        })
+        .collect();
+
+    for ((parser, &effective_since), (parse_elapsed, parse_result)) in parsers
+        .iter()
+        .zip(effective_sinces.iter())
+        .zip(parse_outcomes)
+    {
+        let provider_started = Instant::now();
+        perf.log(
+            "provider_start",
+            format!("provider={}", parser.provider_name()),
+        );
+
+        match parse_result {
             Ok(messages) => {
-                let parse_elapsed = parse_started.elapsed();
                 let parsed_count = messages.len();
                 let parsed_sessions = message_session_count(&messages);
                 let scoped = match refresh_range {
@@ -248,7 +269,7 @@ pub async fn run(
             Err(error) => {
                 perf.log_duration(
                     "parse_sessions_error",
-                    parse_started.elapsed(),
+                    parse_elapsed,
                     format!("provider={} error={}", parser.provider_name(), error),
                 );
                 eprintln!(
@@ -302,7 +323,7 @@ pub async fn run(
         if let Some(csv_type) = csv {
             match csv_type.as_str() {
                 "models" => println!("model,provider,source,tokens,cost_usd,messages,sessions,percent"),
-                _ => println!("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_tokens,messages,sessions"),
+                _ => println!("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,messages,sessions"),
             }
             return Ok(());
         }
@@ -508,13 +529,10 @@ fn build_reload_fn(
         let store = UsageStore::new();
         let parsers = build_parsers(&current_provider_names, false);
 
+        // Resolve incremental windows (sequential reads), parse concurrently,
+        // then ingest sequentially so SQLite writes stay serialized.
+        let mut reload_sinces: Vec<Option<NaiveDate>> = Vec::with_capacity(parsers.len());
         for parser in &parsers {
-            let provider_started = Instant::now();
-            perf.log(
-                "reload_provider_start",
-                format!("provider={}", parser.provider_name()),
-            );
-
             let started = Instant::now();
             let since = store.default_since(parser.provider_name(), output_since)?;
             perf.log_duration(
@@ -522,12 +540,31 @@ fn build_reload_fn(
                 started.elapsed(),
                 format!("provider={} since={:?}", parser.provider_name(), since),
             );
-            let started = Instant::now();
-            match parser.parse_sessions(since) {
+            reload_sinces.push(since);
+        }
+
+        let reload_outcomes: Vec<(Duration, Result<Vec<UnifiedMessage>>)> = parsers
+            .par_iter()
+            .zip(reload_sinces.par_iter())
+            .map(|(parser, since)| {
+                let started = Instant::now();
+                let result = parser.parse_sessions(*since);
+                (started.elapsed(), result)
+            })
+            .collect();
+
+        for (parser, (parse_elapsed, parse_result)) in parsers.iter().zip(reload_outcomes) {
+            let provider_started = Instant::now();
+            perf.log(
+                "reload_provider_start",
+                format!("provider={}", parser.provider_name()),
+            );
+
+            match parse_result {
                 Ok(messages) => {
                     perf.log_duration(
                         "reload_parse_sessions",
-                        started.elapsed(),
+                        parse_elapsed,
                         format!(
                             "provider={} messages={} sessions={}",
                             parser.provider_name(),
@@ -568,7 +605,7 @@ fn build_reload_fn(
                 Err(error) => {
                     perf.log_duration(
                         "reload_parse_sessions_error",
-                        started.elapsed(),
+                        parse_elapsed,
                         format!("provider={} error={}", parser.provider_name(), error),
                     );
                 } // tolerate per-provider errors during reload
@@ -837,7 +874,7 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
     }
 
     println!("\n=== By Model ===");
-    for model in summary.by_model.iter().take(10) {
+    for model in &summary.by_model {
         println!(
             "{} [{}]: {} tokens | ${:.2} | {} messages",
             model.model,
@@ -849,7 +886,7 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
     }
 
     println!("\n=== Recent Daily Totals ===");
-    for day in summary.daily.iter().rev().take(14).rev() {
+    for day in summary.daily.iter().rev().take(365).rev() {
         println!(
             "{}: {} tokens | ${:.2} | {} messages | {} sessions",
             day.date,
@@ -937,7 +974,7 @@ fn print_quota_summary(
                 QuotaDisplayMode::Remaining => "remaining",
             };
             print!(
-                "  - {}: {:.1}% {}",
+                "  - {}: {:.2}% {}",
                 window.label, display_percent, mode_label
             );
             if let Some(ref resets_at) = window.resets_at {
@@ -984,18 +1021,18 @@ fn format_int<T: ToString>(value: T) -> String {
 }
 
 fn print_daily_csv(rows: &[tokenpulse_core::usage::DailyUsageRow]) {
-    println!("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_tokens,messages,sessions");
+    println!("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,messages,sessions");
     for row in rows {
-        let cache = row.cache_read_tokens + row.cache_write_tokens;
         println!(
-            "{},{},{},{:.6},{},{},{},{},{}",
+            "{},{},{},{:.6},{},{},{},{},{},{}",
             row.date,
             row.source,
             row.total_tokens,
             row.cost_usd,
             row.input_tokens,
             row.output_tokens,
-            cache,
+            row.cache_read_tokens,
+            row.cache_write_tokens,
             row.message_count,
             row.session_count,
         );

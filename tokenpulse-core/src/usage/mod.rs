@@ -91,6 +91,8 @@ pub struct ModelSummary {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
     pub message_count: usize,
     pub session_count: usize,
     pub percent: f64,
@@ -167,10 +169,9 @@ pub fn compute_usage_summary(messages: &[UnifiedMessage]) -> UsageSummary {
             let tokens: i64 = entries.iter().map(|entry| entry.total_tokens()).sum();
             let input_tokens: i64 = entries.iter().map(|entry| entry.tokens.input).sum();
             let output_tokens: i64 = entries.iter().map(|entry| entry.tokens.output).sum();
-            let cache_tokens: i64 = entries
-                .iter()
-                .map(|entry| entry.tokens.cache_read + entry.tokens.cache_write)
-                .sum();
+            let cache_read_tokens: i64 = entries.iter().map(|entry| entry.tokens.cache_read).sum();
+            let cache_write_tokens: i64 =
+                entries.iter().map(|entry| entry.tokens.cache_write).sum();
             ModelSummary {
                 model,
                 provider: providers.into_iter().collect::<Vec<_>>().join(","),
@@ -179,7 +180,9 @@ pub fn compute_usage_summary(messages: &[UnifiedMessage]) -> UsageSummary {
                 tokens,
                 input_tokens,
                 output_tokens,
-                cache_tokens,
+                cache_tokens: cache_read_tokens + cache_write_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
                 message_count: entries.len(),
                 session_count: sessions.len(),
                 percent: percent(tokens, total_tokens),

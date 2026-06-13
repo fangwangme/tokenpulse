@@ -40,7 +40,7 @@ fn render_daily_table(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut days = visible_daily_rows(dashboard, &state.enabled_sources);
+    let days = sorted_daily_rows(dashboard, state);
     if days.is_empty() {
         f.render_widget(
             Paragraph::new(empty_data_message(state, "No daily data"))
@@ -49,35 +49,19 @@ fn render_daily_table(
         );
         return;
     }
-    // Sort daily data
-    match state.sort_field {
-        SortField::Date => {
-            days.sort_by_key(|d| d.date);
-            if !state.sort_ascending {
-                days.reverse();
-            }
-        }
-        SortField::Cost => {
-            days.sort_by(|a, b| {
-                a.cost_usd
-                    .partial_cmp(&b.cost_usd)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            if !state.sort_ascending {
-                days.reverse();
-            }
-        }
-        SortField::Tokens => {
-            days.sort_by_key(|d| d.total_tokens);
-            if !state.sort_ascending {
-                days.reverse();
-            }
-        }
-    }
 
     let today = Local::now().date_naive();
     let show_wow = inner.width >= 100;
     let show_detail_cols = inner.width >= 80;
+    // Split cache into read/write columns; abbreviate the headers when space is tight.
+    let cache_split_wide = inner.width >= 90;
+    let cache_col_width = if cache_split_wide { 10usize } else { 7usize };
+    let (cache_r_header, cache_w_header) = if cache_split_wide {
+        ("Cache R", "Cache W")
+    } else {
+        ("CR", "CW")
+    };
+    let cache_color = Color::Rgb(251, 146, 60);
 
     let value_by_date: HashMap<NaiveDate, f64> = days
         .iter()
@@ -133,8 +117,12 @@ fn render_daily_table(
                 Style::default().fg(Color::Rgb(167, 139, 250)).bold(),
             ),
             Span::styled(
-                format!("{:<10}", "Cache"),
-                Style::default().fg(Color::Rgb(251, 146, 60)).bold(),
+                format!("{:<cache_col_width$}", cache_r_header),
+                Style::default().fg(cache_color).bold(),
+            ),
+            Span::styled(
+                format!("{:<cache_col_width$}", cache_w_header),
+                Style::default().fg(cache_color).bold(),
             ),
         ]);
     }
@@ -224,12 +212,18 @@ fn render_daily_table(
                     ),
                 ),
                 Span::styled(
-                    format!("{:<10}", format_compact(day.cache_tokens())),
-                    selected_row_style(
-                        metric_style(Color::Rgb(251, 146, 60), row_bg),
-                        selected,
-                        theme,
+                    format!(
+                        "{:<cache_col_width$}",
+                        format_compact(day.cache_read_tokens)
                     ),
+                    selected_row_style(metric_style(cache_color, row_bg), selected, theme),
+                ),
+                Span::styled(
+                    format!(
+                        "{:<cache_col_width$}",
+                        format_compact(day.cache_write_tokens)
+                    ),
+                    selected_row_style(metric_style(cache_color, row_bg), selected, theme),
                 ),
             ]);
         }
@@ -268,6 +262,39 @@ pub fn visible_daily_rows(
         .into_iter()
         .filter(|day| day.total_tokens > 0)
         .collect()
+}
+
+/// Daily rows in the exact order the table displays them: the visible
+/// (non-empty) days sorted by the active sort field/direction. The table
+/// renderer and the `n` "jump to today" shortcut both rely on this so the
+/// selected-row index points at the same row in both places.
+pub fn sorted_daily_rows(dashboard: &UsageDashboard, state: &UsageState) -> Vec<DailyStats> {
+    let mut days = visible_daily_rows(dashboard, &state.enabled_sources);
+    match state.sort_field {
+        SortField::Date => {
+            days.sort_by_key(|d| d.date);
+            if !state.sort_ascending {
+                days.reverse();
+            }
+        }
+        SortField::Cost => {
+            days.sort_by(|a, b| {
+                a.cost_usd
+                    .partial_cmp(&b.cost_usd)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if !state.sort_ascending {
+                days.reverse();
+            }
+        }
+        SortField::Tokens => {
+            days.sort_by_key(|d| d.total_tokens);
+            if !state.sort_ascending {
+                days.reverse();
+            }
+        }
+    }
+    days
 }
 
 pub fn daily_metric_value(day: &DailyStats, metric: OverviewMetric) -> f64 {

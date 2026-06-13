@@ -15,7 +15,7 @@ pub struct Config {
 }
 
 fn default_version() -> u32 {
-    2
+    3
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,14 +34,15 @@ pub struct DisplayConfig {
     pub theme: ThemePreference,
     #[serde(default)]
     pub quota_display_mode: QuotaDisplayMode,
-    /// Auto-refresh interval for quota TUI in seconds. 0 = disabled.
-    /// Supported values: 0, 60, 120, 300, 600, 900.
-    #[serde(default = "default_quota_auto_refresh_secs")]
-    pub quota_auto_refresh_secs: u32,
-    /// Auto-refresh interval for usage TUI in seconds. 0 = disabled.
-    /// Supported values: 0, 300, 600, 900, 1800.
-    #[serde(default = "default_usage_auto_refresh_secs")]
-    pub usage_auto_refresh_secs: u32,
+    /// Unified auto-refresh interval (seconds) for both quota and usage in the
+    /// TUI. 0 = disabled. Supported values: 0, 60, 120, 300, 600, 900.
+    /// `quota_auto_refresh_secs` is accepted as an alias for migration from
+    /// older configs that stored separate quota/usage intervals.
+    #[serde(
+        default = "default_auto_refresh_secs",
+        alias = "quota_auto_refresh_secs"
+    )]
+    pub auto_refresh_secs: u32,
     #[serde(default = "default_true")]
     pub show_account: bool,
     #[serde(default = "default_true")]
@@ -111,7 +112,7 @@ impl Default for Config {
         providers.insert("copilot".to_string(), ProviderConfig::default());
 
         Self {
-            version: 2,
+            version: 3,
             providers,
             display: DisplayConfig::default(),
         }
@@ -133,8 +134,7 @@ impl Default for DisplayConfig {
             show_empty_providers: false,
             theme: ThemePreference::default(),
             quota_display_mode: QuotaDisplayMode::default(),
-            quota_auto_refresh_secs: default_quota_auto_refresh_secs(),
-            usage_auto_refresh_secs: default_usage_auto_refresh_secs(),
+            auto_refresh_secs: default_auto_refresh_secs(),
             show_account: true,
             scan_antigravity: true,
         }
@@ -145,12 +145,8 @@ fn default_true() -> bool {
     true
 }
 
-fn default_quota_auto_refresh_secs() -> u32 {
+fn default_auto_refresh_secs() -> u32 {
     300
-}
-
-fn default_usage_auto_refresh_secs() -> u32 {
-    600
 }
 
 pub struct ConfigManager {
@@ -193,11 +189,11 @@ impl ConfigManager {
         let content = fs::read_to_string(&self.config_path)?;
         let mut config: Config = toml::from_str(&content)?;
 
-        if config.version < 2 {
-            config.version = 2;
-            if config.display.usage_auto_refresh_secs == 300 {
-                config.display.usage_auto_refresh_secs = 600;
-            }
+        if config.version < 3 {
+            // v3 unified the separate quota/usage auto-refresh intervals into a
+            // single `auto_refresh_secs`. The old `quota_auto_refresh_secs` value
+            // is carried over via serde alias; re-saving drops the legacy keys.
+            config.version = 3;
             if let Err(e) = self.save(&config) {
                 tracing::warn!("Failed to save migrated config: {}", e);
             }
@@ -320,20 +316,32 @@ enabled = true
             config.display.quota_display_mode,
             QuotaDisplayMode::Remaining
         );
-        assert_eq!(config.display.quota_auto_refresh_secs, 300);
-        assert_eq!(config.display.usage_auto_refresh_secs, 600);
+        assert_eq!(config.display.auto_refresh_secs, 300);
         assert!(config.display.show_account);
     }
 
     #[test]
     fn test_auto_refresh_secs_deserializes_from_toml() {
         let toml_str = r#"
-version = 1
+version = 3
 [display]
-quota_auto_refresh_secs = 60
+auto_refresh_secs = 60
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.display.quota_auto_refresh_secs, 60);
+        assert_eq!(config.display.auto_refresh_secs, 60);
+    }
+
+    #[test]
+    fn test_auto_refresh_secs_migrates_from_quota_alias() {
+        let toml_str = r#"
+version = 2
+[display]
+quota_auto_refresh_secs = 120
+usage_auto_refresh_secs = 900
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        // Legacy quota interval is carried over; usage key is ignored.
+        assert_eq!(config.display.auto_refresh_secs, 120);
     }
 
     #[test]
@@ -350,11 +358,10 @@ theme = "dark"
     #[test]
     fn test_auto_refresh_secs_defaults_when_absent() {
         let toml_str = r#"
-version = 1
+version = 3
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.display.quota_auto_refresh_secs, 300);
-        assert_eq!(config.display.usage_auto_refresh_secs, 600);
+        assert_eq!(config.display.auto_refresh_secs, 300);
         assert_eq!(config.display.theme, ThemePreference::Auto);
     }
 
@@ -363,26 +370,27 @@ version = 1
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("config.toml");
 
-        // Write a version 1 config with 300s (5m) usage refresh
-        let v1_toml = r#"
-version = 1
+        // Write a legacy v2 config with separate quota/usage intervals.
+        let legacy_toml = r#"
+version = 2
 [display]
-quota_auto_refresh_secs = 300
-usage_auto_refresh_secs = 300
+quota_auto_refresh_secs = 120
+usage_auto_refresh_secs = 900
 "#;
-        fs::write(&config_path, v1_toml).unwrap();
+        fs::write(&config_path, legacy_toml).unwrap();
 
         let manager = ConfigManager { config_path };
         let loaded = manager.load().unwrap();
 
-        // Should be migrated to version 2 and 600s
-        assert_eq!(loaded.version, 2);
-        assert_eq!(loaded.display.usage_auto_refresh_secs, 600);
-        assert_eq!(loaded.display.quota_auto_refresh_secs, 300);
+        // Migrated to v3 with a single interval carried from the quota value.
+        assert_eq!(loaded.version, 3);
+        assert_eq!(loaded.display.auto_refresh_secs, 120);
 
-        // Verify the file was written back
+        // The rewritten file drops the legacy keys in favor of the unified one.
         let written_content = fs::read_to_string(&manager.config_path).unwrap();
-        assert!(written_content.contains("version = 2"));
-        assert!(written_content.contains("usage_auto_refresh_secs = 600"));
+        assert!(written_content.contains("version = 3"));
+        assert!(written_content.contains("auto_refresh_secs = 120"));
+        assert!(!written_content.contains("quota_auto_refresh_secs"));
+        assert!(!written_content.contains("usage_auto_refresh_secs"));
     }
 }

@@ -7,55 +7,58 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{debug, info};
 
-const LS_PROBE_TIMEOUT_SECS: u64 = 3;
+// The Language Server proxies RetrieveUserQuotaSummary to Antigravity's backend,
+// so this is a real network round-trip, not a local liveness check. Keep it in
+// line with the other providers (20s) instead of a tight 3s probe budget.
+const LS_REQUEST_TIMEOUT_SECS: u64 = 20;
 
-// Connect-RPC service
+// Connect-RPC service exposed by the Antigravity Language Server.
 const LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
 
-// ── LS RPC response types ──
+const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1000;
+const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+// ── RetrieveUserQuotaSummary response ──
+
+#[derive(Debug, Deserialize)]
+struct LsQuotaSummaryResponse {
+    #[serde(default)]
+    response: Option<LsQuotaSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LsQuotaSummary {
+    #[serde(default)]
+    groups: Vec<LsQuotaGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LsQuotaGroup {
+    #[serde(default, rename = "displayName")]
+    display_name: String,
+    #[serde(default)]
+    buckets: Vec<LsQuotaBucket>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LsQuotaBucket {
+    #[serde(default)]
+    window: String,
+    #[serde(default, rename = "remainingFraction")]
+    remaining_fraction: f64,
+    #[serde(default, rename = "resetTime")]
+    reset_time: Option<String>,
+}
+
+// ── GetUserStatus response (account + plan only) ──
 
 #[derive(Debug, Deserialize)]
 struct LsUserStatusResponse {
-    #[serde(default, rename = "cascadeModelConfigData")]
-    cascade_model_config_data: Option<CascadeModelConfigData>,
     #[serde(default, rename = "userStatus")]
     user_status: Option<UserStatus>,
-    #[serde(default, rename = "clientModelConfigs")]
-    client_model_configs: Vec<ClientModelConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CascadeModelConfigData {
-    #[serde(default, rename = "clientModelConfigs")]
-    client_model_configs: Vec<ClientModelConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ClientModelConfig {
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default, rename = "modelOrAlias")]
-    model_or_alias: Option<ModelOrAlias>,
-    #[serde(default, rename = "quotaInfo")]
-    quota_info: Option<LsQuotaInfo>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ModelOrAlias {
-    #[serde(default)]
-    model: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct LsQuotaInfo {
-    #[serde(default, rename = "remainingFraction")]
-    remaining_fraction: Option<f64>,
-    #[serde(default, rename = "resetTime")]
-    reset_time: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,8 +67,6 @@ struct UserStatus {
     email: Option<String>,
     #[serde(default, rename = "planStatus")]
     plan_status: Option<PlanStatus>,
-    #[serde(default, rename = "cascadeModelConfigData")]
-    cascade_model_config_data: Option<CascadeModelConfigData>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,19 +81,10 @@ struct PlanInfo {
     plan_name: Option<String>,
 }
 
-// ── Unified pool data ──
-
-#[derive(Debug, Clone)]
-struct PoolQuota {
-    remaining_fraction: f64,
-    reset_time: Option<String>,
-    period_duration_ms: i64,
-}
-
-struct PoolData {
-    pools: HashMap<String, PoolQuota>,
-    plan: Option<String>,
+#[derive(Debug, Default)]
+struct UserMetadata {
     account: Option<String>,
+    plan: Option<String>,
 }
 
 // ── Main fetcher ──
@@ -102,66 +94,26 @@ pub struct AntigravityQuotaFetcher {
 }
 
 impl AntigravityQuotaFetcher {
-    const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1000;
-    const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-
     pub fn new() -> Self {
         let ls_client = Client::builder()
-            .timeout(Duration::from_secs(LS_PROBE_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(LS_REQUEST_TIMEOUT_SECS))
             .danger_accept_invalid_certs(true)
             .build()
             .unwrap_or_else(|_| Client::new());
         Self { ls_client }
     }
 
-    // ── Language Server fallback ──
-
-    async fn probe_ls(&self, connection: &AntigravityConnection) -> Option<PoolData> {
-        debug!(
-            "Using {} Antigravity LS at {}:{}",
-            connection.runtime_kind.as_str(),
-            connection.scheme,
-            connection.port
-        );
-
+    /// POST a standard IDE-metadata request to a Language Server RPC method and
+    /// deserialize the JSON response. Returns `None` on any transport, status,
+    /// or decode error so callers can fall back to the next connection.
+    async fn rpc_post<T: serde::de::DeserializeOwned>(
+        &self,
+        connection: &AntigravityConnection,
+        method: &str,
+    ) -> Option<T> {
         let url = format!(
-            "{}://127.0.0.1:{}/{}/GetUserStatus",
-            connection.scheme, connection.port, LS_SERVICE
-        );
-
-        let metadata = serde_json::json!({
-            "ideName": "antigravity",
-            "extensionName": "antigravity",
-            "ideVersion": "unknown",
-            "locale": "en",
-        });
-
-        let body = serde_json::json!({ "metadata": metadata });
-
-        let mut request = self
-            .ls_client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Connect-Protocol-Version", "1")
-            .json(&body);
-        if let Some(csrf_token) = connection.csrf_token.as_deref() {
-            request = request.header("x-codeium-csrf-token", csrf_token);
-        }
-        let response = request.send().await.ok()?;
-
-        if !response.status().is_success() {
-            debug!("GetUserStatus failed: {}", response.status());
-            return self.probe_ls_model_configs(connection).await;
-        }
-
-        let data: LsUserStatusResponse = response.json().await.ok()?;
-        self.parse_ls_response(data)
-    }
-
-    async fn probe_ls_model_configs(&self, connection: &AntigravityConnection) -> Option<PoolData> {
-        let url = format!(
-            "{}://127.0.0.1:{}/{}/GetCommandModelConfigs",
-            connection.scheme, connection.port, LS_SERVICE
+            "{}://127.0.0.1:{}/{}/{}",
+            connection.scheme, connection.port, LS_SERVICE, method
         );
 
         let body = serde_json::json!({
@@ -182,229 +134,153 @@ impl AntigravityQuotaFetcher {
         if let Some(csrf_token) = connection.csrf_token.as_deref() {
             request = request.header("x-codeium-csrf-token", csrf_token);
         }
+
         let response = request.send().await.ok()?;
-
         if !response.status().is_success() {
-            debug!("GetCommandModelConfigs failed: {}", response.status());
+            debug!("{} failed: {}", method, response.status());
+            return None;
+        }
+        response.json::<T>().await.ok()
+    }
+
+    /// Probe a single connection for the user's quota summary, returning a
+    /// fully built snapshot when the server reports usable quota buckets.
+    async fn probe_connection(&self, connection: &AntigravityConnection) -> Option<QuotaSnapshot> {
+        debug!(
+            "Probing {} Antigravity LS at {}:{}",
+            connection.runtime_kind.as_str(),
+            connection.scheme,
+            connection.port
+        );
+
+        let summary: LsQuotaSummaryResponse = self
+            .rpc_post(connection, "RetrieveUserQuotaSummary")
+            .await?;
+        let windows = windows_from_summary(&summary.response?);
+        if windows.is_empty() {
             return None;
         }
 
-        let data: LsUserStatusResponse = response.json().await.ok()?;
-        self.parse_ls_response(data)
-    }
+        // Account/plan are not part of the quota summary; fetch them best-effort.
+        let metadata = self
+            .rpc_post::<LsUserStatusResponse>(connection, "GetUserStatus")
+            .await
+            .map(user_metadata_from_status)
+            .unwrap_or_default();
 
-    async fn probe_ls_connections(
-        &self,
-        connections: &[AntigravityConnection],
-        runtime_kind: AntigravityRuntimeKind,
-    ) -> Option<PoolData> {
-        for connection in connections
-            .iter()
-            .filter(|conn| conn.runtime_kind == runtime_kind)
-        {
-            if let Some(pool_data) = self.probe_ls(connection).await {
-                info!(
-                    "Antigravity quota fetched via {} Language Server (pid={})",
-                    connection.runtime_kind.as_str(),
-                    connection.pid
-                );
-                return Some(pool_data);
-            }
-        }
-        None
-    }
-
-    async fn probe_remaining_ls_connections(
-        &self,
-        connections: &[AntigravityConnection],
-    ) -> Option<PoolData> {
-        for connection in connections.iter().filter(|conn| {
-            conn.runtime_kind != AntigravityRuntimeKind::Cli
-                && conn.runtime_kind != AntigravityRuntimeKind::Desktop
-        }) {
-            if let Some(pool_data) = self.probe_ls(connection).await {
-                info!(
-                    "Antigravity quota fetched via {} Language Server (pid={})",
-                    connection.runtime_kind.as_str(),
-                    connection.pid
-                );
-                return Some(pool_data);
-            }
-        }
-        None
-    }
-
-    fn parse_ls_response(&self, data: LsUserStatusResponse) -> Option<PoolData> {
-        let account = data
-            .user_status
-            .as_ref()
-            .and_then(|u| u.email.clone())
-            .filter(|email| !email.trim().is_empty());
-
-        let configs = data
-            .user_status
-            .as_ref()
-            .and_then(|u| u.cascade_model_config_data.as_ref())
-            .map(|c| c.client_model_configs.clone())
-            .or_else(|| {
-                data.cascade_model_config_data
-                    .as_ref()
-                    .map(|c| c.client_model_configs.clone())
-            })
-            .unwrap_or_else(|| data.client_model_configs.clone());
-        if configs.is_empty() {
-            return None;
-        }
-
-        let plan = data
-            .user_status
-            .and_then(|u| u.plan_status)
-            .and_then(|p| p.plan_info)
-            .and_then(|i| i.plan_name);
-
-        let mut pools: HashMap<String, PoolQuota> = HashMap::new();
-
-        for config in &configs {
-            let label = config.label.as_deref().unwrap_or("");
-            let model = config
-                .model_or_alias
-                .as_ref()
-                .and_then(|m| m.model.as_deref())
-                .unwrap_or("");
-
-            // Skip if no quota info
-            let quota = match &config.quota_info {
-                Some(q) => q,
-                None => continue,
-            };
-
-            let frac = quota.remaining_fraction.unwrap_or(1.0);
-            let reset_time = quota.reset_time.clone();
-
-            // Determine pool from label or model name
-            let pool_name = self.pool_label_from_ls(label, model);
-            let period_duration_ms =
-                self.infer_period_duration_ms(reset_time.as_deref(), &pool_name);
-
-            let entry = pools.entry(pool_name).or_insert(PoolQuota {
-                remaining_fraction: frac,
-                reset_time: reset_time.clone(),
-                period_duration_ms,
-            });
-            if frac < entry.remaining_fraction {
-                *entry = PoolQuota {
-                    remaining_fraction: frac,
-                    reset_time,
-                    period_duration_ms,
-                };
-            }
-        }
-
-        if pools.is_empty() {
-            return None;
-        }
-
-        Some(PoolData {
-            pools,
-            plan,
-            account,
+        Some(QuotaSnapshot {
+            provider: "antigravity".to_string(),
+            plan: metadata.plan,
+            account: metadata.account,
+            windows,
+            credits: None,
+            fetched_at: Utc::now(),
         })
     }
+}
 
-    fn pool_label_from_ls(&self, label: &str, model: &str) -> String {
-        let combined = format!("{} {}", label, model).to_lowercase();
-        if combined.contains("gemini") && combined.contains("pro") {
-            "Gemini Pro".to_string()
-        } else if combined.contains("gemini") && combined.contains("flash") {
-            "Gemini Flash".to_string()
-        } else {
-            "Claude".to_string()
-        }
-    }
+/// Map a quota summary into sorted `RateWindow`s: Gemini before Claude, and
+/// within each group the 5-hour limit before the weekly limit.
+fn windows_from_summary(summary: &LsQuotaSummary) -> Vec<RateWindow> {
+    let mut built: Vec<(u8, u8, RateWindow)> = Vec::new();
 
-    fn pool_period_duration_ms(&self, pool_label: &str) -> i64 {
-        if pool_label.to_lowercase().contains("flash") {
-            Self::FIVE_HOURS_MS
-        } else {
-            Self::SEVEN_DAYS_MS
-        }
-    }
+    for group in &summary.groups {
+        let group_label = clean_group_label(&group.display_name);
+        let group_rank = group_rank(&group_label);
 
-    fn infer_period_duration_ms(&self, reset_time: Option<&str>, pool_label: &str) -> i64 {
-        let Some(reset_time) = reset_time else {
-            return self.pool_period_duration_ms(pool_label);
-        };
-
-        let Some(reset_at) = DateTime::parse_from_rfc3339(reset_time)
-            .ok()
-            .map(|dt| dt.with_timezone(&Utc))
-        else {
-            return self.pool_period_duration_ms(pool_label);
-        };
-
-        if reset_at
-            .signed_duration_since(Utc::now())
-            .num_milliseconds()
-            <= Self::FIVE_HOURS_MS
-        {
-            Self::FIVE_HOURS_MS
-        } else {
-            Self::SEVEN_DAYS_MS
-        }
-    }
-
-    // Common: convert pool data to QuotaSnapshot
-    fn pools_to_snapshot(&self, pool_data: PoolData) -> QuotaSnapshot {
-        let mut windows = Vec::new();
-
-        let mut sorted_pools: Vec<_> = pool_data.pools.into_iter().collect();
-        sorted_pools.sort_by(|a, b| {
-            let key = |name: &str| -> &str {
-                if name.contains("Pro") {
-                    "0"
-                } else if name.contains("Flash") {
-                    "1"
-                } else {
-                    "2"
-                }
-            };
-            key(&a.0).cmp(key(&b.0))
-        });
-
-        for (pool, quota) in sorted_pools {
-            let used = ((1.0 - quota.remaining_fraction.clamp(0.0, 1.0)) * 100.0).round();
-            let resets_at = quota.reset_time.and_then(|s| {
-                DateTime::parse_from_rfc3339(&s)
+        for bucket in &group.buckets {
+            let (window_suffix, window_rank, period_duration_ms) =
+                window_descriptor(&bucket.window);
+            // Keep full precision; the UI rounds for display.
+            let used = (1.0 - bucket.remaining_fraction.clamp(0.0, 1.0)) * 100.0;
+            let resets_at = bucket.reset_time.as_deref().and_then(|s| {
+                DateTime::parse_from_rfc3339(s)
                     .ok()
                     .map(|d| d.with_timezone(&Utc))
             });
 
-            windows.push(RateWindow {
-                label: pool,
-                used_percent: used,
-                resets_at,
-                period_duration_ms: Some(quota.period_duration_ms),
-            });
-        }
-
-        if windows.is_empty() {
-            windows.push(RateWindow {
-                label: "Usage".to_string(),
-                used_percent: 0.0,
-                resets_at: None,
-                period_duration_ms: None,
-            });
-        }
-
-        QuotaSnapshot {
-            provider: "antigravity".to_string(),
-            plan: pool_data.plan,
-            account: pool_data.account,
-            windows,
-            credits: None,
-            fetched_at: Utc::now(),
+            built.push((
+                group_rank,
+                window_rank,
+                RateWindow {
+                    label: format!("{} ({})", group_label, window_suffix),
+                    used_percent: used,
+                    resets_at,
+                    period_duration_ms,
+                },
+            ));
         }
     }
+
+    built.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    built.into_iter().map(|(_, _, window)| window).collect()
+}
+
+/// Turn a server group display name into a short, clean label.
+fn clean_group_label(display_name: &str) -> String {
+    let lower = display_name.to_lowercase();
+    if lower.contains("gemini") {
+        "Gemini".to_string()
+    } else if lower.contains("claude") || lower.contains("gpt") {
+        "Claude".to_string()
+    } else {
+        let trimmed = display_name.trim();
+        let cleaned = trimmed
+            .strip_suffix(" Models")
+            .or_else(|| trimmed.strip_suffix(" models"))
+            .unwrap_or(trimmed)
+            .trim();
+        if cleaned.is_empty() {
+            "Usage".to_string()
+        } else {
+            cleaned.to_string()
+        }
+    }
+}
+
+fn group_rank(group_label: &str) -> u8 {
+    match group_label {
+        "Gemini" => 0,
+        "Claude" => 1,
+        _ => 2,
+    }
+}
+
+/// Map a server window identifier to a display suffix, sort rank, and period.
+fn window_descriptor(window: &str) -> (String, u8, Option<i64>) {
+    match window.to_lowercase().as_str() {
+        "5h" => ("5h".to_string(), 0, Some(FIVE_HOURS_MS)),
+        "weekly" => ("7d".to_string(), 1, Some(SEVEN_DAYS_MS)),
+        _ => (window.to_string(), 2, None),
+    }
+}
+
+fn user_metadata_from_status(status: LsUserStatusResponse) -> UserMetadata {
+    let user = status.user_status;
+    let account = user
+        .as_ref()
+        .and_then(|u| u.email.clone())
+        .filter(|email| !email.trim().is_empty());
+    let plan = user
+        .and_then(|u| u.plan_status)
+        .and_then(|p| p.plan_info)
+        .and_then(|i| i.plan_name)
+        .filter(|name| !name.trim().is_empty());
+    UserMetadata { account, plan }
+}
+
+/// Order detected connections so the CLI server is tried first, then Desktop,
+/// then any other runtime kinds, preserving discovery order within each group.
+fn ordered_connections(connections: &[AntigravityConnection]) -> Vec<&AntigravityConnection> {
+    let mut ordered: Vec<&AntigravityConnection> = Vec::with_capacity(connections.len());
+    for kind in [AntigravityRuntimeKind::Cli, AntigravityRuntimeKind::Desktop] {
+        ordered.extend(connections.iter().filter(|conn| conn.runtime_kind == kind));
+    }
+    ordered.extend(connections.iter().filter(|conn| {
+        conn.runtime_kind != AntigravityRuntimeKind::Cli
+            && conn.runtime_kind != AntigravityRuntimeKind::Desktop
+    }));
+    ordered
 }
 
 impl Default for AntigravityQuotaFetcher {
@@ -432,22 +308,15 @@ impl QuotaFetcher for AntigravityQuotaFetcher {
                 Vec::new()
             });
 
-        if let Some(pool_data) = self
-            .probe_ls_connections(&connections, AntigravityRuntimeKind::Cli)
-            .await
-        {
-            return Ok(self.pools_to_snapshot(pool_data));
-        }
-
-        if let Some(pool_data) = self
-            .probe_ls_connections(&connections, AntigravityRuntimeKind::Desktop)
-            .await
-        {
-            return Ok(self.pools_to_snapshot(pool_data));
-        }
-
-        if let Some(pool_data) = self.probe_remaining_ls_connections(&connections).await {
-            return Ok(self.pools_to_snapshot(pool_data));
+        for connection in ordered_connections(&connections) {
+            if let Some(snapshot) = self.probe_connection(connection).await {
+                info!(
+                    "Antigravity quota fetched via {} Language Server (pid={})",
+                    connection.runtime_kind.as_str(),
+                    connection.pid
+                );
+                return Ok(snapshot);
+            }
         }
 
         Err(anyhow!(
@@ -460,90 +329,122 @@ impl QuotaFetcher for AntigravityQuotaFetcher {
 mod tests {
     use super::*;
 
-    #[test]
-    fn pool_period_duration_matches_pool_type() {
-        let fetcher = AntigravityQuotaFetcher::new();
+    const SAMPLE_QUOTA_SUMMARY: &str = r#"{
+        "response": {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "description": "Models within this group: Gemini Flash, Gemini Pro",
+                    "buckets": [
+                        {
+                            "bucketId": "gemini-weekly",
+                            "displayName": "Weekly Limit",
+                            "window": "weekly",
+                            "remainingFraction": 0.9755835,
+                            "resetTime": "2026-06-19T05:07:40Z"
+                        },
+                        {
+                            "bucketId": "gemini-5h",
+                            "displayName": "Five Hour Limit",
+                            "window": "5h",
+                            "remainingFraction": 0.8852908,
+                            "resetTime": "2026-06-12T10:07:40Z"
+                        }
+                    ]
+                },
+                {
+                    "displayName": "Claude and GPT models",
+                    "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+                    "buckets": [
+                        {
+                            "bucketId": "3p-weekly",
+                            "displayName": "Weekly Limit",
+                            "window": "weekly",
+                            "remainingFraction": 0.1584452,
+                            "resetTime": "2026-06-12T09:51:22Z"
+                        },
+                        {
+                            "bucketId": "3p-5h",
+                            "displayName": "Five Hour Limit",
+                            "window": "5h",
+                            "remainingFraction": 1,
+                            "resetTime": "2026-06-12T11:10:43Z"
+                        }
+                    ]
+                }
+            ]
+        }
+    }"#;
 
+    #[test]
+    fn parses_quota_summary_into_sorted_windows() {
+        let parsed: LsQuotaSummaryResponse = serde_json::from_str(SAMPLE_QUOTA_SUMMARY).unwrap();
+        let summary = parsed.response.expect("response present");
+        let windows = windows_from_summary(&summary);
+
+        let labels: Vec<&str> = windows.iter().map(|w| w.label.as_str()).collect();
         assert_eq!(
-            fetcher.pool_period_duration_ms("Gemini Flash"),
-            AntigravityQuotaFetcher::FIVE_HOURS_MS
-        );
-        assert_eq!(
-            fetcher.pool_period_duration_ms("Gemini Pro"),
-            AntigravityQuotaFetcher::SEVEN_DAYS_MS
-        );
-        assert_eq!(
-            fetcher.pool_period_duration_ms("Claude"),
-            AntigravityQuotaFetcher::SEVEN_DAYS_MS
+            labels,
+            vec!["Gemini (5h)", "Gemini (7d)", "Claude (5h)", "Claude (7d)",]
         );
     }
 
     #[test]
-    fn infer_period_duration_uses_reset_time_before_pool_default() {
-        let fetcher = AntigravityQuotaFetcher::new();
-        let short_reset = (Utc::now() + chrono::Duration::hours(4)).to_rfc3339();
-        let long_reset = (Utc::now() + chrono::Duration::hours(6)).to_rfc3339();
+    fn maps_window_durations_and_used_percent() {
+        let parsed: LsQuotaSummaryResponse = serde_json::from_str(SAMPLE_QUOTA_SUMMARY).unwrap();
+        let windows = windows_from_summary(&parsed.response.unwrap());
 
+        let gemini_5h = &windows[0];
+        assert_eq!(gemini_5h.label, "Gemini (5h)");
+        assert_eq!(gemini_5h.period_duration_ms, Some(FIVE_HOURS_MS));
+        assert!((gemini_5h.used_percent - (1.0 - 0.8852908_f64) * 100.0).abs() < 1e-9);
+        assert!(gemini_5h.resets_at.is_some());
+
+        let gemini_weekly = &windows[1];
+        assert_eq!(gemini_weekly.label, "Gemini (7d)");
+        assert_eq!(gemini_weekly.period_duration_ms, Some(SEVEN_DAYS_MS));
+
+        let third_party_weekly = &windows[3];
+        assert_eq!(third_party_weekly.label, "Claude (7d)");
+        assert!((third_party_weekly.used_percent - (1.0 - 0.1584452_f64) * 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn clean_group_label_maps_known_groups() {
+        assert_eq!(clean_group_label("Gemini Models"), "Gemini");
+        assert_eq!(clean_group_label("Claude and GPT models"), "Claude");
+        assert_eq!(clean_group_label("Experimental Models"), "Experimental");
+    }
+
+    #[test]
+    fn window_descriptor_falls_back_for_unknown_windows() {
         assert_eq!(
-            fetcher.infer_period_duration_ms(Some(&short_reset), "Claude"),
-            AntigravityQuotaFetcher::FIVE_HOURS_MS
+            window_descriptor("5h"),
+            ("5h".to_string(), 0, Some(FIVE_HOURS_MS))
         );
         assert_eq!(
-            fetcher.infer_period_duration_ms(Some(&long_reset), "Gemini Flash"),
-            AntigravityQuotaFetcher::SEVEN_DAYS_MS
+            window_descriptor("weekly"),
+            ("7d".to_string(), 1, Some(SEVEN_DAYS_MS))
         );
         assert_eq!(
-            fetcher.infer_period_duration_ms(None, "Gemini Flash"),
-            AntigravityQuotaFetcher::FIVE_HOURS_MS
+            window_descriptor("monthly"),
+            ("monthly".to_string(), 2, None)
         );
     }
 
     #[test]
-    fn pools_to_snapshot_preserves_per_pool_periods() {
-        let fetcher = AntigravityQuotaFetcher::new();
-        let snapshot = fetcher.pools_to_snapshot(PoolData {
-            pools: HashMap::from([
-                (
-                    "Gemini Flash".to_string(),
-                    PoolQuota {
-                        remaining_fraction: 0.9,
-                        reset_time: Some("2026-03-18T00:00:00Z".to_string()),
-                        period_duration_ms: AntigravityQuotaFetcher::FIVE_HOURS_MS,
-                    },
-                ),
-                (
-                    "Claude".to_string(),
-                    PoolQuota {
-                        remaining_fraction: 0.2,
-                        reset_time: Some("2026-03-24T00:00:00Z".to_string()),
-                        period_duration_ms: AntigravityQuotaFetcher::SEVEN_DAYS_MS,
-                    },
-                ),
-            ]),
-            plan: Some("test".to_string()),
-            account: Some("user@example.com".to_string()),
-        });
-
-        assert_eq!(snapshot.account.as_deref(), Some("user@example.com"));
-
-        let flash = snapshot
-            .windows
-            .iter()
-            .find(|window| window.label == "Gemini Flash")
-            .unwrap();
-        let claude = snapshot
-            .windows
-            .iter()
-            .find(|window| window.label == "Claude")
-            .unwrap();
-
-        assert_eq!(
-            flash.period_duration_ms,
-            Some(AntigravityQuotaFetcher::FIVE_HOURS_MS)
-        );
-        assert_eq!(
-            claude.period_duration_ms,
-            Some(AntigravityQuotaFetcher::SEVEN_DAYS_MS)
-        );
+    fn extracts_account_and_plan_from_user_status() {
+        let parsed: LsUserStatusResponse = serde_json::from_str(
+            r#"{
+                "userStatus": {
+                    "email": "user@example.com",
+                    "planStatus": { "planInfo": { "planName": "Pro" } }
+                }
+            }"#,
+        )
+        .unwrap();
+        let metadata = user_metadata_from_status(parsed);
+        assert_eq!(metadata.account.as_deref(), Some("user@example.com"));
+        assert_eq!(metadata.plan.as_deref(), Some("Pro"));
     }
 }

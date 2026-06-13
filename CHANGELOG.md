@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-13
+
+### Added
+- Antigravity quota now reports both the 5-hour and weekly limits for each model group via the Language Server's `RetrieveUserQuotaSummary` endpoint, surfaced as `Gemini (5h)`/`Gemini (7d)` and `Claude (5h)`/`Claude (7d)` rate windows.
+- Split the aggregated `Cache` column into separate `Cache R` (read) and `Cache W` (write) columns in the TUI Daily, Models, and Activity drill-down views (abbreviated `CR`/`CW` when the terminal is narrow), and added `cache_read_tokens`/`cache_write_tokens` to `ModelSummary`.
+- Logged a warning when a model has no pricing catalog entry after the lazy-refresh attempt, making missing liteLLM/OpenRouter/models.dev entries easy to spot.
+
+### Changed
+- Rewrote the Antigravity quota fetcher around the modern multi-window endpoint, removing the legacy pool-name matching and reset-duration heuristics (and their tests).
+- Fetch provider quotas in parallel (one Tokio task per provider) and parse provider usage concurrently, so a slow or blocking provider no longer stalls the others.
+- Merged the separate quota/usage auto-refresh intervals into a single `auto_refresh_secs` setting (default 5 minutes); legacy `quota_auto_refresh_secs` is migrated automatically.
+- Display quota percentages with two decimal places in the gauges and summaries.
+- Redesigned the quota gauge: a pure progress bar on top (no inline number or time) with a detail line directly beneath it (`<countdown> used X.XX% remaining Y.YY% <pace>`) and a blank row between consecutive windows; the reset countdown and used/remaining figures are colored by the remaining balance and the pace indicator keeps its own color (omitted once the window is exhausted). Compact cards still collapse to a single-line bar.
+- Raised the Quota Overview per-provider window cap from 3 to 4 so all four Antigravity windows are visible.
+- Laid out the Activity selected-day overview as a consistent two-column grid, moving the session count onto its own row.
+- Replaced the single aggregated `cache_tokens` column in the daily CSV export with explicit `cache_read_tokens` and `cache_write_tokens` columns.
+- Rendered the TUI quota "Fetched" timestamp in local time instead of UTC.
+- Lifted the `--no-tui` summary caps: the console summary now prints all models and up to a year (365 days) of daily totals.
+- Remapped the TUI "Today" shortcut from `T` to `n` to avoid clashing with the lowercase `t` (sort by tokens) shortcut.
+- Toned down the footer shortcut hints by dropping the highlighted background badge in favor of subtle colored key text.
+- Stopped surfacing Claude Code extra-credit usage in the CLI/TUI quota output.
+
+### Fixed
+- Fixed the Daily tab `n` ("jump to today") shortcut selecting the wrong row: it located today's index in date order while the table was sorted by the active column (default cost ↓), so the highlight and scroll jumped to an unrelated row. The renderer and the shortcut now share one `sorted_daily_rows` order, so `n` lands on today's actual displayed row.
+- Raised the Antigravity Language Server request timeout from 3s to 20s (matching the other quota providers); the `RetrieveUserQuotaSummary` call is a real backend round-trip, and the tight 3s budget made it fail intermittently.
+
 ## [0.3.3] - 2026-06-12
 
 ### Fixed

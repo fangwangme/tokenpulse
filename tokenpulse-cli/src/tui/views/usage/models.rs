@@ -97,7 +97,15 @@ pub fn render_models_page(
     let cost_width = 8usize;
     let input_width = 9usize;
     let output_width = 9usize;
-    let cache_width = 9usize;
+    // Split cache into read/write columns; abbreviate the headers when space is tight.
+    let cache_split_wide = total_width >= 100;
+    let cache_read_width = if cache_split_wide { 9usize } else { 7usize };
+    let cache_write_width = if cache_split_wide { 9usize } else { 7usize };
+    let (cache_r_header, cache_w_header) = if cache_split_wide {
+        ("Cache R", "Cache W")
+    } else {
+        ("CR", "CW")
+    };
     let pct_width = 7usize;
     let msg_width = 8usize;
     let tokens_width = 9usize;
@@ -114,7 +122,8 @@ pub fn render_models_page(
                 + cost_width
                 + input_width
                 + output_width
-                + cache_width
+                + cache_read_width
+                + cache_write_width
                 + 1
                 + pct_width
                 + 1
@@ -205,7 +214,11 @@ pub fn render_models_page(
             Style::default().fg(Color::Rgb(167, 139, 250)).bold(),
         ),
         Span::styled(
-            format!("{:<cache_width$}", headers[7]),
+            format!("{:<cache_read_width$}", cache_r_header),
+            Style::default().fg(Color::Rgb(251, 146, 60)).bold(),
+        ),
+        Span::styled(
+            format!("{:<cache_write_width$}", cache_w_header),
             Style::default().fg(Color::Rgb(251, 146, 60)).bold(),
         ),
         Span::raw(" "),
@@ -311,7 +324,21 @@ pub fn render_models_page(
                 ),
             ),
             Span::styled(
-                format!("{:<cache_width$}", format_compact(model.cache_tokens)),
+                format!(
+                    "{:<cache_read_width$}",
+                    format_compact(model.cache_read_tokens)
+                ),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(251, 146, 60)),
+                    selected,
+                    theme,
+                ),
+            ),
+            Span::styled(
+                format!(
+                    "{:<cache_write_width$}",
+                    format_compact(model.cache_write_tokens)
+                ),
                 selected_row_style(
                     Style::default().fg(Color::Rgb(251, 146, 60)),
                     selected,

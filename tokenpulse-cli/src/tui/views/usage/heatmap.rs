@@ -382,7 +382,7 @@ fn render_selected_day_overview(
         return;
     }
 
-    let lines = if area.width >= 34 && area.height >= 4 {
+    let lines = if area.width >= 34 && area.height >= 6 {
         vec![
             Line::from(vec![
                 Span::styled(
@@ -420,10 +420,17 @@ fn render_selected_day_overview(
                     format_compact(day.output_tokens),
                     Style::default().fg(Color::Rgb(167, 139, 250)),
                 ),
-                Span::raw("  "),
-                Span::styled("C ", Style::default().fg(theme.dim)),
+            ]),
+            Line::from(vec![
+                Span::styled("CR ", Style::default().fg(theme.dim)),
                 Span::styled(
-                    format_compact(day.cache_tokens()),
+                    format_compact(day.cache_read_tokens),
+                    Style::default().fg(Color::Rgb(251, 146, 60)),
+                ),
+                Span::raw("  "),
+                Span::styled("CW ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.cache_write_tokens),
                     Style::default().fg(Color::Rgb(251, 146, 60)),
                 ),
             ]),
@@ -439,7 +446,8 @@ fn render_selected_day_overview(
                     format_compact(day.messages),
                     Style::default().fg(Color::Rgb(96, 165, 250)),
                 ),
-                Span::raw("  "),
+            ]),
+            Line::from(vec![
                 Span::styled("Sess ", Style::default().fg(theme.dim)),
                 Span::styled(format_compact(day.sessions), Style::default().fg(theme.fg)),
             ]),
@@ -482,9 +490,15 @@ fn render_selected_day_overview(
                     Style::default().fg(Color::Rgb(167, 139, 250)),
                 ),
                 Span::raw("  "),
-                Span::styled("C ", Style::default().fg(theme.dim)),
+                Span::styled("CR ", Style::default().fg(theme.dim)),
                 Span::styled(
-                    format_compact(day.cache_tokens()),
+                    format_compact(day.cache_read_tokens),
+                    Style::default().fg(Color::Rgb(251, 146, 60)),
+                ),
+                Span::raw("  "),
+                Span::styled("CW ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(day.cache_write_tokens),
                     Style::default().fg(Color::Rgb(251, 146, 60)),
                 ),
             ]),
@@ -558,9 +572,15 @@ fn render_selected_day_agent_detail(
                     Style::default().fg(Color::Rgb(167, 139, 250)),
                 ),
                 Span::raw(" "),
-                Span::styled("C ", Style::default().fg(theme.dim)),
+                Span::styled("CR ", Style::default().fg(theme.dim)),
                 Span::styled(
-                    format_compact(stats.cache_read_tokens + stats.cache_write_tokens),
+                    format_compact(stats.cache_read_tokens),
+                    Style::default().fg(Color::Rgb(251, 146, 60)),
+                ),
+                Span::raw(" "),
+                Span::styled("CW ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format_compact(stats.cache_write_tokens),
                     Style::default().fg(Color::Rgb(251, 146, 60)),
                 ),
             ]));

@@ -223,10 +223,12 @@ Non-TUI output includes:
 
 - overall totals
 - by-provider totals
-- by-model totals
-- recent daily totals
+- by-model totals (all models)
+- recent daily totals (up to the last 365 days)
 - weekly totals
 - monthly totals
+
+The daily CSV export (`--csv`) emits separate `cache_read_tokens` and `cache_write_tokens` columns rather than a single combined cache figure.
 
 ## TUI Model
 
@@ -315,8 +317,7 @@ Settings and configuration view:
 
 - Toggle quota display mode (`used` or `remaining` credit balance)
 - Enable/disable individual providers
-- Set and save `quota_auto_refresh_interval` (0, 1, 2, 5, 10, 15 min)
-- Set and save `usage_auto_refresh_interval` (0, 5, 10, 15, 30 min)
+- Set and save `auto_refresh_interval` (0, 1, 2, 5, 10, 15 min) — shared by quota + usage
 - Cycle through theme preference (`auto`, `dark`, `light`)
 - Toggle active Antigravity session scanning and alias synchronization (`scan_antigravity`: true / false)
 - Space or Enter keys cycle or toggle the active setting, and Up/Down (`j`/`k`) keys move selection.
