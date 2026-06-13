@@ -302,7 +302,7 @@ pub async fn run(
         if let Some(csv_type) = csv {
             match csv_type.as_str() {
                 "models" => println!("model,provider,source,tokens,cost_usd,messages,sessions,percent"),
-                _ => println!("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_tokens,messages,sessions"),
+                _ => println!("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,messages,sessions"),
             }
             return Ok(());
         }
@@ -837,7 +837,7 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
     }
 
     println!("\n=== By Model ===");
-    for model in summary.by_model.iter().take(10) {
+    for model in &summary.by_model {
         println!(
             "{} [{}]: {} tokens | ${:.2} | {} messages",
             model.model,
@@ -849,7 +849,7 @@ fn print_summary(summary: &tokenpulse_core::usage::UsageSummary) {
     }
 
     println!("\n=== Recent Daily Totals ===");
-    for day in summary.daily.iter().rev().take(14).rev() {
+    for day in summary.daily.iter().rev().take(365).rev() {
         println!(
             "{}: {} tokens | ${:.2} | {} messages | {} sessions",
             day.date,
@@ -984,18 +984,18 @@ fn format_int<T: ToString>(value: T) -> String {
 }
 
 fn print_daily_csv(rows: &[tokenpulse_core::usage::DailyUsageRow]) {
-    println!("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_tokens,messages,sessions");
+    println!("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,messages,sessions");
     for row in rows {
-        let cache = row.cache_read_tokens + row.cache_write_tokens;
         println!(
-            "{},{},{},{:.6},{},{},{},{},{}",
+            "{},{},{},{:.6},{},{},{},{},{},{}",
             row.date,
             row.source,
             row.total_tokens,
             row.cost_usd,
             row.input_tokens,
             row.output_tokens,
-            cache,
+            row.cache_read_tokens,
+            row.cache_write_tokens,
             row.message_count,
             row.session_count,
         );

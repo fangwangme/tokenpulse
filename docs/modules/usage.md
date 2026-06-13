@@ -223,10 +223,12 @@ Non-TUI output includes:
 
 - overall totals
 - by-provider totals
-- by-model totals
-- recent daily totals
+- by-model totals (all models)
+- recent daily totals (up to the last 365 days)
 - weekly totals
 - monthly totals
+
+The daily CSV export (`--csv`) emits separate `cache_read_tokens` and `cache_write_tokens` columns rather than a single combined cache figure.
 
 ## TUI Model
 

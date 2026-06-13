@@ -110,7 +110,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 ### Tab 3: Daily
 - Top: summary bar with Today, This Week, This Month, period cost, tokens, messages, and sessions
 - Bottom: daily table with today highlighted
-- Daily numeric columns use distinct colors (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`)
+- Daily numeric columns use distinct colors (`Tokens`, `Cost`, `Input`, `Output`, `Cache R`, `Cache W`, `Msgs`); cache read/write headers abbreviate to `CR`/`CW` on narrow terminals
 - Wide terminals include a 7-day token trend column
 - Sorted by date (most recent first) or cost/tokens
 
@@ -123,7 +123,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 - Mouse-clickable cells — click any day to select it and see drill-down
 - Clickable legend cells — click an intensity level to show its current value range
 - The heatmap surface is theme-invariant, using soft gray background and cell border colors in both app themes so low activity levels remain visible and intensity direction stays consistent
-- Drill-down: select any day to see token summary, agent totals, and per-agent model cost breakdown
+- Drill-down: select any day to see token summary (with cache read/write split as `CR`/`CW`), agent totals, and per-agent model cost breakdown
 - Selected-day panel supports scroll when the detail list is taller than the viewport, with a dedicated bottom-row scroll hint so the final token-detail line is not overwritten
 - Streak tracking: current streak and longest streak
 
@@ -168,7 +168,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 | `Ctrl+L`              | Clear Models quick filter                |
 | `s`                   | Open/close source filter overlay         |
 | `w`                   | Cycle activity window (26w/52w/365d)     |
-| `T`                   | Jump to today (Daily/Activity)           |
+| `n`                   | Jump to today/now (Daily/Activity)       |
 | `PgUp` / `PgDn`       | Scroll selected-day detail (Activity)    |
 | `a`                   | Toggle all sources (in filter overlay)   |
 | `Space` / `Enter`     | Toggle source (in filter overlay)        |

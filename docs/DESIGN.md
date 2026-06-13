@@ -24,7 +24,7 @@ As of 2026-04-25:
 - the usage TUI is organized around `Overview`, `Models`, `Daily`, `Activity`, `Quota`, and `Settings`
 - CLI usage output includes daily, weekly, and monthly summaries
 - pricing snapshots are stored per day/model so historical cost does not silently drift
-- quota view shows top 3 windows per provider in Overview tab; all windows in per-provider detail tabs
+- quota view shows up to the top 4 windows per provider in Overview tab; all windows in per-provider detail tabs
 - each quota gauge shows an expected-progress marker (`▏`) and ETA to limit
 - activity heatmap uses solid colored cells scaled to value intensity, with a theme-invariant background/border
 

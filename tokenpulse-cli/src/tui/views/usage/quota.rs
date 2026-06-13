@@ -137,14 +137,14 @@ fn render_snapshot_card(
     let has_plan_display = snapshot.plan.is_some() && show_account;
     let show_account_row = has_account_display || has_plan_display;
 
-    let base_windows: Vec<&RateWindow> = if overview && snapshot.windows.len() > 3 {
+    let base_windows: Vec<&RateWindow> = if overview && snapshot.windows.len() > 4 {
         let mut sorted: Vec<&RateWindow> = snapshot.windows.iter().collect();
         sorted.sort_by(|a, b| {
             b.used_percent
                 .partial_cmp(&a.used_percent)
                 .unwrap_or(Ordering::Equal)
         });
-        sorted.into_iter().take(3).collect()
+        sorted.into_iter().take(4).collect()
     } else {
         snapshot.windows.iter().collect()
     };
@@ -296,7 +296,10 @@ fn render_snapshot_card(
     if !compact && cursor < sections.len() {
         let footer = Paragraph::new(format!(
             "Fetched {}",
-            snapshot.fetched_at.format("%Y-%m-%d %H:%M UTC")
+            snapshot
+                .fetched_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
         ))
         .style(Style::default().fg(theme.dim));
         f.render_widget(footer, sections[cursor]);

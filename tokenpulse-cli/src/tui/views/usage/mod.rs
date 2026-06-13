@@ -190,10 +190,6 @@ impl DailyStats {
         })
     }
 
-    pub fn cache_tokens(&self) -> i64 {
-        self.cache_read_tokens + self.cache_write_tokens
-    }
-
     pub fn filtered(&self, enabled: &BTreeSet<String>) -> Option<Self> {
         let providers: HashMap<String, DayBreakdown> = self
             .providers
@@ -294,7 +290,8 @@ pub struct AggregatedModelSummary {
     pub tokens: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub cache_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
     pub message_count: usize,
     pub session_count: usize,
 }
@@ -551,7 +548,8 @@ impl UsageDashboard {
                 entry.tokens += stats.tokens;
                 entry.input_tokens += stats.input_tokens;
                 entry.output_tokens += stats.output_tokens;
-                entry.cache_tokens += stats.cache_read_tokens + stats.cache_write_tokens;
+                entry.cache_read_tokens += stats.cache_read_tokens;
+                entry.cache_write_tokens += stats.cache_write_tokens;
                 entry.message_count += stats.messages.max(0) as usize;
                 entry.session_count += stats.sessions.max(0) as usize;
             }
@@ -572,7 +570,9 @@ impl UsageDashboard {
                 tokens: aggregated.tokens,
                 input_tokens: aggregated.input_tokens,
                 output_tokens: aggregated.output_tokens,
-                cache_tokens: aggregated.cache_tokens,
+                cache_tokens: aggregated.cache_read_tokens + aggregated.cache_write_tokens,
+                cache_read_tokens: aggregated.cache_read_tokens,
+                cache_write_tokens: aggregated.cache_write_tokens,
                 message_count: aggregated.message_count,
                 session_count: aggregated.session_count,
                 percent: if total_cost > 0.0 {
@@ -1384,7 +1384,7 @@ where
                                     state.next_page();
                                 }
                             }
-                            KeyCode::Char('T') => {
+                            KeyCode::Char('n') => {
                                 let today = Local::now().date_naive();
                                 let rows =
                                     daily::visible_daily_rows(&dashboard, &state.enabled_sources);
@@ -1445,7 +1445,7 @@ where
                                 );
                                 state.scroll_heatmap_detail_down(max);
                             }
-                            KeyCode::Char('T') => {
+                            KeyCode::Char('n') => {
                                 state.set_selected_heatmap_date(Some(Local::now().date_naive()));
                             }
                             KeyCode::Char('t') => {
@@ -1804,13 +1804,7 @@ fn render_tabs(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: &T
 
 fn key_help(key: &'static str, desc: impl Into<String>, theme: &Theme) -> Vec<Span<'static>> {
     vec![
-        Span::styled(
-            format!(" {key} "),
-            Style::default()
-                .bg(theme.accent_soft)
-                .fg(theme.on_accent)
-                .bold(),
-        ),
+        Span::styled(key.to_string(), Style::default().fg(theme.accent_soft)),
         Span::styled(
             format!(" {}  ", desc.into()),
             Style::default().fg(theme.dim),
@@ -1912,7 +1906,7 @@ fn render_footer(
                 spans.extend(key_help("r", "refresh", theme));
                 spans.extend(key_help("←→", "tab", theme));
                 spans.extend(key_help("↑↓", "select", theme));
-                spans.extend(key_help("T", "today", theme));
+                spans.extend(key_help("n", "today", theme));
 
                 let dir = if state.sort_ascending { "↑" } else { "↓" };
                 let field = match state.sort_field {
@@ -1950,7 +1944,7 @@ fn render_footer(
                 spans.extend(key_help("q", "quit", theme));
                 spans.extend(key_help("r", "refresh", theme));
                 spans.extend(key_help("←→", "tab", theme));
-                spans.extend(key_help("T", "today", theme));
+                spans.extend(key_help("n", "today", theme));
                 spans.extend(key_help("pgup/pgdn", "detail", theme));
                 spans.extend(key_help(
                     "t/c",
@@ -2185,7 +2179,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
         }
         UsagePage::Daily => {
             keybindings.extend([
-                ("T", "scroll list selection to Today"),
+                ("n", "scroll list selection to Today"),
                 ("c", "sort table by Cost value"),
                 ("t", "sort table by Tokens value"),
                 ("d", "sort table by Date value"),
@@ -2194,7 +2188,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
         }
         UsagePage::Heatmap => {
             keybindings.extend([
-                ("T", "scroll list selection to Today"),
+                ("n", "scroll list selection to Today"),
                 ("t", "toggle heatmap metric to Tokens"),
                 ("c", "toggle heatmap metric to Cost"),
                 ("pgup/pgdn", "scroll selected day details"),
