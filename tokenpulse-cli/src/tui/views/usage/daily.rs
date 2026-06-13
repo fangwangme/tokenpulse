@@ -40,7 +40,7 @@ fn render_daily_table(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut days = visible_daily_rows(dashboard, &state.enabled_sources);
+    let days = sorted_daily_rows(dashboard, state);
     if days.is_empty() {
         f.render_widget(
             Paragraph::new(empty_data_message(state, "No daily data"))
@@ -48,31 +48,6 @@ fn render_daily_table(
             inner,
         );
         return;
-    }
-    // Sort daily data
-    match state.sort_field {
-        SortField::Date => {
-            days.sort_by_key(|d| d.date);
-            if !state.sort_ascending {
-                days.reverse();
-            }
-        }
-        SortField::Cost => {
-            days.sort_by(|a, b| {
-                a.cost_usd
-                    .partial_cmp(&b.cost_usd)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            if !state.sort_ascending {
-                days.reverse();
-            }
-        }
-        SortField::Tokens => {
-            days.sort_by_key(|d| d.total_tokens);
-            if !state.sort_ascending {
-                days.reverse();
-            }
-        }
     }
 
     let today = Local::now().date_naive();
@@ -287,6 +262,39 @@ pub fn visible_daily_rows(
         .into_iter()
         .filter(|day| day.total_tokens > 0)
         .collect()
+}
+
+/// Daily rows in the exact order the table displays them: the visible
+/// (non-empty) days sorted by the active sort field/direction. The table
+/// renderer and the `n` "jump to today" shortcut both rely on this so the
+/// selected-row index points at the same row in both places.
+pub fn sorted_daily_rows(dashboard: &UsageDashboard, state: &UsageState) -> Vec<DailyStats> {
+    let mut days = visible_daily_rows(dashboard, &state.enabled_sources);
+    match state.sort_field {
+        SortField::Date => {
+            days.sort_by_key(|d| d.date);
+            if !state.sort_ascending {
+                days.reverse();
+            }
+        }
+        SortField::Cost => {
+            days.sort_by(|a, b| {
+                a.cost_usd
+                    .partial_cmp(&b.cost_usd)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if !state.sort_ascending {
+                days.reverse();
+            }
+        }
+        SortField::Tokens => {
+            days.sort_by_key(|d| d.total_tokens);
+            if !state.sort_ascending {
+                days.reverse();
+            }
+        }
+    }
+    days
 }
 
 pub fn daily_metric_value(day: &DailyStats, metric: OverviewMetric) -> f64 {

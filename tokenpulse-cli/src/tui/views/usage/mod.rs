@@ -1385,8 +1385,7 @@ where
                             }
                             KeyCode::Char('n') => {
                                 let today = Local::now().date_naive();
-                                let rows =
-                                    daily::visible_daily_rows(&dashboard, &state.enabled_sources);
+                                let rows = daily::sorted_daily_rows(&dashboard, &state);
                                 if let Some(idx) = rows.iter().position(|r| r.date == today) {
                                     state.selected_row = idx;
                                     let frame = terminal.size()?;

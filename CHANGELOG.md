@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stopped surfacing Claude Code extra-credit usage in the CLI/TUI quota output.
 
 ### Fixed
+- Fixed the Daily tab `n` ("jump to today") shortcut selecting the wrong row: it located today's index in date order while the table was sorted by the active column (default cost ↓), so the highlight and scroll jumped to an unrelated row. The renderer and the shortcut now share one `sorted_daily_rows` order, so `n` lands on today's actual displayed row.
 - Raised the Antigravity Language Server request timeout from 3s to 20s (matching the other quota providers); the `RetrieveUserQuotaSummary` call is a real backend round-trip, and the tight 3s budget made it fail intermittently.
 
 ## [0.3.3] - 2026-06-12
