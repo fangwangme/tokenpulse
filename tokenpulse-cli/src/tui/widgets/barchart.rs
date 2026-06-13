@@ -21,6 +21,7 @@ pub struct StackedBarChart<'a> {
     colors: HashMap<&'a str, Color>,
     max_value: f64,
     value_format: ValueFormat,
+    x_labels: &'a [String],
 }
 
 impl<'a> StackedBarChart<'a> {
@@ -35,6 +36,7 @@ impl<'a> StackedBarChart<'a> {
             colors: HashMap::new(),
             max_value: max_value.max(1.0),
             value_format: ValueFormat::Currency,
+            x_labels: &[],
         }
     }
 
@@ -45,6 +47,14 @@ impl<'a> StackedBarChart<'a> {
 
     pub fn value_format(mut self, value_format: ValueFormat) -> Self {
         self.value_format = value_format;
+        self
+    }
+
+    /// Date labels for the X axis, one per data point (oldest first). A few
+    /// evenly spaced entries — always including the first and last — are drawn
+    /// along the bottom row to help locate dates.
+    pub fn x_labels(mut self, labels: &'a [String]) -> Self {
+        self.x_labels = labels;
         self
     }
 }
@@ -151,6 +161,80 @@ impl<'a> Widget for StackedBarChart<'a> {
                 );
             }
         }
+
+        // X-axis: evenly spaced date ticks aligned to the actual bar columns.
+        if !self.x_labels.is_empty() {
+            let axis_y = area.y + chart_height as u16;
+            render_x_axis(
+                buf,
+                chart_x,
+                bar_width as u16,
+                bars.len(),
+                axis_y,
+                self.x_labels,
+            );
+        }
+    }
+}
+
+/// Draw evenly spaced date ticks aligned to the bar columns. The first and last
+/// bars always get a label (oldest / newest date); intermediate ticks are added
+/// when the width allows. Each label is centered on the column it refers to, so
+/// the date always lines up with its bar — including when days are aggregated
+/// into buckets and the bars occupy less than the full chart width.
+fn render_x_axis(
+    buf: &mut Buffer,
+    chart_x: u16,
+    bar_width: u16,
+    bars_len: usize,
+    y: u16,
+    labels: &[String],
+) {
+    let label_w = 5u16; // "MM-DD"
+    let n = labels.len();
+    if n == 0 || bars_len == 0 || bar_width == 0 {
+        return;
+    }
+
+    // Width actually occupied by the bars (may be narrower than the chart).
+    let span = bars_len as u16 * bar_width;
+    if span < label_w {
+        return;
+    }
+
+    // Pick a tick count whose even spacing leaves room between labels.
+    let max_ticks = (1 + span.saturating_sub(1) / (label_w + 3)).clamp(2, 6) as usize;
+    let ticks = max_ticks.min(bars_len);
+
+    let mut last_end: i64 = i64::MIN;
+    for tick in 0..ticks {
+        let bar_idx = if ticks <= 1 {
+            0
+        } else {
+            (tick as f64 * (bars_len - 1) as f64 / (ticks - 1) as f64).round() as usize
+        };
+
+        // Date for this bar: endpoints exact, middles use the bucket's first day
+        // (matches how `aggregated_bars` slices the data by index).
+        let data_idx = if bars_len >= n {
+            bar_idx.min(n - 1)
+        } else if bar_idx + 1 == bars_len {
+            n - 1
+        } else {
+            (bar_idx * n / bars_len).min(n - 1)
+        };
+
+        let label = &labels[data_idx];
+        let lw = UnicodeWidthStr::width(label.as_str()) as u16;
+        let bar_center = chart_x as f64 + (bar_idx as f64 + 0.5) * bar_width as f64;
+        let max_start = (chart_x + span).saturating_sub(lw);
+        let start =
+            ((bar_center - lw as f64 / 2.0).round() as i64).clamp(chart_x as i64, max_start as i64);
+        if start <= last_end {
+            continue; // never overwrite the previous label
+        }
+        buf.set_string(start as u16, y, label, Style::default().fg(Color::DarkGray));
+        last_end = start + lw as i64;
     }
 }
 

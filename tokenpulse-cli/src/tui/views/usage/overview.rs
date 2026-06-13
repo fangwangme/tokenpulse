@@ -105,45 +105,37 @@ fn render_overview_chart(
         return;
     }
 
+    // X-axis date ticks (oldest first); the widget shows the first/last plus a
+    // few evenly spaced dates in between to make bars easy to locate.
+    let x_labels: Vec<String> = recent
+        .iter()
+        .map(|day| day.date.format("%m-%d").to_string())
+        .collect();
+
     let chart = StackedBarChart::new(&chart_data)
         .color("openai", theme.company_color("openai"))
         .color("google", theme.company_color("google"))
         .color("anthropic", theme.company_color("anthropic"))
         .color("other", theme.company_color("other"))
-        .value_format(state.overview_metric.value_format());
+        .value_format(state.overview_metric.value_format())
+        .x_labels(&x_labels);
     f.render_widget(chart, sections[0]);
 
-    // Legend: only show enabled sources
-    let mut legend_spans = vec![Span::styled(
-        recent
-            .first()
-            .map(|d| d.date.format("%m-%d").to_string())
-            .unwrap_or_default(),
-        Style::default().fg(theme.dim),
-    )];
-    legend_spans.push(Span::raw("  "));
-
+    // Legend: provider colors only — dates now live on the chart's X axis.
     let provider_legend: &[(&str, &str, Color)] = &[
         ("anthropic", "Anthropic", theme.company_color("anthropic")),
         ("openai", "OpenAI", theme.company_color("openai")),
         ("google", "Google", theme.company_color("google")),
         ("other", "Others", theme.company_color("other")),
     ];
+    let mut legend_spans = Vec::with_capacity(provider_legend.len() * 2);
     for (_, label, color) in provider_legend {
         legend_spans.push(Span::styled(
             format!("● {}", label),
             Style::default().fg(*color),
         ));
-        legend_spans.push(Span::raw(" "));
+        legend_spans.push(Span::raw("  "));
     }
-    legend_spans.push(Span::raw(" "));
-    legend_spans.push(Span::styled(
-        recent
-            .last()
-            .map(|d| d.date.format("%m-%d").to_string())
-            .unwrap_or_default(),
-        Style::default().fg(theme.dim),
-    ));
 
     f.render_widget(Paragraph::new(Line::from(legend_spans)), sections[1]);
 }
