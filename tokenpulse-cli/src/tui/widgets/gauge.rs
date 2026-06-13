@@ -72,7 +72,7 @@ impl<'a> Widget for GradientGauge<'a> {
         }
 
         let percent_text = if self.show_percent {
-            format!("{:>6.2}%", self.percent)
+            format!("{:>3.0}%", self.percent)
         } else {
             String::new()
         };

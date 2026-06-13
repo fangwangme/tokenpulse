@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-06-14
+
+### Added
+- Overview chart X axis: a few evenly spaced date ticks (always including the oldest and newest day) drawn in the previously-blank bottom row and centered on the actual bar columns, so dates stay aligned with their bars even when days are aggregated into buckets and the bars occupy less than the full chart width.
+
+### Changed
+- Display quota percentages as whole numbers (e.g. `used 42%`) on the gauge bar and the used/remaining detail line, reverting the two-decimal display introduced in 0.4.0 (the extra precision wasted horizontal space without adding meaning).
+- Removed the per-card "Fetched <time>" footer on the Quota page; the footer status line already reports the unified refresh time.
+- The Overview chart legend now lists only the provider colors — the first/last dates moved onto the new X axis.
+
+### Fixed
+- Unified the runtime auto-refresh timer so every page shows the same countdown. Usage and quota tracked separate `Instant`s that reset independently as each finished; because the local usage scan completes far faster than the networked quota fetch, the two drifted apart and the Quota page and the other pages showed different "Auto-refresh in" values. They now share one timer that triggers both scans together and only resets once both have finished (the 0.4.0 change had unified only the config setting, not the runtime timers).
+
 ## [0.4.0] - 2026-06-13
 
 ### Added

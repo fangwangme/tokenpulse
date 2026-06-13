@@ -25,12 +25,8 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
     let auto_refresh = {
         let base = refresh_label(config.display.auto_refresh_secs);
         if config.display.auto_refresh_secs > 0 {
-            // The next due refresh is whichever timer fires soonest.
-            let elapsed = state
-                .last_quota_refresh
-                .elapsed()
-                .min(state.last_usage_refresh.elapsed())
-                .as_secs() as u32;
+            // A single shared timer drives both usage and quota refreshes.
+            let elapsed = state.last_refresh.elapsed().as_secs() as u32;
             let remaining = config.display.auto_refresh_secs.saturating_sub(elapsed);
             let m = remaining / 60;
             let s = remaining % 60;

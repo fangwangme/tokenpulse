@@ -156,7 +156,7 @@ back to a single line in compact cards:
   (`▏`) showing where theoretical usage should be at this point in time. The
   fill respects the active display mode (used vs remaining); no number or time
   is printed on the bar itself.
-- **Detail line** — `<reset countdown>   used X.XX%   remaining Y.YY%   <pace>`.
+- **Detail line** — `<reset countdown>   used X%   remaining Y%   <pace>`.
   The reset countdown and the used/remaining percentages are colored by the
   balance amount (green/yellow/red); the pace text keeps its own pace color and
   carries the at-current-rate ETA when behind pace ("on track" / "N% under pace"
@@ -175,10 +175,10 @@ back to a single line in compact cards:
   │  Plan: Pro                                                          │
   │                                                                     │
   │  Gemini (5h)  ████████████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
-  │    3h 12m   used 42.10%   remaining 57.90%   On track               │
+  │    3h 12m   used 42%   remaining 58%   On track                     │
   │                                                                     │
   │  Gemini (7d)  █████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
-  │    4d 6h    used 18.30%   remaining 81.70%   12% under pace          │
+  │    4d 6h    used 18%   remaining 82%   12% under pace                │
   ╰─────────────────────────────────────────────────────────────────────╯
 ```
 

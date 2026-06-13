@@ -697,8 +697,7 @@ pub struct UsageState {
     pub data_date_range: Option<(NaiveDate, NaiveDate)>,
     // Quota and Provider filter state
     pub quota_snapshots: Vec<tokenpulse_core::QuotaSnapshot>,
-    pub last_usage_refresh: Instant,
-    pub last_quota_refresh: Instant,
+    pub last_refresh: Instant,
     pub usage_refresh_in_progress: bool,
     pub quota_refresh_in_progress: bool,
 }
@@ -752,8 +751,7 @@ impl UsageState {
             refresh_status: None,
             data_date_range: compute_data_date_range(dashboard),
             quota_snapshots,
-            last_usage_refresh: Instant::now(),
-            last_quota_refresh: Instant::now(),
+            last_refresh: Instant::now(),
             usage_refresh_in_progress: false,
             quota_refresh_in_progress: false,
         }
@@ -761,6 +759,15 @@ impl UsageState {
 
     pub fn is_refreshing(&self) -> bool {
         self.usage_refresh_in_progress || self.quota_refresh_in_progress
+    }
+
+    /// Reset the shared auto-refresh countdown. Called once both the usage and
+    /// quota refreshes have finished (success or failure) so the single timer
+    /// always restarts from one consistent anchor.
+    fn reset_timer_if_idle(&mut self) {
+        if !self.is_refreshing() {
+            self.last_refresh = Instant::now();
+        }
     }
 
     pub fn next_page(&mut self) {
@@ -1059,13 +1066,14 @@ where
                     summary = new_summary;
                     dashboard = new_dashboard;
                     let saved_quota_snapshots = state.quota_snapshots.clone();
-                    let saved_last_quota_refresh = state.last_quota_refresh;
+                    let saved_last_refresh = state.last_refresh;
                     let saved_quota_refresh_in_progress = state.quota_refresh_in_progress;
 
                     state = UsageState::new(&dashboard, saved_quota_snapshots);
-                    state.last_quota_refresh = saved_last_quota_refresh;
+                    state.last_refresh = saved_last_refresh;
                     state.quota_refresh_in_progress = saved_quota_refresh_in_progress;
                     state.usage_refresh_in_progress = false;
+                    state.reset_timer_if_idle();
                     state.page = saved_page;
                     state.sort_field = saved_sort_field;
                     state.sort_ascending = saved_sort_ascending;
@@ -1090,7 +1098,7 @@ where
                 }
                 TuiMessage::UsageReloadFailed(err) => {
                     state.usage_refresh_in_progress = false;
-                    state.last_usage_refresh = Instant::now();
+                    state.reset_timer_if_idle();
                     state.set_refresh_status(
                         format!("Refresh failed: {}", err),
                         RefreshStatusLevel::Error,
@@ -1109,7 +1117,7 @@ where
                         }
                     }
                     state.quota_refresh_in_progress = false;
-                    state.last_quota_refresh = Instant::now();
+                    state.reset_timer_if_idle();
                     if !errors.is_empty() {
                         state.set_refresh_status(
                             format!("Refresh failed: {}", errors.join(", ")),
@@ -1121,7 +1129,7 @@ where
                 }
                 TuiMessage::QuotaReloadFailed(err) => {
                     state.quota_refresh_in_progress = false;
-                    state.last_quota_refresh = Instant::now();
+                    state.reset_timer_if_idle();
                     state.set_refresh_status(
                         format!("Refresh failed: {}", err),
                         RefreshStatusLevel::Error,
@@ -1151,13 +1159,16 @@ where
             }
         })?;
 
-        // 1. Auto-refresh check for Usage
+        // Auto-refresh: a single shared timer drives both scans. When it
+        // elapses and nothing is in flight, kick off the usage and quota
+        // refreshes together; the timer only resets once both have finished.
         let auto_secs = config.display.auto_refresh_secs;
         if auto_secs > 0
-            && !state.usage_refresh_in_progress
-            && state.last_usage_refresh.elapsed().as_secs() >= auto_secs as u64
+            && !state.is_refreshing()
+            && state.last_refresh.elapsed().as_secs() >= auto_secs as u64
         {
             state.usage_refresh_in_progress = true;
+            state.quota_refresh_in_progress = true;
             state.set_refresh_status("Auto-refreshing...", RefreshStatusLevel::Info);
 
             let reload_clone = Arc::clone(&reload_fn_arc);
@@ -1173,15 +1184,6 @@ where
                     }
                 }
             });
-        }
-
-        // 2. Auto-refresh check for Quota
-        if auto_secs > 0
-            && !state.quota_refresh_in_progress
-            && state.last_quota_refresh.elapsed().as_secs() >= auto_secs as u64
-        {
-            state.quota_refresh_in_progress = true;
-            state.set_refresh_status("Auto-refreshing...", RefreshStatusLevel::Info);
 
             let enabled_providers: Vec<String> = config
                 .providers
@@ -1989,13 +1991,9 @@ fn render_footer(
     let countdown_str = {
         let auto_secs = config.display.auto_refresh_secs;
         if auto_secs > 0 {
-            // Quota page tracks the quota refresh timer; other pages the usage one.
-            let last_refresh = if state.page == UsagePage::Quota {
-                state.last_quota_refresh
-            } else {
-                state.last_usage_refresh
-            };
-            let elapsed = last_refresh.elapsed().as_secs() as u32;
+            // A single shared timer drives both usage and quota, so every page
+            // shows the same countdown.
+            let elapsed = state.last_refresh.elapsed().as_secs() as u32;
             let remaining = auto_secs.saturating_sub(elapsed);
             let m = remaining / 60;
             let s = remaining % 60;

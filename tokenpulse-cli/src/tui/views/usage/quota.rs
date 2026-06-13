@@ -288,20 +288,7 @@ fn render_snapshot_card(
                 .style(Style::default().fg(theme.dim))
                 .alignment(Alignment::Left);
             f.render_widget(line, sections[cursor]);
-            cursor += 1;
         }
-    }
-
-    if !compact && cursor < sections.len() {
-        let footer = Paragraph::new(format!(
-            "Fetched {}",
-            snapshot
-                .fetched_at
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
-        ))
-        .style(Style::default().fg(theme.dim));
-        f.render_widget(footer, sections[cursor]);
     }
 }
 
@@ -383,12 +370,12 @@ fn render_window_block(
         Span::styled(reset_str, Style::default().fg(balance_color)),
         Span::raw("   "),
         Span::styled(
-            format!("used {:.2}%", window.used_percent),
+            format!("used {:.0}%", window.used_percent),
             Style::default().fg(balance_color),
         ),
         Span::raw("   "),
         Span::styled(
-            format!("remaining {:.2}%", remaining_percent),
+            format!("remaining {:.0}%", remaining_percent),
             Style::default().fg(balance_color),
         ),
     ];
