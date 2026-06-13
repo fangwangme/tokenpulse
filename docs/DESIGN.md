@@ -25,7 +25,7 @@ As of 2026-04-25:
 - CLI usage output includes daily, weekly, and monthly summaries
 - pricing snapshots are stored per day/model so historical cost does not silently drift
 - quota view shows up to the top 4 windows per provider in Overview tab; all windows in per-provider detail tabs
-- each quota gauge shows an expected-progress marker (`▏`) and ETA to limit
+- each quota window renders a progress bar (with an expected-progress marker `▏`) and, when height allows, a detail line below it with the reset countdown, used/remaining percentages, and an at-current-rate pace indicator
 - activity heatmap uses solid colored cells scaled to value intensity, with a theme-invariant background/border
 
 Known gaps:
@@ -149,30 +149,35 @@ The quota view has two modes:
 - **Overview tab** shows up to the top 4 windows per provider for a compact summary
 - **Detail tabs** (per provider) show all available rate windows
 
-Each gauge includes:
-- A gradient color progress bar
-- An expected-progress marker (`▏`) showing where theoretical usage should be at this point in time
-- Pace ETA: when ahead of pace, shows estimated time to limit; when behind, shows "under pace"
-- Fixed-width label columns for proper alignment (especially for Gemini CLI's multiple models)
-- GitHub Copilot uses dynamic calendar-month billing period calculation
+Each quota window renders on two lines when there is vertical room (and falls
+back to a single line in compact cards):
+- **Top line** — the gradient progress bar with an expected-progress marker
+  (`▏`) showing where theoretical usage should be at this point in time. The
+  fill respects the active display mode (used vs remaining); no number or time
+  is printed on the bar itself.
+- **Detail line** — `resets <countdown>   used X.XX%   remaining Y.YY%   <pace>`.
+  The reset countdown and the used/remaining percentages are colored by the
+  balance amount (green/yellow/red); the pace text keeps its own pace color and
+  carries the at-current-rate ETA when behind pace ("on track" / "N% under pace"
+  / "+N% pace | eta …").
+- Fixed-width label columns keep multiple windows aligned (especially Antigravity's
+  per-group 5h/weekly pairs).
+- Compact cards collapse to one line: bar + percentage + reset countdown.
+- GitHub Copilot uses dynamic calendar-month billing period calculation.
 
 ```
 ╭─────────────────────────────────────────────────────────────────────╮
 │                    ⚡ TokenPulse - Quota Overview                    │
 ╰─────────────────────────────────────────────────────────────────────╯
 
-  ╭─ CLAUDE CODE ───────────────────────────────────────────────────╮
-  │  Plan: Pro                                                      │
-  │                                                                 │
-  │  Session (5h)   ████████████▏░░░░░░░░░░░░░░░░░  42%  ⏳ 3h 12m │
-  │  Weekly (7d)    █████▏░░░░░░░░░░░░░░░░░░░░░░░░  18%  ⏳ 4d 6h  │
-  ╰─────────────────────────────────────────────────────────────────╯
-
-  ╭─ GITHUB COPILOT ────────────────────────────────────────────────╮
-  │  Plan: Pro                                                      │
-  │                                                                 │
-  │  Completions    ██████████████████▏░░░░░░░░░░░  67%  ⏳ 12d    │
-  ╰─────────────────────────────────────────────────────────────────╯
+  ╭─ ANTIGRAVITY ───────────────────────────────────────────────────────╮
+  │  Plan: Pro                                                          │
+  │                                                                     │
+  │  Gemini (5h)  ████████████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+  │    resets 3h 12m   used 42.10%   remaining 57.90%   On track        │
+  │  Gemini (7d)  █████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+  │    resets 4d 6h    used 18.30%   remaining 81.70%   12% under pace   │
+  ╰─────────────────────────────────────────────────────────────────────╯
 ```
 
 ### Dashboard TUI Layout

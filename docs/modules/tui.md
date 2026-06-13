@@ -72,23 +72,27 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 
 ## Quota View Layout
 
+Each window uses a two-line block: a pure progress bar on top, then a detail
+line `resets … used … remaining … <pace>` below it. Compact cards collapse to a
+single bar + percentage + reset countdown.
+
 ```
-┌─────────────────────────────────────────────────────┐
-│  Header: "TokenPulse - Quota" + timestamp           │
-├─────────────────────────────────────────────────────┤
-│  ┌─ Claude ──────────────────────────────────────┐  │
-│  │  [gauge] Session   ████████░░░░ 42%  3h 12m   │  │
-│  │  [gauge] Weekly    ███░░░░░░░░░ 18%  4d 6h    │  │
-│  │  [gauge] Sonnet    ██████░░░░░░ 48%  4d 6h    │  │
-│  │  [text]  Credits   $12.40 / $100.00            │  │
-│  └───────────────────────────────────────────────┘  │
-│  ┌─ Copilot ────────────────────────────────────┐  │
-│  │  [gauge] Completions ███████░░░ 25%  29d      │  │
-│  │  [gauge] Premium     ██░░░░░░░░ 10%  29d      │  │
-│  └───────────────────────────────────────────────┘  │
-├─────────────────────────────────────────────────────┤
-│  Footer: q quit │ r refresh │ j/k scroll            │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Header: "TokenPulse - Quota" + timestamp                        │
+├──────────────────────────────────────────────────────────────────┤
+│  ┌─ Antigravity ────────────────────────────────────────────┐    │
+│  │  Gemini (5h)  ████████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │    │
+│  │    resets 3h 12m   used 42.00%  remaining 58.00%  On track │    │
+│  │  Gemini (7d)  ███▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │    │
+│  │    resets 4d 6h    used 18.00%  remaining 82.00%  12% under pace │
+│  └──────────────────────────────────────────────────────────┘    │
+│  ┌─ Copilot ────────────────────────────────────────────────┐    │
+│  │  Completions  ███████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │    │
+│  │    resets 29d      used 25.00%  remaining 75.00%  On track │    │
+│  └──────────────────────────────────────────────────────────┘    │
+├──────────────────────────────────────────────────────────────────┤
+│  Footer: q quit │ r refresh │ j/k scroll                         │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Usage View Layout
@@ -129,8 +133,8 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 
 ### Tab 5: Quota
 - Live quota usage monitoring.
-- Displays rate limits (e.g. Session 5h, Weekly 7d) with progress gauges, expected progress indicators, and time to reset/limit.
-- Displays remaining balance or used credits depending on the active display mode.
+- Displays rate limits (e.g. Session 5h, Weekly 7d) as a two-line block: a progress bar with an expected-progress marker on top, and a detail line below with the reset countdown, used/remaining percentages (colored by the remaining balance), and an at-current-rate pace indicator. Compact cards collapse to a single bar + percentage + reset countdown.
+- The bar fill reflects remaining balance or used amount depending on the active display mode.
 
 ### Tab 6: Settings
 - Live settings configuration panel for the application.

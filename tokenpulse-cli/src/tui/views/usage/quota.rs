@@ -234,7 +234,6 @@ fn render_snapshot_card(
             render_window_block(
                 f,
                 gauge_area,
-                snapshot,
                 window,
                 display_mode,
                 theme,
@@ -309,7 +308,6 @@ fn render_snapshot_card(
 fn render_window_block(
     f: &mut ratatui::Frame,
     area: Rect,
-    snapshot: &QuotaSnapshot,
     window: &RateWindow,
     display_mode: &QuotaDisplayMode,
     theme: &Theme,
@@ -339,14 +337,17 @@ fn render_window_block(
         QuotaDisplayMode::Remaining => (100.0 - *ep).clamp(0.0, 100.0),
     });
 
-    let gauge = GradientGauge::new(&label, shown_percent)
-        .width(area.width.saturating_sub(22) as usize)
+    let base_gauge = GradientGauge::new(&label, shown_percent)
         .color(gauge_color)
-        .time(&reset_str)
         .expected_percent(expected_pct)
         .label_width(fixed_label_width);
 
+    // Compact cards render a single line with no detail row, so keep the
+    // percentage and reset countdown on the bar itself.
     if compact {
+        let gauge = base_gauge
+            .width(area.width.saturating_sub(22) as usize)
+            .time(&reset_str);
         f.render_widget(gauge, area);
         return;
     }
@@ -356,49 +357,48 @@ fn render_window_block(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
 
+    // Top line: pure progress bar (no trailing number); every figure lives on
+    // the detail line below so nothing is duplicated.
+    let gauge = base_gauge
+        .width(split[0].width as usize)
+        .show_percent(false);
     f.render_widget(gauge, split[0]);
 
     if split[1].height == 0 {
         return;
     }
 
+    // Detail line: reset countdown + used/remaining colored by the balance
+    // amount (same green/yellow/red rule as the gauge), then the pacer (which
+    // carries its own at-current-rate ETA) in its pace color.
+    let balance_color = theme.gauge_color(window.used_percent);
+    let remaining_percent = (100.0 - window.used_percent).max(0.0);
     let pace = pace_result
         .map(|(status, text, _)| Span::styled(text, Style::default().fg(theme.pace_color(status))))
-        .unwrap_or_else(|| Span::styled("No pace data", Style::default().fg(theme.dim)));
+        .unwrap_or_else(|| {
+            Span::styled("No pace data".to_string(), Style::default().fg(theme.dim))
+        });
 
-    let primary = match display_mode {
-        QuotaDisplayMode::Used => format!("{:.2}% used", window.used_percent),
-        QuotaDisplayMode::Remaining => format!("{:.2}% left", shown_percent),
-    };
-    let secondary = match display_mode {
-        QuotaDisplayMode::Used => format!("{:.2}% left", 100.0 - window.used_percent),
-        QuotaDisplayMode::Remaining => format!("{:.2}% used", window.used_percent),
-    };
+    let detail = Line::from(vec![
+        Span::styled(
+            format!("resets {}", reset_str),
+            Style::default().fg(balance_color),
+        ),
+        Span::raw("   "),
+        Span::styled(
+            format!("used {:.2}%", window.used_percent),
+            Style::default().fg(balance_color),
+        ),
+        Span::raw("   "),
+        Span::styled(
+            format!("remaining {:.2}%", remaining_percent),
+            Style::default().fg(balance_color),
+        ),
+        Span::raw("   "),
+        pace,
+    ]);
 
-    let detail = if compact {
-        Line::from(vec![
-            Span::styled(
-                primary,
-                Style::default().fg(theme.provider_color(&snapshot.provider)),
-            ),
-            Span::raw("  "),
-            pace,
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(
-                primary,
-                Style::default().fg(theme.provider_color(&snapshot.provider)),
-            ),
-            Span::raw("  "),
-            Span::styled(secondary, Style::default().fg(theme.fg)),
-            Span::raw("  "),
-            pace,
-        ])
-    };
-
-    let paragraph = Paragraph::new(detail).style(Style::default().fg(theme.dim));
-    f.render_widget(paragraph, split[1]);
+    f.render_widget(Paragraph::new(detail), split[1]);
 }
 
 fn format_reset_duration(diff: chrono::Duration) -> String {
