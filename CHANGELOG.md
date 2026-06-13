@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fetch provider quotas in parallel (one Tokio task per provider) and parse provider usage concurrently, so a slow or blocking provider no longer stalls the others.
 - Merged the separate quota/usage auto-refresh intervals into a single `auto_refresh_secs` setting (default 5 minutes); legacy `quota_auto_refresh_secs` is migrated automatically.
 - Display quota percentages with two decimal places in the gauges and summaries.
-- Redesigned the quota gauge: a pure progress bar on top (no inline number or time) and, below a blank spacer row, a detail line (`<countdown> used X.XX% remaining Y.YY% <pace>`), with the reset countdown and used/remaining figures colored by the remaining balance and the pace indicator keeping its own color (omitted once the window is exhausted). Compact cards still collapse to a single-line bar.
+- Redesigned the quota gauge: a pure progress bar on top (no inline number or time) with a detail line directly beneath it (`<countdown> used X.XX% remaining Y.YY% <pace>`) and a blank row between consecutive windows; the reset countdown and used/remaining figures are colored by the remaining balance and the pace indicator keeps its own color (omitted once the window is exhausted). Compact cards still collapse to a single-line bar.
 - Raised the Quota Overview per-provider window cap from 3 to 4 so all four Antigravity windows are visible.
 - Replaced the single aggregated `cache_tokens` column in the daily CSV export with explicit `cache_read_tokens` and `cache_write_tokens` columns.
 - Rendered the TUI quota "Fetched" timestamp in local time instead of UTC.
@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remapped the TUI "Today" shortcut from `T` to `n` to avoid clashing with the lowercase `t` (sort by tokens) shortcut.
 - Toned down the footer shortcut hints by dropping the highlighted background badge in favor of subtle colored key text.
 - Stopped surfacing Claude Code extra-credit usage in the CLI/TUI quota output.
+
+### Fixed
+- Raised the Antigravity Language Server request timeout from 3s to 20s (matching the other quota providers); the `RetrieveUserQuotaSummary` call is a real backend round-trip, and the tight 3s budget made it fail intermittently.
 
 ## [0.3.3] - 2026-06-12
 

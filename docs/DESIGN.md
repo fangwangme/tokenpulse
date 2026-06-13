@@ -149,9 +149,9 @@ The quota view has two modes:
 - **Overview tab** shows up to the top 4 windows per provider for a compact summary
 - **Detail tabs** (per provider) show all available rate windows
 
-Each quota window renders as a bar plus a detail line (separated by a blank
-spacer row for breathing room) when there is vertical room, and falls back to a
-single line in compact cards:
+Each quota window renders as a bar with its detail line directly beneath it, and
+a blank row separating consecutive windows, when there is vertical room; it falls
+back to a single line in compact cards:
 - **Top line** — the gradient progress bar with an expected-progress marker
   (`▏`) showing where theoretical usage should be at this point in time. The
   fill respects the active display mode (used vs remaining); no number or time
@@ -175,10 +175,9 @@ single line in compact cards:
   │  Plan: Pro                                                          │
   │                                                                     │
   │  Gemini (5h)  ████████████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
-  │                                                                     │
   │    3h 12m   used 42.10%   remaining 57.90%   On track               │
-  │  Gemini (7d)  █████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
   │                                                                     │
+  │  Gemini (7d)  █████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
   │    4d 6h    used 18.30%   remaining 81.70%   12% under pace          │
   ╰─────────────────────────────────────────────────────────────────────╯
 ```

@@ -10,7 +10,10 @@ use serde::Deserialize;
 use std::time::Duration;
 use tracing::{debug, info};
 
-const LS_PROBE_TIMEOUT_SECS: u64 = 3;
+// The Language Server proxies RetrieveUserQuotaSummary to Antigravity's backend,
+// so this is a real network round-trip, not a local liveness check. Keep it in
+// line with the other providers (20s) instead of a tight 3s probe budget.
+const LS_REQUEST_TIMEOUT_SECS: u64 = 20;
 
 // Connect-RPC service exposed by the Antigravity Language Server.
 const LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
@@ -93,7 +96,7 @@ pub struct AntigravityQuotaFetcher {
 impl AntigravityQuotaFetcher {
     pub fn new() -> Self {
         let ls_client = Client::builder()
-            .timeout(Duration::from_secs(LS_PROBE_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(LS_REQUEST_TIMEOUT_SECS))
             .danger_accept_invalid_certs(true)
             .build()
             .unwrap_or_else(|_| Client::new());

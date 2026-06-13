@@ -354,11 +354,7 @@ fn render_window_block(
 
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // progress bar
-            Constraint::Length(1), // spacer for breathing room
-            Constraint::Min(0),    // detail line
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
 
     // Top line: pure progress bar (no trailing number); every figure lives on
@@ -368,7 +364,10 @@ fn render_window_block(
         .show_percent(false);
     f.render_widget(gauge, split[0]);
 
-    let detail_area = split[2];
+    // The detail line sits directly under the bar. render_snapshot_card gives
+    // each window an extra row, so the leftover row below the detail becomes a
+    // blank gap between consecutive windows (not between the bar and the text).
+    let detail_area = split[1];
     if detail_area.height == 0 {
         return;
     }
