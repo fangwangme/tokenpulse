@@ -146,7 +146,7 @@ tokenpulse --log                          # write a timestamped startup timing l
 ### Quota Tab
 
 The quota view has two modes:
-- **Overview tab** shows only the top 3 most-used windows per provider for a compact summary
+- **Overview tab** shows up to the top 4 windows per provider for a compact summary
 - **Detail tabs** (per provider) show all available rate windows
 
 Each gauge includes:
@@ -231,18 +231,9 @@ Each gauge includes:
   Press q to quit │ ←/→ switch tabs │ ↑/↓ move selected row/day
 ```
 
-Current usage TUI notes:
-
-- `Overview` shows a 60-day stacked chart switchable between token and cost views, plus a scrollable `Top Models` table
-- `Overview` top models use their own visible scroll hint, cost percentage, and wider model/agent columns so long model IDs and multi-agent attribution fit better
-- `Models` shows a searchable (`/`), sortable table with a sort-aware `%` share column and per-column semantic colors (`Model`=company color, `Tokens`=green, `Cost`=gold, `Msgs`=blue)
-- `Daily` shows Today/This Week/This Month cost, period totals, and daily rows as a colored table (`Tokens`, `Cost`, `Input`, `Output`, `Cache`, `Msgs`) with a 7-day token trend column on wide terminals
-- `Activity` shows range cost stats, a GitHub-style calendar heatmap with solid colored cells split at 20/40/60/80% of the visible window peak, GitHub-green cost cells, Kaggle-blue token cells, mouse-clickable cells, clickable legend ranges, and selected-day drill-down grouped by agent first, then model, with agent/model cost totals
-- `Activity` heatmap surface is theme-invariant, using soft gray background and cell border colors in both light and dark themes
-- `Activity` selected-day panel includes total/input/output/cache/reasoning/message/session summary and supports detail scrolling when the agent/model list exceeds the viewport, with the scroll hint rendered on its own bottom row
-- `Quota` displays rate limits (e.g. Session 5h, Weekly 7d) with progress gauges, expected progress indicators, and remaining balance or used credits
-- `Settings` provides a live configuration view to toggle display modes, provider visibility, theme preferences, and adjust the unified TUI auto-refresh interval
-- Press `s` on any tab to open a source filter overlay (toggle providers on/off)
+The per-tab behaviour, columns, key bindings, and Settings options are
+documented authoritatively in [`modules/tui.md`](modules/tui.md); this section
+only sketches the conceptual layout.
 
 **Company vs Agent Distinction:**
 - **Company color** = model family owner (`OpenAI`, `Google`, `Anthropic`, `Others`)
@@ -254,57 +245,20 @@ The TUI uses company color for model names and chart segments, while agent/sourc
 
 ## Data Models
 
-### Quota
-
-```rust
-pub struct QuotaSnapshot {
-    pub provider: String,           // "claude", "codex"
-    pub plan: Option<String>,       // "Pro", "Plus"
-    pub windows: Vec<RateWindow>,
-    pub credits: Option<CreditInfo>,
-    pub fetched_at: DateTime<Utc>,
-}
-
-pub struct RateWindow {
-    pub label: String,              // "Session (5h)", "Weekly"
-    pub used_percent: f64,          // 0.0 - 100.0
-    pub resets_at: Option<DateTime<Utc>>,
-}
-
-pub struct CreditInfo {
-    pub used: f64,
-    pub limit: Option<f64>,         // None = unlimited
-    pub currency: String,           // "USD"
-}
-```
-
-### Usage
-
-```rust
-pub struct TokenBreakdown {
-    pub input: i64,
-    pub output: i64,
-    pub cache_read: i64,
-    pub cache_write: i64,
-    pub reasoning: i64,
-}
-
-pub struct UnifiedMessage {
-    pub client: String,             // "claude", "codex", "opencode", "pi"
-    pub client_detail: Option<String>,
-    pub model_id: String,           // "claude-opus-4", "o3"
-    pub provider_id: String,        // "anthropic", "openai"
-    pub session_id: String,
-    pub timestamp: i64,             // Unix ms
-    pub date: String,               // "YYYY-MM-DD"
-    pub tokens: TokenBreakdown,
-    pub cost: f64,                  // calculated USD
-}
-```
+The shared data contracts (`QuotaSnapshot`, `RateWindow`, `CreditInfo`,
+`TokenBreakdown`, `UnifiedMessage`, `ModelSummary`, …) live in
+[`tokenpulse-core/src/provider.rs`](../tokenpulse-core/src/provider.rs) and
+`tokenpulse-core/src/usage/mod.rs`. Those definitions are the source of truth —
+read them there rather than maintaining a second copy here.
 
 ---
 
 ## API Details
+
+> Per-provider endpoints, auth, and response mapping are documented
+> authoritatively in [`modules/quota.md`](modules/quota.md) (quota) and
+> [`modules/usage.md`](modules/usage.md) (session parsing). The notes below are a
+> quick reference.
 
 ### Claude Code Quota
 
