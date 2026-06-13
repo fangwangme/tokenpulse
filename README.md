@@ -55,11 +55,12 @@ output for scripting.
   one TUI, or plain-text/JSON/CSV output
 - **Ledger-backed** — local SQLite with per-day pricing snapshots so historical
   cost does not silently drift
-- **Quota overview** — up to the top 4 windows per provider with pace ETA and
-  expected-progress marker; per-provider detail in the Quota tab
-- **Auto-refresh in TUI** — configurable intervals for quota view (1/2/5/10/15
-  min, default 5 min) and usage view (5/10/15/30 min, default 10 min); cycle
-  or toggle in the Settings tab, countdown shown in footer
+- **Quota overview** — up to the top 4 windows per provider; each is a progress
+  bar with an expected-progress marker plus a detail line showing the reset
+  countdown, used/remaining percentages, and an at-current-rate pace indicator
+- **Auto-refresh in TUI** — one interval for both quota and usage
+  (0/1/2/5/10/15 min, default 5 min); cycle or toggle in the Settings tab, with
+  a countdown shown in the footer
 - **`r` to refresh** — in both quota and usage views without restarting TUI
 - **60-day stacked bar chart** — switchable between token and cost views
 - **Heatmap** — solid-cell coloring for value levels; GitHub-green palette for
