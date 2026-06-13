@@ -382,7 +382,7 @@ fn render_selected_day_overview(
         return;
     }
 
-    let lines = if area.width >= 34 && area.height >= 4 {
+    let lines = if area.width >= 34 && area.height >= 6 {
         vec![
             Line::from(vec![
                 Span::styled(
@@ -446,7 +446,8 @@ fn render_selected_day_overview(
                     format_compact(day.messages),
                     Style::default().fg(Color::Rgb(96, 165, 250)),
                 ),
-                Span::raw("  "),
+            ]),
+            Line::from(vec![
                 Span::styled("Sess ", Style::default().fg(theme.dim)),
                 Span::styled(format_compact(day.sessions), Style::default().fg(theme.fg)),
             ]),

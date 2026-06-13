@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Display quota percentages with two decimal places in the gauges and summaries.
 - Redesigned the quota gauge: a pure progress bar on top (no inline number or time) with a detail line directly beneath it (`<countdown> used X.XX% remaining Y.YY% <pace>`) and a blank row between consecutive windows; the reset countdown and used/remaining figures are colored by the remaining balance and the pace indicator keeps its own color (omitted once the window is exhausted). Compact cards still collapse to a single-line bar.
 - Raised the Quota Overview per-provider window cap from 3 to 4 so all four Antigravity windows are visible.
+- Laid out the Activity selected-day overview as a consistent two-column grid, moving the session count onto its own row.
 - Replaced the single aggregated `cache_tokens` column in the daily CSV export with explicit `cache_read_tokens` and `cache_write_tokens` columns.
 - Rendered the TUI quota "Fetched" timestamp in local time instead of UTC.
 - Lifted the `--no-tui` summary caps: the console summary now prints all models and up to a year (365 days) of daily totals.
