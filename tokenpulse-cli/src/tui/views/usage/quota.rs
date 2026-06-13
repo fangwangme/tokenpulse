@@ -367,12 +367,12 @@ fn render_window_block(
         .unwrap_or_else(|| Span::styled("No pace data", Style::default().fg(theme.dim)));
 
     let primary = match display_mode {
-        QuotaDisplayMode::Used => format!("{:.0}% used", window.used_percent),
-        QuotaDisplayMode::Remaining => format!("{:.0}% left", shown_percent),
+        QuotaDisplayMode::Used => format!("{:.2}% used", window.used_percent),
+        QuotaDisplayMode::Remaining => format!("{:.2}% left", shown_percent),
     };
     let secondary = match display_mode {
-        QuotaDisplayMode::Used => format!("{:.0}% left", 100.0 - window.used_percent),
-        QuotaDisplayMode::Remaining => format!("{:.0}% used", window.used_percent),
+        QuotaDisplayMode::Used => format!("{:.2}% left", 100.0 - window.used_percent),
+        QuotaDisplayMode::Remaining => format!("{:.2}% used", window.used_percent),
     };
 
     let detail = if compact {

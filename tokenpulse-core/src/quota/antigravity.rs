@@ -176,7 +176,7 @@ impl AntigravityQuotaFetcher {
     }
 }
 
-/// Map a quota summary into sorted `RateWindow`s: Gemini before Claude/GPT, and
+/// Map a quota summary into sorted `RateWindow`s: Gemini before Claude, and
 /// within each group the 5-hour limit before the weekly limit.
 fn windows_from_summary(summary: &LsQuotaSummary) -> Vec<RateWindow> {
     let mut built: Vec<(u8, u8, RateWindow)> = Vec::new();
@@ -188,7 +188,8 @@ fn windows_from_summary(summary: &LsQuotaSummary) -> Vec<RateWindow> {
         for bucket in &group.buckets {
             let (window_suffix, window_rank, period_duration_ms) =
                 window_descriptor(&bucket.window);
-            let used = ((1.0 - bucket.remaining_fraction.clamp(0.0, 1.0)) * 100.0).round();
+            // Keep full precision; the UI rounds for display.
+            let used = (1.0 - bucket.remaining_fraction.clamp(0.0, 1.0)) * 100.0;
             let resets_at = bucket.reset_time.as_deref().and_then(|s| {
                 DateTime::parse_from_rfc3339(s)
                     .ok()
@@ -218,7 +219,7 @@ fn clean_group_label(display_name: &str) -> String {
     if lower.contains("gemini") {
         "Gemini".to_string()
     } else if lower.contains("claude") || lower.contains("gpt") {
-        "Claude/GPT".to_string()
+        "Claude".to_string()
     } else {
         let trimmed = display_name.trim();
         let cleaned = trimmed
@@ -237,7 +238,7 @@ fn clean_group_label(display_name: &str) -> String {
 fn group_rank(group_label: &str) -> u8 {
     match group_label {
         "Gemini" => 0,
-        "Claude/GPT" => 1,
+        "Claude" => 1,
         _ => 2,
     }
 }
@@ -381,12 +382,7 @@ mod tests {
         let labels: Vec<&str> = windows.iter().map(|w| w.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec![
-                "Gemini (5h)",
-                "Gemini (7d)",
-                "Claude/GPT (5h)",
-                "Claude/GPT (7d)",
-            ]
+            vec!["Gemini (5h)", "Gemini (7d)", "Claude (5h)", "Claude (7d)",]
         );
     }
 
@@ -398,10 +394,7 @@ mod tests {
         let gemini_5h = &windows[0];
         assert_eq!(gemini_5h.label, "Gemini (5h)");
         assert_eq!(gemini_5h.period_duration_ms, Some(FIVE_HOURS_MS));
-        assert_eq!(
-            gemini_5h.used_percent,
-            ((1.0 - 0.8852908_f64) * 100.0).round()
-        );
+        assert!((gemini_5h.used_percent - (1.0 - 0.8852908_f64) * 100.0).abs() < 1e-9);
         assert!(gemini_5h.resets_at.is_some());
 
         let gemini_weekly = &windows[1];
@@ -409,17 +402,14 @@ mod tests {
         assert_eq!(gemini_weekly.period_duration_ms, Some(SEVEN_DAYS_MS));
 
         let third_party_weekly = &windows[3];
-        assert_eq!(third_party_weekly.label, "Claude/GPT (7d)");
-        assert_eq!(
-            third_party_weekly.used_percent,
-            ((1.0 - 0.1584452_f64) * 100.0).round()
-        );
+        assert_eq!(third_party_weekly.label, "Claude (7d)");
+        assert!((third_party_weekly.used_percent - (1.0 - 0.1584452_f64) * 100.0).abs() < 1e-9);
     }
 
     #[test]
     fn clean_group_label_maps_known_groups() {
         assert_eq!(clean_group_label("Gemini Models"), "Gemini");
-        assert_eq!(clean_group_label("Claude and GPT models"), "Claude/GPT");
+        assert_eq!(clean_group_label("Claude and GPT models"), "Claude");
         assert_eq!(clean_group_label("Experimental Models"), "Experimental");
     }
 

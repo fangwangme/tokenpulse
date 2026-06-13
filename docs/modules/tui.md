@@ -138,8 +138,7 @@ The `model_color()` method detects provider from model name and assigns a fixed 
   - `quota_display_mode` (toggle between `used` and `remaining` credit balance)
   - `show_empty_providers` (true / false)
   - `show_account` (true / false)
-  - `quota_auto_refresh_interval` (toggle auto-refresh interval for Quota: 0, 1, 2, 5, 10, 15 min)
-  - `usage_auto_refresh_interval` (toggle auto-refresh interval for Usage: 0, 5, 10, 15, 30 min)
+  - `auto_refresh_interval` (unified auto-refresh interval for quota + usage: 0, 1, 2, 5, 10, 15 min; 0 = disabled)
   - `theme` (cycle through auto / dark / light)
   - `scan_antigravity` (toggle active Antigravity session scanning and alias synchronization: true / false)
   - Individual provider enabled/disabled switches

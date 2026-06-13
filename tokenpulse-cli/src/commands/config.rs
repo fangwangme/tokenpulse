@@ -32,18 +32,12 @@ pub fn run(action: ConfigAction) -> Result<()> {
                 QuotaDisplayMode::Remaining => "remaining",
             };
             println!("  quota_display_mode: {}", mode_str);
-            let refresh_str = match config.display.quota_auto_refresh_secs {
+            let refresh_str = match config.display.auto_refresh_secs {
                 0 => "disabled".to_string(),
                 s if s % 60 == 0 => format!("{} min", s / 60),
                 s => format!("{}s", s),
             };
-            println!("  quota_auto_refresh_interval: {}", refresh_str);
-            let usage_refresh_str = match config.display.usage_auto_refresh_secs {
-                0 => "disabled".to_string(),
-                s if s % 60 == 0 => format!("{} min", s / 60),
-                s => format!("{}s", s),
-            };
-            println!("  usage_auto_refresh_interval: {}", usage_refresh_str);
+            println!("  auto_refresh_interval: {}", refresh_str);
         }
         ConfigAction::Enable { provider } => {
             manager.enable_provider(&provider)?;
@@ -121,10 +115,10 @@ pub fn run(action: ConfigAction) -> Result<()> {
                     manager.save(&config)?;
                     println!("theme = {}", config.display.theme.label());
                 }
-                "quota_auto_refresh_interval" => {
+                "auto_refresh_interval" => {
                     let mins: u32 = value.parse().map_err(|_| {
                         anyhow::anyhow!(
-                            "Invalid value '{}' for quota_auto_refresh_interval. Expected: 0, 1, 2, 5, 10, 15",
+                            "Invalid value '{}' for auto_refresh_interval. Expected: 0, 1, 2, 5, 10, 15",
                             value
                         )
                     })?;
@@ -137,52 +131,23 @@ pub fn run(action: ConfigAction) -> Result<()> {
                         15 => 900,
                         _ => {
                             anyhow::bail!(
-                                "Invalid value '{}' for quota_auto_refresh_interval. Supported intervals: 0, 1, 2, 5, 10, 15 (minutes)",
+                                "Invalid value '{}' for auto_refresh_interval. Supported intervals: 0, 1, 2, 5, 10, 15 (minutes)",
                                 value
                             );
                         }
                     };
-                    config.display.quota_auto_refresh_secs = secs;
+                    config.display.auto_refresh_secs = secs;
                     manager.save(&config)?;
                     let label = if secs == 0 {
                         "disabled".to_string()
                     } else {
                         format!("{mins} min")
                     };
-                    println!("quota_auto_refresh_interval = {label}");
-                }
-                "usage_auto_refresh_interval" => {
-                    let mins: u32 = value.parse().map_err(|_| {
-                        anyhow::anyhow!(
-                            "Invalid value '{}' for usage_auto_refresh_interval. Expected: 0, 5, 10, 15, 30",
-                            value
-                        )
-                    })?;
-                    let secs = match mins {
-                        0 => 0,
-                        5 => 300,
-                        10 => 600,
-                        15 => 900,
-                        30 => 1800,
-                        _ => {
-                            anyhow::bail!(
-                                "Invalid value '{}' for usage_auto_refresh_interval. Supported intervals: 0, 5, 10, 15, 30 (minutes)",
-                                value
-                            );
-                        }
-                    };
-                    config.display.usage_auto_refresh_secs = secs;
-                    manager.save(&config)?;
-                    let label = if secs == 0 {
-                        "disabled".to_string()
-                    } else {
-                        format!("{mins} min")
-                    };
-                    println!("usage_auto_refresh_interval = {label}");
+                    println!("auto_refresh_interval = {label}");
                 }
                 _ => {
                     anyhow::bail!(
-                        "Unknown setting '{}'. Available settings:\n  quota_display_mode           (used | remaining)\n  show_empty_providers         (true | false)\n  show_account                 (true | false)\n  theme                        (auto | dark | light)\n  quota_auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  usage_auto_refresh_interval  (0 | 5 | 10 | 15 | 30 — minutes, 0 = disabled)",
+                        "Unknown setting '{}'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  show_account           (true | false)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)",
                         key
                     );
                 }

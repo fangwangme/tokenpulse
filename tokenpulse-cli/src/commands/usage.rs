@@ -1,6 +1,7 @@
 use crate::tui;
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDate, SecondsFormat, Utc};
+use rayon::prelude::*;
 use std::{
     collections::{BTreeSet, HashSet},
     fs::{File, OpenOptions},
@@ -140,13 +141,9 @@ pub async fn run(
 
     let mut found_any_source = false;
 
+    // Resolve each provider's incremental window first (sequential store reads).
+    let mut effective_sinces: Vec<Option<NaiveDate>> = Vec::with_capacity(parsers.len());
     for parser in &parsers {
-        let provider_started = Instant::now();
-        perf.log(
-            "provider_start",
-            format!("provider={}", parser.provider_name()),
-        );
-
         let since_started = Instant::now();
         let effective_since = if rebuild_all
             || refresh_range.is_some()
@@ -165,11 +162,35 @@ pub async fn run(
                 effective_since
             ),
         );
+        effective_sinces.push(effective_since);
+    }
 
-        let parse_started = Instant::now();
-        match parser.parse_sessions(effective_since) {
+    // Parse every provider concurrently — parsing is independent and the
+    // heaviest step (Antigravity also syncs over the local network). Ingestion
+    // below stays sequential so SQLite writes remain serialized and ordered.
+    let parse_outcomes: Vec<(Duration, Result<Vec<UnifiedMessage>>)> = parsers
+        .par_iter()
+        .zip(effective_sinces.par_iter())
+        .map(|(parser, since)| {
+            let started = Instant::now();
+            let result = parser.parse_sessions(*since);
+            (started.elapsed(), result)
+        })
+        .collect();
+
+    for ((parser, &effective_since), (parse_elapsed, parse_result)) in parsers
+        .iter()
+        .zip(effective_sinces.iter())
+        .zip(parse_outcomes)
+    {
+        let provider_started = Instant::now();
+        perf.log(
+            "provider_start",
+            format!("provider={}", parser.provider_name()),
+        );
+
+        match parse_result {
             Ok(messages) => {
-                let parse_elapsed = parse_started.elapsed();
                 let parsed_count = messages.len();
                 let parsed_sessions = message_session_count(&messages);
                 let scoped = match refresh_range {
@@ -248,7 +269,7 @@ pub async fn run(
             Err(error) => {
                 perf.log_duration(
                     "parse_sessions_error",
-                    parse_started.elapsed(),
+                    parse_elapsed,
                     format!("provider={} error={}", parser.provider_name(), error),
                 );
                 eprintln!(
@@ -508,13 +529,10 @@ fn build_reload_fn(
         let store = UsageStore::new();
         let parsers = build_parsers(&current_provider_names, false);
 
+        // Resolve incremental windows (sequential reads), parse concurrently,
+        // then ingest sequentially so SQLite writes stay serialized.
+        let mut reload_sinces: Vec<Option<NaiveDate>> = Vec::with_capacity(parsers.len());
         for parser in &parsers {
-            let provider_started = Instant::now();
-            perf.log(
-                "reload_provider_start",
-                format!("provider={}", parser.provider_name()),
-            );
-
             let started = Instant::now();
             let since = store.default_since(parser.provider_name(), output_since)?;
             perf.log_duration(
@@ -522,12 +540,31 @@ fn build_reload_fn(
                 started.elapsed(),
                 format!("provider={} since={:?}", parser.provider_name(), since),
             );
-            let started = Instant::now();
-            match parser.parse_sessions(since) {
+            reload_sinces.push(since);
+        }
+
+        let reload_outcomes: Vec<(Duration, Result<Vec<UnifiedMessage>>)> = parsers
+            .par_iter()
+            .zip(reload_sinces.par_iter())
+            .map(|(parser, since)| {
+                let started = Instant::now();
+                let result = parser.parse_sessions(*since);
+                (started.elapsed(), result)
+            })
+            .collect();
+
+        for (parser, (parse_elapsed, parse_result)) in parsers.iter().zip(reload_outcomes) {
+            let provider_started = Instant::now();
+            perf.log(
+                "reload_provider_start",
+                format!("provider={}", parser.provider_name()),
+            );
+
+            match parse_result {
                 Ok(messages) => {
                     perf.log_duration(
                         "reload_parse_sessions",
-                        started.elapsed(),
+                        parse_elapsed,
                         format!(
                             "provider={} messages={} sessions={}",
                             parser.provider_name(),
@@ -568,7 +605,7 @@ fn build_reload_fn(
                 Err(error) => {
                     perf.log_duration(
                         "reload_parse_sessions_error",
-                        started.elapsed(),
+                        parse_elapsed,
                         format!("provider={} error={}", parser.provider_name(), error),
                     );
                 } // tolerate per-provider errors during reload
@@ -937,7 +974,7 @@ fn print_quota_summary(
                 QuotaDisplayMode::Remaining => "remaining",
             };
             print!(
-                "  - {}: {:.1}% {}",
+                "  - {}: {:.2}% {}",
                 window.label, display_percent, mode_label
             );
             if let Some(ref resets_at) = window.resets_at {

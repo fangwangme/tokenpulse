@@ -62,7 +62,7 @@ impl<'a> Widget for GradientGauge<'a> {
             return;
         }
 
-        let percent_text = format!("{:>3}%", self.percent.round() as i32);
+        let percent_text = format!("{:>6.2}%", self.percent);
         let trailing = if let Some(time) = self.show_time {
             format!(" {} {}", percent_text, truncate_display_width(time, 12))
         } else {

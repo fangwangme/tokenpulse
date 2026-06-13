@@ -1152,10 +1152,10 @@ where
         })?;
 
         // 1. Auto-refresh check for Usage
-        let usage_auto_secs = config.display.usage_auto_refresh_secs;
-        if usage_auto_secs > 0
+        let auto_secs = config.display.auto_refresh_secs;
+        if auto_secs > 0
             && !state.usage_refresh_in_progress
-            && state.last_usage_refresh.elapsed().as_secs() >= usage_auto_secs as u64
+            && state.last_usage_refresh.elapsed().as_secs() >= auto_secs as u64
         {
             state.usage_refresh_in_progress = true;
             state.set_refresh_status("Auto-refreshing...", RefreshStatusLevel::Info);
@@ -1176,10 +1176,9 @@ where
         }
 
         // 2. Auto-refresh check for Quota
-        let quota_auto_secs = config.display.quota_auto_refresh_secs;
-        if quota_auto_secs > 0
+        if auto_secs > 0
             && !state.quota_refresh_in_progress
-            && state.last_quota_refresh.elapsed().as_secs() >= quota_auto_secs as u64
+            && state.last_quota_refresh.elapsed().as_secs() >= auto_secs as u64
         {
             state.quota_refresh_in_progress = true;
             state.set_refresh_status("Auto-refreshing...", RefreshStatusLevel::Info);
@@ -1988,22 +1987,17 @@ fn render_footer(
         }
     };
 
-    let countdown_str = if state.page == UsagePage::Quota {
-        let quota_auto_secs = config.display.quota_auto_refresh_secs;
-        if quota_auto_secs > 0 {
-            let elapsed = state.last_quota_refresh.elapsed().as_secs() as u32;
-            let remaining = quota_auto_secs.saturating_sub(elapsed);
-            let m = remaining / 60;
-            let s = remaining % 60;
-            Some(format!("Quota auto-refresh in: {}m {}s", m, s))
-        } else {
-            None
-        }
-    } else {
-        let usage_auto_secs = config.display.usage_auto_refresh_secs;
-        if usage_auto_secs > 0 {
-            let elapsed = state.last_usage_refresh.elapsed().as_secs() as u32;
-            let remaining = usage_auto_secs.saturating_sub(elapsed);
+    let countdown_str = {
+        let auto_secs = config.display.auto_refresh_secs;
+        if auto_secs > 0 {
+            // Quota page tracks the quota refresh timer; other pages the usage one.
+            let last_refresh = if state.page == UsagePage::Quota {
+                state.last_quota_refresh
+            } else {
+                state.last_usage_refresh
+            };
+            let elapsed = last_refresh.elapsed().as_secs() as u32;
+            let remaining = auto_secs.saturating_sub(elapsed);
             let m = remaining / 60;
             let s = remaining % 60;
             Some(format!("Auto-refresh in: {}m {}s", m, s))

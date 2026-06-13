@@ -11,7 +11,7 @@ A Rust CLI tool with two core features:
 **Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI has been deprecated and is retained for historical data analytics only.
 
 **Language:** Rust
-**Key Principle:** On-demand by default, with optional auto-refresh. Run command → see results → exit. Configure quota auto-refresh interval (default 5m) and usage auto-refresh interval (default 10m) in the CLI or live in the TUI Settings tab.
+**Key Principle:** On-demand by default, with optional auto-refresh. Run command → see results → exit. Configure a single auto-refresh interval (default 5m, applies to both quota and usage) in the CLI or live in the TUI Settings tab.
 
 ---
 
@@ -241,7 +241,7 @@ Current usage TUI notes:
 - `Activity` heatmap surface is theme-invariant, using soft gray background and cell border colors in both light and dark themes
 - `Activity` selected-day panel includes total/input/output/cache/reasoning/message/session summary and supports detail scrolling when the agent/model list exceeds the viewport, with the scroll hint rendered on its own bottom row
 - `Quota` displays rate limits (e.g. Session 5h, Weekly 7d) with progress gauges, expected progress indicators, and remaining balance or used credits
-- `Settings` provides a live configuration view to toggle display modes, provider visibility, theme preferences, and adjust Quota and Usage TUI auto-refresh intervals
+- `Settings` provides a live configuration view to toggle display modes, provider visibility, theme preferences, and adjust the unified TUI auto-refresh interval
 - Press `s` on any tab to open a source filter overlay (toggle providers on/off)
 
 **Company vs Agent Distinction:**

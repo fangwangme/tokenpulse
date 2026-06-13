@@ -144,12 +144,12 @@ No external auth lookup. Antigravity quota is read from a running local Antigrav
 
 | Bucket field                 | → RateWindow                                                    |
 | ---------------------------- | --------------------------------------------------------------- |
-| group `displayName`          | Label prefix (`Gemini Models` → `Gemini`, `Claude and GPT models` → `Claude/GPT`) |
+| group `displayName`          | Label prefix (`Gemini Models` → `Gemini`, `Claude and GPT models` → `Claude`) |
 | `window` (`5h` / `weekly`)   | Label suffix `(5h)` / `(7d)` and period duration (5h / 7d)      |
 | `remainingFraction`          | `used_percent = round((1 - remainingFraction) * 100)`           |
 | `resetTime`                  | `resets_at`                                                     |
 
-Windows are sorted Gemini before Claude/GPT, and within each group the 5-hour limit before the weekly limit.
+Windows are sorted Gemini before Claude, and within each group the 5-hour limit before the weekly limit.
 
 ---
 

@@ -164,9 +164,8 @@ tokenpulse config set quota_display_mode=used
 # Theme: auto, dark, light
 tokenpulse config set theme=dark
 
-# Auto-refresh intervals (0 = disabled)
-tokenpulse config set quota_auto_refresh_interval=5
-tokenpulse config set usage_auto_refresh_interval=10
+# Auto-refresh interval in minutes for quota + usage (0 = disabled)
+tokenpulse config set auto_refresh_interval=5
 
 # Show empty providers in the dashboard
 tokenpulse config set show_empty_providers=true
