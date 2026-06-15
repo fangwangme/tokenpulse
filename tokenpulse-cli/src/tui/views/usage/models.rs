@@ -113,29 +113,36 @@ pub fn render_models_page(
     let last_width = if show_last { 11usize } else { 0usize };
     let show_sparkline = total_width >= 144;
     let sparkline_width = if show_sparkline { 15usize } else { 0usize };
-    let raw_agent_width = (total_width / 4).clamp(22, 36);
-    let raw_model_width = total_width
-        .saturating_sub(
-            rank_width
-                + raw_agent_width
-                + tokens_width
-                + cost_width
-                + input_width
-                + output_width
-                + cache_read_width
-                + cache_write_width
-                + 1
-                + pct_width
-                + 1
-                + msg_width
-                + last_width
-                + sparkline_width
-                + 2, // spacer for trend
-        )
-        .clamp(12, 40);
-    let model_width = (raw_model_width * 4) / 5;
-    let saved_space = raw_model_width - model_width;
-    let agent_width = raw_agent_width + saved_space;
+    let last_spacer_width = if show_last { 1usize } else { 0usize };
+    let trend_spacer_width = if show_sparkline { 2usize } else { 0usize };
+    let total_spacers = 10usize + last_spacer_width + trend_spacer_width;
+    let available_for_both = total_width.saturating_sub(
+        rank_width
+            + tokens_width
+            + cost_width
+            + input_width
+            + output_width
+            + cache_read_width
+            + cache_write_width
+            + pct_width
+            + msg_width
+            + last_width
+            + sparkline_width
+            + total_spacers,
+    );
+    let (model_width, agent_width) = if available_for_both < 32 {
+        let m_w = 22usize.min(available_for_both);
+        let a_w = available_for_both.saturating_sub(m_w);
+        (m_w, a_w)
+    } else {
+        let a_w = (available_for_both * 3 / 5).clamp(10, 40);
+        let m_w = available_for_both.saturating_sub(a_w);
+        if m_w < 22 {
+            (22usize, available_for_both.saturating_sub(22))
+        } else {
+            (m_w, a_w)
+        }
+    };
     let share_total = model_table_share_total(models.iter().copied(), state.sort_field);
 
     // Build per-model 7-day token sparkline data
@@ -183,59 +190,68 @@ pub fn render_models_page(
             format!("{:<rank_width$}", headers[0]),
             Style::default().fg(theme.dim).bold(),
         ),
+        Span::raw(" "),
         Span::styled(
             format!("{:<model_width$}", headers[1]),
             Style::default().fg(theme.accent).bold(),
         ),
+        Span::raw(" "),
         Span::styled(
             format!("{:<agent_width$}", headers[2]),
             Style::default().fg(theme.accent_soft).bold(),
         ),
+        Span::raw(" "),
         Span::styled(
             format!(
-                "{:<tokens_width$}",
+                "{:>tokens_width$}",
                 format!("{}{}", headers[3], sort_indicator(SortField::Tokens))
             ),
             Style::default().fg(Color::Rgb(52, 211, 153)).bold(),
         ),
+        Span::raw(" "),
         Span::styled(
             format!(
-                "{:<cost_width$}",
+                "{:>cost_width$}",
                 format!("{}{}", headers[4], sort_indicator(SortField::Cost))
             ),
             Style::default().fg(Color::Rgb(250, 204, 21)).bold(),
         ),
+        Span::raw(" "),
         Span::styled(
-            format!("{:<input_width$}", headers[5]),
+            format!("{:>input_width$}", headers[5]),
             Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
         ),
+        Span::raw(" "),
         Span::styled(
-            format!("{:<output_width$}", headers[6]),
+            format!("{:>output_width$}", headers[6]),
             Style::default().fg(Color::Rgb(167, 139, 250)).bold(),
         ),
+        Span::raw(" "),
         Span::styled(
-            format!("{:<cache_read_width$}", cache_r_header),
-            Style::default().fg(Color::Rgb(251, 146, 60)).bold(),
-        ),
-        Span::styled(
-            format!("{:<cache_write_width$}", cache_w_header),
+            format!("{:>cache_read_width$}", cache_r_header),
             Style::default().fg(Color::Rgb(251, 146, 60)).bold(),
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:<pct_width$}", headers[8]),
+            format!("{:>cache_write_width$}", cache_w_header),
+            Style::default().fg(Color::Rgb(251, 146, 60)).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>pct_width$}", headers[8]),
             Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:<msg_width$}", headers[9]),
+            format!("{:>msg_width$}", headers[9]),
             Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
         ),
     ];
     if show_last {
+        header_spans.push(Span::raw(" "));
         header_spans.push(Span::styled(
             format!(
-                "{:<last_width$}",
+                "{:>last_width$}",
                 format!("{}{}", headers[10], sort_indicator(SortField::Date))
             ),
             Style::default().fg(theme.dim).bold(),
@@ -280,10 +296,12 @@ pub fn render_models_page(
                 format!("{:<rank_width$}", rank),
                 selected_row_style(Style::default().fg(theme.dim), selected, theme),
             ),
+            Span::raw(" "),
             Span::styled(
                 format!("{:<model_width$}", truncate(&model.model, model_width)),
                 selected_row_style(Style::default().fg(model_color), selected, theme),
             ),
+            Span::raw(" "),
             Span::styled(
                 format!(
                     "{:<agent_width$}",
@@ -291,41 +309,46 @@ pub fn render_models_page(
                 ),
                 selected_row_style(Style::default().fg(theme.accent_soft), selected, theme),
             ),
+            Span::raw(" "),
             Span::styled(
-                format!("{:<tokens_width$}", format_compact(model.tokens)),
+                format!("{:>tokens_width$}", format_compact(model.tokens)),
                 selected_row_style(
                     Style::default().fg(Color::Rgb(52, 211, 153)),
                     selected,
                     theme,
                 ),
             ),
+            Span::raw(" "),
             Span::styled(
-                format!("{:<cost_width$}", format_cost_compact(model.cost)),
+                format!("{:>cost_width$}", format_cost_compact(model.cost)),
                 selected_row_style(
                     Style::default().fg(Color::Rgb(250, 204, 21)),
                     selected,
                     theme,
                 ),
             ),
+            Span::raw(" "),
             Span::styled(
-                format!("{:<input_width$}", format_compact(model.input_tokens)),
+                format!("{:>input_width$}", format_compact(model.input_tokens)),
                 selected_row_style(
                     Style::default().fg(Color::Rgb(96, 165, 250)),
                     selected,
                     theme,
                 ),
             ),
+            Span::raw(" "),
             Span::styled(
-                format!("{:<output_width$}", format_compact(model.output_tokens)),
+                format!("{:>output_width$}", format_compact(model.output_tokens)),
                 selected_row_style(
                     Style::default().fg(Color::Rgb(167, 139, 250)),
                     selected,
                     theme,
                 ),
             ),
+            Span::raw(" "),
             Span::styled(
                 format!(
-                    "{:<cache_read_width$}",
+                    "{:>cache_read_width$}",
                     format_compact(model.cache_read_tokens)
                 ),
                 selected_row_style(
@@ -334,9 +357,10 @@ pub fn render_models_page(
                     theme,
                 ),
             ),
+            Span::raw(" "),
             Span::styled(
                 format!(
-                    "{:<cache_write_width$}",
+                    "{:>cache_write_width$}",
                     format_compact(model.cache_write_tokens)
                 ),
                 selected_row_style(
@@ -347,7 +371,7 @@ pub fn render_models_page(
             ),
             Span::raw(" "),
             Span::styled(
-                format!("{:<pct_width$}", format!("{:.1}%", pct)),
+                format!("{:>pct_width$}", format!("{:.1}%", pct)),
                 selected_row_style(
                     Style::default().fg(Color::Rgb(96, 165, 250)),
                     selected,
@@ -356,7 +380,7 @@ pub fn render_models_page(
             ),
             Span::raw(" "),
             Span::styled(
-                format!("{:<msg_width$}", format_compact(model.message_count as i64)),
+                format!("{:>msg_width$}", format_compact(model.message_count as i64)),
                 selected_row_style(
                     Style::default().fg(Color::Rgb(96, 165, 250)),
                     selected,
@@ -369,8 +393,9 @@ pub fn render_models_page(
                 .last_used
                 .map(|date| date.format("%Y-%m-%d").to_string())
                 .unwrap_or_else(|| "n/a".to_string());
+            spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                format!("{:<last_width$}", last),
+                format!("{:>last_width$}", last),
                 selected_row_style(Style::default().fg(theme.dim), selected, theme),
             ));
         }

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-06-16
+
+### Changed
+- Models page: right-align trailing metrics columns (Tokens, Cost, Input, Output, Cache R/W, %, Msgs) for better readability, and insert explicit 1-character spacers between columns to prevent text overlap.
+- Models page: dynamically allocate remaining width between Model and Agent columns. When available space is tight (<32 chars), guarantee a minimum width of 22 to fully display names like `Gemini 3.1 Pro Preview`. When space is ample, divide the space in a 2:3 ratio, letting the Agent column grow up to 40 characters so long agent lists are not truncated.
+
+### Fixed
+- Overview chart: replace discrete integer bar width steps with average floating point width stretching. The bars are dynamically stretched to cover the entire chart area width, eliminating the blank space on the right side of the chart.
+
 ## [0.4.1] - 2026-06-14
 
 ### Added
