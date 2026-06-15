@@ -22,10 +22,11 @@ pub struct StackedBarChart<'a> {
     max_value: f64,
     value_format: ValueFormat,
     x_labels: &'a [String],
+    bar_width: usize,
 }
 
 impl<'a> StackedBarChart<'a> {
-    pub fn new(data: &'a [(f64, HashMap<&'a str, f64>)]) -> Self {
+    pub fn new(data: &'a [(f64, HashMap<&'a str, f64>)], bar_width: usize) -> Self {
         let max_value = data
             .iter()
             .map(|(_, vals)| vals.values().sum())
@@ -37,6 +38,7 @@ impl<'a> StackedBarChart<'a> {
             max_value: max_value.max(1.0),
             value_format: ValueFormat::Currency,
             x_labels: &[],
+            bar_width: bar_width.max(1),
         }
     }
 
@@ -75,16 +77,19 @@ impl<'a> Widget for StackedBarChart<'a> {
             return;
         }
 
-        let chart_width_val = chart_width as usize;
-        let max_bars = chart_width_val;
-        let bars = aggregated_bars(self.data, max_bars);
-        let bars_len = bars.len();
-
+        let bar_width = self.bar_width;
+        let bars_len = self.data.len();
         if bars_len == 0 {
             return;
         }
 
-        let avg_width = chart_width_val as f64 / bars_len as f64;
+        let total_bars_width = bars_len * bar_width;
+        let chart_offset = if (chart_width as usize) > total_bars_width {
+            ((chart_width as usize - total_bars_width) / 2) as u16
+        } else {
+            0u16
+        };
+        let start_x = chart_x + chart_offset;
 
         // Render Y-axis labels (4 evenly spaced ticks)
         let num_ticks = chart_height.min(4).max(2);
@@ -103,21 +108,13 @@ impl<'a> Widget for StackedBarChart<'a> {
         }
 
         // Render bars
-        for (bar_idx, values) in bars.iter().enumerate() {
-            let bar_start = (bar_idx as f64 * avg_width).round() as usize;
-            let bar_end = ((bar_idx + 1) as f64 * avg_width).round() as usize;
-            let draw_width = bar_end - bar_start;
-
-            if draw_width == 0 {
-                continue;
-            }
-
-            let bar_x = chart_x + bar_start as u16;
-            if bar_x + draw_width as u16 > chart_x + chart_width {
+        for (bar_idx, values) in self.data.iter().enumerate() {
+            let bar_x = start_x + (bar_idx * bar_width) as u16;
+            if bar_x + bar_width as u16 > chart_x + chart_width {
                 break;
             }
 
-            let total: f64 = values.values().sum();
+            let total = values.0;
             if total <= 0.0 {
                 continue;
             }
@@ -127,7 +124,7 @@ impl<'a> Widget for StackedBarChart<'a> {
             let full_rows = height_eighths / 8;
             let partial = height_eighths % 8;
 
-            let mut segments: Vec<_> = values.iter().collect();
+            let mut segments: Vec<_> = values.1.iter().collect();
             segments.sort_by(|left, right| {
                 right
                     .1
@@ -153,7 +150,7 @@ impl<'a> Widget for StackedBarChart<'a> {
                     buf,
                     bar_x,
                     y,
-                    draw_width,
+                    bar_width,
                     '█',
                     &segment_ranges,
                     row * 8,
@@ -167,7 +164,7 @@ impl<'a> Widget for StackedBarChart<'a> {
                     buf,
                     bar_x,
                     y,
-                    draw_width,
+                    bar_width,
                     BLOCKS[partial - 1],
                     &segment_ranges,
                     full_rows * 8,
@@ -181,10 +178,10 @@ impl<'a> Widget for StackedBarChart<'a> {
             let axis_y = area.y + chart_height as u16;
             render_x_axis(
                 buf,
-                chart_x,
-                chart_width,
-                avg_width,
-                bars.len(),
+                start_x,
+                total_bars_width as u16,
+                bar_width as u16,
+                bars_len,
                 axis_y,
                 self.x_labels,
             );
@@ -200,24 +197,24 @@ impl<'a> Widget for StackedBarChart<'a> {
 fn render_x_axis(
     buf: &mut Buffer,
     chart_x: u16,
-    chart_width: u16,
-    avg_width: f64,
+    total_bars_width: u16,
+    bar_width: u16,
     bars_len: usize,
     y: u16,
     labels: &[String],
 ) {
     let label_w = 5u16; // "MM-DD"
     let n = labels.len();
-    if n == 0 || bars_len == 0 || chart_width == 0 {
+    if n == 0 || bars_len == 0 || bar_width == 0 || total_bars_width == 0 {
         return;
     }
 
-    if chart_width < label_w {
+    if total_bars_width < label_w {
         return;
     }
 
     // Pick a tick count whose even spacing leaves room between labels.
-    let max_ticks = (1 + chart_width.saturating_sub(1) / (label_w + 3)).clamp(2, 6) as usize;
+    let max_ticks = (1 + total_bars_width.saturating_sub(1) / (label_w + 3)).clamp(2, 6) as usize;
     let ticks = max_ticks.min(bars_len);
 
     let mut last_end: i64 = i64::MIN;
@@ -228,8 +225,7 @@ fn render_x_axis(
             (tick as f64 * (bars_len - 1) as f64 / (ticks - 1) as f64).round() as usize
         };
 
-        // Date for this bar: endpoints exact, middles use the bucket's first day
-        // (matches how `aggregated_bars` slices the data by index).
+        // Date for this bar
         let data_idx = if bars_len >= n {
             bar_idx.min(n - 1)
         } else if bar_idx + 1 == bars_len {
@@ -240,10 +236,8 @@ fn render_x_axis(
 
         let label = &labels[data_idx];
         let lw = UnicodeWidthStr::width(label.as_str()) as u16;
-        let bar_start = chart_x as f64 + (bar_idx as f64 * avg_width);
-        let bar_end = chart_x as f64 + ((bar_idx + 1) as f64 * avg_width);
-        let bar_center = (bar_start + bar_end) / 2.0;
-        let max_start = (chart_x + chart_width).saturating_sub(lw);
+        let bar_center = chart_x as f64 + (bar_idx as f64 + 0.5) * bar_width as f64;
+        let max_start = (chart_x + total_bars_width).saturating_sub(lw);
         let start =
             ((bar_center - lw as f64 / 2.0).round() as i64).clamp(chart_x as i64, max_start as i64);
         if start <= last_end {

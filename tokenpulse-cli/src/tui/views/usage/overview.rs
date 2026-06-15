@@ -47,9 +47,32 @@ fn render_overview_chart(
     state: &UsageState,
     theme: &Theme,
 ) {
+    let temp_block = Block::default().borders(Borders::ALL);
+    let inner_temp = temp_block.inner(area);
+    let y_axis_width = 7u16;
+    let chart_width = inner_temp.width.saturating_sub(y_axis_width + 1) as usize;
+
+    let bar_width = if chart_width < 60 {
+        1
+    } else if chart_width < 150 {
+        2
+    } else {
+        3
+    };
+    let limit = chart_width / bar_width;
+
+    let recent = dashboard.recent_days(limit);
+    let displayed_days = recent.len();
+
+    let metric_name = match state.overview_metric {
+        OverviewMetric::Tokens => "Token Usage",
+        OverviewMetric::Cost => "Cost Usage",
+    };
+    let title = format!(" {} ({} days) ", metric_name, displayed_days);
+
     let block = Block::default()
         .title(Span::styled(
-            format!(" {} ", state.overview_metric.title()),
+            title,
             Style::default().fg(theme.accent).bold(),
         ))
         .borders(Borders::ALL)
@@ -57,7 +80,6 @@ fn render_overview_chart(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let recent = dashboard.recent_days(60);
     if recent.is_empty() {
         f.render_widget(
             Paragraph::new("No usage data").style(Style::default().fg(theme.dim)),
@@ -112,7 +134,7 @@ fn render_overview_chart(
         .map(|day| day.date.format("%m-%d").to_string())
         .collect();
 
-    let chart = StackedBarChart::new(&chart_data)
+    let chart = StackedBarChart::new(&chart_data, bar_width)
         .color("openai", theme.company_color("openai"))
         .color("google", theme.company_color("google"))
         .color("anthropic", theme.company_color("anthropic"))
@@ -196,11 +218,22 @@ fn render_overview_top_models(
     let cost_width = 8usize;
     let tokens_width = 9usize;
     let fixed_width = tokens_width + cost_width + pct_width + 4;
-    let remaining = total_width.saturating_sub(fixed_width);
-    let agent_width = (remaining * 2 / 5).clamp(26, 40);
-    let model_width = total_width
-        .saturating_sub(agent_width + fixed_width)
-        .clamp(18, 36);
+    let available_for_both = total_width.saturating_sub(fixed_width);
+    let (model_width, agent_width) = if available_for_both < 32 {
+        let m_w = 22usize.min(available_for_both);
+        let a_w = available_for_both.saturating_sub(m_w);
+        (m_w, a_w)
+    } else {
+        let a_w = (available_for_both * 3 / 5).clamp(10, 40);
+        let m_w = available_for_both.saturating_sub(a_w);
+        if m_w < 22 {
+            (22usize, available_for_both.saturating_sub(22))
+        } else if m_w > 35 {
+            (35usize, available_for_both.saturating_sub(35))
+        } else {
+            (m_w, a_w)
+        }
+    };
 
     let mut lines = Vec::with_capacity(data_rows_visible + 2);
     lines.push(Line::from(vec![
