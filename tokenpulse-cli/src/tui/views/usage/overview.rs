@@ -228,6 +228,8 @@ fn render_overview_top_models(
         let m_w = available_for_both.saturating_sub(a_w);
         if m_w < 22 {
             (22usize, available_for_both.saturating_sub(22))
+        } else if m_w > 35 {
+            (35usize, available_for_both.saturating_sub(35))
         } else {
             (m_w, a_w)
         }
