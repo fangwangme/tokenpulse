@@ -116,21 +116,20 @@ pub fn render_models_page(
     let last_spacer_width = if show_last { 1usize } else { 0usize };
     let trend_spacer_width = if show_sparkline { 2usize } else { 0usize };
     let total_spacers = 10usize + last_spacer_width + trend_spacer_width;
-    let available_for_both = total_width
-        .saturating_sub(
-            rank_width
-                + tokens_width
-                + cost_width
-                + input_width
-                + output_width
-                + cache_read_width
-                + cache_write_width
-                + pct_width
-                + msg_width
-                + last_width
-                + sparkline_width
-                + total_spacers,
-        );
+    let available_for_both = total_width.saturating_sub(
+        rank_width
+            + tokens_width
+            + cost_width
+            + input_width
+            + output_width
+            + cache_read_width
+            + cache_write_width
+            + pct_width
+            + msg_width
+            + last_width
+            + sparkline_width
+            + total_spacers,
+    );
     let (model_width, agent_width) = if available_for_both < 32 {
         let m_w = 22usize.min(available_for_both);
         let a_w = available_for_both.saturating_sub(m_w);
