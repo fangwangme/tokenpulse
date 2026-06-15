@@ -218,11 +218,20 @@ fn render_overview_top_models(
     let cost_width = 8usize;
     let tokens_width = 9usize;
     let fixed_width = tokens_width + cost_width + pct_width + 4;
-    let remaining = total_width.saturating_sub(fixed_width);
-    let agent_width = (remaining * 2 / 5).clamp(26, 40);
-    let model_width = total_width
-        .saturating_sub(agent_width + fixed_width)
-        .clamp(18, 36);
+    let available_for_both = total_width.saturating_sub(fixed_width);
+    let (model_width, agent_width) = if available_for_both < 32 {
+        let m_w = 22usize.min(available_for_both);
+        let a_w = available_for_both.saturating_sub(m_w);
+        (m_w, a_w)
+    } else {
+        let a_w = (available_for_both * 3 / 5).clamp(10, 40);
+        let m_w = available_for_both.saturating_sub(a_w);
+        if m_w < 22 {
+            (22usize, available_for_both.saturating_sub(22))
+        } else {
+            (m_w, a_w)
+        }
+    };
 
     let mut lines = Vec::with_capacity(data_rows_visible + 2);
     lines.push(Line::from(vec![
