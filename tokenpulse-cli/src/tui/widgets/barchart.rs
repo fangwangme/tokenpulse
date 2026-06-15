@@ -75,10 +75,16 @@ impl<'a> Widget for StackedBarChart<'a> {
             return;
         }
 
-        let desired_bar_width = (chart_width as usize / self.data.len().max(1)).clamp(1, 3);
-        let max_bars = (chart_width as usize / desired_bar_width).max(1);
+        let chart_width_val = chart_width as usize;
+        let max_bars = chart_width_val;
         let bars = aggregated_bars(self.data, max_bars);
-        let bar_width = desired_bar_width.min((chart_width as usize / bars.len().max(1)).max(1));
+        let bars_len = bars.len();
+
+        if bars_len == 0 {
+            return;
+        }
+
+        let avg_width = chart_width_val as f64 / bars_len as f64;
 
         // Render Y-axis labels (4 evenly spaced ticks)
         let num_ticks = chart_height.min(4).max(2);
@@ -98,8 +104,16 @@ impl<'a> Widget for StackedBarChart<'a> {
 
         // Render bars
         for (bar_idx, values) in bars.iter().enumerate() {
-            let bar_x = chart_x + (bar_idx * bar_width) as u16;
-            if bar_x + bar_width as u16 > chart_x + chart_width {
+            let bar_start = (bar_idx as f64 * avg_width).round() as usize;
+            let bar_end = ((bar_idx + 1) as f64 * avg_width).round() as usize;
+            let draw_width = bar_end - bar_start;
+
+            if draw_width == 0 {
+                continue;
+            }
+
+            let bar_x = chart_x + bar_start as u16;
+            if bar_x + draw_width as u16 > chart_x + chart_width {
                 break;
             }
 
@@ -139,7 +153,7 @@ impl<'a> Widget for StackedBarChart<'a> {
                     buf,
                     bar_x,
                     y,
-                    bar_width,
+                    draw_width,
                     '█',
                     &segment_ranges,
                     row * 8,
@@ -153,7 +167,7 @@ impl<'a> Widget for StackedBarChart<'a> {
                     buf,
                     bar_x,
                     y,
-                    bar_width,
+                    draw_width,
                     BLOCKS[partial - 1],
                     &segment_ranges,
                     full_rows * 8,
@@ -168,7 +182,8 @@ impl<'a> Widget for StackedBarChart<'a> {
             render_x_axis(
                 buf,
                 chart_x,
-                bar_width as u16,
+                chart_width,
+                avg_width,
                 bars.len(),
                 axis_y,
                 self.x_labels,
@@ -185,25 +200,24 @@ impl<'a> Widget for StackedBarChart<'a> {
 fn render_x_axis(
     buf: &mut Buffer,
     chart_x: u16,
-    bar_width: u16,
+    chart_width: u16,
+    avg_width: f64,
     bars_len: usize,
     y: u16,
     labels: &[String],
 ) {
     let label_w = 5u16; // "MM-DD"
     let n = labels.len();
-    if n == 0 || bars_len == 0 || bar_width == 0 {
+    if n == 0 || bars_len == 0 || chart_width == 0 {
         return;
     }
 
-    // Width actually occupied by the bars (may be narrower than the chart).
-    let span = bars_len as u16 * bar_width;
-    if span < label_w {
+    if chart_width < label_w {
         return;
     }
 
     // Pick a tick count whose even spacing leaves room between labels.
-    let max_ticks = (1 + span.saturating_sub(1) / (label_w + 3)).clamp(2, 6) as usize;
+    let max_ticks = (1 + chart_width.saturating_sub(1) / (label_w + 3)).clamp(2, 6) as usize;
     let ticks = max_ticks.min(bars_len);
 
     let mut last_end: i64 = i64::MIN;
@@ -226,8 +240,10 @@ fn render_x_axis(
 
         let label = &labels[data_idx];
         let lw = UnicodeWidthStr::width(label.as_str()) as u16;
-        let bar_center = chart_x as f64 + (bar_idx as f64 + 0.5) * bar_width as f64;
-        let max_start = (chart_x + span).saturating_sub(lw);
+        let bar_start = chart_x as f64 + (bar_idx as f64 * avg_width);
+        let bar_end = chart_x as f64 + ((bar_idx + 1) as f64 * avg_width);
+        let bar_center = (bar_start + bar_end) / 2.0;
+        let max_start = (chart_x + chart_width).saturating_sub(lw);
         let start =
             ((bar_center - lw as f64 / 2.0).round() as i64).clamp(chart_x as i64, max_start as i64);
         if start <= last_end {
