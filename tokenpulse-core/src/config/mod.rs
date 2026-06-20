@@ -47,6 +47,12 @@ pub struct DisplayConfig {
     pub show_account: bool,
     #[serde(default = "default_true")]
     pub scan_antigravity: bool,
+    /// Whether quota refreshes are allowed. When false, the TUI skips
+    /// quota fetches on startup, auto-refresh, and manual `r`. The check
+    /// is read at each refresh trigger, so toggling takes effect on the
+    /// next refresh cycle. Defaults to true.
+    #[serde(default = "default_true")]
+    pub refresh_quota: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,6 +143,7 @@ impl Default for DisplayConfig {
             auto_refresh_secs: default_auto_refresh_secs(),
             show_account: true,
             scan_antigravity: true,
+            refresh_quota: true,
         }
     }
 }
@@ -318,6 +325,8 @@ enabled = true
         );
         assert_eq!(config.display.auto_refresh_secs, 300);
         assert!(config.display.show_account);
+        assert!(config.display.scan_antigravity);
+        assert!(config.display.refresh_quota);
     }
 
     #[test]
@@ -363,6 +372,28 @@ version = 3
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.display.auto_refresh_secs, 300);
         assert_eq!(config.display.theme, ThemePreference::Auto);
+    }
+
+    #[test]
+    fn test_refresh_quota_defaults_true_when_absent() {
+        let toml_str = r#"
+version = 3
+[display]
+auto_refresh_secs = 60
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.display.refresh_quota);
+    }
+
+    #[test]
+    fn test_refresh_quota_deserializes_from_toml() {
+        let toml_str = r#"
+version = 3
+[display]
+refresh_quota = false
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.display.refresh_quota);
     }
 
     #[test]

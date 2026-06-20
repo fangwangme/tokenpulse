@@ -320,6 +320,7 @@ Settings and configuration view:
 - Set and save `auto_refresh_interval` (0, 1, 2, 5, 10, 15 min) — shared by quota + usage
 - Cycle through theme preference (`auto`, `dark`, `light`)
 - Toggle active Antigravity session scanning and alias synchronization (`scan_antigravity`: true / false)
+- Enable / disable quota balance refresh (`refresh_quota`: true / false, default true)
 - Space or Enter keys cycle or toggle the active setting, and Up/Down (`j`/`k`) keys move selection.
 
 
