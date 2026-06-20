@@ -1022,7 +1022,7 @@ where
     // Initial background reload on startup
     state.set_refresh_status("Refreshing...", RefreshStatusLevel::Info);
     state.usage_refresh_in_progress = true;
-    state.quota_refresh_in_progress = true;
+    state.quota_refresh_in_progress = config.display.refresh_quota;
 
     {
         let reload_clone = Arc::clone(&reload_fn_arc);
@@ -1040,7 +1040,7 @@ where
         });
     }
 
-    {
+    if config.display.refresh_quota {
         let enabled_providers: Vec<String> = config
             .providers
             .iter()
@@ -1168,7 +1168,7 @@ where
             && state.last_refresh.elapsed().as_secs() >= auto_secs as u64
         {
             state.usage_refresh_in_progress = true;
-            state.quota_refresh_in_progress = true;
+            state.quota_refresh_in_progress = config.display.refresh_quota;
             state.set_refresh_status("Auto-refreshing...", RefreshStatusLevel::Info);
 
             let reload_clone = Arc::clone(&reload_fn_arc);
@@ -1185,13 +1185,15 @@ where
                 }
             });
 
-            let enabled_providers: Vec<String> = config
-                .providers
-                .iter()
-                .filter(|(_, p)| p.enabled)
-                .map(|(k, _)| k.clone())
-                .collect();
-            spawn_quota_reload(msg_tx.clone(), enabled_providers);
+            if config.display.refresh_quota {
+                let enabled_providers: Vec<String> = config
+                    .providers
+                    .iter()
+                    .filter(|(_, p)| p.enabled)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                spawn_quota_reload(msg_tx.clone(), enabled_providers);
+            }
         }
 
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -1281,7 +1283,7 @@ where
                     {
                         state.set_refresh_status("Refreshing...", RefreshStatusLevel::Info);
                         state.usage_refresh_in_progress = true;
-                        state.quota_refresh_in_progress = true;
+                        state.quota_refresh_in_progress = config.display.refresh_quota;
 
                         let reload_clone = Arc::clone(&reload_fn_arc);
                         let tx = msg_tx.clone();
@@ -1300,13 +1302,15 @@ where
                             }
                         });
 
-                        let enabled_providers: Vec<String> = config
-                            .providers
-                            .iter()
-                            .filter(|(_, p)| p.enabled)
-                            .map(|(k, _)| k.clone())
-                            .collect();
-                        spawn_quota_reload(msg_tx.clone(), enabled_providers);
+                        if config.display.refresh_quota {
+                            let enabled_providers: Vec<String> = config
+                                .providers
+                                .iter()
+                                .filter(|(_, p)| p.enabled)
+                                .map(|(k, _)| k.clone())
+                                .collect();
+                            spawn_quota_reload(msg_tx.clone(), enabled_providers);
+                        }
 
                         continue;
                     }

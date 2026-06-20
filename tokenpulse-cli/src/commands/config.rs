@@ -38,6 +38,7 @@ pub fn run(action: ConfigAction) -> Result<()> {
                 s => format!("{}s", s),
             };
             println!("  auto_refresh_interval: {}", refresh_str);
+            println!("  refresh_quota: {}", config.display.refresh_quota);
         }
         ConfigAction::Enable { provider } => {
             manager.enable_provider(&provider)?;
@@ -145,9 +146,23 @@ pub fn run(action: ConfigAction) -> Result<()> {
                     };
                     println!("auto_refresh_interval = {label}");
                 }
+                "refresh_quota" => {
+                    config.display.refresh_quota = match value {
+                        "true" | "1" | "yes" => true,
+                        "false" | "0" | "no" => false,
+                        _ => {
+                            anyhow::bail!(
+                                "Invalid value '{}' for refresh_quota. Expected: true, false",
+                                value
+                            );
+                        }
+                    };
+                    manager.save(&config)?;
+                    println!("refresh_quota = {value}");
+                }
                 _ => {
                     anyhow::bail!(
-                        "Unknown setting '{}'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  show_account           (true | false)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)",
+                        "Unknown setting '{}'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  show_account           (true | false)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)",
                         key
                     );
                 }
