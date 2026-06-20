@@ -147,6 +147,7 @@ between consecutive windows. Compact cards collapse to a single bar + percentage
   - `auto_refresh_interval` (unified auto-refresh interval for quota + usage: 0, 1, 2, 5, 10, 15 min; 0 = disabled)
   - `theme` (cycle through auto / dark / light)
   - `scan_antigravity` (toggle active Antigravity session scanning and alias synchronization: true / false)
+  - `refresh_quota` (enable / disable quota balance refresh on startup, auto-refresh, and manual `r`: true / false, default true)
   - Individual provider enabled/disabled switches
 - Controls: use Up/Down (`j`/`k`) to navigate settings, and Space or Enter to cycle/toggle the selected setting.
 

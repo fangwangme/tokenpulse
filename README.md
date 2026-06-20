@@ -173,6 +173,9 @@ tokenpulse config set show_empty_providers=true
 
 # Show / hide account name in quota cards
 tokenpulse config set show_account=true
+
+# Enable / disable quota refresh (default: true)
+tokenpulse config set refresh_quota=false
 ```
 
 ## Data Model
