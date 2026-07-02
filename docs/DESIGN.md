@@ -164,11 +164,9 @@ back to a single line in compact cards:
 - Fixed-width label columns keep multiple windows aligned (especially Antigravity's
   per-group 5h/weekly pairs).
 - Compact cards collapse to one line: bar + percentage + reset countdown.
-- When the overview has 2-3 enabled quota sources and Codex is one of them on a
-  wide terminal, Codex takes a full column and the other providers stack in the
-  other column. Four or more sources keep the regular grid layout.
 - Codex can show each available manual rate-limit reset credit with its expiry
-  as separate quota card rows, collapsing only when height is constrained.
+  as separate quota card rows, ordered by earliest expiry and collapsing only
+  when height is constrained.
 - GitHub Copilot uses dynamic calendar-month billing period calculation.
 
 ```

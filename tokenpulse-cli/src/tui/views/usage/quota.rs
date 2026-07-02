@@ -78,11 +78,6 @@ fn render_overview(
         return;
     }
 
-    if should_use_codex_column_layout(area, snapshots) {
-        render_codex_column_layout(f, area, snapshots, display_mode, theme, show_account);
-        return;
-    }
-
     let columns = if area.width >= 110 { 2 } else { 1 };
     let rows = snapshots.len().div_ceil(columns);
     let row_constraints = vec![Constraint::Min(6); rows];
@@ -113,89 +108,6 @@ fn render_overview(
                 );
             }
         }
-    }
-}
-
-fn should_use_codex_column_layout(area: Rect, snapshots: &[&QuotaSnapshot]) -> bool {
-    area.width >= 110
-        && (2..=3).contains(&snapshots.len())
-        && snapshots
-            .iter()
-            .any(|snapshot| snapshot.provider == "codex")
-}
-
-fn render_codex_column_layout(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    snapshots: &[&QuotaSnapshot],
-    display_mode: &QuotaDisplayMode,
-    theme: &Theme,
-    show_account: bool,
-) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
-        .split(area);
-
-    let codex_index = snapshots
-        .iter()
-        .position(|snapshot| snapshot.provider == "codex")
-        .unwrap_or(0);
-    let codex = snapshots[codex_index];
-    let other_snapshots: Vec<&QuotaSnapshot> = snapshots
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, snapshot)| (idx != codex_index).then_some(*snapshot))
-        .collect();
-
-    render_snapshot_card(
-        f,
-        columns[0],
-        codex,
-        display_mode,
-        theme,
-        false,
-        true,
-        show_account,
-    );
-
-    if other_snapshots.is_empty() {
-        return;
-    }
-
-    if other_snapshots.len() == 1 {
-        render_snapshot_card(
-            f,
-            columns[1],
-            other_snapshots[0],
-            display_mode,
-            theme,
-            false,
-            true,
-            show_account,
-        );
-        return;
-    }
-
-    let row_areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(vec![
-            Constraint::Ratio(1, other_snapshots.len() as u32);
-            other_snapshots.len()
-        ])
-        .split(columns[1]);
-
-    for (snapshot, row_area) in other_snapshots.iter().zip(row_areas.iter()) {
-        render_snapshot_card(
-            f,
-            *row_area,
-            snapshot,
-            display_mode,
-            theme,
-            false,
-            true,
-            show_account,
-        );
     }
 }
 
@@ -547,39 +459,36 @@ fn format_reset_credit_lines(snapshot: &QuotaSnapshot, max_rows: usize) -> Vec<S
         return Vec::new();
     }
 
-    let mut credits: Vec<(usize, &tokenpulse_core::RateLimitResetCredit)> = snapshot
-        .rate_limit_reset_credits
-        .iter()
-        .enumerate()
-        .collect();
-    credits
-        .sort_by_key(|(index, credit)| (credit.expires_at.is_none(), credit.expires_at, index + 1));
+    let mut credits: Vec<&tokenpulse_core::RateLimitResetCredit> =
+        snapshot.rate_limit_reset_credits.iter().collect();
+    credits.sort_by_key(|credit| (credit.expires_at.is_none(), credit.expires_at));
 
-    let format_line = |index: usize, credit: &tokenpulse_core::RateLimitResetCredit| {
+    let format_line = |display_index: usize, credit: &tokenpulse_core::RateLimitResetCredit| {
         let expiry = credit
             .expires_at
             .map(|time| format_reset_credit_timestamp(&time))
             .unwrap_or_else(|| "expiry unknown".to_string());
-        format!("#{} {expiry}", index + 1)
+        format!("#{} {expiry}", display_index + 1)
     };
 
     if max_rows >= count {
         return credits
             .into_iter()
+            .enumerate()
             .map(|(index, credit)| format_line(index, credit))
             .collect();
     }
 
     if max_rows == 1 {
-        let (index, credit) = credits[0];
-        return vec![format_line(index, credit)];
+        return vec![format_line(0, credits[0])];
     }
 
     let visible_rows = max_rows - 1;
     let mut lines: Vec<String> = credits
         .iter()
         .take(visible_rows)
-        .map(|(index, credit)| format_line(*index, credit))
+        .enumerate()
+        .map(|(index, credit)| format_line(index, credit))
         .collect();
     lines.push(format!("+{} more reset credits", count - visible_rows));
     lines
@@ -618,41 +527,6 @@ mod tests {
             rate_limit_reset_credits: vec![],
             fetched_at: Utc::now(),
         }
-    }
-
-    #[test]
-    fn codex_column_layout_only_applies_to_two_or_three_sources() {
-        let codex = snapshot("codex");
-        let claude = snapshot("claude");
-        let copilot = snapshot("copilot");
-        let antigravity = snapshot("antigravity");
-        let wide = Rect::new(0, 0, 120, 30);
-
-        assert!(should_use_codex_column_layout(wide, &[&codex, &claude]));
-        assert!(should_use_codex_column_layout(
-            wide,
-            &[&claude, &codex, &copilot]
-        ));
-        assert!(!should_use_codex_column_layout(
-            wide,
-            &[&codex, &claude, &copilot, &antigravity]
-        ));
-    }
-
-    #[test]
-    fn codex_column_layout_requires_width_and_codex() {
-        let codex = snapshot("codex");
-        let claude = snapshot("claude");
-        let copilot = snapshot("copilot");
-
-        assert!(!should_use_codex_column_layout(
-            Rect::new(0, 0, 100, 30),
-            &[&codex, &claude]
-        ));
-        assert!(!should_use_codex_column_layout(
-            Rect::new(0, 0, 120, 30),
-            &[&claude, &copilot]
-        ));
     }
 
     #[test]
@@ -701,9 +575,12 @@ mod tests {
 
         let lines = format_reset_credit_lines(&codex, 10);
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].starts_with("#2 "));
-        assert!(lines[1].starts_with("#1 "));
+        assert!(lines[0].starts_with("#1 "));
+        assert!(lines[0].contains("2026-07-18"));
+        assert!(lines[1].starts_with("#2 "));
+        assert!(lines[1].contains("2026-07-27"));
         assert!(lines[2].starts_with("#3 "));
+        assert!(lines[2].contains("2026-08-01"));
     }
 }
 

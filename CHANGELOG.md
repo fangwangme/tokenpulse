@@ -8,11 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Codex quota now fetches available manual rate-limit reset credits and shows each credit's expiry in CLI and TUI quota output.
+- Codex quota now fetches available manual rate-limit reset credits and shows each credit's local expiry in CLI and TUI quota output.
 
 ### Changed
-- Quota Overview gives Codex a full column on wide terminals when 2-3 quota sources are enabled; 4+ sources keep the regular grid layout.
-- TUI reset-credit rows use compact per-credit expiry lines to avoid redundant summary text in narrow quota cards.
+- CLI reset-credit output uses a `Banked reset` / `Expiration time (local)` table.
+- CLI and TUI reset-credit rows show the earliest expiring credits first and use compact per-credit expiry lines to avoid redundant summary text.
 
 ## [0.4.3] - 2026-06-21
 

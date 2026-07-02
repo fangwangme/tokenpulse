@@ -287,38 +287,6 @@ fn allocate_segment_units(
     allocated
 }
 
-fn aggregated_bars<'a>(
-    data: &'a [(f64, HashMap<&'a str, f64>)],
-    max_columns: usize,
-) -> Vec<HashMap<&'a str, f64>> {
-    if data.is_empty() || max_columns == 0 {
-        return Vec::new();
-    }
-
-    if data.len() <= max_columns {
-        return data.iter().map(|(_, values)| values.clone()).collect();
-    }
-
-    let bucket_count = max_columns.min(data.len());
-    let mut buckets = Vec::with_capacity(bucket_count);
-
-    for bucket_idx in 0..bucket_count {
-        let start = bucket_idx * data.len() / bucket_count;
-        let end = ((bucket_idx + 1) * data.len() / bucket_count).max(start + 1);
-        let mut merged = HashMap::new();
-
-        for (_, values) in &data[start..end.min(data.len())] {
-            for (name, value) in values {
-                *merged.entry(*name).or_insert(0.0) += *value;
-            }
-        }
-
-        buckets.push(merged);
-    }
-
-    buckets
-}
-
 fn render_band(
     buf: &mut Buffer,
     bar_x: u16,

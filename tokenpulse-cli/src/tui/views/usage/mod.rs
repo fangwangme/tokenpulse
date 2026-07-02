@@ -109,13 +109,6 @@ impl OverviewMetric {
         *self = OverviewMetric::Cost;
     }
 
-    pub fn title(self) -> &'static str {
-        match self {
-            OverviewMetric::Tokens => "Token Usage (60 days)",
-            OverviewMetric::Cost => "Cost Usage (60 days)",
-        }
-    }
-
     pub fn value_format(self) -> crate::tui::widgets::ValueFormat {
         match self {
             OverviewMetric::Tokens => crate::tui::widgets::ValueFormat::CompactNumber,
