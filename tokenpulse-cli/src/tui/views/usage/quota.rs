@@ -150,27 +150,10 @@ fn render_snapshot_card(
 
     let fixed_rows =
         if show_account_row { 1 } else { 0 } + if snapshot.credits.is_some() { 1 } else { 0 };
-    let desired_reset_credit_rows = snapshot.rate_limit_reset_credits.len();
-    let compact = compact
-        || inner.height < (base_windows.len() * 3 + fixed_rows + desired_reset_credit_rows) as u16;
+    let compact = compact || inner.height < (base_windows.len() * 3 + fixed_rows) as u16;
 
     let lines_per_window = if compact { 1 } else { 3 };
-    let min_window_rows = if base_windows.is_empty() {
-        0
-    } else {
-        lines_per_window
-    };
-    let max_reset_credit_rows = if desired_reset_credit_rows == 0 {
-        0
-    } else {
-        inner
-            .height
-            .saturating_sub((fixed_rows + min_window_rows) as u16)
-            .max(1) as usize
-    };
-    let reset_credit_lines = format_reset_credit_lines(snapshot, max_reset_credit_rows);
-    let reserved_lines = fixed_rows + reset_credit_lines.len();
-    let available_for_windows = inner.height.saturating_sub(reserved_lines as u16);
+    let available_for_windows = inner.height.saturating_sub(fixed_rows as u16);
     let max_allowed_windows = (available_for_windows as usize / lines_per_window).max(1);
 
     let windows = if max_allowed_windows < base_windows.len() {
@@ -188,6 +171,12 @@ fn render_snapshot_card(
         .max()
         .unwrap_or(10);
     let fixed_label_width = max_label_len.min(inner.width.saturating_sub(30) as usize);
+    let used_window_lines = windows.len() * lines_per_window;
+    let reset_credit_rows = inner
+        .height
+        .saturating_sub((fixed_rows + used_window_lines) as u16)
+        as usize;
+    let reset_credit_lines = format_reset_credit_lines(snapshot, reset_credit_rows);
 
     let mut constraints = Vec::new();
     if show_account_row {
@@ -460,14 +449,11 @@ fn format_credit_text(
 
 fn format_reset_credit_lines(snapshot: &QuotaSnapshot, max_rows: usize) -> Vec<String> {
     let count = snapshot.rate_limit_reset_credits.len();
-    if count == 0 || max_rows == 0 {
+    if count == 0 || max_rows < 2 {
         return Vec::new();
     }
 
     let mut lines = vec!["Banked reset  Expiration".to_string()];
-    if max_rows == 1 {
-        return lines;
-    }
 
     let mut credits: Vec<&tokenpulse_core::RateLimitResetCredit> =
         snapshot.rate_limit_reset_credits.iter().collect();

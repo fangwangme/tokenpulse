@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Codex quota now fetches available manual rate-limit reset credits and shows each credit's local expiry in CLI and TUI quota output.
+- Settings now shows the TokenPulse package version as read-only information.
 
 ### Changed
 - CLI reset-credit output uses a `Banked reset` / `Expiration time` table with local timestamps.

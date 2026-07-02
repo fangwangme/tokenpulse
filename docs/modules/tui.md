@@ -141,6 +141,7 @@ between consecutive windows. Compact cards collapse to a single bar + percentage
 
 ### Tab 6: Settings
 - Live settings configuration panel for the application.
+- Shows the read-only TokenPulse package version near the config file path.
 - Configurable settings include:
   - `quota_display_mode` (toggle between `used` and `remaining` credit balance)
   - `show_empty_providers` (true / false)
