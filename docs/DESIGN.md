@@ -157,13 +157,18 @@ back to a single line in compact cards:
   fill respects the active display mode (used vs remaining); no number or time
   is printed on the bar itself.
 - **Detail line** — `<reset countdown>   used X%   remaining Y%   <pace>`.
-  The reset countdown and the used/remaining percentages are colored by the
+  The reset countdown and used/remaining percentages are colored by the
   balance amount (green/yellow/red); the pace text keeps its own pace color and
   carries the at-current-rate ETA when behind pace ("on track" / "N% under pace"
   / "+N% pace | eta …"), and is omitted entirely once the window is exhausted.
 - Fixed-width label columns keep multiple windows aligned (especially Antigravity's
   per-group 5h/weekly pairs).
 - Compact cards collapse to one line: bar + percentage + reset countdown.
+- When the overview has 2-3 enabled quota sources and Codex is one of them on a
+  wide terminal, Codex takes a full column and the other providers stack in the
+  other column. Four or more sources keep the regular grid layout.
+- Codex can show each available manual rate-limit reset credit with its expiry
+  as separate quota card rows, collapsing only when height is constrained.
 - GitHub Copilot uses dynamic calendar-month billing period calculation.
 
 ```

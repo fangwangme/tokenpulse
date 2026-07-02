@@ -246,6 +246,7 @@ impl QuotaFetcher for CopilotQuotaFetcher {
                 account: None,
                 windows,
                 credits: None,
+                rate_limit_reset_credits: vec![],
                 fetched_at: Utc::now(),
             });
         }

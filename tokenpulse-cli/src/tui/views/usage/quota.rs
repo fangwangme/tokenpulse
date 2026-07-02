@@ -2,7 +2,6 @@ use super::UsageState;
 use crate::commands::quota::quota_display_name;
 use crate::tui::theme::Theme;
 use crate::tui::widgets::GradientGauge;
-// No chrono imports needed here
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Style, Stylize},
@@ -79,6 +78,11 @@ fn render_overview(
         return;
     }
 
+    if should_use_codex_column_layout(area, snapshots) {
+        render_codex_column_layout(f, area, snapshots, display_mode, theme, show_account);
+        return;
+    }
+
     let columns = if area.width >= 110 { 2 } else { 1 };
     let rows = snapshots.len().div_ceil(columns);
     let row_constraints = vec![Constraint::Min(6); rows];
@@ -109,6 +113,89 @@ fn render_overview(
                 );
             }
         }
+    }
+}
+
+fn should_use_codex_column_layout(area: Rect, snapshots: &[&QuotaSnapshot]) -> bool {
+    area.width >= 110
+        && (2..=3).contains(&snapshots.len())
+        && snapshots
+            .iter()
+            .any(|snapshot| snapshot.provider == "codex")
+}
+
+fn render_codex_column_layout(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    snapshots: &[&QuotaSnapshot],
+    display_mode: &QuotaDisplayMode,
+    theme: &Theme,
+    show_account: bool,
+) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+        .split(area);
+
+    let codex_index = snapshots
+        .iter()
+        .position(|snapshot| snapshot.provider == "codex")
+        .unwrap_or(0);
+    let codex = snapshots[codex_index];
+    let other_snapshots: Vec<&QuotaSnapshot> = snapshots
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, snapshot)| (idx != codex_index).then_some(*snapshot))
+        .collect();
+
+    render_snapshot_card(
+        f,
+        columns[0],
+        codex,
+        display_mode,
+        theme,
+        false,
+        true,
+        show_account,
+    );
+
+    if other_snapshots.is_empty() {
+        return;
+    }
+
+    if other_snapshots.len() == 1 {
+        render_snapshot_card(
+            f,
+            columns[1],
+            other_snapshots[0],
+            display_mode,
+            theme,
+            false,
+            true,
+            show_account,
+        );
+        return;
+    }
+
+    let row_areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![
+            Constraint::Ratio(1, other_snapshots.len() as u32);
+            other_snapshots.len()
+        ])
+        .split(columns[1]);
+
+    for (snapshot, row_area) in other_snapshots.iter().zip(row_areas.iter()) {
+        render_snapshot_card(
+            f,
+            *row_area,
+            snapshot,
+            display_mode,
+            theme,
+            false,
+            true,
+            show_account,
+        );
     }
 }
 
@@ -149,13 +236,29 @@ fn render_snapshot_card(
         snapshot.windows.iter().collect()
     };
 
-    let compact = compact
-        || inner.height < (base_windows.len() * 3 + if show_account_row { 1 } else { 0 }) as u16;
-
-    let reserved_lines =
+    let fixed_rows =
         if show_account_row { 1 } else { 0 } + if snapshot.credits.is_some() { 1 } else { 0 };
-    let available_for_windows = inner.height.saturating_sub(reserved_lines as u16);
+    let desired_reset_credit_rows = snapshot.rate_limit_reset_credits.len();
+    let compact = compact
+        || inner.height < (base_windows.len() * 3 + fixed_rows + desired_reset_credit_rows) as u16;
+
     let lines_per_window = if compact { 1 } else { 3 };
+    let min_window_rows = if base_windows.is_empty() {
+        0
+    } else {
+        lines_per_window
+    };
+    let max_reset_credit_rows = if desired_reset_credit_rows == 0 {
+        0
+    } else {
+        inner
+            .height
+            .saturating_sub((fixed_rows + min_window_rows) as u16)
+            .max(1) as usize
+    };
+    let reset_credit_lines = format_reset_credit_lines(snapshot, max_reset_credit_rows);
+    let reserved_lines = fixed_rows + reset_credit_lines.len();
+    let available_for_windows = inner.height.saturating_sub(reserved_lines as u16);
     let max_allowed_windows = (available_for_windows as usize / lines_per_window).max(1);
 
     let windows = if max_allowed_windows < base_windows.len() {
@@ -182,6 +285,9 @@ fn render_snapshot_card(
         constraints.push(Constraint::Length(if compact { 1 } else { 3 }));
     }
     if snapshot.credits.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    for _ in &reset_credit_lines {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Min(0));
@@ -245,49 +351,22 @@ fn render_snapshot_card(
 
     if let Some(credits) = &snapshot.credits {
         if cursor < sections.len() {
-            let credit_text = match display_mode {
-                QuotaDisplayMode::Used => {
-                    if let Some(limit) = credits.limit {
-                        let percent = if limit > 0.0 {
-                            (credits.used / limit * 100.0).clamp(0.0, 999.0)
-                        } else {
-                            0.0
-                        };
-                        format!(
-                            "Credits {}{:.2} / {}{:.2} ({:.0}%)",
-                            credits.currency, credits.used, credits.currency, limit, percent
-                        )
-                    } else {
-                        format!(
-                            "Credits {}{:.2} (unlimited)",
-                            credits.currency, credits.used
-                        )
-                    }
-                }
-                QuotaDisplayMode::Remaining => {
-                    if let Some(limit) = credits.limit {
-                        let remaining = (limit - credits.used).max(0.0);
-                        let percent = if limit > 0.0 {
-                            (remaining / limit * 100.0).clamp(0.0, 100.0)
-                        } else {
-                            0.0
-                        };
-                        format!(
-                            "Balance {}{:.2} / {}{:.2} ({:.0}%)",
-                            credits.currency, remaining, credits.currency, limit, percent
-                        )
-                    } else {
-                        format!(
-                            "Balance {}{:.2} (unlimited)",
-                            credits.currency, credits.used
-                        )
-                    }
-                }
-            };
+            let credit_text = format_credit_text(credits, display_mode);
             let line = Paragraph::new(credit_text)
                 .style(Style::default().fg(theme.dim))
                 .alignment(Alignment::Left);
             f.render_widget(line, sections[cursor]);
+            cursor += 1;
+        }
+    }
+
+    for reset_text in reset_credit_lines {
+        if cursor < sections.len() {
+            let line = Paragraph::new(reset_text)
+                .style(Style::default().fg(theme.dim))
+                .alignment(Alignment::Left);
+            f.render_widget(line, sections[cursor]);
+            cursor += 1;
         }
     }
 }
@@ -367,7 +446,10 @@ fn render_window_block(
     let remaining_percent = (100.0 - window.used_percent).max(0.0);
 
     let mut detail_spans = vec![
-        Span::styled(reset_str, Style::default().fg(balance_color)),
+        Span::styled(
+            format!("reset {reset_str}"),
+            Style::default().fg(balance_color),
+        ),
         Span::raw("   "),
         Span::styled(
             format!("used {:.0}%", window.used_percent),
@@ -404,10 +486,224 @@ fn format_reset_duration(diff: chrono::Duration) -> String {
     }
 }
 
+fn format_reset_credit_timestamp(time: &chrono::DateTime<chrono::Utc>) -> String {
+    time.with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+fn format_credit_text(
+    credits: &tokenpulse_core::CreditInfo,
+    display_mode: &QuotaDisplayMode,
+) -> String {
+    match display_mode {
+        QuotaDisplayMode::Used => {
+            if let Some(limit) = credits.limit {
+                let percent = if limit > 0.0 {
+                    (credits.used / limit * 100.0).clamp(0.0, 999.0)
+                } else {
+                    0.0
+                };
+                format!(
+                    "Credits {} / {} ({:.0}%)",
+                    format_credit_amount(&credits.currency, credits.used),
+                    format_credit_amount(&credits.currency, limit),
+                    percent
+                )
+            } else {
+                format!(
+                    "Credits {}",
+                    format_credit_amount(&credits.currency, credits.used)
+                )
+            }
+        }
+        QuotaDisplayMode::Remaining => {
+            if let Some(limit) = credits.limit {
+                let remaining = (limit - credits.used).max(0.0);
+                let percent = if limit > 0.0 {
+                    (remaining / limit * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
+                format!(
+                    "Balance {} / {} ({:.0}%)",
+                    format_credit_amount(&credits.currency, remaining),
+                    format_credit_amount(&credits.currency, limit),
+                    percent
+                )
+            } else {
+                format!(
+                    "Balance {}",
+                    format_credit_amount(&credits.currency, credits.used)
+                )
+            }
+        }
+    }
+}
+
+fn format_reset_credit_lines(snapshot: &QuotaSnapshot, max_rows: usize) -> Vec<String> {
+    let count = snapshot.rate_limit_reset_credits.len();
+    if count == 0 || max_rows == 0 {
+        return Vec::new();
+    }
+
+    let mut credits: Vec<(usize, &tokenpulse_core::RateLimitResetCredit)> = snapshot
+        .rate_limit_reset_credits
+        .iter()
+        .enumerate()
+        .collect();
+    credits
+        .sort_by_key(|(index, credit)| (credit.expires_at.is_none(), credit.expires_at, index + 1));
+
+    let format_line = |index: usize, credit: &tokenpulse_core::RateLimitResetCredit| {
+        let expiry = credit
+            .expires_at
+            .map(|time| format_reset_credit_timestamp(&time))
+            .unwrap_or_else(|| "expiry unknown".to_string());
+        format!("#{} {expiry}", index + 1)
+    };
+
+    if max_rows >= count {
+        return credits
+            .into_iter()
+            .map(|(index, credit)| format_line(index, credit))
+            .collect();
+    }
+
+    if max_rows == 1 {
+        let (index, credit) = credits[0];
+        return vec![format_line(index, credit)];
+    }
+
+    let visible_rows = max_rows - 1;
+    let mut lines: Vec<String> = credits
+        .iter()
+        .take(visible_rows)
+        .map(|(index, credit)| format_line(*index, credit))
+        .collect();
+    lines.push(format!("+{} more reset credits", count - visible_rows));
+    lines
+}
+
+fn format_credit_amount(currency: &str, value: f64) -> String {
+    if currency == "USD" {
+        format!("${value:.2}")
+    } else if currency.is_empty() {
+        format!("{value:.2}")
+    } else {
+        format!("{currency}{value:.2}")
+    }
+}
+
 fn quota_percent(display_mode: &QuotaDisplayMode, used_percent: f64) -> f64 {
     match display_mode {
         QuotaDisplayMode::Used => used_percent,
         QuotaDisplayMode::Remaining => (100.0 - used_percent).max(0.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+    use tokenpulse_core::RateLimitResetCredit;
+
+    fn snapshot(provider: &str) -> QuotaSnapshot {
+        QuotaSnapshot {
+            provider: provider.to_string(),
+            plan: None,
+            account: None,
+            windows: vec![],
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn codex_column_layout_only_applies_to_two_or_three_sources() {
+        let codex = snapshot("codex");
+        let claude = snapshot("claude");
+        let copilot = snapshot("copilot");
+        let antigravity = snapshot("antigravity");
+        let wide = Rect::new(0, 0, 120, 30);
+
+        assert!(should_use_codex_column_layout(wide, &[&codex, &claude]));
+        assert!(should_use_codex_column_layout(
+            wide,
+            &[&claude, &codex, &copilot]
+        ));
+        assert!(!should_use_codex_column_layout(
+            wide,
+            &[&codex, &claude, &copilot, &antigravity]
+        ));
+    }
+
+    #[test]
+    fn codex_column_layout_requires_width_and_codex() {
+        let codex = snapshot("codex");
+        let claude = snapshot("claude");
+        let copilot = snapshot("copilot");
+
+        assert!(!should_use_codex_column_layout(
+            Rect::new(0, 0, 100, 30),
+            &[&codex, &claude]
+        ));
+        assert!(!should_use_codex_column_layout(
+            Rect::new(0, 0, 120, 30),
+            &[&claude, &copilot]
+        ));
+    }
+
+    #[test]
+    fn formats_codex_reset_credit_expiry() {
+        let mut codex = snapshot("codex");
+        let expires_at = DateTime::parse_from_rfc3339("2026-07-18T00:37:13Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        codex.rate_limit_reset_credits.push(RateLimitResetCredit {
+            id: "RateLimitResetCredit_1".to_string(),
+            reset_type: Some("codex_rate_limits".to_string()),
+            status: "available".to_string(),
+            granted_at: None,
+            expires_at: Some(expires_at),
+        });
+
+        let lines = format_reset_credit_lines(&codex, 10);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("#1 "));
+        assert!(lines[0].contains(&format_reset_credit_timestamp(&expires_at)));
+    }
+
+    #[test]
+    fn formats_each_codex_reset_credit_expiry_when_space_allows() {
+        let mut codex = snapshot("codex");
+        for (index, expires_at) in [
+            "2026-07-27T00:37:13Z",
+            "2026-07-18T00:37:13Z",
+            "2026-08-01T00:37:13Z",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            codex.rate_limit_reset_credits.push(RateLimitResetCredit {
+                id: format!("RateLimitResetCredit_{}", index + 1),
+                reset_type: Some("codex_rate_limits".to_string()),
+                status: "available".to_string(),
+                granted_at: None,
+                expires_at: Some(
+                    DateTime::parse_from_rfc3339(expires_at)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                ),
+            });
+        }
+
+        let lines = format_reset_credit_lines(&codex, 10);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("#2 "));
+        assert!(lines[1].starts_with("#1 "));
+        assert!(lines[2].starts_with("#3 "));
     }
 }
 

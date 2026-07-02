@@ -174,6 +174,7 @@ impl AntigravityQuotaFetcher {
             account: metadata.account,
             windows,
             credits: None,
+            rate_limit_reset_credits: vec![],
             fetched_at: Utc::now(),
         })
     }
