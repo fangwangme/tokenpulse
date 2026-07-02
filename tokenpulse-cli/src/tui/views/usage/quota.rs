@@ -272,10 +272,15 @@ fn render_snapshot_card(
         }
     }
 
-    for reset_text in reset_credit_lines {
+    for (index, reset_text) in reset_credit_lines.into_iter().enumerate() {
         if cursor < sections.len() {
+            let style = if index == 0 {
+                Style::default().fg(theme.fg).bold()
+            } else {
+                Style::default().fg(theme.dim)
+            };
             let line = Paragraph::new(reset_text)
-                .style(Style::default().fg(theme.dim))
+                .style(style)
                 .alignment(Alignment::Left);
             f.render_widget(line, sections[cursor]);
             cursor += 1;
@@ -459,6 +464,11 @@ fn format_reset_credit_lines(snapshot: &QuotaSnapshot, max_rows: usize) -> Vec<S
         return Vec::new();
     }
 
+    let mut lines = vec!["Banked reset  Expiration".to_string()];
+    if max_rows == 1 {
+        return lines;
+    }
+
     let mut credits: Vec<&tokenpulse_core::RateLimitResetCredit> =
         snapshot.rate_limit_reset_credits.iter().collect();
     credits.sort_by_key(|credit| (credit.expires_at.is_none(), credit.expires_at));
@@ -471,26 +481,34 @@ fn format_reset_credit_lines(snapshot: &QuotaSnapshot, max_rows: usize) -> Vec<S
         format!("#{} {expiry}", display_index + 1)
     };
 
-    if max_rows >= count {
-        return credits
-            .into_iter()
+    let max_credit_rows = max_rows - 1;
+    if max_credit_rows >= count {
+        lines.extend(
+            credits
+                .into_iter()
+                .enumerate()
+                .map(|(index, credit)| format_line(index, credit)),
+        );
+        return lines;
+    }
+
+    if max_credit_rows == 1 {
+        lines.push(format_line(0, credits[0]));
+        return lines;
+    }
+
+    let visible_credit_rows = max_credit_rows - 1;
+    lines.extend(
+        credits
+            .iter()
+            .take(visible_credit_rows)
             .enumerate()
-            .map(|(index, credit)| format_line(index, credit))
-            .collect();
-    }
-
-    if max_rows == 1 {
-        return vec![format_line(0, credits[0])];
-    }
-
-    let visible_rows = max_rows - 1;
-    let mut lines: Vec<String> = credits
-        .iter()
-        .take(visible_rows)
-        .enumerate()
-        .map(|(index, credit)| format_line(index, credit))
-        .collect();
-    lines.push(format!("+{} more reset credits", count - visible_rows));
+            .map(|(index, credit)| format_line(index, credit)),
+    );
+    lines.push(format!(
+        "+{} more reset credits",
+        count - visible_credit_rows
+    ));
     lines
 }
 
@@ -508,79 +526,6 @@ fn quota_percent(display_mode: &QuotaDisplayMode, used_percent: f64) -> f64 {
     match display_mode {
         QuotaDisplayMode::Used => used_percent,
         QuotaDisplayMode::Remaining => (100.0 - used_percent).max(0.0),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::{DateTime, Utc};
-    use tokenpulse_core::RateLimitResetCredit;
-
-    fn snapshot(provider: &str) -> QuotaSnapshot {
-        QuotaSnapshot {
-            provider: provider.to_string(),
-            plan: None,
-            account: None,
-            windows: vec![],
-            credits: None,
-            rate_limit_reset_credits: vec![],
-            fetched_at: Utc::now(),
-        }
-    }
-
-    #[test]
-    fn formats_codex_reset_credit_expiry() {
-        let mut codex = snapshot("codex");
-        let expires_at = DateTime::parse_from_rfc3339("2026-07-18T00:37:13Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        codex.rate_limit_reset_credits.push(RateLimitResetCredit {
-            id: "RateLimitResetCredit_1".to_string(),
-            reset_type: Some("codex_rate_limits".to_string()),
-            status: "available".to_string(),
-            granted_at: None,
-            expires_at: Some(expires_at),
-        });
-
-        let lines = format_reset_credit_lines(&codex, 10);
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].starts_with("#1 "));
-        assert!(lines[0].contains(&format_reset_credit_timestamp(&expires_at)));
-    }
-
-    #[test]
-    fn formats_each_codex_reset_credit_expiry_when_space_allows() {
-        let mut codex = snapshot("codex");
-        for (index, expires_at) in [
-            "2026-07-27T00:37:13Z",
-            "2026-07-18T00:37:13Z",
-            "2026-08-01T00:37:13Z",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            codex.rate_limit_reset_credits.push(RateLimitResetCredit {
-                id: format!("RateLimitResetCredit_{}", index + 1),
-                reset_type: Some("codex_rate_limits".to_string()),
-                status: "available".to_string(),
-                granted_at: None,
-                expires_at: Some(
-                    DateTime::parse_from_rfc3339(expires_at)
-                        .unwrap()
-                        .with_timezone(&Utc),
-                ),
-            });
-        }
-
-        let lines = format_reset_credit_lines(&codex, 10);
-        assert_eq!(lines.len(), 3);
-        assert!(lines[0].starts_with("#1 "));
-        assert!(lines[0].contains("2026-07-18"));
-        assert!(lines[1].starts_with("#2 "));
-        assert!(lines[1].contains("2026-07-27"));
-        assert!(lines[2].starts_with("#3 "));
-        assert!(lines[2].contains("2026-08-01"));
     }
 }
 

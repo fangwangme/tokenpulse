@@ -1006,7 +1006,7 @@ fn print_rate_limit_reset_credits(snapshot: &tokenpulse_core::QuotaSnapshot) {
         "  Banked resets: {} available",
         snapshot.rate_limit_reset_credits.len()
     );
-    println!("    {:<13} {}", "Banked reset", "Expiration time (local)");
+    println!("    {:<13} {}", "Banked reset", "Expiration time");
 
     let mut credits: Vec<_> = snapshot.rate_limit_reset_credits.iter().collect();
     credits.sort_by_key(|credit| (credit.expires_at.is_none(), credit.expires_at));
