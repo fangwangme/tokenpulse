@@ -2,7 +2,6 @@ use super::UsageState;
 use crate::commands::quota::quota_display_name;
 use crate::tui::theme::Theme;
 use crate::tui::widgets::GradientGauge;
-// No chrono imports needed here
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Style, Stylize},
@@ -149,13 +148,12 @@ fn render_snapshot_card(
         snapshot.windows.iter().collect()
     };
 
-    let compact = compact
-        || inner.height < (base_windows.len() * 3 + if show_account_row { 1 } else { 0 }) as u16;
-
-    let reserved_lines =
+    let fixed_rows =
         if show_account_row { 1 } else { 0 } + if snapshot.credits.is_some() { 1 } else { 0 };
-    let available_for_windows = inner.height.saturating_sub(reserved_lines as u16);
+    let compact = compact || inner.height < (base_windows.len() * 3 + fixed_rows) as u16;
+
     let lines_per_window = if compact { 1 } else { 3 };
+    let available_for_windows = inner.height.saturating_sub(fixed_rows as u16);
     let max_allowed_windows = (available_for_windows as usize / lines_per_window).max(1);
 
     let windows = if max_allowed_windows < base_windows.len() {
@@ -173,6 +171,12 @@ fn render_snapshot_card(
         .max()
         .unwrap_or(10);
     let fixed_label_width = max_label_len.min(inner.width.saturating_sub(30) as usize);
+    let used_window_lines = windows.len() * lines_per_window;
+    let reset_credit_rows = inner
+        .height
+        .saturating_sub((fixed_rows + used_window_lines) as u16)
+        as usize;
+    let reset_credit_lines = format_reset_credit_lines(snapshot, reset_credit_rows);
 
     let mut constraints = Vec::new();
     if show_account_row {
@@ -182,6 +186,9 @@ fn render_snapshot_card(
         constraints.push(Constraint::Length(if compact { 1 } else { 3 }));
     }
     if snapshot.credits.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    for _ in &reset_credit_lines {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Min(0));
@@ -245,49 +252,27 @@ fn render_snapshot_card(
 
     if let Some(credits) = &snapshot.credits {
         if cursor < sections.len() {
-            let credit_text = match display_mode {
-                QuotaDisplayMode::Used => {
-                    if let Some(limit) = credits.limit {
-                        let percent = if limit > 0.0 {
-                            (credits.used / limit * 100.0).clamp(0.0, 999.0)
-                        } else {
-                            0.0
-                        };
-                        format!(
-                            "Credits {}{:.2} / {}{:.2} ({:.0}%)",
-                            credits.currency, credits.used, credits.currency, limit, percent
-                        )
-                    } else {
-                        format!(
-                            "Credits {}{:.2} (unlimited)",
-                            credits.currency, credits.used
-                        )
-                    }
-                }
-                QuotaDisplayMode::Remaining => {
-                    if let Some(limit) = credits.limit {
-                        let remaining = (limit - credits.used).max(0.0);
-                        let percent = if limit > 0.0 {
-                            (remaining / limit * 100.0).clamp(0.0, 100.0)
-                        } else {
-                            0.0
-                        };
-                        format!(
-                            "Balance {}{:.2} / {}{:.2} ({:.0}%)",
-                            credits.currency, remaining, credits.currency, limit, percent
-                        )
-                    } else {
-                        format!(
-                            "Balance {}{:.2} (unlimited)",
-                            credits.currency, credits.used
-                        )
-                    }
-                }
-            };
+            let credit_text = format_credit_text(credits, display_mode);
             let line = Paragraph::new(credit_text)
                 .style(Style::default().fg(theme.dim))
                 .alignment(Alignment::Left);
             f.render_widget(line, sections[cursor]);
+            cursor += 1;
+        }
+    }
+
+    for (index, reset_text) in reset_credit_lines.into_iter().enumerate() {
+        if cursor < sections.len() {
+            let style = if index == 0 {
+                Style::default().fg(theme.fg).bold()
+            } else {
+                Style::default().fg(theme.dim)
+            };
+            let line = Paragraph::new(reset_text)
+                .style(style)
+                .alignment(Alignment::Left);
+            f.render_widget(line, sections[cursor]);
+            cursor += 1;
         }
     }
 }
@@ -367,7 +352,10 @@ fn render_window_block(
     let remaining_percent = (100.0 - window.used_percent).max(0.0);
 
     let mut detail_spans = vec![
-        Span::styled(reset_str, Style::default().fg(balance_color)),
+        Span::styled(
+            format!("reset {reset_str}"),
+            Style::default().fg(balance_color),
+        ),
         Span::raw("   "),
         Span::styled(
             format!("used {:.0}%", window.used_percent),
@@ -401,6 +389,122 @@ fn format_reset_duration(diff: chrono::Duration) -> String {
         format!("{}h {}m", total_hours, total_minutes % 60)
     } else {
         format!("{}m", total_minutes)
+    }
+}
+
+fn format_reset_credit_timestamp(time: &chrono::DateTime<chrono::Utc>) -> String {
+    time.with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+fn format_credit_text(
+    credits: &tokenpulse_core::CreditInfo,
+    display_mode: &QuotaDisplayMode,
+) -> String {
+    match display_mode {
+        QuotaDisplayMode::Used => {
+            if let Some(limit) = credits.limit {
+                let percent = if limit > 0.0 {
+                    (credits.used / limit * 100.0).clamp(0.0, 999.0)
+                } else {
+                    0.0
+                };
+                format!(
+                    "Credits {} / {} ({:.0}%)",
+                    format_credit_amount(&credits.currency, credits.used),
+                    format_credit_amount(&credits.currency, limit),
+                    percent
+                )
+            } else {
+                format!(
+                    "Credits {}",
+                    format_credit_amount(&credits.currency, credits.used)
+                )
+            }
+        }
+        QuotaDisplayMode::Remaining => {
+            if let Some(limit) = credits.limit {
+                let remaining = (limit - credits.used).max(0.0);
+                let percent = if limit > 0.0 {
+                    (remaining / limit * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
+                format!(
+                    "Balance {} / {} ({:.0}%)",
+                    format_credit_amount(&credits.currency, remaining),
+                    format_credit_amount(&credits.currency, limit),
+                    percent
+                )
+            } else {
+                format!(
+                    "Balance {}",
+                    format_credit_amount(&credits.currency, credits.used)
+                )
+            }
+        }
+    }
+}
+
+fn format_reset_credit_lines(snapshot: &QuotaSnapshot, max_rows: usize) -> Vec<String> {
+    let count = snapshot.rate_limit_reset_credits.len();
+    if count == 0 || max_rows < 2 {
+        return Vec::new();
+    }
+
+    let mut lines = vec!["Banked reset  Expiration".to_string()];
+
+    let mut credits: Vec<&tokenpulse_core::RateLimitResetCredit> =
+        snapshot.rate_limit_reset_credits.iter().collect();
+    credits.sort_by_key(|credit| (credit.expires_at.is_none(), credit.expires_at));
+
+    let format_line = |display_index: usize, credit: &tokenpulse_core::RateLimitResetCredit| {
+        let expiry = credit
+            .expires_at
+            .map(|time| format_reset_credit_timestamp(&time))
+            .unwrap_or_else(|| "expiry unknown".to_string());
+        format!("#{} {expiry}", display_index + 1)
+    };
+
+    let max_credit_rows = max_rows - 1;
+    if max_credit_rows >= count {
+        lines.extend(
+            credits
+                .into_iter()
+                .enumerate()
+                .map(|(index, credit)| format_line(index, credit)),
+        );
+        return lines;
+    }
+
+    if max_credit_rows == 1 {
+        lines.push(format_line(0, credits[0]));
+        return lines;
+    }
+
+    let visible_credit_rows = max_credit_rows - 1;
+    lines.extend(
+        credits
+            .iter()
+            .take(visible_credit_rows)
+            .enumerate()
+            .map(|(index, credit)| format_line(index, credit)),
+    );
+    lines.push(format!(
+        "+{} more reset credits",
+        count - visible_credit_rows
+    ));
+    lines
+}
+
+fn format_credit_amount(currency: &str, value: f64) -> String {
+    if currency == "USD" {
+        format!("${value:.2}")
+    } else if currency.is_empty() {
+        format!("{value:.2}")
+    } else {
+        format!("{currency}{value:.2}")
     }
 }
 

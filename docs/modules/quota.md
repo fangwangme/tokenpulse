@@ -71,13 +71,22 @@ GET https://chatgpt.com/backend-api/wham/usage
 Authorization: Bearer <access_token>
 ```
 
+Manual rate-limit reset credits are fetched separately:
+
+```
+GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
+Authorization: Bearer <access_token>
+```
+
 ### Response Mapping
-| API Field                                  | → RateWindow |
-| ------------------------------------------ | ------------ |
-| `rate_limit.primary_window.used_percent`   | Session      |
-| `rate_limit.secondary_window.used_percent` | Weekly       |
-| `credits.balance`                          | Credits      |
-| `plan_type`                                | plan field   |
+| API Field                                   | → Snapshot field |
+| ------------------------------------------- | ---------------- |
+| `rate_limit.primary_window.used_percent`    | Session window   |
+| `rate_limit.secondary_window.used_percent`  | Weekly window    |
+| `rate_limit.*_window.reset_at`              | window reset countdown source |
+| `rate_limit.*_window.reset_after_seconds`   | reset countdown fallback |
+| `plan_type`                                 | plan field       |
+| reset credits `credits[].expires_at`        | manual reset-credit expiry |
 
 Also check response headers: `x-codex-primary-used-percent`, `x-codex-secondary-used-percent`
 

@@ -199,6 +199,10 @@ pub fn render_settings_tab(
             Style::default().fg(theme.fg),
         ),
     ]));
+    lines.push(Line::from(vec![
+        Span::styled("Version ", Style::default().fg(theme.dim)),
+        Span::styled(env!("CARGO_PKG_VERSION"), Style::default().fg(theme.fg)),
+    ]));
     lines.push(Line::raw(""));
 
     let items = get_settings_items(state, config, theme);

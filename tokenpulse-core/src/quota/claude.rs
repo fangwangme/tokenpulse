@@ -170,6 +170,7 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
             windows,
             // Claude Code credit usage is intentionally not surfaced.
             credits: None,
+            rate_limit_reset_credits: vec![],
             fetched_at: Utc::now(),
         })
     }

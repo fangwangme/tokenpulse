@@ -12,6 +12,8 @@ pub struct QuotaSnapshot {
     pub account: Option<String>,
     pub windows: Vec<RateWindow>,
     pub credits: Option<CreditInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rate_limit_reset_credits: Vec<RateLimitResetCredit>,
     pub fetched_at: DateTime<Utc>,
 }
 
@@ -29,6 +31,18 @@ pub struct CreditInfo {
     pub used: f64,
     pub limit: Option<f64>,
     pub currency: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitResetCredit {
+    pub id: String,
+    #[serde(default)]
+    pub reset_type: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub granted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn test_credit_info_unlimited() {
+    fn test_credit_info_without_limit() {
         let credits = CreditInfo {
             used: 45.20,
             limit: None,
@@ -259,6 +273,7 @@ mod tests {
                 limit: Some(100.0),
                 currency: "USD".to_string(),
             }),
+            rate_limit_reset_credits: vec![],
             fetched_at: now,
         };
 
@@ -357,6 +372,7 @@ mod tests {
             account: None,
             windows: vec![],
             credits: None,
+            rate_limit_reset_credits: vec![],
             fetched_at: Utc::now(),
         };
 

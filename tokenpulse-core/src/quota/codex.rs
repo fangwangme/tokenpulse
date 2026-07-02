@@ -1,8 +1,8 @@
 use crate::auth::codex::CodexAuth;
-use crate::provider::{QuotaFetcher, QuotaSnapshot, RateWindow};
+use crate::provider::{QuotaFetcher, QuotaSnapshot, RateLimitResetCredit, RateWindow};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
@@ -11,6 +11,7 @@ use tracing::debug;
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 
 const QUOTA_API_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const RESET_CREDITS_API_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
 #[derive(Debug, Deserialize)]
 struct CodexQuotaResponse {
@@ -42,6 +43,25 @@ struct WindowInfo {
 
 #[derive(Debug, Clone)]
 struct FlexNumber(f64);
+
+#[derive(Debug, Deserialize)]
+struct ResetCreditsResponse {
+    #[serde(default)]
+    credits: Vec<CodexResetCredit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexResetCredit {
+    id: String,
+    #[serde(default)]
+    reset_type: Option<String>,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    granted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    expires_at: Option<DateTime<Utc>>,
+}
 
 impl Default for FlexNumber {
     fn default() -> Self {
@@ -123,6 +143,38 @@ impl CodexQuotaFetcher {
                     * 1000,
             ),
         }
+    }
+
+    async fn fetch_reset_credits(&self, access_token: &str) -> Result<Vec<RateLimitResetCredit>> {
+        let response = self
+            .client
+            .get(RESET_CREDITS_API_URL)
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+
+        debug!("Codex reset-credit response status: {}", response.status());
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Codex reset-credit API error {}: {}", status, text));
+        }
+
+        let response_text = response.text().await?;
+        let parsed: ResetCreditsResponse = serde_json::from_str(&response_text)?;
+        Ok(parsed
+            .credits
+            .into_iter()
+            .filter(|credit| credit.status == "available")
+            .map(|credit| RateLimitResetCredit {
+                id: credit.id,
+                reset_type: credit.reset_type,
+                status: credit.status,
+                granted_at: credit.granted_at,
+                expires_at: credit.expires_at,
+            })
+            .collect())
     }
 }
 
@@ -213,12 +265,21 @@ impl QuotaFetcher for CodexQuotaFetcher {
 
         let email = self.auth.load_email();
 
+        let rate_limit_reset_credits = match self.fetch_reset_credits(&tokens.access_token).await {
+            Ok(credits) => credits,
+            Err(err) => {
+                debug!("Codex reset-credit fetch skipped: {}", err);
+                Vec::new()
+            }
+        };
+
         Ok(QuotaSnapshot {
             provider: "codex".to_string(),
             plan: quota.plan_type,
             account: email,
             windows,
             credits: None,
+            rate_limit_reset_credits,
             fetched_at: Utc::now(),
         })
     }
@@ -257,6 +318,37 @@ mod tests {
         assert_eq!(
             window.resets_at,
             Utc.timestamp_opt(1_744_246_400, 0).single()
+        );
+    }
+
+    #[test]
+    fn parses_reset_credit_expiry_list() {
+        let response: ResetCreditsResponse = serde_json::from_str(
+            r#"{
+                "credits": [
+                    {
+                        "id": "RateLimitResetCredit_1",
+                        "reset_type": "codex_rate_limits",
+                        "status": "available",
+                        "granted_at": "2026-06-18T00:37:13.295648Z",
+                        "expires_at": "2026-07-18T00:37:13.295648Z"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.credits.len(), 1);
+        let credit = &response.credits[0];
+        assert_eq!(credit.id, "RateLimitResetCredit_1");
+        assert_eq!(credit.status, "available");
+        assert_eq!(
+            credit.expires_at,
+            Some(
+                DateTime::parse_from_rfc3339("2026-07-18T00:37:13.295648Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            )
         );
     }
 }

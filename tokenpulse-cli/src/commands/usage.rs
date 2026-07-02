@@ -1,6 +1,6 @@
 use crate::tui;
 use anyhow::{anyhow, Result};
-use chrono::{NaiveDate, SecondsFormat, Utc};
+use chrono::{DateTime, Local, NaiveDate, SecondsFormat, Utc};
 use rayon::prelude::*;
 use std::{
     collections::{BTreeSet, HashSet},
@@ -981,10 +981,7 @@ fn print_quota_summary(
                 let now = chrono::Utc::now();
                 let duration = resets_at.signed_duration_since(now);
                 if duration.num_seconds() > 0 {
-                    let total_minutes = duration.num_minutes();
-                    let hours = total_minutes / 60;
-                    let mins = total_minutes % 60;
-                    print!(" (resets in {}h {}m)", hours, mins);
+                    print!(" (resets in {})", format_reset_countdown(duration));
                 }
             }
             println!();
@@ -996,7 +993,45 @@ fn print_quota_summary(
             }
             println!();
         }
+        print_rate_limit_reset_credits(snapshot);
     }
+}
+
+fn print_rate_limit_reset_credits(snapshot: &tokenpulse_core::QuotaSnapshot) {
+    if snapshot.rate_limit_reset_credits.is_empty() {
+        return;
+    }
+
+    println!(
+        "  Banked resets: {} available",
+        snapshot.rate_limit_reset_credits.len()
+    );
+    println!("    {:<13} {}", "Banked reset", "Expiration time");
+
+    let mut credits: Vec<_> = snapshot.rate_limit_reset_credits.iter().collect();
+    credits.sort_by_key(|credit| (credit.expires_at.is_none(), credit.expires_at));
+
+    for (index, credit) in credits.iter().enumerate() {
+        let expiration = credit
+            .expires_at
+            .as_ref()
+            .map(format_local_timestamp)
+            .unwrap_or_else(|| "unknown".to_string());
+        println!("    #{:<12} {}", index + 1, expiration);
+    }
+}
+
+fn format_reset_countdown(diff: chrono::Duration) -> String {
+    let total_minutes = diff.num_minutes().max(0);
+    let hours = total_minutes / 60;
+    let mins = total_minutes % 60;
+    format!("{}h {}m", hours, mins)
+}
+
+fn format_local_timestamp(time: &DateTime<Utc>) -> String {
+    time.with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M %Z")
+        .to_string()
 }
 
 fn format_int<T: ToString>(value: T) -> String {

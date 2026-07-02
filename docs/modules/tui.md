@@ -136,10 +136,12 @@ between consecutive windows. Compact cards collapse to a single bar + percentage
 ### Tab 5: Quota
 - Live quota usage monitoring.
 - Displays rate limits (e.g. Session 5h, Weekly 7d) as a progress bar with an expected-progress marker on top and a detail line directly below it (reset countdown, used/remaining percentages colored by the remaining balance, and an at-current-rate pace indicator that is omitted once the window is exhausted), with a blank row separating consecutive windows. Compact cards collapse to a single bar + percentage + reset countdown.
+- Codex quota cards show each available manual rate-limit reset credit with its expiry when the reset-credit endpoint returns them, ordered by earliest expiry and collapsing later-expiring rows only when the terminal height is too constrained.
 - The bar fill reflects remaining balance or used amount depending on the active display mode.
 
 ### Tab 6: Settings
 - Live settings configuration panel for the application.
+- Shows the read-only TokenPulse package version near the config file path.
 - Configurable settings include:
   - `quota_display_mode` (toggle between `used` and `remaining` credit balance)
   - `show_empty_providers` (true / false)

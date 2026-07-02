@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Codex quota now fetches available manual rate-limit reset credits and shows each credit's local expiry in CLI and TUI quota output.
+- Settings now shows the TokenPulse package version as read-only information.
+
+### Changed
+- CLI reset-credit output uses a `Banked reset` / `Expiration time` table with local timestamps.
+- CLI and TUI reset-credit rows show the earliest expiring credits first and use compact per-credit expiry lines to avoid redundant summary text.
+
 ## [0.4.3] - 2026-06-21
 
 ### Added
