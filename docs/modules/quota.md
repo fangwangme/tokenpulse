@@ -49,10 +49,13 @@ anthropic-beta: oauth-2025-04-20
 ### Response Mapping
 | API Field                              | → RateWindow                                   |
 | -------------------------------------- | ---------------------------------------------- |
-| `five_hour.utilization`                | Session (5h), used_percent = utilization * 100 |
+| `five_hour.utilization`                | Session (5h); `used_percent = utilization`     |
 | `seven_day.utilization`                | Weekly (7d)                                    |
-| `seven_day_sonnet.utilization`         | Sonnet                                         |
-| `seven_day_opus.utilization`           | Opus                                           |
+| `seven_day_sonnet.utilization`         | Sonnet (7d)                                    |
+| `seven_day_opus.utilization`           | Opus (7d)                                      |
+| `limits[]` where `kind == "weekly_scoped"` and `scope.model.display_name == "Fable"` | Fable (7d); `used_percent = percent`           |
+
+`utilization` and `percent` are already 0–100 values; TokenPulse stores them directly as `used_percent` without rescaling.
 
 Extra-credit usage (`extra_usage`) is intentionally not surfaced for Claude Code.
 
