@@ -5,7 +5,7 @@ pub mod overview;
 pub mod quota;
 pub mod settings;
 
-use crate::tui::theme::Theme;
+use crate::tui::theme::{Theme, ThemeMode};
 use crate::tui::widgets::HeatmapMetric;
 use anyhow::Result;
 use chrono::{Duration, Local, NaiveDate};
@@ -29,7 +29,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 use tokenpulse_core::{
-    config::{Config, ConfigManager},
+    config::{Config, ConfigManager, ThemePreference},
     usage::{normalize_model_name, DailyUsageRow, DashboardDay, ModelSummary, UsageSummary},
 };
 
@@ -985,6 +985,22 @@ fn spawn_quota_reload(
     });
 }
 
+/// When the theme preference is `auto`, re-detect the OS appearance and swap the
+/// active theme if it changed. Called on each refresh (auto or manual) so the TUI
+/// follows the system light/dark setting without a dedicated polling loop. Uses a
+/// side-effect-free OS probe only (no OSC11), so it never disturbs the event loop's
+/// stdin reader.
+fn follow_system_theme(theme: &mut Theme, preference: ThemePreference) {
+    if preference != ThemePreference::Auto {
+        return;
+    }
+    if let Some(mode) = ThemeMode::detect_system_appearance() {
+        if mode != theme.mode {
+            *theme = Theme::new(mode);
+        }
+    }
+}
+
 pub fn run<F>(
     mut summary: UsageSummary,
     daily_rows: Vec<DailyUsageRow>,
@@ -1160,6 +1176,7 @@ where
             && !state.is_refreshing()
             && state.last_refresh.elapsed().as_secs() >= auto_secs as u64
         {
+            follow_system_theme(&mut theme, config.display.theme);
             state.usage_refresh_in_progress = true;
             state.quota_refresh_in_progress = config.display.refresh_quota;
             state.set_refresh_status("Auto-refreshing...", RefreshStatusLevel::Info);
@@ -1274,6 +1291,7 @@ where
                     if matches!(key.code, KeyCode::Char('r'))
                         && !key.modifiers.contains(KeyModifiers::CONTROL)
                     {
+                        follow_system_theme(&mut theme, config.display.theme);
                         state.set_refresh_status("Refreshing...", RefreshStatusLevel::Info);
                         state.usage_refresh_in_progress = true;
                         state.quota_refresh_in_progress = config.display.refresh_quota;

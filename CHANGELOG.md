@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-07-04
+
+### Added
+- Auto theme now follows the OS appearance at runtime: when the theme preference is `auto`, each refresh (auto-refresh or manual `r`) re-detects the system light/dark setting on macOS and swaps the active theme if it changed, without a dedicated polling loop. The runtime probe intentionally skips the OSC11 terminal query to avoid colliding with the TUI's stdin reader; startup detection is unchanged.
+
 ## [0.4.4] - 2026-07-04
 
 ### Added
