@@ -22,6 +22,8 @@ struct ClaudeQuotaResponse {
     seven_day_sonnet: Option<WindowUsage>,
     #[serde(default)]
     seven_day_opus: Option<WindowUsage>,
+    #[serde(default)]
+    limits: Vec<UsageLimit>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +32,30 @@ struct WindowUsage {
     utilization: f64,
     #[serde(default)]
     resets_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageLimit {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    percent: f64,
+    #[serde(default)]
+    resets_at: Option<String>,
+    #[serde(default)]
+    scope: Option<UsageLimitScope>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageLimitScope {
+    #[serde(default)]
+    model: Option<UsageLimitModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageLimitModel {
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 pub struct ClaudeQuotaFetcher {
@@ -163,6 +189,29 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
             });
         }
 
+        for limit in quota.limits {
+            let is_fable = limit
+                .scope
+                .as_ref()
+                .and_then(|s| s.model.as_ref())
+                .and_then(|m| m.display_name.as_deref())
+                .map(|name| name == "Fable")
+                .unwrap_or(false);
+            let is_weekly = limit.kind.as_deref() == Some("weekly_scoped");
+            if is_fable && is_weekly {
+                windows.push(RateWindow {
+                    label: "Fable (7d)".to_string(),
+                    used_percent: limit.percent,
+                    resets_at: limit.resets_at.and_then(|s| {
+                        DateTime::parse_from_rfc3339(&s)
+                            .ok()
+                            .map(|d| d.with_timezone(&Utc))
+                    }),
+                    period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
+                });
+            }
+        }
+
         Ok(QuotaSnapshot {
             provider: "claude".to_string(),
             plan: Some("Pro".to_string()),
@@ -192,5 +241,39 @@ mod tests {
 
         assert_eq!(quota.five_hour.unwrap().utilization, 42.5);
         assert_eq!(quota.seven_day.unwrap().utilization, 18.0);
+    }
+
+    #[test]
+    fn claude_quota_response_parses_fable_limit() {
+        let quota: ClaudeQuotaResponse = serde_json::from_str(
+            r#"{
+                "five_hour":null,
+                "seven_day":null,
+                "seven_day_sonnet":null,
+                "seven_day_opus":null,
+                "limits":[
+                    {"kind":"session","group":"session","percent":24,"resets_at":null,"scope":null},
+                    {"kind":"weekly_all","group":"weekly","percent":73,"resets_at":null,"scope":null},
+                    {"kind":"weekly_scoped","group":"weekly","percent":76,"resets_at":"2026-07-04T14:00:00Z","scope":{"model":{"id":null,"display_name":"Fable"}}}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let fable = quota
+            .limits
+            .into_iter()
+            .find(|l| {
+                l.kind.as_deref() == Some("weekly_scoped")
+                    && l.scope
+                        .as_ref()
+                        .and_then(|s| s.model.as_ref())
+                        .and_then(|m| m.display_name.as_deref())
+                        == Some("Fable")
+            })
+            .expect("fable limit present");
+
+        assert_eq!(fable.percent, 76.0);
+        assert_eq!(fable.resets_at.as_deref(), Some("2026-07-04T14:00:00Z"));
     }
 }
