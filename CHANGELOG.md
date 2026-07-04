@@ -7,13 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-07-04
+
 ### Added
+- Claude Code quota now surfaces a dedicated `Fable (7d)` rate-limit window when the provider reports per-model weekly limits scoped to the Fable model family, alongside the existing Session, Weekly, Sonnet, and Opus windows.
 - Codex quota now fetches available manual rate-limit reset credits and shows each credit's local expiry in CLI and TUI quota output.
 - Settings now shows the TokenPulse package version as read-only information.
 
 ### Changed
 - CLI reset-credit output uses a `Banked reset` / `Expiration time` table with local timestamps.
 - CLI and TUI reset-credit rows show the earliest expiring credits first and use compact per-credit expiry lines to avoid redundant summary text.
+- Refreshed dashboard screenshots to match the current TUI.
 
 ## [0.4.3] - 2026-06-21
 
