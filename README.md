@@ -163,6 +163,8 @@ tokenpulse config disable gemini
 tokenpulse config set quota_display_mode=used
 
 # Theme: auto, dark, light
+# "auto" follows the OS appearance and re-checks on each refresh, so the TUI
+# switches light/dark when you change the system setting while it's running (macOS).
 tokenpulse config set theme=dark
 
 # Auto-refresh interval in minutes for quota + usage (0 = disabled)

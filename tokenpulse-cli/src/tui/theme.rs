@@ -77,6 +77,17 @@ impl ThemeMode {
         None
     }
 
+    /// Re-detect the OS appearance for runtime "auto" following.
+    ///
+    /// Unlike [`Self::detect`], this deliberately skips the OSC11 terminal query
+    /// and environment variables. It is called from inside the running TUI loop,
+    /// where issuing an OSC query would collide with crossterm's stdin reader and
+    /// where env vars never change. Returns `None` on platforms without a cheap,
+    /// side-effect-free probe (currently anything other than macOS).
+    pub fn detect_system_appearance() -> Option<Self> {
+        Self::detect_from_macos()
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Light => "light",
