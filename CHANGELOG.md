@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-07-06
+
+### Fixed
+- Fixed Antigravity model mapping when using Gemini 3.5 Flash (Medium): when the Language Server returns `gemini-default` as the `responseModel` routing alias, the parser now falls back to `model` (e.g. `MODEL_PLACEHOLDER_M20`) and extracts the custom `modelDisplayName` to normalize it into `gemini-3.5-flash-medium`, preserving the model attributes correctly.
+
 ## [0.4.5] - 2026-07-04
 
 ### Added
