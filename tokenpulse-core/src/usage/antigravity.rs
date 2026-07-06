@@ -663,7 +663,17 @@ fn sync_antigravity_with_options(
                 .or_else(|| chat_model.get("model"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            let model_id = resolve_antigravity_model_id_with_aliases(raw_model_id, &model_aliases);
+            let mut model_id =
+                resolve_antigravity_model_id_with_aliases(raw_model_id, &model_aliases);
+            if is_pseudo_raw_model(&model_id) {
+                if let Some(display_name) =
+                    chat_model.get("modelDisplayName").and_then(Value::as_str)
+                {
+                    if let Some(normalized) = normalize_display_name_to_id(display_name) {
+                        model_id = normalized;
+                    }
+                }
+            }
             if model_id != "unknown" {
                 primary_model_id = model_id;
                 break;
@@ -732,7 +742,17 @@ fn sync_antigravity_with_options(
                 .or_else(|| chat_model.get("model"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            let model_id = resolve_antigravity_model_id_with_aliases(raw_model_id, &model_aliases);
+            let mut model_id =
+                resolve_antigravity_model_id_with_aliases(raw_model_id, &model_aliases);
+            if is_pseudo_raw_model(&model_id) {
+                if let Some(display_name) =
+                    chat_model.get("modelDisplayName").and_then(Value::as_str)
+                {
+                    if let Some(normalized) = normalize_display_name_to_id(display_name) {
+                        model_id = normalized;
+                    }
+                }
+            }
 
             let created_at = chat_model
                 .get("chatStartMetadata")
@@ -1420,6 +1440,53 @@ fn normalize_cached_antigravity_artifacts(
     }
 
     Ok(())
+}
+
+fn is_pseudo_raw_model(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+    id.is_empty()
+        || id == "unknown"
+        || id.starts_with("auto-")
+        || id.ends_with("-auto-review")
+        || id.ends_with("-default")
+}
+
+fn normalize_display_name_to_id(display_name: &str) -> Option<String> {
+    let trimmed = display_name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_lowercase();
+    if !lower.starts_with("gemini ")
+        && !lower.starts_with("claude ")
+        && !lower.starts_with("gpt-oss ")
+    {
+        return None;
+    }
+
+    let replaced_parens = lower.replace('(', " ").replace(')', " ");
+    let replaced_spaces = replaced_parens.replace(' ', "-");
+
+    let mut normalized = String::new();
+    let mut last_was_dash = false;
+    for c in replaced_spaces.chars() {
+        if c == '-' {
+            if !last_was_dash {
+                normalized.push('-');
+                last_was_dash = true;
+            }
+        } else {
+            normalized.push(c);
+            last_was_dash = false;
+        }
+    }
+
+    let trimmed_normalized = normalized.trim_matches('-');
+    if trimmed_normalized.is_empty() {
+        None
+    } else {
+        Some(trimmed_normalized.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -2894,5 +2961,33 @@ mod tests {
         let db_entry_mtime_ms = db_entry.modified_ms.unwrap();
         let wal_mtime_ms = system_time_to_millis(wal_mtime).unwrap();
         assert_eq!(db_entry_mtime_ms, wal_mtime_ms);
+    }
+
+    #[test]
+    fn test_normalize_display_name_to_id() {
+        assert_eq!(
+            normalize_display_name_to_id("Gemini (3.5 Flash)"),
+            Some("gemini-3.5-flash".to_string())
+        );
+        assert_eq!(
+            normalize_display_name_to_id("Claude (3.5 Sonnet)"),
+            Some("claude-3.5-sonnet".to_string())
+        );
+        assert_eq!(
+            normalize_display_name_to_id("gpt-oss (some model)"),
+            Some("gpt-oss-some-model".to_string())
+        );
+        assert_eq!(normalize_display_name_to_id("gpt-4o"), None);
+        assert_eq!(normalize_display_name_to_id("   "), None);
+    }
+
+    #[test]
+    fn test_is_pseudo_raw_model() {
+        assert!(is_pseudo_raw_model(""));
+        assert!(is_pseudo_raw_model("unknown"));
+        assert!(is_pseudo_raw_model("UNKNOWN"));
+        assert!(is_pseudo_raw_model("auto-review"));
+        assert!(is_pseudo_raw_model("gemini-default"));
+        assert!(!is_pseudo_raw_model("gemini-1.5-pro"));
     }
 }
