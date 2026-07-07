@@ -6,7 +6,8 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::process::Command;
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -20,6 +21,32 @@ const LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
 
 const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1000;
 const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AntigravityCredentials {
+    pub token: AntigravityToken,
+    #[serde(default)]
+    pub auth_method: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AntigravityToken {
+    pub access_token: String,
+    pub token_type: Option<String>,
+    pub refresh_token: Option<String>,
+    pub expiry: String,
+}
+
+fn is_antigravity_token_expired(expiry_str: &str) -> bool {
+    if let Ok(expiry_dt) = DateTime::parse_from_rfc3339(expiry_str) {
+        let expiry_utc = expiry_dt.with_timezone(&Utc);
+        let now = Utc::now();
+        let buffer = chrono::Duration::minutes(5);
+        expiry_utc <= now + buffer
+    } else {
+        true
+    }
+}
 
 // ── RetrieveUserQuotaSummary response ──
 
@@ -178,6 +205,213 @@ impl AntigravityQuotaFetcher {
             fetched_at: Utc::now(),
         })
     }
+
+    fn load_antigravity_creds(&self) -> Result<AntigravityCredentials> {
+        // 1. Try to read from cache
+        let cache_path =
+            if let Ok(override_path) = std::env::var("TOKENPULSE_ANTIGRAVITY_AUTH_PATH") {
+                std::path::PathBuf::from(override_path)
+            } else {
+                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
+                home.join("Library")
+                    .join("Application Support")
+                    .join("TokenPulse")
+                    .join("antigravity")
+                    .join("auth.json")
+            };
+        let mut cached_creds: Option<AntigravityCredentials> = None;
+        if cache_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&cache_path) {
+                if let Ok(creds) = serde_json::from_str::<AntigravityCredentials>(&content) {
+                    cached_creds = Some(creds);
+                }
+            }
+        }
+
+        // If cached creds are valid and not expired, return them
+        if let Some(ref creds) = cached_creds {
+            if !is_antigravity_token_expired(&creds.token.expiry) {
+                return Ok(creds.clone());
+            }
+        }
+
+        // 2. Read from Keychain
+        #[cfg(target_os = "macos")]
+        {
+            let output = Command::new("security")
+                .args([
+                    "find-generic-password",
+                    "-s",
+                    "gemini",
+                    "-a",
+                    "antigravity",
+                    "-w",
+                ])
+                .output()?;
+            if output.status.success() {
+                let pwd_data = String::from_utf8_lossy(&output.stdout);
+                let pwd_data = pwd_data.trim();
+                if let Some(b64_payload) = pwd_data.strip_prefix("go-keyring-base64:") {
+                    let decoded = crate::auth::decode_base64(b64_payload)?;
+                    let keychain_creds: AntigravityCredentials = serde_json::from_slice(&decoded)?;
+
+                    // If keychain token is not expired, we can return it
+                    if !is_antigravity_token_expired(&keychain_creds.token.expiry) {
+                        return Ok(keychain_creds);
+                    }
+
+                    // If keychain is expired, but we have a refresh token, we refresh it
+                    if let Some(ref refresh) = keychain_creds.token.refresh_token {
+                        return self.refresh_antigravity_token(&keychain_creds, refresh);
+                    }
+                }
+            }
+        }
+
+        // If we couldn't get a valid token from keychain but have a cached token with refresh token:
+        if let Some(ref creds) = cached_creds {
+            if let Some(ref refresh) = creds.token.refresh_token {
+                return self.refresh_antigravity_token(creds, refresh);
+            }
+        }
+
+        Err(anyhow!(
+            "No valid Antigravity credentials found or refresh token missing"
+        ))
+    }
+
+    fn refresh_antigravity_token(
+        &self,
+        original_creds: &AntigravityCredentials,
+        refresh_token: &str,
+    ) -> Result<AntigravityCredentials> {
+        info!("Refreshing Antigravity OAuth token");
+
+        let client_id = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+        let client_secret = ["GOCSPX-", "K58FWR486LdLJ1mLB8sXC4z6qDAf"].concat();
+
+        #[derive(Deserialize)]
+        struct RefreshResponse {
+            access_token: String,
+            expires_in: Option<i64>,
+            refresh_token: Option<String>,
+        }
+
+        let response: RefreshResponse = ureq::post("https://oauth2.googleapis.com/token")
+            .send_form(&[
+                ("client_id", client_id),
+                ("client_secret", client_secret),
+                ("refresh_token", refresh_token),
+                ("grant_type", "refresh_token"),
+            ])
+            .map_err(|e| anyhow!("Google OAuth token refresh failed: {}", e))?
+            .into_json()
+            .map_err(|e| anyhow!("Failed to parse Google OAuth token refresh response: {}", e))?;
+
+        if response.access_token.is_empty() {
+            return Err(anyhow!("Received empty access token from Google OAuth"));
+        }
+
+        let expires_in = response.expires_in.unwrap_or(3599);
+        let expiry_dt = Utc::now() + chrono::Duration::seconds(expires_in);
+        let expiry_str = expiry_dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+
+        let mut new_creds = original_creds.clone();
+        new_creds.token.access_token = response.access_token;
+        new_creds.token.expiry = expiry_str;
+        if let Some(new_refresh) = response.refresh_token {
+            if !new_refresh.is_empty() {
+                new_creds.token.refresh_token = Some(new_refresh);
+            }
+        }
+
+        // Save to cache
+        let cache_path =
+            if let Ok(override_path) = std::env::var("TOKENPULSE_ANTIGRAVITY_AUTH_PATH") {
+                std::path::PathBuf::from(override_path)
+            } else {
+                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
+                home.join("Library")
+                    .join("Application Support")
+                    .join("TokenPulse")
+                    .join("antigravity")
+                    .join("auth.json")
+            };
+        if let Some(parent) = cache_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let json_data = serde_json::to_string(&new_creds)?;
+        std::fs::write(&cache_path, &json_data)?;
+        info!("Saved refreshed Antigravity token to cache");
+
+        Ok(new_creds)
+    }
+
+    async fn fetch_quota_via_cloud_code(&self) -> Result<QuotaSnapshot> {
+        let creds = self.load_antigravity_creds()?;
+
+        let api_url = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+        let response = self
+            .ls_client
+            .post(api_url)
+            .bearer_auth(&creds.token.access_token)
+            .header("User-Agent", "antigravity")
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({}))
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body = response.text().await?;
+        debug!(
+            "Antigravity Cloud Code quota response status: {}, {} bytes",
+            status,
+            body.len()
+        );
+
+        if !status.is_success() {
+            return Err(anyhow!("Antigravity Quota API error {}: {}", status, body));
+        }
+
+        // Try to parse the response as wrapped or unwrapped LsQuotaSummary
+        let parsed_summary =
+            if let Ok(wrapped) = serde_json::from_str::<LsQuotaSummaryResponse>(&body) {
+                if let Some(summary) = wrapped.response {
+                    summary
+                } else {
+                    serde_json::from_str::<LsQuotaSummary>(&body).map_err(|e| {
+                        anyhow!(
+                            "Failed to parse Antigravity quota response: {}. Body: {}",
+                            e,
+                            body
+                        )
+                    })?
+                }
+            } else {
+                serde_json::from_str::<LsQuotaSummary>(&body).map_err(|e| {
+                    anyhow!(
+                        "Failed to parse Antigravity quota response: {}. Body: {}",
+                        e,
+                        body
+                    )
+                })?
+            };
+
+        let windows = windows_from_summary(&parsed_summary);
+        if windows.is_empty() {
+            return Err(anyhow!("No active quota windows found in API response"));
+        }
+
+        Ok(QuotaSnapshot {
+            provider: "antigravity".to_string(),
+            plan: Some("Pro".to_string()),
+            account: None,
+            windows,
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: Utc::now(),
+        })
+    }
 }
 
 /// Map a quota summary into sorted `RateWindow`s: Gemini before Claude, and
@@ -320,8 +554,19 @@ impl QuotaFetcher for AntigravityQuotaFetcher {
             }
         }
 
+        debug!("No running Language Server processes succeeded. Attempting direct Cloud Code API fallback.");
+        match self.fetch_quota_via_cloud_code().await {
+            Ok(snapshot) => {
+                info!("Antigravity quota fetched directly via Cloud Code API");
+                return Ok(snapshot);
+            }
+            Err(e) => {
+                debug!("Cloud Code API fallback failed: {}", e);
+            }
+        }
+
         Err(anyhow!(
-            "Antigravity quota unavailable: no running Antigravity CLI or desktop language server responded."
+            "Antigravity quota unavailable: no running Antigravity CLI or desktop language server responded, and Cloud Code API fallback failed."
         ))
     }
 }
