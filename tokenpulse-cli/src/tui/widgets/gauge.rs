@@ -128,7 +128,11 @@ impl<'a> Widget for GradientGauge<'a> {
         let bar: String = (0..bar_width)
             .map(|i| {
                 if Some(i) == expected_pos {
-                    '▏' // expected progress marker
+                    if i < filled.min(bar_width) {
+                        '█' // keep as solid block if inside the filled progress region
+                    } else {
+                        '▏' // expected progress marker in unfilled region
+                    }
                 } else if i < filled.min(bar_width) {
                     '█'
                 } else {

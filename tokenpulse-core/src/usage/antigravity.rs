@@ -1006,13 +1006,13 @@ struct StaticModelAlias {
 const STATIC_MODEL_ALIASES: &[StaticModelAlias] = &[
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M37",
-        model_id: "gemini-3.1-pro-preview",
+        model_id: "gemini-3.1-pro-preview-high",
         label: Some("Gemini 3.1 Pro (High)"),
         source: "user-initial-mapping;tokscale",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M36",
-        model_id: "gemini-3.1-pro-preview",
+        model_id: "gemini-3.1-pro-preview-low",
         label: Some("Gemini 3.1 Pro (Low)"),
         source: "user-initial-mapping;tokscale",
     },
@@ -1024,13 +1024,13 @@ const STATIC_MODEL_ALIASES: &[StaticModelAlias] = &[
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M8",
-        model_id: "gemini-3-pro-preview",
+        model_id: "gemini-3-pro-preview-high",
         label: Some("Gemini 3 Pro (High)"),
         source: "user-initial-mapping",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M7",
-        model_id: "gemini-3-pro-preview",
+        model_id: "gemini-3-pro-preview-low",
         label: Some("Gemini 3 Pro (Low)"),
         source: "user-initial-mapping",
     },
@@ -1073,25 +1073,25 @@ const STATIC_MODEL_ALIASES: &[StaticModelAlias] = &[
     // Additional placeholders from dynamic JSON:
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M132",
-        model_id: "gemini-3.5-flash",
+        model_id: "gemini-3.5-flash-high",
         label: Some("Gemini 3.5 Flash (High)"),
         source: "captured-antigravity-get-user-status",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M16",
-        model_id: "gemini-3.1-pro-preview",
+        model_id: "gemini-3.1-pro-preview-high",
         label: Some("Gemini 3.1 Pro (High)"),
         source: "captured-antigravity-get-user-status",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M187",
-        model_id: "gemini-3.5-flash",
+        model_id: "gemini-3.5-flash-low",
         label: Some("Gemini 3.5 Flash (Low)"),
         source: "captured-antigravity-get-user-status",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M20",
-        model_id: "gemini-3.5-flash",
+        model_id: "gemini-3.5-flash-medium",
         label: Some("Gemini 3.5 Flash (Medium)"),
         source: "captured-antigravity-get-user-status",
     },
@@ -1577,23 +1577,6 @@ fn format_normalization_fallback(model_id: &str) -> Option<String> {
         chars_replaced = true;
     }
 
-    // 4. Uniformly strip thinking/performance level tokens (high, low, medium, thinking)
-    let mut tier_stripped = false;
-    if !flash_a_normalized
-        && (normalized.contains("-high")
-            || normalized.contains("-low")
-            || normalized.contains("-medium")
-            || normalized.contains("-thinking"))
-    {
-        let tokens: Vec<&str> = normalized.split('-').collect();
-        let filtered: Vec<&str> = tokens
-            .into_iter()
-            .filter(|&t| t != "high" && t != "low" && t != "medium" && t != "thinking")
-            .collect();
-        normalized = filtered.join("-");
-        tier_stripped = true;
-    }
-
     // 5. Version formatting rule (converting hyphens back to dots for Gemini versions):
     // e.g. gemini-3-0 -> gemini-3, gemini-3-1 -> gemini-3.1, gemini-3-5 -> gemini-3.5
     let mut version_formatted = false;
@@ -1647,7 +1630,6 @@ fn format_normalization_fallback(model_id: &str) -> Option<String> {
 
     if prefix_stripped
         || chars_replaced
-        || tier_stripped
         || version_formatted
         || preview_processed
         || flash_a_normalized
@@ -2633,11 +2615,11 @@ mod tests {
         let messages = parser.parse_sessions(None).unwrap();
 
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].model_id, "claude-opus-4-6");
+        assert_eq!(messages[0].model_id, "claude-opus-4-6-thinking");
         assert_eq!(messages[0].provider_id, "anthropic");
-        assert_eq!(messages[1].model_id, "gemini-3.5-flash");
+        assert_eq!(messages[1].model_id, "gemini-3.5-flash-medium");
         assert_eq!(messages[1].provider_id, "google");
-        assert_eq!(messages[2].model_id, "claude-opus-4-6");
+        assert_eq!(messages[2].model_id, "claude-opus-4-6-thinking");
         assert_eq!(messages[2].provider_id, "anthropic");
     }
 
@@ -2671,13 +2653,13 @@ mod tests {
             .prepare("SELECT model_id FROM sessions WHERE session_id = 'sess-1'")
             .unwrap();
         let session_model: String = stmt.query_row([], |row| row.get(0)).unwrap();
-        assert_eq!(session_model, "gemini-3.1-pro-preview");
+        assert_eq!(session_model, "gemini-3.1-pro-preview-high");
 
         let mut stmt2 = conn
             .prepare("SELECT model_id FROM session_usage WHERE id = 'msg-1'")
             .unwrap();
         let usage_model: String = stmt2.query_row([], |row| row.get(0)).unwrap();
-        assert_eq!(usage_model, "gemini-3.5-flash");
+        assert_eq!(usage_model, "gemini-3.5-flash-medium");
     }
 
     #[test]
@@ -2700,13 +2682,13 @@ mod tests {
         let saved = merge_and_save_model_alias_history(&sessions_dir, &dynamic_aliases).unwrap();
         assert_eq!(
             resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M132", &saved),
-            "gemini-3.5-flash"
+            "gemini-3.5-flash-high"
         );
 
         let loaded = load_model_alias_history_map(&sessions_dir).unwrap();
         assert_eq!(
             resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M132", &loaded),
-            "gemini-3.5-flash"
+            "gemini-3.5-flash-high"
         );
 
         let history_path = model_alias_history_path(&sessions_dir).unwrap();
@@ -2726,11 +2708,11 @@ mod tests {
         let saved = merge_and_save_model_alias_history(&sessions_dir, &HashMap::new()).unwrap();
         assert_eq!(
             resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M26", &saved),
-            "claude-opus-4-6"
+            "claude-opus-4-6-thinking"
         );
         assert_eq!(
             resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M37", &saved),
-            "gemini-3.1-pro-preview"
+            "gemini-3.1-pro-preview-high"
         );
 
         let history_path = model_alias_history_path(&sessions_dir).unwrap();
@@ -2809,23 +2791,23 @@ mod tests {
         );
         assert_eq!(
             resolve_antigravity_model_id("antigravity-gemini-3-pro-high"),
-            "gemini-3-pro-preview"
+            "gemini-3-pro-preview-high"
         );
         assert_eq!(
             resolve_antigravity_model_id("antigravity-gemini-3-pro-low"),
-            "gemini-3-pro-preview"
+            "gemini-3-pro-preview-low"
         );
         assert_eq!(
             resolve_antigravity_model_id("gemini-3.0-pro-high"),
-            "gemini-3-pro-preview"
+            "gemini-3-pro-preview-high"
         );
         assert_eq!(
             resolve_antigravity_model_id("gemini-3.1-pro-high"),
-            "gemini-3.1-pro-preview"
+            "gemini-3.1-pro-preview-high"
         );
         assert_eq!(
             resolve_antigravity_model_id("gemini-3-1-pro-preview-low"),
-            "gemini-3.1-pro-preview"
+            "gemini-3.1-pro-preview-low"
         );
         assert_eq!(
             resolve_antigravity_model_id("gemini-3-pro-image"),
@@ -2837,31 +2819,31 @@ mod tests {
     fn test_antigravity_label_to_model_id_handles_future_label_shapes() {
         assert_eq!(
             antigravity_label_to_model_id("Claude Opus 4.5 (Thinking)").as_deref(),
-            Some("claude-opus-4-5")
+            Some("claude-opus-4-5-thinking")
         );
         assert_eq!(
             antigravity_label_to_model_id("Claude Sonnet 4.5 (Thinking)").as_deref(),
-            Some("claude-sonnet-4-5")
+            Some("claude-sonnet-4-5-thinking")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3.0 Pro Preview (High)").as_deref(),
-            Some("gemini-3-pro-preview")
+            Some("gemini-3-pro-preview-high")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3.0 Pro (High)").as_deref(),
-            Some("gemini-3-pro-preview")
+            Some("gemini-3-pro-preview-high")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3.1 Pro (High)").as_deref(),
-            Some("gemini-3.1-pro-preview")
+            Some("gemini-3.1-pro-preview-high")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3.1 Pro Preview (Low)").as_deref(),
-            Some("gemini-3.1-pro-preview")
+            Some("gemini-3.1-pro-preview-low")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3 Pro Preview (Low)").as_deref(),
-            Some("gemini-3-pro-preview")
+            Some("gemini-3-pro-preview-low")
         );
         assert_eq!(
             antigravity_label_to_model_id("Gemini 3 Pro (Image)").as_deref(),
