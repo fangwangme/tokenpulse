@@ -213,11 +213,9 @@ impl AntigravityQuotaFetcher {
                 std::path::PathBuf::from(override_path)
             } else {
                 let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
-                home.join("Library")
-                    .join("Application Support")
-                    .join("TokenPulse")
-                    .join("antigravity")
-                    .join("auth.json")
+                home.join(".gemini")
+                    .join("antigravity-cli")
+                    .join("antigravity-oauth-token")
             };
         let mut cached_creds: Option<AntigravityCredentials> = None;
         if cache_path.exists() {
@@ -300,7 +298,7 @@ impl AntigravityQuotaFetcher {
         let response: RefreshResponse = ureq::post("https://oauth2.googleapis.com/token")
             .send_form(&[
                 ("client_id", client_id),
-                ("client_secret", client_secret),
+                ("client_secret", &client_secret),
                 ("refresh_token", refresh_token),
                 ("grant_type", "refresh_token"),
             ])
@@ -331,11 +329,9 @@ impl AntigravityQuotaFetcher {
                 std::path::PathBuf::from(override_path)
             } else {
                 let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
-                home.join("Library")
-                    .join("Application Support")
-                    .join("TokenPulse")
-                    .join("antigravity")
-                    .join("auth.json")
+                home.join(".gemini")
+                    .join("antigravity-cli")
+                    .join("antigravity-oauth-token")
             };
         if let Some(parent) = cache_path.parent() {
             let _ = std::fs::create_dir_all(parent);
