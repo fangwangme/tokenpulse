@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-07-07
+
+### Added
+- Claude Code auto-refresh: support automatic OAuth access token refresh when expired or on 401 Unauthorized API responses, with persistence back to credentials file and macOS Keychain.
+
 ## [0.4.6] - 2026-07-06
 
 ### Fixed

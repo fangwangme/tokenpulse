@@ -93,36 +93,65 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
     }
 
     async fn fetch_quota(&self) -> Result<QuotaSnapshot> {
-        let creds = self.auth.load_credentials()?;
+        let mut creds = self.auth.load_credentials()?;
+        let mut token = creds.claude_ai_oauth.access_token.clone();
 
         if self.auth.is_token_expired(&creds) {
-            return Err(anyhow!(
-                "Claude token expired. Please run `claude` to refresh your session."
-            ));
+            debug!("Claude token is expired, attempting to refresh");
+            match self.auth.refresh_token(&mut creds) {
+                Ok(new_token) => {
+                    token = new_token;
+                }
+                Err(e) => {
+                    debug!(
+                        "Failed to refresh Claude token: {}. Falling back to existing token.",
+                        e
+                    );
+                }
+            }
         }
 
-        let response = self
+        let mut response = self
             .client
             .get(QUOTA_API_URL)
-            .bearer_auth(&creds.claude_ai_oauth.access_token)
+            .bearer_auth(&token)
             .header("anthropic-beta", "oauth-2025-04-20")
             .header("Accept", "application/json")
             .send()
             .await?;
 
-        let status = response.status();
+        let mut status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            debug!("Claude quota fetch returned 401 Unauthorized, attempting to refresh token");
+            match self.auth.refresh_token(&mut creds) {
+                Ok(new_token) => {
+                    token = new_token;
+                    response = self
+                        .client
+                        .get(QUOTA_API_URL)
+                        .bearer_auth(&token)
+                        .header("anthropic-beta", "oauth-2025-04-20")
+                        .header("Accept", "application/json")
+                        .send()
+                        .await?;
+                    status = response.status();
+                }
+                Err(e) => {
+                    return Err(anyhow!(
+                        "Claude session expired and token refresh failed: {}",
+                        e
+                    ));
+                }
+            }
+        }
+
         let body = response.text().await?;
         debug!(
             "Claude quota response status: {}, {} bytes",
             status,
             body.len()
         );
-
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(anyhow!(
-                "Claude session expired. Please run `claude` to refresh your session."
-            ));
-        }
 
         if !status.is_success() {
             return Err(anyhow!("Quota API error {}: {}", status, body));
