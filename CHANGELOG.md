@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-07-08
+
+### Fixed
+- Antigravity model alias normalization: fixed database normalization logic that stripped performance tiers (`-medium`, `-high`, `-low`, `-thinking`) from model IDs in the local database cache, preventing historical records (such as `gemini-3.5-flash-medium`) from being incorrectly consolidated.
+- Quota progress bar: fixed visual layout rendering in `widgets/gauge.rs` that introduced visual gaps/holes in the progress bar when the expected progress marker was positioned inside the filled area of the bar under both `Used` and `Remaining` display modes.
+
 ## [0.4.7] - 2026-07-07
 
 ### Added
