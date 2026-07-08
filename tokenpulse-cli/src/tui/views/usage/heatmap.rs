@@ -521,14 +521,15 @@ fn render_selected_day_agent_detail(
         Style::default().fg(theme.accent_soft).bold(),
     )])];
 
-    let cost_width = 8usize.min(area.width.saturating_sub(10) as usize);
+    let cost_width = 10usize.min(area.width.saturating_sub(12) as usize).max(8);
     let model_width = area.width.saturating_sub((cost_width + 3) as u16) as usize;
+    let model_width_inner = model_width.saturating_sub(2);
     for group in groups {
         let agent_name = super::display_source_name(&group.source);
         let agent_color = theme.provider_color(&group.source);
         lines.push(Line::from(vec![
             Span::styled(
-                truncate(agent_name, model_width),
+                format!("{:<model_width$}", truncate(agent_name, model_width)),
                 Style::default().fg(agent_color).bold(),
             ),
             Span::raw(" "),
@@ -543,7 +544,10 @@ fn render_selected_day_agent_detail(
             lines.push(Line::from(vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(
-                    truncate(&model_name, model_width.saturating_sub(2)),
+                    format!(
+                        "{:<model_width_inner$}",
+                        truncate(&model_name, model_width_inner)
+                    ),
                     Style::default().fg(model_color),
                 ),
                 Span::raw(" "),

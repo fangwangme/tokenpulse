@@ -2277,13 +2277,13 @@ pub fn truncate(text: &str, width: usize) -> String {
 pub fn format_compact(value: i64) -> String {
     let abs = value.abs();
     if abs >= 1_000_000_000 {
-        format!("{:.4}B", value as f64 / 1_000_000_000.0)
+        format!("{:.2} B", value as f64 / 1_000_000_000.0)
     } else if abs >= 1_000_000 {
-        format!("{:.4}M", value as f64 / 1_000_000.0)
+        format!("{:.2} M", value as f64 / 1_000_000.0)
     } else if abs >= 1_000 {
-        format!("{:.1}K", value as f64 / 1_000.0)
+        format!("{:.2} K", value as f64 / 1_000.0)
     } else {
-        value.to_string()
+        format!("{:.2}  ", value as f64)
     }
 }
 
@@ -2291,7 +2291,9 @@ pub fn format_cost_compact(value: f64) -> String {
     let sign = if value < 0.0 { "-" } else { "" };
     let abs = value.abs();
     if abs >= 1_000.0 {
-        format!("{}${}", sign, format_int_commas(abs.round() as i64))
+        let int_part = abs.trunc() as i64;
+        let cents = ((abs.fract() * 100.0).round() as i64).abs();
+        format!("{}${}.{:02}", sign, format_int_commas(int_part), cents)
     } else {
         format!("{}${:.2}", sign, abs)
     }

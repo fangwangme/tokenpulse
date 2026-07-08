@@ -94,7 +94,7 @@ pub fn render_models_page(
     let header_y = inner.y;
     let total_width = inner.width as usize;
     let rank_width = 4usize;
-    let cost_width = 8usize;
+    let cost_width = 10usize;
     let input_width = 9usize;
     let output_width = 9usize;
     // Split cache into read/write columns; abbreviate the headers when space is tight.

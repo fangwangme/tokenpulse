@@ -363,13 +363,13 @@ fn format_int_commas(value: i64) -> String {
 fn format_compact(value: i64) -> String {
     let abs = value.abs();
     if abs >= 1_000_000_000 {
-        format!("{:.4}B", value as f64 / 1_000_000_000.0)
+        format!("{:.2} B", value as f64 / 1_000_000_000.0)
     } else if abs >= 1_000_000 {
-        format!("{:.4}M", value as f64 / 1_000_000.0)
+        format!("{:.2} M", value as f64 / 1_000_000.0)
     } else if abs >= 1_000 {
-        format!("{:.1}K", value as f64 / 1_000.0)
+        format!("{:.2} K", value as f64 / 1_000.0)
     } else {
-        value.to_string()
+        format!("{:.2}  ", value as f64)
     }
 }
 

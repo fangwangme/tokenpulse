@@ -91,16 +91,18 @@ fn render_daily_table(
             ),
             Style::default().fg(theme.accent_soft).bold(),
         ),
+        Span::raw(" "),
         Span::styled(
             format!(
-                "{:<10}",
+                "{:>10}",
                 format!("{}{}", "Tokens", sort_indicator(SortField::Tokens))
             ),
             Style::default().fg(Color::Rgb(52, 211, 153)).bold(),
         ),
+        Span::raw(" "),
         Span::styled(
             format!(
-                "{:<10}",
+                "{:>10}",
                 format!("{}{}", "Cost", sort_indicator(SortField::Cost))
             ),
             Style::default().fg(Color::Rgb(250, 204, 21)).bold(),
@@ -108,29 +110,35 @@ fn render_daily_table(
     ];
     if show_detail_cols {
         header_spans.extend([
+            Span::raw(" "),
             Span::styled(
-                format!("{:<10}", "Input"),
+                format!("{:>10}", "Input"),
                 Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
             ),
+            Span::raw(" "),
             Span::styled(
-                format!("{:<10}", "Output"),
+                format!("{:>10}", "Output"),
                 Style::default().fg(Color::Rgb(167, 139, 250)).bold(),
             ),
+            Span::raw(" "),
             Span::styled(
-                format!("{:<cache_col_width$}", cache_r_header),
+                format!("{:>cache_col_width$}", cache_r_header),
                 Style::default().fg(cache_color).bold(),
             ),
+            Span::raw(" "),
             Span::styled(
-                format!("{:<cache_col_width$}", cache_w_header),
+                format!("{:>cache_col_width$}", cache_w_header),
                 Style::default().fg(cache_color).bold(),
             ),
         ]);
     }
+    header_spans.push(Span::raw(" "));
     header_spans.push(Span::styled(
-        format!("{:<8}", "Msgs"),
+        format!("{:>8}", "Msgs"),
         Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
     ));
     if show_wow {
+        header_spans.push(Span::raw("  "));
         header_spans.push(Span::styled(
             format!("{:<wow_width$}", state.daily_metric.daily_vs7d_header()),
             Style::default().fg(theme.dim).bold(),
@@ -176,16 +184,18 @@ fn render_daily_table(
                 format!("{:<date_width$}", date_text),
                 selected_row_style(date_style, selected, theme),
             ),
+            Span::raw(" "),
             Span::styled(
-                format!("{:<10}", format_compact(day.total_tokens)),
+                format!("{:>10}", format_compact(day.total_tokens)),
                 selected_row_style(
                     metric_style(Color::Rgb(52, 211, 153), row_bg),
                     selected,
                     theme,
                 ),
             ),
+            Span::raw(" "),
             Span::styled(
-                format!("{:<10}", format_cost_compact(day.cost_usd)),
+                format!("{:>10}", format_cost_compact(day.cost_usd)),
                 selected_row_style(
                     metric_style(Color::Rgb(250, 204, 21), row_bg),
                     selected,
@@ -195,40 +205,45 @@ fn render_daily_table(
         ];
         if show_detail_cols {
             spans.extend([
+                Span::raw(" "),
                 Span::styled(
-                    format!("{:<10}", format_compact(day.input_tokens)),
+                    format!("{:>10}", format_compact(day.input_tokens)),
                     selected_row_style(
                         metric_style(Color::Rgb(96, 165, 250), row_bg),
                         selected,
                         theme,
                     ),
                 ),
+                Span::raw(" "),
                 Span::styled(
-                    format!("{:<10}", format_compact(day.output_tokens)),
+                    format!("{:>10}", format_compact(day.output_tokens)),
                     selected_row_style(
                         metric_style(Color::Rgb(167, 139, 250), row_bg),
                         selected,
                         theme,
                     ),
                 ),
+                Span::raw(" "),
                 Span::styled(
                     format!(
-                        "{:<cache_col_width$}",
+                        "{:>cache_col_width$}",
                         format_compact(day.cache_read_tokens)
                     ),
                     selected_row_style(metric_style(cache_color, row_bg), selected, theme),
                 ),
+                Span::raw(" "),
                 Span::styled(
                     format!(
-                        "{:<cache_col_width$}",
+                        "{:>cache_col_width$}",
                         format_compact(day.cache_write_tokens)
                     ),
                     selected_row_style(metric_style(cache_color, row_bg), selected, theme),
                 ),
             ]);
         }
+        spans.push(Span::raw(" "));
         spans.push(Span::styled(
-            format!("{:<8}", format_compact(day.messages)),
+            format!("{:>8}", format_compact(day.messages)),
             selected_row_style(
                 metric_style(Color::Rgb(96, 165, 250), row_bg),
                 selected,
@@ -236,6 +251,7 @@ fn render_daily_table(
             ),
         ));
         if show_wow {
+            spans.push(Span::raw("  "));
             let prior_date = day.date - Duration::days(7);
             let current = daily_metric_value(day, state.daily_metric);
             let prior = value_by_date.get(&prior_date).copied();

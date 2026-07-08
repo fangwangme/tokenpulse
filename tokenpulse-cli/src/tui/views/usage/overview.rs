@@ -215,7 +215,7 @@ fn render_overview_top_models(
         .map(|entry| overview_model_metric_value(entry, state.overview_metric))
         .sum::<f64>();
     let pct_width = 7usize;
-    let cost_width = 8usize;
+    let cost_width = 10usize;
     let tokens_width = 9usize;
     let fixed_width = tokens_width + cost_width + pct_width + 4;
     let available_for_both = total_width.saturating_sub(fixed_width);
