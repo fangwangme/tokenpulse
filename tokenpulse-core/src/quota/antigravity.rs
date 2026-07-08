@@ -500,11 +500,11 @@ fn user_metadata_from_status(status: LsUserStatusResponse) -> UserMetadata {
     UserMetadata { account, plan }
 }
 
-/// Order detected connections so the CLI server is tried first, then Desktop,
+/// Order detected connections so the Desktop server is tried first, then CLI,
 /// then any other runtime kinds, preserving discovery order within each group.
 fn ordered_connections(connections: &[AntigravityConnection]) -> Vec<&AntigravityConnection> {
     let mut ordered: Vec<&AntigravityConnection> = Vec::with_capacity(connections.len());
-    for kind in [AntigravityRuntimeKind::Cli, AntigravityRuntimeKind::Desktop] {
+    for kind in [AntigravityRuntimeKind::Desktop, AntigravityRuntimeKind::Cli] {
         ordered.extend(connections.iter().filter(|conn| conn.runtime_kind == kind));
     }
     ordered.extend(connections.iter().filter(|conn| {
@@ -531,13 +531,10 @@ impl QuotaFetcher for AntigravityQuotaFetcher {
     }
 
     async fn fetch_quota(&self) -> Result<QuotaSnapshot> {
-        let connections = tokio::task::spawn_blocking(detect_antigravity_connections)
-            .await
-            .unwrap_or_else(|e| Err(anyhow!("Spawn blocking failed: {}", e)))
-            .unwrap_or_else(|e| {
-                debug!("Antigravity language server discovery failed: {}", e);
-                Vec::new()
-            });
+        let connections = detect_antigravity_connections().await.unwrap_or_else(|e| {
+            debug!("Antigravity language server discovery failed: {}", e);
+            Vec::new()
+        });
 
         for connection in ordered_connections(&connections) {
             if let Some(snapshot) = self.probe_connection(connection).await {

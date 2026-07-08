@@ -71,9 +71,24 @@ pub struct PricingCatalog {
     entries: HashMap<String, PricingRecord>,
 }
 
+fn canonicalize_catalog_key(key: &str) -> String {
+    if let Some((provider, model)) = key.split_once('/') {
+        format!("{}/{}", provider, crate::model_id::canonical(model))
+    } else {
+        crate::model_id::canonical(key)
+    }
+}
+
 impl PricingCatalog {
     pub fn new(entries: HashMap<String, PricingRecord>) -> Self {
-        Self { entries }
+        let mut canonical_entries = HashMap::new();
+        for (key, record) in entries {
+            let canonical_key = canonicalize_catalog_key(&key);
+            canonical_entries.insert(canonical_key, record);
+        }
+        Self {
+            entries: canonical_entries,
+        }
     }
 
     pub fn entries(&self) -> &HashMap<String, PricingRecord> {
@@ -83,10 +98,11 @@ impl PricingCatalog {
     // Sources are merged in explicit priority order. Keep the first usable
     // record for a key and only replace missing or zero-priced rows.
     pub fn insert_if_missing_or_unusable(&mut self, key: String, record: PricingRecord) {
-        match self.entries.get(&key) {
+        let canonical_key = canonicalize_catalog_key(&key);
+        match self.entries.get(&canonical_key) {
             Some(existing) if pricing_record_is_usable(existing) => {}
             _ => {
-                self.entries.insert(key, record);
+                self.entries.insert(canonical_key, record);
             }
         }
     }
@@ -96,7 +112,8 @@ impl PricingCatalog {
         model_id: &str,
         provider_id: Option<&str>,
     ) -> Option<ResolvedPricing<'a>> {
-        for candidate in pricing_lookup_candidates_with_provider(model_id, provider_id) {
+        let canonical_id = crate::model_id::canonical(model_id);
+        for candidate in pricing_lookup_candidates_with_provider(&canonical_id, provider_id) {
             let Some((key, record)) = self
                 .entries
                 .get_key_value(&candidate)
@@ -340,7 +357,7 @@ fn strip_three_segment_prefix(model_id: &str) -> Option<&str> {
 
 fn strip_quality_tier_suffix(model_id: &str) -> Option<String> {
     let normalized = model_id.trim().replace('_', "-");
-    for suffix in ["-high", "-medium", "-low"] {
+    for suffix in ["-high", "-medium", "-low", "-thinking"] {
         if normalized.to_ascii_lowercase().ends_with(suffix) {
             let end = normalized.len() - suffix.len();
             return Some(normalized[..end].to_string());

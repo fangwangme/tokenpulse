@@ -1,5 +1,3 @@
-use crate::model_id::strip_date_suffix;
-
 pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
         return Some(dt.timestamp_millis());
@@ -16,70 +14,7 @@ pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
 }
 
 pub fn normalize_model_name(model_id: &str) -> String {
-    let mut normalized = model_id.trim().to_ascii_lowercase();
-
-    if let Some(stripped) = strip_date_suffix(&normalized) {
-        normalized = stripped;
-    }
-
-    if let Some(last_segment) = normalized.rsplit('/').next() {
-        normalized = last_segment.to_string();
-    }
-
-    normalized = normalized.replace(['.', '_', ' '], "-");
-    normalized = collapse_repeated_hyphens(&normalized);
-    normalized = strip_known_prefix(&normalized);
-    normalized = strip_tier_suffix(&normalized);
-    normalized = strip_reasoning_suffix(&normalized);
-
-    if let Some(stripped) = normalized.strip_suffix("-0") {
-        normalized = stripped.to_string();
-    }
-
-    normalized = normalized.trim_matches('-').to_string();
-
-    match normalized.as_str() {
-        "gemini-3-pro" | "gemini-3-flash" => {
-            normalized.push_str("-preview");
-        }
-        _ => {}
-    }
-
-    normalized
-}
-
-fn strip_tier_suffix(model_id: &str) -> String {
-    let mut result = model_id.to_string();
-    loop {
-        let mut stripped = false;
-        for suffix in ["-high", "-medium", "-low", "-free"] {
-            if let Some(s) = result.strip_suffix(suffix) {
-                result = s.to_string();
-                stripped = true;
-                break;
-            }
-        }
-        if !stripped {
-            break;
-        }
-    }
-    result
-}
-
-fn strip_known_prefix(model_id: &str) -> String {
-    for prefix in ["antigravity-", "anti-gravity-"] {
-        if let Some(stripped) = model_id.strip_prefix(prefix) {
-            return stripped.to_string();
-        }
-    }
-    model_id.to_string()
-}
-
-fn strip_reasoning_suffix(model_id: &str) -> String {
-    model_id
-        .strip_suffix("-thinking")
-        .unwrap_or(model_id)
-        .to_string()
+    crate::model_id::canonical(model_id)
 }
 
 pub fn detect_provider_from_model(model: &str) -> String {
@@ -115,25 +50,6 @@ pub fn detect_provider_from_model(model: &str) -> String {
     } else {
         "other".to_string()
     }
-}
-
-fn collapse_repeated_hyphens(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut last_was_hyphen = false;
-
-    for ch in value.chars() {
-        if ch == '-' {
-            if !last_was_hyphen {
-                out.push(ch);
-            }
-            last_was_hyphen = true;
-        } else {
-            out.push(ch);
-            last_was_hyphen = false;
-        }
-    }
-
-    out
 }
 
 #[cfg(test)]

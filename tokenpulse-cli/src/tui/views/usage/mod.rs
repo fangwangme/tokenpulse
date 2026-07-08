@@ -32,6 +32,7 @@ use tokenpulse_core::{
     config::{Config, ConfigManager, ThemePreference},
     usage::{normalize_model_name, DailyUsageRow, DashboardDay, ModelSummary, UsageSummary},
 };
+use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
 // Pages
@@ -944,7 +945,14 @@ fn spawn_quota_reload(
         let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
         let total_fetchers = fetchers.len();
         let observed_at = chrono::Utc::now();
+        let fetch_start = std::time::Instant::now();
         let results = tokenpulse_core::quota::fetch_all(fetchers).await;
+        let fetch_elapsed = fetch_start.elapsed();
+        info!(
+            "Quota fetch completed in {} ms (fetchers count: {})",
+            fetch_elapsed.as_millis(),
+            total_fetchers
+        );
 
         let mut snapshots = Vec::new();
         let mut errors = Vec::new();
@@ -954,6 +962,7 @@ fn spawn_quota_reload(
                     snapshots.push(snapshot);
                 }
                 Err(e) => {
+                    warn!("Quota fetch failed for provider: {}", e);
                     errors.push(e.to_string());
                 }
             }
@@ -2268,9 +2277,9 @@ pub fn truncate(text: &str, width: usize) -> String {
 pub fn format_compact(value: i64) -> String {
     let abs = value.abs();
     if abs >= 1_000_000_000 {
-        format!("{:.1}B", value as f64 / 1_000_000_000.0)
+        format!("{:.4}B", value as f64 / 1_000_000_000.0)
     } else if abs >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
+        format!("{:.4}M", value as f64 / 1_000_000.0)
     } else if abs >= 1_000 {
         format!("{:.1}K", value as f64 / 1_000.0)
     } else {

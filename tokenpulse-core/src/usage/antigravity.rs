@@ -16,7 +16,7 @@ const PARSER_VERSION: &str = "antigravity-v2";
 const MODEL_ALIAS_HISTORY_VERSION: u32 = 1;
 const MODEL_ALIAS_HISTORY_FILE_NAME: &str = "model-aliases.json";
 const ANTIGRAVITY_LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
-const ANTIGRAVITY_RPC_BODY_CAP: usize = 16 * 1024 * 1024;
+const ANTIGRAVITY_RPC_BODY_CAP: usize = 64 * 1024 * 1024;
 
 pub struct AntigravitySessionParser {
     rebuild_cache: bool,
@@ -78,6 +78,7 @@ impl SessionParser for AntigravitySessionParser {
 
         for root in self.session_paths() {
             // Sync first!
+            let sync_started_ms = Local::now().timestamp_millis();
             if !self.skip_sync {
                 if let Err(e) = sync_antigravity_with_options(
                     &root,
@@ -102,12 +103,32 @@ impl SessionParser for AntigravitySessionParser {
 
             // Now read from SQLite
             let conn = open_cache_db(&root)?;
-            let query = "SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
-                                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                                pricing_day, parser_version
-                         FROM session_usage
-                         ORDER BY timestamp ASC";
-            let mut stmt = conn.prepare(query)?;
+            let mut query = String::from(
+                "SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
+                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                        pricing_day, parser_version
+                 FROM session_usage"
+            );
+
+            let mut params = Vec::new();
+            if let Some(since_date) = _since {
+                let since_ms = since_date
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_millis();
+                query.push_str(
+                    " WHERE timestamp >= ?1
+                       OR (client || ':' || session_id) IN (
+                           SELECT client || ':' || session_id FROM sessions WHERE synced_at >= ?2
+                       )",
+                );
+                params.push(since_ms);
+                params.push(sync_started_ms);
+            }
+            query.push_str(" ORDER BY timestamp ASC");
+
+            let mut stmt = conn.prepare(&query)?;
 
             let map_row = |row: &rusqlite::Row<'_>| {
                 Ok((
@@ -127,7 +148,7 @@ impl SessionParser for AntigravitySessionParser {
                 ))
             };
 
-            let rows = stmt.query_map([], map_row)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), map_row)?;
 
             for row in rows {
                 let (
@@ -333,6 +354,14 @@ pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
     sync_antigravity_with_options(sessions_dir, AntigravitySyncOptions::default())
 }
 
+fn block_on_async<F: std::future::Future>(future: F) -> F::Output {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(future))
+    } else {
+        tokio::runtime::Runtime::new().unwrap().block_on(future)
+    }
+}
+
 pub fn sync_active_antigravity_aliases() -> Result<()> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let cache_dir = home
@@ -340,11 +369,17 @@ pub fn sync_active_antigravity_aliases() -> Result<()> {
         .join("share")
         .join("tokenpulse")
         .join("antigravity-cache");
-    let connections = detect_antigravity_connections()?;
-    if !connections.is_empty() {
-        let dynamic_model_aliases = fetch_dynamic_model_aliases(&connections);
-        merge_and_save_model_alias_history(&cache_dir, &dynamic_model_aliases)?;
-    }
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?;
+    block_on_async(async {
+        let connections = detect_antigravity_connections_with_client(&client).await?;
+        if !connections.is_empty() {
+            let dynamic_model_aliases = fetch_dynamic_model_aliases(&client, &connections).await;
+            merge_and_save_model_alias_history(&cache_dir, &dynamic_model_aliases)?;
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
     Ok(())
 }
 
@@ -352,10 +387,25 @@ fn sync_antigravity_with_options(
     sessions_dir: &Path,
     options: AntigravitySyncOptions,
 ) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?;
+    block_on_async(sync_antigravity_with_options_async(
+        &client,
+        sessions_dir,
+        options,
+    ))
+}
+
+async fn sync_antigravity_with_options_async(
+    client: &reqwest::Client,
+    sessions_dir: &Path,
+    options: AntigravitySyncOptions,
+) -> Result<()> {
     let sync_start = std::time::Instant::now();
     std::fs::create_dir_all(sessions_dir)?;
 
-    let connections = match detect_antigravity_connections() {
+    let connections = match detect_antigravity_connections_with_client(client).await {
         Ok(c) => c,
         Err(e) => {
             warn!(
@@ -385,7 +435,7 @@ fn sync_antigravity_with_options(
 
     let cached_rows_before = count_antigravity_session_cache_rows(&db_conn);
 
-    let dynamic_model_aliases = fetch_dynamic_model_aliases(&connections);
+    let dynamic_model_aliases = fetch_dynamic_model_aliases(client, &connections).await;
     let model_aliases =
         match merge_and_save_model_alias_history(sessions_dir, &dynamic_model_aliases) {
             Ok(aliases) => aliases,
@@ -397,12 +447,12 @@ fn sync_antigravity_with_options(
 
     let mut synced_sessions_count = 0;
 
-    let mut cached_sessions: HashMap<(String, String), i64> = HashMap::new();
+    let mut cached_sessions: HashMap<(String, String), (Option<i64>, Option<i64>)> = HashMap::new();
     if let Ok(mut stmt) = db_conn.prepare(
         r#"
-        SELECT client, session_id, last_modified_ms FROM sessions
+        SELECT client, session_id, last_modified_ms, step_count FROM sessions
         UNION
-        SELECT session_usage.client, sessions.session_id, sessions.last_modified_ms
+        SELECT session_usage.client, sessions.session_id, sessions.last_modified_ms, sessions.step_count
         FROM session_usage
         JOIN sessions ON sessions.session_id = session_usage.session_id
         "#,
@@ -412,29 +462,43 @@ fn sync_antigravity_with_options(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
             ))
         }) {
             for row in rows {
-                if let Ok((client, id, Some(last_mod))) = row {
-                    cached_sessions.insert((client, id), last_mod);
+                if let Ok((client, id, last_mod, step_count)) = row {
+                    cached_sessions.insert((client, id), (last_mod, step_count));
                 }
             }
         }
     }
 
+    let active_kinds: Vec<AntigravityRuntimeKind> =
+        connections.iter().map(|c| c.runtime_kind).collect();
+    let local_conversation_ids = discover_local_conversation_ids(&active_kinds);
+    debug!(
+        "Discovered {} local conversation files",
+        local_conversation_ids.len()
+    );
+
     let mut unique_summaries: HashMap<AntigravitySessionCacheKey, AntigravitySyncSummary> =
         HashMap::new();
     for connection in &connections {
-        let response = match rpc_request(connection, "GetAllCascadeTrajectories", &json!({})) {
-            Ok(r) => r,
-            Err(e) => {
-                debug!(
-                    "Failed to query GetAllCascadeTrajectories from {}: {}",
-                    connection.port, e
-                );
-                continue;
-            }
-        };
+        if !options.rebuild_all_cache && !local_conversation_ids.is_empty() {
+            continue;
+        }
+
+        let response =
+            match rpc_request(client, connection, "GetAllCascadeTrajectories", &json!({})).await {
+                Ok(r) => r,
+                Err(e) => {
+                    debug!(
+                        "Failed to query GetAllCascadeTrajectories from {}: {}",
+                        connection.port, e
+                    );
+                    continue;
+                }
+            };
 
         let trajectory_entries = extract_trajectory_entries(&response);
 
@@ -455,106 +519,16 @@ fn sync_antigravity_with_options(
                 continue;
             }
 
-            let last_modified_ms = item
-                .get("lastModifiedTime")
-                .or_else(|| item.get("lastModified"))
-                .or_else(|| item.get("updatedAt"))
-                .and_then(parse_timestamp_value);
-
-            let project_id = item
-                .get("projectId")
-                .and_then(Value::as_str)
-                .map(String::from);
-            let trajectory_id = item
-                .get("trajectoryId")
-                .and_then(Value::as_str)
-                .map(String::from);
-            let title = item
-                .get("summary")
-                .and_then(Value::as_str)
-                .map(String::from);
-            let status = item.get("status").and_then(Value::as_str).map(String::from);
-            let step_count = item.get("stepCount").and_then(Value::as_i64);
-            let created_time_ms = item.get("createdTime").and_then(parse_timestamp_value);
-            let last_user_input_time_ms = item
-                .get("lastUserInputTime")
-                .and_then(parse_timestamp_value);
-            let parent_conversation_id = item
-                .get("parentConversationId")
-                .and_then(Value::as_str)
-                .map(String::from);
-
-            let mendel_experiment_ids = item.get("mendelExperimentIds").and_then(|v| {
-                if let Some(arr) = v.as_array() {
-                    let ids: Vec<String> = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                    Some(ids.join(","))
-                } else {
-                    v.as_str().map(String::from)
-                }
-            });
-
-            let workspace = item.get("workspace");
-            let workspace_path = workspace
-                .and_then(|w| w.get("workspacePath").or_else(|| w.get("path")))
-                .and_then(Value::as_str)
-                .map(String::from);
-            let git_root = workspace
-                .and_then(|w| w.get("gitRoot"))
-                .and_then(Value::as_str)
-                .map(String::from);
-            let repository = workspace
-                .and_then(|w| w.get("repository"))
-                .and_then(Value::as_str)
-                .map(String::from);
-            let git_origin_url = workspace
-                .and_then(|w| w.get("gitOriginUrl"))
-                .and_then(Value::as_str)
-                .map(String::from);
-            let branch_name = workspace
-                .and_then(|w| w.get("branchName"))
-                .and_then(Value::as_str)
-                .map(String::from);
-
-            let summary_data = AntigravitySyncSummary {
-                last_modified_ms,
-                connections: vec![connection.clone()],
-                trajectory_id,
-                title,
-                status,
-                step_count,
-                created_time_ms,
-                last_user_input_time_ms,
-                project_id,
-                workspace_path,
-                git_root,
-                repository,
-                git_origin_url,
-                branch_name,
-                parent_conversation_id,
-                mendel_experiment_ids,
-            };
-
             upsert_sync_summary(
                 &mut unique_summaries,
                 AntigravitySessionCacheKey {
                     session_id,
                     runtime_kind: connection.runtime_kind,
                 },
-                summary_data,
+                summary_from_trajectory_item(&item, connection.clone()),
             );
         }
     }
-
-    let active_kinds: Vec<AntigravityRuntimeKind> =
-        connections.iter().map(|c| c.runtime_kind).collect();
-    let local_conversation_ids = discover_local_conversation_ids(&active_kinds);
-    debug!(
-        "Discovered {} local conversation files",
-        local_conversation_ids.len()
-    );
     for local in local_conversation_ids {
         let cache_key = AntigravitySessionCacheKey {
             session_id: local.session_id.clone(),
@@ -594,56 +568,117 @@ fn sync_antigravity_with_options(
         }
     }
 
-    let total_detected_sessions = unique_summaries.len();
-    let now_ms = Local::now().timestamp_millis();
-
+    let mut sessions_to_sync = Vec::new();
     for (cache_key, summary) in unique_summaries {
-        let session_id = cache_key.session_id;
-        let client_str = client_str_for_runtime_kind(cache_key.runtime_kind);
+        let session_id = cache_key.session_id.clone();
+        let client_str = client_str_for_runtime_kind(cache_key.runtime_kind).to_string();
         let last_modified_ms = summary.last_modified_ms;
-        let lm = last_modified_ms.unwrap_or(now_ms);
 
         if !options.rebuild_all_cache {
-            if let Some(cached_lm) =
-                cached_sessions.get(&(client_str.to_string(), session_id.clone()))
+            if let Some((cached_lm, cached_step)) =
+                cached_sessions.get(&(client_str.clone(), session_id.clone()))
             {
-                if *cached_lm >= lm {
+                let unchanged = match (cached_lm, last_modified_ms) {
+                    (Some(cached), Some(current)) => cached >= &current,
+                    _ => match (cached_step, summary.step_count) {
+                        (Some(cached), Some(current)) => cached >= &current,
+                        _ => false,
+                    },
+                };
+                if unchanged {
                     debug!("Session {} is unchanged, skipping sync", session_id);
                     continue;
                 }
             }
         }
+        sessions_to_sync.push((cache_key, summary));
+    }
 
-        let mut metadata_response = None;
-        for conn in &summary.connections {
-            debug!(
-                "Syncing Antigravity session {} (modified: {:?}) from {} port {}",
-                session_id,
-                last_modified_ms,
-                conn.runtime_kind.as_str(),
-                conn.port
-            );
-            match rpc_request(
-                conn,
-                "GetCascadeTrajectoryGeneratorMetadata",
-                &json!({ "cascadeId": session_id }),
-            ) {
-                Ok(r) => {
-                    metadata_response = Some(r);
-                    break;
-                }
-                Err(e) => {
-                    debug!(
-                        "Failed to fetch generator metadata for session {} from port {}: {}",
-                        session_id, conn.port, e
-                    );
+    let total_detected_sessions = sessions_to_sync.len();
+    if total_detected_sessions == 0 {
+        return Ok(());
+    }
+
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for (idx, (cache_key, summary)) in sessions_to_sync.iter().enumerate() {
+        let client_clone = client.clone();
+        let sem_clone = semaphore.clone();
+        let session_id = cache_key.session_id.clone();
+        let connections = summary.connections.clone();
+        let metadata_timeout = if options.rebuild_all_cache {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(10)
+        };
+
+        join_set.spawn(async move {
+            let _permit = sem_clone.acquire().await.ok();
+            let mut metadata_response = None;
+            for conn in &connections {
+                match rpc_request_with_timeout(
+                    &client_clone,
+                    conn,
+                    "GetCascadeTrajectoryGeneratorMetadata",
+                    &json!({ "cascadeId": session_id }),
+                    metadata_timeout,
+                )
+                .await
+                {
+                    Ok(r) => {
+                        metadata_response = Some(r);
+                        break;
+                    }
+                    Err(e) => {
+                        debug!(
+                            "Failed to fetch generator metadata for session {} from port {}: {}",
+                            session_id, conn.port, e
+                        );
+                    }
                 }
             }
-        }
+            (idx, metadata_response)
+        });
+    }
 
-        let Some(metadata_response) = metadata_response else {
+    let mut responses = vec![None; sessions_to_sync.len()];
+    let mut failed_metadata_count = 0usize;
+    while let Some(res) = join_set.join_next().await {
+        match res {
+            Ok((idx, metadata_response)) => {
+                if metadata_response.is_none() {
+                    failed_metadata_count += 1;
+                }
+                responses[idx] = metadata_response;
+            }
+            Err(e) => {
+                failed_metadata_count += 1;
+                debug!("Antigravity metadata sync task failed: {}", e);
+            }
+        }
+    }
+
+    let now_ms = Local::now().timestamp_millis();
+    let mut empty_metadata_count = 0usize;
+    let mut zero_usage_sessions_count = 0usize;
+    for (idx, (cache_key, summary)) in sessions_to_sync.into_iter().enumerate() {
+        let Some(metadata_response) = responses[idx].take() else {
+            let tx = db_conn.transaction()?;
+            upsert_antigravity_session_row(
+                &tx,
+                &cache_key.session_id,
+                client_str_for_runtime_kind(cache_key.runtime_kind),
+                &summary,
+                "unknown",
+                now_ms,
+            )?;
+            tx.commit()?;
             continue;
         };
+
+        let session_id = cache_key.session_id;
+        let client_str = client_str_for_runtime_kind(cache_key.runtime_kind);
 
         let metadata = metadata_response
             .get("generatorMetadata")
@@ -651,8 +686,13 @@ fn sync_antigravity_with_options(
             .cloned()
             .unwrap_or_default();
 
-        if metadata.is_empty() {
-            continue;
+        let metadata_was_empty = metadata.is_empty();
+        if metadata_was_empty {
+            empty_metadata_count += 1;
+            debug!(
+                "Antigravity session {} ({}) returned empty generatorMetadata",
+                session_id, client_str
+            );
         }
 
         let mut primary_model_id = "unknown".to_string();
@@ -686,55 +726,16 @@ fn sync_antigravity_with_options(
             rusqlite::params![client_str, &session_id],
         )?;
 
-        tx.execute(
-            "INSERT INTO sessions (
-                session_id, trajectory_id, client, title, model_id, status, step_count,
-                created_time_ms, last_modified_ms, last_user_input_time_ms, project_id,
-                workspace_path, git_root, repository, git_origin_url, branch_name,
-                parent_conversation_id, mendel_experiment_ids, synced_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, client) DO UPDATE SET
-                trajectory_id = excluded.trajectory_id,
-                client = excluded.client,
-                title = excluded.title,
-                model_id = excluded.model_id,
-                status = excluded.status,
-                step_count = excluded.step_count,
-                created_time_ms = excluded.created_time_ms,
-                last_modified_ms = excluded.last_modified_ms,
-                last_user_input_time_ms = excluded.last_user_input_time_ms,
-                project_id = excluded.project_id,
-                workspace_path = excluded.workspace_path,
-                git_root = excluded.git_root,
-                repository = excluded.repository,
-                git_origin_url = excluded.git_origin_url,
-                branch_name = excluded.branch_name,
-                parent_conversation_id = excluded.parent_conversation_id,
-                mendel_experiment_ids = excluded.mendel_experiment_ids,
-                synced_at = excluded.synced_at",
-            rusqlite::params![
-                &session_id,
-                summary.trajectory_id,
-                client_str,
-                summary.title,
-                primary_model_id,
-                summary.status,
-                summary.step_count,
-                summary.created_time_ms,
-                lm,
-                summary.last_user_input_time_ms,
-                summary.project_id,
-                summary.workspace_path,
-                summary.git_root,
-                summary.repository,
-                summary.git_origin_url,
-                summary.branch_name,
-                summary.parent_conversation_id,
-                summary.mendel_experiment_ids,
-                now_ms,
-            ],
+        upsert_antigravity_session_row(
+            &tx,
+            &session_id,
+            client_str,
+            &summary,
+            &primary_model_id,
+            now_ms,
         )?;
 
+        let mut inserted_usage_rows = 0usize;
         for (step_idx, meta) in metadata.iter().enumerate() {
             let chat_model = meta.get("chatModel").unwrap_or(meta);
             let raw_model_id = chat_model
@@ -820,22 +821,38 @@ fn sync_antigravity_with_options(
                             PARSER_VERSION,
                         ],
                     )?;
+                    inserted_usage_rows += 1;
                 }
             }
         }
 
         tx.commit()?;
+        if metadata_was_empty {
+            continue;
+        }
+        if inserted_usage_rows == 0 {
+            zero_usage_sessions_count += 1;
+            debug!(
+                "Antigravity session {} ({}) produced no usage rows from {} metadata entries",
+                session_id,
+                client_str,
+                metadata.len()
+            );
+        }
         synced_sessions_count += 1;
     }
 
     let cached_rows_after = count_antigravity_session_cache_rows(&db_conn);
 
     info!(
-        "Antigravity sync: Synced local Antigravity cache in {} ms. Connections: {}, sessions: (total: {}, synced: {}), cache rows: {} -> {}",
+        "Antigravity sync: Synced local Antigravity cache in {} ms. Connections: {}, sessions: (total: {}, synced: {}, metadata_failed: {}, metadata_empty: {}, zero_usage: {}), cache rows: {} -> {}",
         sync_start.elapsed().as_millis(),
         connections.len(),
         total_detected_sessions,
         synced_sessions_count,
+        failed_metadata_count,
+        empty_metadata_count,
+        zero_usage_sessions_count,
         cached_rows_before,
         cached_rows_after
     );
@@ -851,6 +868,65 @@ fn client_str_for_runtime_kind(runtime_kind: AntigravityRuntimeKind) -> &'static
     }
 }
 
+fn upsert_antigravity_session_row(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    client: &str,
+    summary: &AntigravitySyncSummary,
+    model_id: &str,
+    synced_at: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO sessions (
+            session_id, trajectory_id, client, title, model_id, status, step_count,
+            created_time_ms, last_modified_ms, last_user_input_time_ms, project_id,
+            workspace_path, git_root, repository, git_origin_url, branch_name,
+            parent_conversation_id, mendel_experiment_ids, synced_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id, client) DO UPDATE SET
+            trajectory_id = excluded.trajectory_id,
+            client = excluded.client,
+            title = excluded.title,
+            model_id = excluded.model_id,
+            status = excluded.status,
+            step_count = excluded.step_count,
+            created_time_ms = excluded.created_time_ms,
+            last_modified_ms = excluded.last_modified_ms,
+            last_user_input_time_ms = excluded.last_user_input_time_ms,
+            project_id = excluded.project_id,
+            workspace_path = excluded.workspace_path,
+            git_root = excluded.git_root,
+            repository = excluded.repository,
+            git_origin_url = excluded.git_origin_url,
+            branch_name = excluded.branch_name,
+            parent_conversation_id = excluded.parent_conversation_id,
+            mendel_experiment_ids = excluded.mendel_experiment_ids,
+            synced_at = excluded.synced_at",
+        rusqlite::params![
+            session_id,
+            summary.trajectory_id.as_deref(),
+            client,
+            summary.title.as_deref(),
+            model_id,
+            summary.status.as_deref(),
+            summary.step_count,
+            summary.created_time_ms,
+            summary.last_modified_ms,
+            summary.last_user_input_time_ms,
+            summary.project_id.as_deref(),
+            summary.workspace_path.as_deref(),
+            summary.git_root.as_deref(),
+            summary.repository.as_deref(),
+            summary.git_origin_url.as_deref(),
+            summary.branch_name.as_deref(),
+            summary.parent_conversation_id.as_deref(),
+            summary.mendel_experiment_ids.as_deref(),
+            synced_at,
+        ],
+    )?;
+    Ok(())
+}
+
 fn antigravity_logical_message_key(session_id: &str, raw_message_key: &str) -> String {
     format!("{session_id}:{raw_message_key}")
 }
@@ -862,6 +938,77 @@ fn antigravity_storage_message_id(client: &str, logical_message_key: &str) -> St
 fn update_opt<T>(dest: &mut Option<T>, src: Option<T>) {
     if dest.is_none() {
         *dest = src;
+    }
+}
+
+fn summary_from_trajectory_item(
+    item: &Value,
+    connection: AntigravityConnection,
+) -> AntigravitySyncSummary {
+    let last_modified_ms = item
+        .get("lastModifiedTime")
+        .or_else(|| item.get("lastModified"))
+        .or_else(|| item.get("updatedAt"))
+        .and_then(parse_timestamp_value);
+    let workspace = item.get("workspace");
+    let mendel_experiment_ids = item.get("mendelExperimentIds").and_then(|v| {
+        if let Some(arr) = v.as_array() {
+            let ids: Vec<String> = arr
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect();
+            Some(ids.join(","))
+        } else {
+            v.as_str().map(String::from)
+        }
+    });
+
+    AntigravitySyncSummary {
+        last_modified_ms,
+        connections: vec![connection],
+        trajectory_id: item
+            .get("trajectoryId")
+            .and_then(Value::as_str)
+            .map(String::from),
+        title: item
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(String::from),
+        status: item.get("status").and_then(Value::as_str).map(String::from),
+        step_count: item.get("stepCount").and_then(Value::as_i64),
+        created_time_ms: item.get("createdTime").and_then(parse_timestamp_value),
+        last_user_input_time_ms: item
+            .get("lastUserInputTime")
+            .and_then(parse_timestamp_value),
+        project_id: item
+            .get("projectId")
+            .and_then(Value::as_str)
+            .map(String::from),
+        workspace_path: workspace
+            .and_then(|w| w.get("workspacePath").or_else(|| w.get("path")))
+            .and_then(Value::as_str)
+            .map(String::from),
+        git_root: workspace
+            .and_then(|w| w.get("gitRoot"))
+            .and_then(Value::as_str)
+            .map(String::from),
+        repository: workspace
+            .and_then(|w| w.get("repository"))
+            .and_then(Value::as_str)
+            .map(String::from),
+        git_origin_url: workspace
+            .and_then(|w| w.get("gitOriginUrl"))
+            .and_then(Value::as_str)
+            .map(String::from),
+        branch_name: workspace
+            .and_then(|w| w.get("branchName"))
+            .and_then(Value::as_str)
+            .map(String::from),
+        parent_conversation_id: item
+            .get("parentConversationId")
+            .and_then(Value::as_str)
+            .map(String::from),
+        mendel_experiment_ids,
     }
 }
 
@@ -940,19 +1087,16 @@ fn prioritize_connections_for_runtime(
     runtime_kind: AntigravityRuntimeKind,
 ) {
     let mut ordered = Vec::new();
-    if runtime_kind != AntigravityRuntimeKind::Unknown {
-        for conn in all_connections
-            .iter()
-            .filter(|conn| conn.runtime_kind == runtime_kind)
-        {
-            push_unique_connection(&mut ordered, conn.clone());
-        }
+    for conn in all_connections
+        .iter()
+        .filter(|conn| conn.runtime_kind == runtime_kind)
+    {
+        push_unique_connection(&mut ordered, conn.clone());
     }
     for conn in connections.drain(..) {
-        push_unique_connection(&mut ordered, conn);
-    }
-    for conn in all_connections {
-        push_unique_connection(&mut ordered, conn.clone());
+        if conn.runtime_kind == runtime_kind {
+            push_unique_connection(&mut ordered, conn);
+        }
     }
     *connections = ordered;
 }
@@ -1119,13 +1263,15 @@ fn static_model_aliases() -> HashMap<String, ModelAlias> {
     aliases
 }
 
-fn fetch_dynamic_model_aliases(
+async fn fetch_dynamic_model_aliases(
+    client: &reqwest::Client,
     connections: &[AntigravityConnection],
 ) -> HashMap<String, ModelAlias> {
     let mut aliases = HashMap::new();
 
     for connection in connections {
         let response = match rpc_request(
+            client,
             connection,
             "GetUserStatus",
             &json!({
@@ -1136,7 +1282,9 @@ fn fetch_dynamic_model_aliases(
                     "locale": "en",
                 }
             }),
-        ) {
+        )
+        .await
+        {
             Ok(response) => response,
             Err(e) => {
                 debug!(
@@ -1225,16 +1373,16 @@ fn model_alias_history_path(sessions_dir: &Path) -> Option<PathBuf> {
 }
 
 fn load_model_alias_history_map(sessions_dir: &Path) -> Result<HashMap<String, ModelAlias>> {
-    let mut aliases = static_model_aliases();
     let Some(path) = model_alias_history_path(sessions_dir) else {
-        return Ok(aliases);
+        return Ok(static_model_aliases());
     };
     if !path.exists() {
-        return Ok(aliases);
+        return Ok(static_model_aliases());
     }
 
     let content = std::fs::read_to_string(&path)?;
     let history: ModelAliasHistory = serde_json::from_str(&content)?;
+    let mut aliases = static_model_aliases();
     aliases.extend(
         history
             .aliases
@@ -1443,12 +1591,7 @@ fn normalize_cached_antigravity_artifacts(
 }
 
 fn is_pseudo_raw_model(model: &str) -> bool {
-    let id = model.to_ascii_lowercase();
-    id.is_empty()
-        || id == "unknown"
-        || id.starts_with("auto-")
-        || id.ends_with("-auto-review")
-        || id.ends_with("-default")
+    crate::model_id::is_pseudo(model)
 }
 
 fn normalize_display_name_to_id(display_name: &str) -> Option<String> {
@@ -1812,14 +1955,25 @@ fn parse_timestamp_value(value: &Value) -> Option<i64> {
         .filter(|timestamp| *timestamp > 0)
 }
 
-pub fn detect_antigravity_connections() -> Result<Vec<AntigravityConnection>> {
+pub async fn detect_antigravity_connections() -> Result<Vec<AntigravityConnection>> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?;
+    detect_antigravity_connections_with_client(&client).await
+}
+
+pub async fn detect_antigravity_connections_with_client(
+    client: &reqwest::Client,
+) -> Result<Vec<AntigravityConnection>> {
     let candidates = detect_process_candidates()?;
     let mut connections = Vec::new();
 
     for candidate in candidates {
         let ports = candidate_probe_ports(&candidate, find_listening_ports(candidate.pid)?);
         for port in ports {
-            if let Some(scheme) = probe_heartbeat(port, candidate.csrf_token.as_deref()) {
+            if let Some(scheme) =
+                probe_heartbeat(client, port, candidate.csrf_token.as_deref()).await
+            {
                 connections.push(AntigravityConnection {
                     pid: candidate.pid,
                     port,
@@ -2012,29 +2166,11 @@ fn discover_local_conversation_ids_from_home(
                         if ext == "pb" || ext == "db" {
                             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                                 if stem.len() >= 20 {
-                                    let mut modified_ms = path
+                                    let modified_ms = path
                                         .metadata()
                                         .ok()
                                         .and_then(|metadata| metadata.modified().ok())
                                         .and_then(system_time_to_millis);
-                                    if ext == "db" {
-                                        for extra_ext in &["db-wal", "db-shm"] {
-                                            let extra_path = path.with_extension(extra_ext);
-                                            if extra_path.exists() {
-                                                if let Some(extra_ms) = extra_path
-                                                    .metadata()
-                                                    .ok()
-                                                    .and_then(|metadata| metadata.modified().ok())
-                                                    .and_then(system_time_to_millis)
-                                                {
-                                                    modified_ms = match modified_ms {
-                                                        Some(m) => Some(m.max(extra_ms)),
-                                                        None => Some(extra_ms),
-                                                    };
-                                                }
-                                            }
-                                        }
-                                    }
                                     session_ids.push(LocalConversationId {
                                         session_id: stem.to_string(),
                                         modified_ms,
@@ -2180,32 +2316,45 @@ fn parse_port_from_line(line: &str) -> Option<u16> {
     None
 }
 
-fn probe_heartbeat(port: u16, csrf_token: Option<&str>) -> Option<&'static str> {
-    for scheme in ["https", "http"] {
-        if probe_heartbeat_with_scheme(scheme, port, csrf_token) {
+async fn probe_heartbeat(
+    client: &reqwest::Client,
+    port: u16,
+    csrf_token: Option<&str>,
+) -> Option<&'static str> {
+    // Only probe https (pure h2) per user decision
+    for scheme in ["https"] {
+        if probe_heartbeat_with_scheme(client, scheme, port, csrf_token).await {
             return Some(scheme);
         }
     }
     None
 }
 
-fn probe_heartbeat_with_scheme(scheme: &'static str, port: u16, csrf_token: Option<&str>) -> bool {
+async fn probe_heartbeat_with_scheme(
+    client: &reqwest::Client,
+    scheme: &'static str,
+    port: u16,
+    csrf_token: Option<&str>,
+) -> bool {
     let body = json!({ "uuid": "00000000-0000-0000-0000-000000000000" });
     let Ok((status, text)) = language_server_request_text(
+        client,
         scheme,
         port,
         csrf_token,
         "Heartbeat",
         &body,
-        Duration::from_secs(2),
+        Duration::from_secs(1),
         ANTIGRAVITY_RPC_BODY_CAP,
-    ) else {
+    )
+    .await
+    else {
         return false;
     };
 
     status == 200
         && heartbeat_response_looks_well_formed(&text)
-        && probe_endpoint_identity(scheme, port, csrf_token)
+        && probe_endpoint_identity(client, scheme, port, csrf_token).await
 }
 
 fn heartbeat_response_looks_well_formed(body: &str) -> bool {
@@ -2217,12 +2366,17 @@ fn heartbeat_response_looks_well_formed(body: &str) -> bool {
     serde_json::from_str::<Value>(slice).is_ok()
 }
 
-fn probe_endpoint_identity(scheme: &'static str, port: u16, csrf_token: Option<&str>) -> bool {
+async fn probe_endpoint_identity(
+    client: &reqwest::Client,
+    scheme: &'static str,
+    port: u16,
+    csrf_token: Option<&str>,
+) -> bool {
     for method in [
         "GetCascadeTrajectoryGeneratorMetadata",
         "GetAllCascadeTrajectories",
     ] {
-        if let Some(body) = identity_probe_request(scheme, port, csrf_token, method) {
+        if let Some(body) = identity_probe_request(client, scheme, port, csrf_token, method).await {
             if response_contains_antigravity_marker(method, &body) {
                 return true;
             }
@@ -2231,21 +2385,24 @@ fn probe_endpoint_identity(scheme: &'static str, port: u16, csrf_token: Option<&
     false
 }
 
-fn identity_probe_request(
+async fn identity_probe_request(
+    client: &reqwest::Client,
     scheme: &'static str,
     port: u16,
     csrf_token: Option<&str>,
     method: &str,
 ) -> Option<String> {
     let (status, text) = language_server_request_text(
+        client,
         scheme,
         port,
         csrf_token,
         method,
         &json!({}),
-        Duration::from_secs(2),
+        Duration::from_secs(1),
         ANTIGRAVITY_RPC_BODY_CAP,
     )
+    .await
     .ok()?;
 
     (status == 200 || (status == 500 && text.contains("trajectory not found"))).then_some(text)
@@ -2332,7 +2489,8 @@ fn run_command(program: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn language_server_request_text(
+async fn language_server_request_text(
+    client: &reqwest::Client,
     scheme: &str,
     port: u16,
     csrf_token: Option<&str>,
@@ -2346,56 +2504,67 @@ fn language_server_request_text(
         scheme, port, ANTIGRAVITY_LS_SERVICE, method
     );
     let body_text = serde_json::to_string(body)?;
-    let csrf_token = csrf_token
-        .filter(|token| !token.trim().is_empty())
-        .map(String::from);
+    let mut request = client
+        .post(url)
+        .timeout(timeout)
+        .header("Content-Type", "application/json")
+        .header("Connect-Protocol-Version", "1")
+        .body(body_text);
+    if let Some(token) = csrf_token.filter(|t| !t.trim().is_empty()) {
+        request = request.header("X-Codeium-Csrf-Token", token);
+    }
+    let response = request.send().await?;
+    let status_code = response.status().as_u16();
 
-    std::thread::spawn(move || -> Result<(u16, String)> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .danger_accept_invalid_certs(true)
-            .build()?;
-        let mut request = client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .header("Connect-Protocol-Version", "1")
-            .body(body_text);
-        if let Some(csrf_token) = csrf_token {
-            request = request.header("X-Codeium-Csrf-Token", csrf_token);
+    if let Some(length) = response.content_length() {
+        if length > max_body_bytes as u64 {
+            anyhow::bail!("RPC body of {length} bytes exceeds {max_body_bytes} cap");
         }
-        let response = request.send()?;
-        let status_code = response.status().as_u16();
+    }
 
-        if let Some(length) = response.content_length() {
-            if length > max_body_bytes as u64 {
-                anyhow::bail!("RPC body of {length} bytes exceeds {max_body_bytes} cap");
-            }
-        }
-
-        let bytes = response.bytes()?;
-        if bytes.len() > max_body_bytes {
-            anyhow::bail!(
-                "RPC body of {} bytes exceeds {} cap",
-                bytes.len(),
-                max_body_bytes
-            );
-        }
-        Ok((status_code, String::from_utf8(bytes.to_vec())?))
-    })
-    .join()
-    .map_err(|_| anyhow::anyhow!("Antigravity language server request thread panicked"))?
+    let bytes = response.bytes().await?;
+    if bytes.len() > max_body_bytes {
+        anyhow::bail!(
+            "RPC body of {} bytes exceeds {} cap",
+            bytes.len(),
+            max_body_bytes
+        );
+    }
+    Ok((status_code, String::from_utf8(bytes.to_vec())?))
 }
 
-fn rpc_request(connection: &AntigravityConnection, method: &str, body: &Value) -> Result<Value> {
+async fn rpc_request(
+    client: &reqwest::Client,
+    connection: &AntigravityConnection,
+    method: &str,
+    body: &Value,
+) -> Result<Value> {
+    let timeout = match method {
+        "GetCascadeTrajectoryGeneratorMetadata" => Duration::from_secs(10),
+        "GetAllCascadeTrajectories" => Duration::from_secs(10),
+        _ => Duration::from_secs(3),
+    };
+    rpc_request_with_timeout(client, connection, method, body, timeout).await
+}
+
+async fn rpc_request_with_timeout(
+    client: &reqwest::Client,
+    connection: &AntigravityConnection,
+    method: &str,
+    body: &Value,
+    timeout: Duration,
+) -> Result<Value> {
     let (status_code, response_body) = language_server_request_text(
+        client,
         &connection.scheme,
         connection.port,
         connection.csrf_token.as_deref(),
         method,
         body,
-        Duration::from_secs(10),
+        timeout,
         ANTIGRAVITY_RPC_BODY_CAP,
-    )?;
+    )
+    .await?;
 
     if status_code != 200 {
         return Err(anyhow::anyhow!(
@@ -2456,6 +2625,40 @@ mod tests {
         assert_eq!(msg.tokens.cache_read, 20);
         assert_eq!(msg.tokens.cache_write, 0);
         assert_eq!(msg.tokens.reasoning, 10);
+    }
+
+    #[test]
+    fn test_parse_includes_recently_synced_historical_session() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let conn = open_cache_db(&sessions_dir).unwrap();
+        let recently_synced_ms = Local::now().timestamp_millis() + 60_000;
+        conn.execute(
+            "INSERT INTO sessions (session_id, trajectory_id, client, title, model_id, status, step_count, created_time_ms, last_modified_ms, last_user_input_time_ms, synced_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params!["sess-historical", "traj-historical", "antigravity-desktop", "title", "gemini-3.5-flash", "status", 1_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64, recently_synced_ms],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, response_id, pricing_day, parser_version)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "resp-historical", "sess-historical", "antigravity-desktop", "gemini-3.5-flash", "google", 1672531201000_i64, 0_i64,
+                100_i64, 20_i64, 5_i64, 0_i64, 0_i64, "resp-historical", "2023-01-01", "antigravity-v2"
+            ],
+        ).unwrap();
+
+        let parser = AntigravitySessionParser::new()
+            .with_custom_paths(vec![sessions_dir])
+            .with_skip_sync(true);
+        let since = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let messages = parser.parse_sessions(Some(since)).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "sess-historical");
+        assert_eq!(messages[0].timestamp, 1672531201000);
     }
 
     #[test]
@@ -2918,7 +3121,6 @@ mod tests {
 
         let wal_file_path = cli_dir.join("abcdefabcdefabcdefabcdef.db-wal");
         std::fs::write(&wal_file_path, "mock").unwrap();
-        let wal_mtime = wal_file_path.metadata().unwrap().modified().unwrap();
 
         std::fs::write(anti_dir.join(non_uuid), "mock").unwrap();
         std::fs::write(cli_dir.join(txt_file), "mock").unwrap();
@@ -2941,8 +3143,9 @@ mod tests {
             .unwrap();
         assert_eq!(db_entry.runtime_kind, AntigravityRuntimeKind::Cli);
         let db_entry_mtime_ms = db_entry.modified_ms.unwrap();
-        let wal_mtime_ms = system_time_to_millis(wal_mtime).unwrap();
-        assert_eq!(db_entry_mtime_ms, wal_mtime_ms);
+        let db_mtime = db_file_path.metadata().unwrap().modified().unwrap();
+        let db_mtime_ms = system_time_to_millis(db_mtime).unwrap();
+        assert_eq!(db_entry_mtime_ms, db_mtime_ms);
     }
 
     #[test]

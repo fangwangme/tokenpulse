@@ -16,6 +16,7 @@ static HAS_REFRESHED_THIS_RUN: AtomicBool = AtomicBool::new(false);
 
 pub struct PricingCache {
     cache_path: PathBuf,
+    lazy_refresh_attempt_path: PathBuf,
 }
 
 impl PricingCache {
@@ -23,8 +24,8 @@ impl PricingCache {
         HAS_REFRESHED_THIS_RUN.load(Ordering::Relaxed)
     }
 
-    pub fn set_refreshed_this_run(val: bool) {
-        HAS_REFRESHED_THIS_RUN.store(val, Ordering::Relaxed);
+    fn mark_refreshed_this_run() {
+        HAS_REFRESHED_THIS_RUN.store(true, Ordering::Relaxed);
     }
 
     /// On-demand refresh for missing-model lookups. Attempted at most once
@@ -33,18 +34,14 @@ impl PricingCache {
     /// within the hour, so unknown or misparsed model ids cannot trigger
     /// repeated network fetches across reloads.
     pub fn lazy_refresh_sync(&self) -> Result<Option<PricingCatalog>> {
-        Self::set_refreshed_this_run(true);
+        Self::mark_refreshed_this_run();
 
-        let recently_fetched = fs::metadata(&self.cache_path)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|mtime| mtime.elapsed().ok())
-            .is_some_and(|age| age.as_secs() < LAZY_REFRESH_MIN_INTERVAL_SECS);
-        if recently_fetched {
-            debug!("Skipping on-demand pricing refresh; cache was fetched recently");
+        if self.lazy_refresh_attempted_recently() {
+            debug!("Skipping on-demand pricing refresh; already attempted within the last hour");
             return Ok(None);
         }
 
+        self.mark_lazy_refresh_attempt()?;
         self.fetch_and_cache_sync().map(Some)
     }
 
@@ -62,6 +59,7 @@ impl PricingCache {
 
         Self {
             cache_path: data_dir.join("pricing.json"),
+            lazy_refresh_attempt_path: data_dir.join("pricing-refresh-attempt"),
         }
     }
 
@@ -150,7 +148,7 @@ impl PricingCache {
 
     fn fetch_and_cache_sync(&self) -> Result<PricingCatalog> {
         info!("Refreshing pricing catalog from LiteLLM, OpenRouter, and models.dev");
-        Self::set_refreshed_this_run(true);
+        Self::mark_refreshed_this_run();
 
         let mut failures = Vec::new();
         let mut catalog = PricingCatalog::default();
@@ -264,6 +262,22 @@ impl PricingCache {
                     loaded_mtime: mtime,
                 },
             );
+        Ok(())
+    }
+
+    fn lazy_refresh_attempted_recently(&self) -> bool {
+        [&self.cache_path, &self.lazy_refresh_attempt_path]
+            .iter()
+            .filter_map(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok())
+            .filter_map(|mtime| mtime.elapsed().ok())
+            .any(|age| age.as_secs() < LAZY_REFRESH_MIN_INTERVAL_SECS)
+    }
+
+    fn mark_lazy_refresh_attempt(&self) -> Result<()> {
+        if let Some(parent) = self.lazy_refresh_attempt_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&self.lazy_refresh_attempt_path, Utc::now().to_rfc3339())?;
         Ok(())
     }
 }

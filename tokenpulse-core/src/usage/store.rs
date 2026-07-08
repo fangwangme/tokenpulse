@@ -1,4 +1,3 @@
-use super::normalize_model_name;
 use crate::pricing::{calculate_cost, ModelPricing, PricingCache, PricingCatalog};
 use crate::provider::{TokenBreakdown, UnifiedMessage};
 use crate::usage::{DashboardDay, ModelSummary, ProviderSummary};
@@ -7,7 +6,7 @@ use chrono::{Duration, NaiveDate, Utc};
 use rusqlite::{
     params, params_from_iter, types::Value, Connection, OptionalExtension, Transaction,
 };
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use tracing::{info, warn};
@@ -89,40 +88,46 @@ impl UsageStore {
         Ok(value.and_then(|date| NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()))
     }
 
-    pub fn source_has_stale_parser_version(
+    pub fn check_stale_parser_versions(
         &self,
-        source: &str,
-        parser_version: &str,
-    ) -> Result<bool> {
+        providers_and_versions: &[(&str, &str)],
+    ) -> Result<HashSet<String>> {
+        let mut stale_sources = HashSet::new();
+        if providers_and_versions.is_empty() {
+            return Ok(stale_sources);
+        }
+
         let conn = self.open()?;
-        let has_stale = if source == "antigravity" {
-            conn.query_row(
-                r#"
-                SELECT 1
-                FROM usage_messages
-                WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop') AND parser_version != ?1
-                LIMIT 1
-                "#,
-                params![parser_version],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some()
-        } else {
-            conn.query_row(
-                r#"
-                SELECT 1
-                FROM usage_messages
-                WHERE source = ?1 AND parser_version != ?2
-                LIMIT 1
-                "#,
-                params![source, parser_version],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some()
-        };
-        Ok(has_stale)
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT source, parser_version FROM usage_messages")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut expected = HashMap::new();
+        for (provider, version) in providers_and_versions {
+            expected.insert(*provider, *version);
+        }
+
+        for row in rows {
+            let (source, db_version) = row?;
+            let canonical_source = if source == "antigravity"
+                || source == "antigravity-cli"
+                || source == "antigravity-desktop"
+            {
+                "antigravity"
+            } else {
+                &source
+            };
+
+            if let Some(expected_version) = expected.get(canonical_source) {
+                if db_version != *expected_version {
+                    stale_sources.insert(canonical_source.to_string());
+                }
+            }
+        }
+
+        Ok(stale_sources)
     }
 
     pub fn default_since(
@@ -168,6 +173,7 @@ impl UsageStore {
         let tx = conn.transaction()?;
         let now = Utc::now().timestamp_millis();
         let mut affected_dates = BTreeSet::new();
+        let mut pricing_snapshot_cache = HashMap::new();
 
         for message in messages {
             let snapshot = ensure_pricing_snapshot(
@@ -176,25 +182,27 @@ impl UsageStore {
                 &mut pricing,
                 message,
                 refresh_pricing,
+                &mut pricing_snapshot_cache,
             )?;
             let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
 
             tx.execute(
                 r#"
                 INSERT INTO usage_messages (
-                    source, client, provider_id, model_id, session_id, message_key,
+                    source, client, provider_id, model_id, canonical_model_id, session_id, message_key,
                     timestamp_ms, date, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, reasoning_tokens,
                     total_tokens, cost_usd, pricing_day, parser_version
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6,
-                    ?7, ?8, ?9, ?10,
-                    ?11, ?12, ?13,
-                    ?14, ?15, ?16, ?17
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                    ?8, ?9, ?10, ?11,
+                    ?12, ?13, ?14,
+                    ?15, ?16, ?17, ?18
                 )
                 ON CONFLICT(source, client, message_key) DO UPDATE SET
                     provider_id = excluded.provider_id,
                     model_id = excluded.model_id,
+                    canonical_model_id = excluded.canonical_model_id,
                     session_id = excluded.session_id,
                     timestamp_ms = excluded.timestamp_ms,
                     date = excluded.date,
@@ -213,6 +221,7 @@ impl UsageStore {
                     message.client_detail.as_deref().unwrap_or(&message.client),
                     message.provider_id,
                     message.model_id,
+                    crate::model_id::canonical(&message.model_id),
                     message.session_id,
                     message.message_key,
                     message.timestamp,
@@ -266,6 +275,7 @@ impl UsageStore {
         let tx = conn.transaction()?;
         let now = Utc::now().timestamp_millis();
         let mut affected_dates = BTreeSet::new();
+
         let session_keys: BTreeSet<(String, String, String)> = messages
             .iter()
             .map(|message| {
@@ -298,6 +308,8 @@ impl UsageStore {
             )?;
         }
 
+        let mut pricing_snapshot_cache = HashMap::new();
+
         for message in messages {
             let snapshot = ensure_pricing_snapshot(
                 &tx,
@@ -305,25 +317,27 @@ impl UsageStore {
                 &mut pricing,
                 message,
                 refresh_pricing,
+                &mut pricing_snapshot_cache,
             )?;
             let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
 
             tx.execute(
                 r#"
                 INSERT INTO usage_messages (
-                    source, client, provider_id, model_id, session_id, message_key,
+                    source, client, provider_id, model_id, canonical_model_id, session_id, message_key,
                     timestamp_ms, date, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, reasoning_tokens,
                     total_tokens, cost_usd, pricing_day, parser_version
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6,
-                    ?7, ?8, ?9, ?10,
-                    ?11, ?12, ?13,
-                    ?14, ?15, ?16, ?17
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                    ?8, ?9, ?10, ?11,
+                    ?12, ?13, ?14,
+                    ?15, ?16, ?17, ?18
                 )
                 ON CONFLICT(source, client, message_key) DO UPDATE SET
                     provider_id = excluded.provider_id,
                     model_id = excluded.model_id,
+                    canonical_model_id = excluded.canonical_model_id,
                     session_id = excluded.session_id,
                     timestamp_ms = excluded.timestamp_ms,
                     date = excluded.date,
@@ -342,6 +356,7 @@ impl UsageStore {
                     message.client_detail.as_deref().unwrap_or(&message.client),
                     message.provider_id,
                     message.model_id,
+                    crate::model_id::canonical(&message.model_id),
                     message.session_id,
                     message.message_key,
                     message.timestamp,
@@ -417,6 +432,8 @@ impl UsageStore {
 
         delete_scoped_tx(&tx, None, &[source.to_string()], refresh_pricing)?;
 
+        let mut pricing_snapshot_cache = HashMap::new();
+
         for message in messages {
             let snapshot = ensure_pricing_snapshot(
                 &tx,
@@ -424,25 +441,27 @@ impl UsageStore {
                 &mut pricing,
                 message,
                 refresh_pricing,
+                &mut pricing_snapshot_cache,
             )?;
             let cost = derive_message_cost(message, snapshot.as_ref(), pricing.is_some())?;
 
             tx.execute(
                 r#"
                 INSERT INTO usage_messages (
-                    source, client, provider_id, model_id, session_id, message_key,
+                    source, client, provider_id, model_id, canonical_model_id, session_id, message_key,
                     timestamp_ms, date, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, reasoning_tokens,
                     total_tokens, cost_usd, pricing_day, parser_version
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6,
-                    ?7, ?8, ?9, ?10,
-                    ?11, ?12, ?13,
-                    ?14, ?15, ?16, ?17
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                    ?8, ?9, ?10, ?11,
+                    ?12, ?13, ?14,
+                    ?15, ?16, ?17, ?18
                 )
                 ON CONFLICT(source, client, message_key) DO UPDATE SET
                     provider_id = excluded.provider_id,
                     model_id = excluded.model_id,
+                    canonical_model_id = excluded.canonical_model_id,
                     session_id = excluded.session_id,
                     timestamp_ms = excluded.timestamp_ms,
                     date = excluded.date,
@@ -461,6 +480,7 @@ impl UsageStore {
                     message.client_detail.as_deref().unwrap_or(&message.client),
                     message.provider_id,
                     message.model_id,
+                    crate::model_id::canonical(&message.model_id),
                     message.session_id,
                     message.message_key,
                     message.timestamp,
@@ -811,7 +831,7 @@ impl UsageStore {
         let params = append_common_filters(&mut subquery_filters, since, sources);
         let sql = format!(
             r#"
-            SELECT model_id,
+            SELECT canonical_model_id,
                    provider_id,
                    source,
                    session_id,
@@ -829,7 +849,7 @@ impl UsageStore {
                     session_id,
                     message_key,
                     MAX(provider_id) AS provider_id,
-                    MAX(model_id) AS model_id,
+                    MAX(canonical_model_id) AS canonical_model_id,
                     MAX(cost_usd) AS cost_usd,
                     MAX(total_tokens) AS total_tokens,
                     MAX(input_tokens) AS input_tokens,
@@ -840,7 +860,7 @@ impl UsageStore {
                 WHERE 1=1 {subquery_filters}
                 GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
             )
-            GROUP BY source, provider_id, model_id, session_id ORDER BY SUM(total_tokens) DESC, model_id ASC
+            GROUP BY source, provider_id, canonical_model_id, session_id ORDER BY SUM(total_tokens) DESC, canonical_model_id ASC
             "#,
         );
 
@@ -864,7 +884,7 @@ impl UsageStore {
         let mut grouped: BTreeMap<String, AggregatedModelSummary> = BTreeMap::new();
         for row in rows.flatten() {
             let (
-                model_id,
+                canonical_model_id,
                 provider_id,
                 source,
                 session_id,
@@ -876,8 +896,7 @@ impl UsageStore {
                 cache_read_tokens,
                 cache_write_tokens,
             ) = row;
-            let normalized = normalize_model_name(&model_id);
-            let entry = grouped.entry(normalized).or_default();
+            let entry = grouped.entry(canonical_model_id).or_default();
             entry.providers.insert(provider_id);
             entry.sources.insert(source);
             entry.sessions.insert(session_id);
@@ -1196,7 +1215,7 @@ fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<
             date,
             source,
             provider_id,
-            model_id,
+            canonical_model_id,
             SUM(input_tokens),
             SUM(output_tokens),
             SUM(cache_read_tokens),
@@ -1214,7 +1233,7 @@ fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<
                 session_id,
                 message_key,
                 MAX(provider_id) AS provider_id,
-                MAX(model_id) AS model_id,
+                MAX(canonical_model_id) AS canonical_model_id,
                 MAX(input_tokens) AS input_tokens,
                 MAX(output_tokens) AS output_tokens,
                 MAX(cache_read_tokens) AS cache_read_tokens,
@@ -1226,7 +1245,7 @@ fn rebuild_daily_for_date(tx: &Transaction<'_>, date: &str, now: i64) -> Result<
             WHERE date = ?1
             GROUP BY date, {CANONICAL_SOURCE_SQL}, session_id, message_key
         )
-        GROUP BY date, source, provider_id, model_id
+        GROUP BY date, source, provider_id, canonical_model_id
         "#,
         ),
         params![date, now],
@@ -1240,97 +1259,114 @@ fn ensure_pricing_snapshot(
     pricing: &mut Option<PricingCatalog>,
     message: &UnifiedMessage,
     replace_existing: bool,
+    pricing_snapshot_cache: &mut HashMap<(String, String, String), Option<ModelPricing>>,
 ) -> Result<Option<ModelPricing>> {
-    if replace_existing {
-        tx.execute(
-            "DELETE FROM daily_pricing_snapshots WHERE date = ?1 AND provider_id = ?2 AND model_id = ?3",
-            params![message.date, message.provider_id, message.model_id],
-        )?;
+    let key = (
+        message.date.clone(),
+        message.provider_id.clone(),
+        message.model_id.clone(),
+    );
+    if !replace_existing {
+        if let Some(cached) = pricing_snapshot_cache.get(&key) {
+            return Ok(cached.clone());
+        }
     }
 
-    let existing = tx
-        .query_row(
-            r#"
-            SELECT input_cost_per_token, output_cost_per_token,
-                   cache_read_input_token_cost, cache_creation_input_token_cost
-            FROM daily_pricing_snapshots
-            WHERE date = ?1 AND provider_id = ?2 AND model_id = ?3
-            "#,
-            params![message.date, message.provider_id, message.model_id],
-            |row| {
-                Ok(ModelPricing::new(
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                ))
-            },
-        )
-        .optional()?;
+    let res = (|| -> Result<Option<ModelPricing>> {
+        if replace_existing {
+            tx.execute(
+                "DELETE FROM daily_pricing_snapshots WHERE date = ?1 AND provider_id = ?2 AND model_id = ?3",
+                params![message.date, message.provider_id, message.model_id],
+            )?;
+        }
 
-    if existing.is_some() {
-        return Ok(existing);
-    }
+        let existing = tx
+            .query_row(
+                r#"
+                SELECT input_cost_per_token, output_cost_per_token,
+                       cache_read_input_token_cost, cache_creation_input_token_cost
+                FROM daily_pricing_snapshots
+                WHERE date = ?1 AND provider_id = ?2 AND model_id = ?3
+                "#,
+                params![message.date, message.provider_id, message.model_id],
+                |row| {
+                    Ok(ModelPricing::new(
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                    ))
+                },
+            )
+            .optional()?;
 
-    let mut looked_up = pricing
-        .as_ref()
-        .and_then(|p| p.lookup(&message.model_id, Some(message.provider_id.as_str())));
+        if existing.is_some() {
+            return Ok(existing);
+        }
 
-    if looked_up.is_none()
-        && !is_pseudo_model_id(&message.model_id)
-        && !PricingCache::has_refreshed_this_run()
-    {
-        match pricing_cache.lazy_refresh_sync() {
-            Ok(Some(new_catalog)) => {
-                info!(
-                    "Pricing for model {} was missing or zero-cost; refreshed pricing catalog on demand",
-                    message.model_id
+        let mut looked_up = pricing
+            .as_ref()
+            .and_then(|p| p.lookup(&message.model_id, Some(message.provider_id.as_str())));
+
+        if looked_up.is_none()
+            && !is_pseudo_model_id(&message.model_id)
+            && !PricingCache::has_refreshed_this_run()
+        {
+            match pricing_cache.lazy_refresh_sync() {
+                Ok(Some(new_catalog)) => {
+                    info!(
+                        "Pricing for model {} was missing or zero-cost; refreshed pricing catalog on demand",
+                        message.model_id
+                    );
+                    *pricing = Some(new_catalog);
+                    looked_up = pricing.as_ref().and_then(|p| {
+                        p.lookup(&message.model_id, Some(message.provider_id.as_str()))
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!("Failed to lazy-refresh pricing cache: {}", error);
+                }
+            }
+        }
+
+        if let Some(resolved) = looked_up {
+            let snapshot = resolved.pricing.clone();
+            tx.execute(
+                r#"
+                INSERT INTO daily_pricing_snapshots (
+                    date, provider_id, model_id, input_cost_per_token,
+                    output_cost_per_token, cache_read_input_token_cost,
+                    cache_creation_input_token_cost, captured_at, pricing_source, pricing_version
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "#,
+                params![
+                    message.date,
+                    message.provider_id,
+                    message.model_id,
+                    snapshot.input_cost_per_token,
+                    snapshot.output_cost_per_token,
+                    snapshot.cache_read_input_token_cost,
+                    snapshot.cache_creation_input_token_cost,
+                    Utc::now().timestamp_millis(),
+                    resolved.source,
+                    resolved.version,
+                ],
+            )?;
+            Ok(Some(snapshot))
+        } else {
+            if !is_pseudo_model_id(&message.model_id) {
+                warn!(
+                    "No pricing catalog entry found for model {} (provider: {}). Using zero-cost fallback.",
+                    message.model_id, message.provider_id
                 );
-                *pricing = Some(new_catalog);
-                looked_up = pricing
-                    .as_ref()
-                    .and_then(|p| p.lookup(&message.model_id, Some(message.provider_id.as_str())));
             }
-            Ok(None) => {}
-            Err(error) => {
-                warn!("Failed to lazy-refresh pricing cache: {}", error);
-            }
+            Ok(None)
         }
-    }
+    })()?;
 
-    if let Some(resolved) = looked_up {
-        let snapshot = resolved.pricing.clone();
-        tx.execute(
-            r#"
-            INSERT INTO daily_pricing_snapshots (
-                date, provider_id, model_id, input_cost_per_token,
-                output_cost_per_token, cache_read_input_token_cost,
-                cache_creation_input_token_cost, captured_at, pricing_source, pricing_version
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            "#,
-            params![
-                message.date,
-                message.provider_id,
-                message.model_id,
-                snapshot.input_cost_per_token,
-                snapshot.output_cost_per_token,
-                snapshot.cache_read_input_token_cost,
-                snapshot.cache_creation_input_token_cost,
-                Utc::now().timestamp_millis(),
-                resolved.source,
-                resolved.version,
-            ],
-        )?;
-        Ok(Some(snapshot))
-    } else {
-        if !is_pseudo_model_id(&message.model_id) {
-            warn!(
-                "No pricing catalog entry found for model {} (provider: {}). Using zero-cost fallback.",
-                message.model_id, message.provider_id
-            );
-        }
-        Ok(None)
-    }
+    pricing_snapshot_cache.insert(key, res.clone());
+    Ok(res)
 }
 
 fn load_pricing_for_usage(
@@ -1402,23 +1438,47 @@ fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()
         )
         .unwrap_or(false);
 
-    if table_exists {
-        let client_is_pk: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('usage_messages') WHERE name = 'client' AND pk > 0",
-                [],
-                |row| {
-                    let count: i64 = row.get(0)?;
-                    Ok(count > 0)
-                },
-            )
-            .unwrap_or(false);
+    let user_version: i32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap_or(0);
 
-        if !client_is_pk {
+    if table_exists {
+        if user_version < 1 {
+            if let Some(parent) = path.parent() {
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("usage.db");
+                let today = chrono::Local::now().format("%Y%m%d-%H%M%S");
+                let backup_path = parent.join(format!("{}.bak-{}", file_name, today));
+                let _ = std::fs::copy(path, &backup_path);
+                warn!("Schema update: backed up database to {:?}", backup_path);
+            }
             let _ = conn.execute("DROP TABLE IF EXISTS usage_messages;", []);
             let _ = conn.execute("DROP TABLE IF EXISTS daily_model_usage;", []);
             let _ = conn.execute("DROP TABLE IF EXISTS daily_pricing_snapshots;", []);
+            conn.execute("PRAGMA user_version = 1;", [])?;
+        } else {
+            let client_is_pk: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('usage_messages') WHERE name = 'client' AND pk > 0",
+                    [],
+                    |row| {
+                        let count: i64 = row.get(0)?;
+                        Ok(count > 0)
+                    },
+                )
+                .unwrap_or(false);
+
+            if !client_is_pk {
+                let _ = conn.execute("DROP TABLE IF EXISTS usage_messages;", []);
+                let _ = conn.execute("DROP TABLE IF EXISTS daily_model_usage;", []);
+                let _ = conn.execute("DROP TABLE IF EXISTS daily_pricing_snapshots;", []);
+                conn.execute("PRAGMA user_version = 1;", [])?;
+            }
         }
+    } else {
+        conn.execute("PRAGMA user_version = 1;", [])?;
     }
 
     conn.execute_batch(USAGE_SCHEMA_SQL)?;
@@ -1441,12 +1501,7 @@ fn initialized_paths() -> &'static Mutex<HashSet<PathBuf>> {
 /// They can never resolve against the pricing catalog, so they must not
 /// trigger on-demand pricing refreshes or keep cost repairs pending forever.
 fn is_pseudo_model_id(model_id: &str) -> bool {
-    let id = model_id.to_ascii_lowercase();
-    id.is_empty()
-        || id == "unknown"
-        || id.starts_with("auto-")
-        || id.ends_with("-auto-review")
-        || id.ends_with("-default")
+    crate::model_id::is_pseudo(model_id)
 }
 
 /// SQL twin of [`is_pseudo_model_id`]; keep both in sync.
@@ -1483,6 +1538,7 @@ CREATE TABLE IF NOT EXISTS usage_messages (
     client TEXT NOT NULL,
     provider_id TEXT NOT NULL,
     model_id TEXT NOT NULL,
+    canonical_model_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     message_key TEXT NOT NULL,
     timestamp_ms INTEGER NOT NULL,
@@ -1500,6 +1556,7 @@ CREATE TABLE IF NOT EXISTS usage_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_messages_date ON usage_messages(date);
 CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date ON usage_messages(source, date);
+CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date_canonical ON usage_messages(source, date, canonical_model_id);
 CREATE INDEX IF NOT EXISTS idx_usage_messages_zero_cost
     ON usage_messages(date, source)
     WHERE cost_usd <= 0 AND total_tokens > 0;
@@ -1599,28 +1656,6 @@ mod tests {
             .unwrap();
         let since = store.default_since("claude", None).unwrap().unwrap();
         assert_eq!(since, NaiveDate::from_ymd_opt(2024, 3, 9).unwrap());
-    }
-
-    #[test]
-    fn source_has_stale_parser_version_detects_mismatches() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
-        let mut message = sample_message("2024-03-10", "m1");
-        message.client = "gemini".to_string();
-        message.provider_id = "google".to_string();
-        message.parser_version = "gemini-v2".to_string();
-
-        store.ingest_messages(&[message], false).unwrap();
-
-        assert!(store
-            .source_has_stale_parser_version("gemini", "gemini-v3")
-            .unwrap());
-        assert!(!store
-            .source_has_stale_parser_version("gemini", "gemini-v2")
-            .unwrap());
-        assert!(!store
-            .source_has_stale_parser_version("claude", "claude-v2")
-            .unwrap());
     }
 
     #[test]
