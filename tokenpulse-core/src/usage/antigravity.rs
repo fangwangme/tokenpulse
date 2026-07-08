@@ -362,27 +362,6 @@ fn block_on_async<F: std::future::Future>(future: F) -> F::Output {
     }
 }
 
-pub fn sync_active_antigravity_aliases() -> Result<()> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let cache_dir = home
-        .join(".local")
-        .join("share")
-        .join("tokenpulse")
-        .join("antigravity-cache");
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()?;
-    block_on_async(async {
-        let connections = detect_antigravity_connections_with_client(&client).await?;
-        if !connections.is_empty() {
-            let dynamic_model_aliases = fetch_dynamic_model_aliases(&client, &connections).await;
-            merge_and_save_model_alias_history(&cache_dir, &dynamic_model_aliases)?;
-        }
-        Ok::<(), anyhow::Error>(())
-    })?;
-    Ok(())
-}
-
 fn sync_antigravity_with_options(
     sessions_dir: &Path,
     options: AntigravitySyncOptions,
@@ -2166,11 +2145,29 @@ fn discover_local_conversation_ids_from_home(
                         if ext == "pb" || ext == "db" {
                             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                                 if stem.len() >= 20 {
-                                    let modified_ms = path
+                                    let mut modified_ms = path
                                         .metadata()
                                         .ok()
                                         .and_then(|metadata| metadata.modified().ok())
                                         .and_then(system_time_to_millis);
+                                    if ext == "db" {
+                                        for extra_ext in &["db-wal", "db-shm"] {
+                                            let extra_path = path.with_extension(extra_ext);
+                                            if extra_path.exists() {
+                                                if let Some(extra_ms) = extra_path
+                                                    .metadata()
+                                                    .ok()
+                                                    .and_then(|metadata| metadata.modified().ok())
+                                                    .and_then(system_time_to_millis)
+                                                {
+                                                    modified_ms = match modified_ms {
+                                                        Some(m) => Some(m.max(extra_ms)),
+                                                        None => Some(extra_ms),
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
                                     session_ids.push(LocalConversationId {
                                         session_id: stem.to_string(),
                                         modified_ms,
@@ -3143,9 +3140,9 @@ mod tests {
             .unwrap();
         assert_eq!(db_entry.runtime_kind, AntigravityRuntimeKind::Cli);
         let db_entry_mtime_ms = db_entry.modified_ms.unwrap();
-        let db_mtime = db_file_path.metadata().unwrap().modified().unwrap();
-        let db_mtime_ms = system_time_to_millis(db_mtime).unwrap();
-        assert_eq!(db_entry_mtime_ms, db_mtime_ms);
+        let wal_mtime = wal_file_path.metadata().unwrap().modified().unwrap();
+        let wal_mtime_ms = system_time_to_millis(wal_mtime).unwrap();
+        assert_eq!(db_entry_mtime_ms, wal_mtime_ms);
     }
 
     #[test]

@@ -1557,6 +1557,7 @@ CREATE TABLE IF NOT EXISTS usage_messages (
 CREATE INDEX IF NOT EXISTS idx_usage_messages_date ON usage_messages(date);
 CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date ON usage_messages(source, date);
 CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date_canonical ON usage_messages(source, date, canonical_model_id);
+CREATE INDEX IF NOT EXISTS idx_usage_messages_source_parser_version ON usage_messages(source, parser_version);
 CREATE INDEX IF NOT EXISTS idx_usage_messages_zero_cost
     ON usage_messages(date, source)
     WHERE cost_usd <= 0 AND total_tokens > 0;
