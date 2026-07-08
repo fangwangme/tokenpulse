@@ -32,6 +32,7 @@ use tokenpulse_core::{
     config::{Config, ConfigManager, ThemePreference},
     usage::{normalize_model_name, DailyUsageRow, DashboardDay, ModelSummary, UsageSummary},
 };
+use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
 // Pages
@@ -944,7 +945,14 @@ fn spawn_quota_reload(
         let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
         let total_fetchers = fetchers.len();
         let observed_at = chrono::Utc::now();
+        let fetch_start = std::time::Instant::now();
         let results = tokenpulse_core::quota::fetch_all(fetchers).await;
+        let fetch_elapsed = fetch_start.elapsed();
+        info!(
+            "Quota fetch completed in {} ms (fetchers count: {})",
+            fetch_elapsed.as_millis(),
+            total_fetchers
+        );
 
         let mut snapshots = Vec::new();
         let mut errors = Vec::new();
@@ -954,6 +962,7 @@ fn spawn_quota_reload(
                     snapshots.push(snapshot);
                 }
                 Err(e) => {
+                    warn!("Quota fetch failed for provider: {}", e);
                     errors.push(e.to_string());
                 }
             }
@@ -2268,13 +2277,13 @@ pub fn truncate(text: &str, width: usize) -> String {
 pub fn format_compact(value: i64) -> String {
     let abs = value.abs();
     if abs >= 1_000_000_000 {
-        format!("{:.1}B", value as f64 / 1_000_000_000.0)
+        format!("{:.2} B", value as f64 / 1_000_000_000.0)
     } else if abs >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
+        format!("{:.2} M", value as f64 / 1_000_000.0)
     } else if abs >= 1_000 {
-        format!("{:.1}K", value as f64 / 1_000.0)
+        format!("{:.2} K", value as f64 / 1_000.0)
     } else {
-        value.to_string()
+        format!("{:.2}  ", value as f64)
     }
 }
 
@@ -2282,7 +2291,9 @@ pub fn format_cost_compact(value: f64) -> String {
     let sign = if value < 0.0 { "-" } else { "" };
     let abs = value.abs();
     if abs >= 1_000.0 {
-        format!("{}${}", sign, format_int_commas(abs.round() as i64))
+        let int_part = abs.trunc() as i64;
+        let cents = ((abs.fract() * 100.0).round() as i64).abs();
+        format!("{}${}.{:02}", sign, format_int_commas(int_part), cents)
     } else {
         format!("{}${:.2}", sign, abs)
     }

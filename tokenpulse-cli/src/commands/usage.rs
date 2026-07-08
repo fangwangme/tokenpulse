@@ -44,13 +44,6 @@ pub async fn run(
     let config_manager = ConfigManager::new();
     let config = config_manager.load().unwrap_or_default();
 
-    // Active trigger for Antigravity model aliases synchronization
-    if provider_names.contains(&"antigravity".to_string()) && config.display.scan_antigravity {
-        if let Err(e) = tokenpulse_core::usage::sync_active_antigravity_aliases() {
-            tracing::debug!("Active Antigravity alias synchronization failed: {}", e);
-        }
-    }
-
     let requested_since = since
         .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
         .transpose()?;
@@ -60,7 +53,11 @@ pub async fn run(
         && provider_names.contains(&"antigravity".to_string())
         && config.display.scan_antigravity
     {
-        if let Ok(conns) = tokenpulse_core::usage::detect_antigravity_connections() {
+        let conns_res = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(tokenpulse_core::usage::detect_antigravity_connections())
+        });
+        if let Ok(conns) = conns_res {
             if conns.is_empty() {
                 eprintln!("Warning: No running Antigravity language servers detected. New sessions will not be synced.");
             }
@@ -91,24 +88,11 @@ pub async fn run(
             format!("providers={}", provider_names.join(",")),
         );
         let stale_check_started = Instant::now();
-        for parser in &parsers {
-            let started = Instant::now();
-            let is_stale = store
-                .source_has_stale_parser_version(parser.provider_name(), parser.parser_version())?;
-            perf.log_duration(
-                "stale_check",
-                started.elapsed(),
-                format!(
-                    "provider={} parser_version={} stale={}",
-                    parser.provider_name(),
-                    parser.parser_version(),
-                    is_stale
-                ),
-            );
-            if is_stale {
-                stale_sources.insert(parser.provider_name().to_string());
-            }
-        }
+        let providers_and_versions: Vec<(&str, &str)> = parsers
+            .iter()
+            .map(|parser| (parser.provider_name(), parser.parser_version()))
+            .collect();
+        stale_sources = store.check_stale_parser_versions(&providers_and_versions)?;
         perf.log_duration(
             "stale_check_complete",
             stale_check_started.elapsed(),
@@ -525,7 +509,6 @@ fn build_reload_fn(
             ),
         );
         let _ = tokenpulse_core::pricing::PricingCache::clear_memory_cache();
-        tokenpulse_core::pricing::PricingCache::set_refreshed_this_run(false);
         let store = UsageStore::new();
         let parsers = build_parsers(&current_provider_names, false);
 

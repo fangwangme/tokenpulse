@@ -144,6 +144,12 @@ tokenpulse --refresh-pricing
 
 # Full rebuild from scratch
 tokenpulse --rebuild-all
+```
+
+> [!IMPORTANT]
+> **Antigravity Sync after Rebuild**: If you rebuild the database (e.g. via `--rebuild-all`), you must run the Antigravity CLI and Desktop concurrently once to allow full synchronization of usage history. This is required because they need to be active at the same time to sync and align the data.
+
+```bash
 
 # Write timing diagnostics to a log file
 tokenpulse --log

@@ -5,7 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.9] - 2026-07-08
+
+### Changed
+- **TUI Layout & Alignments**:
+  - Right-aligned numerical columns (Tokens, Cost, Input, Output, Cache, Msgs) in the Daily Breakdown view.
+  - Added explicit spacers between columns in the Daily Breakdown view and doubled the spacer width between the Messages and 7-day Trend columns.
+  - Increased `cost_width` from 8 to 10 in the Models and Overview views, ensuring large cost figures do not overflow and shift columns.
+  - Restructured the Agent / Model Cost detail sidebar to use compact, fixed-width name padding (width 24), bringing the Cost column closer to the names and keeping cost values vertically aligned.
+  - Aligned inline stats (T/I/O/CR/CW) in the Agent / Model Cost breakdown vertically by right-aligning values to a fixed width of 8.
+- **TUI Value Formatting**:
+  - Unified token metrics formatting to consistently display exactly two decimal places and a space before suffixes (e.g., `1.87 B`, `79.89 M`, `961.50 K`).
+  - Ensured base values below 1,000 and zero format as floats with two decimal places and spacer padding (e.g., `719.00  `, `0.00  `), guaranteeing decimal point alignment when right-aligned.
+  - Formatted costs over $1,000.00 to show commas and two decimal places (e.g., `"$1,499.42"`, `"$1,250.00"`).
 
 ## [0.4.8] - 2026-07-08
 
