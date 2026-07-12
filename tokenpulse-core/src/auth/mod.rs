@@ -22,16 +22,13 @@ pub struct DetectedProvider {
 }
 
 pub fn detect_providers() -> Vec<DetectedProvider> {
+    let claude_hint = ClaudeAuth::new().credential_hint();
     vec![
         DetectedProvider {
             name: "claude".to_string(),
             display_name: "Claude Code".to_string(),
-            detected: ClaudeAuth::detect(),
-            credential_hint: if ClaudeAuth::detect() {
-                "~/.claude/.credentials.json found".to_string()
-            } else {
-                "not detected".to_string()
-            },
+            detected: claude_hint.is_some(),
+            credential_hint: claude_hint.unwrap_or_else(|| "not detected".to_string()),
         },
         DetectedProvider {
             name: "codex".to_string(),

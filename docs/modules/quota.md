@@ -30,14 +30,16 @@ pub trait QuotaFetcher: Send + Sync {
 ## Claude Code
 
 ### Credential Flow
-1. Read `~/.claude/.credentials.json` → `claudeAiOauth` object
-2. Fallback: macOS Keychain `"Claude Code-credentials"`
-3. Check `expiresAt` — if within 5 minutes, refresh token
-4. Refresh: `POST https://platform.claude.com/v1/oauth/token`
+1. On macOS, build ordered credential candidates from the current-user Keychain item (`Claude Code-credentials` plus the explicit macOS account), the legacy service-only Keychain item, then `~/.claude/.credentials.json`. Duplicate credentials are removed. On other platforms, read only the credentials file.
+2. Try each candidate in order. A missing or rejected refresh token (`invalid_grant`) or a rejected access token can fall through to the next candidate; network, proxy, rate-limit, and provider errors stop the refresh instead of trying unrelated credentials.
+3. Check `expiresAt` — if within 5 minutes, refresh that candidate at most once via `POST https://platform.claude.com/v1/oauth/token`:
    - `grant_type=refresh_token`
    - `client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e`
    - `refresh_token=<token>`
-5. Save refreshed token back to credentials file
+   - `scope=user:profile user:inference`
+4. Save a successful rotation only to the source that supplied the credential. Before writing, re-read the candidates; a newer Claude Code login wins and the in-flight rotation is discarded.
+
+Provider detection, initialization hints, credential status, and quota fetching all use this same candidate lookup.
 
 ### Quota API
 ```
@@ -82,16 +84,20 @@ Authorization: Bearer <access_token>
 ```
 
 ### Response Mapping
-| API Field                                   | → Snapshot field |
-| ------------------------------------------- | ---------------- |
-| `rate_limit.primary_window.used_percent`    | Session window   |
-| `rate_limit.secondary_window.used_percent`  | Weekly window    |
-| `rate_limit.*_window.reset_at`              | window reset countdown source |
-| `rate_limit.*_window.reset_after_seconds`   | reset countdown fallback |
-| `plan_type`                                 | plan field       |
-| reset credits `credits[].expires_at`        | manual reset-credit expiry |
+`primary_window` and `secondary_window` are response positions, not semantic names. TokenPulse emits exactly the non-null windows returned by the API and derives each label from `limit_window_seconds`:
 
-Also check response headers: `x-codex-primary-used-percent`, `x-codex-secondary-used-percent`
+| API Value | → RateWindow |
+| --------- | ------------ |
+| `limit_window_seconds == 18000` | `Session (5h)` |
+| `limit_window_seconds == 604800` | `Weekly (7d)` |
+| other positive duration | neutral formatted label such as `Window (1d)` |
+| missing or non-positive duration | neutral positional label such as `Primary window` |
+| `reset_at` | window reset countdown source |
+| `reset_after_seconds` | reset countdown fallback |
+| `plan_type` | snapshot plan |
+| reset credits `credits[].expires_at` | manual reset-credit expiry |
+
+No missing 5-hour or 7-day window is synthesized. Reset-credit fetching and display are independent and unchanged.
 
 ## GitHub Copilot
 
