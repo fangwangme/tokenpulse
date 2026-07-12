@@ -9,9 +9,9 @@ use std::process::Command;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const SECURITY_BIN: &str = "/usr/bin/security";
 #[cfg(target_os = "macos")]
 const ID_BIN: &str = "/usr/bin/id";
@@ -61,7 +61,7 @@ impl fmt::Debug for ClaudeOAuth {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ClaudeCredentialSource {
     CurrentUserKeychain { account: String },
-    LegacyKeychain { account: String },
+    LegacyKeychain,
     File,
 }
 
@@ -69,7 +69,7 @@ impl fmt::Debug for ClaudeCredentialSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::CurrentUserKeychain { .. } => "CurrentUserKeychain",
-            Self::LegacyKeychain { .. } => "LegacyKeychain",
+            Self::LegacyKeychain => "LegacyKeychain",
             Self::File => "File",
         })
     }
@@ -79,7 +79,7 @@ impl fmt::Display for ClaudeCredentialSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CurrentUserKeychain { .. } => f.write_str("current-user keychain"),
-            Self::LegacyKeychain { .. } => f.write_str("legacy keychain"),
+            Self::LegacyKeychain => f.write_str("legacy keychain"),
             Self::File => f.write_str("credentials file"),
         }
     }
@@ -173,6 +173,43 @@ struct SystemClaudeCredentialStore {
     credentials_path: PathBuf,
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn keychain_account(source: &ClaudeCredentialSource) -> Option<Option<&str>> {
+    match source {
+        ClaudeCredentialSource::CurrentUserKeychain { account } => Some(Some(account)),
+        ClaudeCredentialSource::LegacyKeychain => Some(None),
+        ClaudeCredentialSource::File => None,
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn keychain_read_args(account: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "find-generic-password".to_string(),
+        "-s".to_string(),
+        KEYCHAIN_SERVICE.to_string(),
+    ];
+    if let Some(account) = account {
+        args.extend(["-a".to_string(), account.to_string()]);
+    }
+    args.push("-w".to_string());
+    args
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn keychain_write_args(account: Option<&str>, json: &str) -> Vec<String> {
+    let mut args = vec![
+        "add-generic-password".to_string(),
+        "-s".to_string(),
+        KEYCHAIN_SERVICE.to_string(),
+    ];
+    if let Some(account) = account {
+        args.extend(["-a".to_string(), account.to_string()]);
+    }
+    args.extend(["-U".to_string(), "-w".to_string(), json.to_string()]);
+    args
+}
+
 impl SystemClaudeCredentialStore {
     fn new(credentials_path: PathBuf) -> Self {
         Self { credentials_path }
@@ -195,12 +232,10 @@ impl SystemClaudeCredentialStore {
 
     #[cfg(target_os = "macos")]
     fn load_keychain(&self, account: Option<&str>) -> Option<ClaudeCredentials> {
-        let mut command = Command::new(SECURITY_BIN);
-        command.args(["find-generic-password", "-s", KEYCHAIN_SERVICE]);
-        if let Some(account) = account {
-            command.args(["-a", account]);
-        }
-        let output = command.arg("-w").output().ok()?;
+        let output = Command::new(SECURITY_BIN)
+            .args(keychain_read_args(account))
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -209,17 +244,11 @@ impl SystemClaudeCredentialStore {
     }
 
     #[cfg(target_os = "macos")]
-    fn save_keychain(&self, account: &str, credentials: &ClaudeCredentials) -> Result<()> {
+    fn save_keychain(&self, account: Option<&str>, credentials: &ClaudeCredentials) -> Result<()> {
         let json = serde_json::to_string(credentials)?;
-        let mut command = Command::new(SECURITY_BIN);
-        command.args([
-            "add-generic-password",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            account,
-        ]);
-        let status = command.args(["-U", "-w", &json]).status()?;
+        let status = Command::new(SECURITY_BIN)
+            .args(keychain_write_args(account, &json))
+            .status()?;
         if !status.success() {
             return Err(anyhow!("Failed to update Claude credentials in keychain"));
         }
@@ -241,15 +270,12 @@ impl ClaudeCredentialStore for SystemClaudeCredentialStore {
                         credentials,
                     })
             });
-            let legacy = account.as_deref().and_then(|name| {
-                self.load_keychain(None)
-                    .map(|credentials| ClaudeCredentialCandidate {
-                        source: ClaudeCredentialSource::LegacyKeychain {
-                            account: name.to_string(),
-                        },
-                        credentials,
-                    })
-            });
+            let legacy = self
+                .load_keychain(None)
+                .map(|credentials| ClaudeCredentialCandidate {
+                    source: ClaudeCredentialSource::LegacyKeychain,
+                    credentials,
+                });
             let file = self
                 .load_file()
                 .map(|credentials| ClaudeCredentialCandidate {
@@ -286,13 +312,11 @@ impl ClaudeCredentialStore for SystemClaudeCredentialStore {
                 Ok(())
             }
             #[cfg(target_os = "macos")]
-            ClaudeCredentialSource::CurrentUserKeychain { account } => {
-                self.save_keychain(account, credentials)
-            }
-            #[cfg(target_os = "macos")]
-            ClaudeCredentialSource::LegacyKeychain { account } => {
-                self.save_keychain(account, credentials)
-            }
+            source @ (ClaudeCredentialSource::CurrentUserKeychain { .. }
+            | ClaudeCredentialSource::LegacyKeychain) => self.save_keychain(
+                keychain_account(source).expect("keychain source"),
+                credentials,
+            ),
             #[cfg(not(target_os = "macos"))]
             _ => Err(anyhow!("Keychain is not supported on this platform")),
         }
@@ -570,9 +594,7 @@ mod tests {
                 credentials: credentials("current", "current-refresh"),
             }),
             Some(ClaudeCredentialCandidate {
-                source: ClaudeCredentialSource::LegacyKeychain {
-                    account: "alice".to_string(),
-                },
+                source: ClaudeCredentialSource::LegacyKeychain,
                 credentials: credentials("legacy", "legacy-refresh"),
             }),
             Some(ClaudeCredentialCandidate {
@@ -591,9 +613,62 @@ mod tests {
         );
         assert!(matches!(
             candidates[1].source,
-            ClaudeCredentialSource::LegacyKeychain { .. }
+            ClaudeCredentialSource::LegacyKeychain
         ));
         assert!(matches!(candidates[2].source, ClaudeCredentialSource::File));
+    }
+
+    #[test]
+    fn system_store_keeps_current_user_and_legacy_keychain_commands_distinct() {
+        let current_user = ClaudeCredentialSource::CurrentUserKeychain {
+            account: "alice".to_string(),
+        };
+        let legacy = ClaudeCredentialSource::LegacyKeychain;
+        let current_account = keychain_account(&current_user).expect("keychain source");
+        let legacy_account = keychain_account(&legacy).expect("keychain source");
+
+        assert_eq!(SECURITY_BIN, "/usr/bin/security");
+        assert_eq!(current_account, Some("alice"));
+        assert_eq!(legacy_account, None);
+        assert_eq!(
+            keychain_read_args(current_account),
+            [
+                "find-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                "alice",
+                "-w",
+            ]
+        );
+        assert_eq!(
+            keychain_read_args(legacy_account),
+            ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"]
+        );
+        assert_eq!(
+            keychain_write_args(current_account, "credential-json"),
+            [
+                "add-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                "alice",
+                "-U",
+                "-w",
+                "credential-json",
+            ]
+        );
+        assert_eq!(
+            keychain_write_args(legacy_account, "credential-json"),
+            [
+                "add-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-U",
+                "-w",
+                "credential-json",
+            ]
+        );
     }
 
     struct MockStore {
@@ -637,9 +712,7 @@ mod tests {
     #[test]
     fn rotation_writes_only_to_the_candidate_source() {
         let candidate = ClaudeCredentialCandidate {
-            source: ClaudeCredentialSource::LegacyKeychain {
-                account: "alice".to_string(),
-            },
+            source: ClaudeCredentialSource::LegacyKeychain,
             credentials: credentials("old-access", "old-refresh"),
         };
         let store = Arc::new(MockStore {
@@ -655,12 +728,7 @@ mod tests {
         assert!(matches!(outcome, ClaudeRefreshOutcome::Updated(_)));
         let saved = store.saved.lock().unwrap();
         assert_eq!(saved.len(), 1);
-        assert_eq!(
-            saved[0].0,
-            ClaudeCredentialSource::LegacyKeychain {
-                account: "alice".to_string()
-            }
-        );
+        assert_eq!(saved[0].0, ClaudeCredentialSource::LegacyKeychain);
         assert_eq!(saved[0].1.claude_ai_oauth.access_token, "rotated-access");
     }
 
