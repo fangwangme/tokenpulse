@@ -16,18 +16,20 @@ const SECURITY_BIN: &str = "/usr/bin/security";
 #[cfg(target_os = "macos")]
 const ID_BIN: &str = "/usr/bin/id";
 const CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-const CLAUDE_CODE_SCOPES: &str = "user:profile user:inference";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaudeCredentials {
     #[serde(rename = "claudeAiOauth")]
     pub claude_ai_oauth: ClaudeOAuth,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl fmt::Debug for ClaudeCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClaudeCredentials")
             .field("claude_ai_oauth", &self.claude_ai_oauth)
+            .field("additional_fields", &self.extra.len())
             .finish()
     }
 }
@@ -44,6 +46,10 @@ pub struct ClaudeOAuth {
     pub subscription_type: Option<String>,
     #[serde(rename = "rateLimitTier", default)]
     pub rate_limit_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl fmt::Debug for ClaudeOAuth {
@@ -54,6 +60,8 @@ impl fmt::Debug for ClaudeOAuth {
             .field("expires_at", &self.expires_at)
             .field("subscription_type", &self.subscription_type)
             .field("rate_limit_tier", &self.rate_limit_tier)
+            .field("scopes", &self.scopes)
+            .field("additional_fields", &self.extra.len())
             .finish()
     }
 }
@@ -131,7 +139,7 @@ impl ClaudeRefreshError {
 
 pub(crate) enum ClaudeRefreshOutcome {
     Updated(ClaudeCredentialCandidate),
-    Reloaded(Option<ClaudeCredentialCandidate>),
+    Reloaded,
 }
 
 pub(crate) struct RotatedClaudeTokens {
@@ -325,6 +333,24 @@ impl ClaudeCredentialStore for SystemClaudeCredentialStore {
 
 struct UreqClaudeTokenRefresher;
 
+#[derive(Serialize)]
+struct RefreshRequest<'a> {
+    grant_type: &'static str,
+    refresh_token: &'a str,
+    client_id: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<&'a str>,
+}
+
+fn stored_refresh_scope(credentials: &ClaudeCredentials) -> Option<String> {
+    credentials
+        .claude_ai_oauth
+        .scopes
+        .as_ref()
+        .filter(|scopes| !scopes.is_empty())
+        .map(|scopes| scopes.join(" "))
+}
+
 impl ClaudeTokenRefresher for UreqClaudeTokenRefresher {
     fn refresh(
         &self,
@@ -336,14 +362,6 @@ impl ClaudeTokenRefresher for UreqClaudeTokenRefresher {
             ));
         }
 
-        #[derive(Serialize)]
-        struct RefreshRequest<'a> {
-            grant_type: &'static str,
-            refresh_token: &'a str,
-            client_id: &'static str,
-            scope: &'static str,
-        }
-
         #[derive(Deserialize)]
         struct RefreshResponse {
             access_token: String,
@@ -351,12 +369,13 @@ impl ClaudeTokenRefresher for UreqClaudeTokenRefresher {
             expires_in: Option<i64>,
         }
 
+        let scope = stored_refresh_scope(credentials);
         let response = ureq::post(CLAUDE_TOKEN_URL)
             .send_json(RefreshRequest {
                 grant_type: "refresh_token",
                 refresh_token: &credentials.claude_ai_oauth.refresh_token,
                 client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-                scope: CLAUDE_CODE_SCOPES,
+                scope: scope.as_deref(),
             })
             .map_err(classify_refresh_transport_error)?;
 
@@ -379,22 +398,22 @@ impl ClaudeTokenRefresher for UreqClaudeTokenRefresher {
 fn classify_refresh_transport_error(error: ureq::Error) -> ClaudeRefreshError {
     match error {
         ureq::Error::Status(status, response) => {
-            let invalid_grant = response
-                .into_json::<serde_json::Value>()
-                .ok()
-                .map(|body| response_is_invalid_grant(&body))
-                .unwrap_or(false);
-            if invalid_grant || matches!(status, 401 | 403) {
-                ClaudeRefreshError::credential(format!(
-                    "Claude token refresh rejected the credential (HTTP {status})"
-                ))
-            } else {
-                ClaudeRefreshError::other(format!("Claude token refresh failed with HTTP {status}"))
-            }
+            let body = response.into_json::<serde_json::Value>().ok();
+            classify_refresh_status(status, body.as_ref())
         }
         ureq::Error::Transport(_) => {
             ClaudeRefreshError::other("Claude token refresh request failed")
         }
+    }
+}
+
+fn classify_refresh_status(status: u16, body: Option<&serde_json::Value>) -> ClaudeRefreshError {
+    if body.map(response_is_invalid_grant).unwrap_or(false) {
+        ClaudeRefreshError::credential(format!(
+            "Claude token refresh rejected the credential (HTTP {status})"
+        ))
+    } else {
+        ClaudeRefreshError::other(format!("Claude token refresh failed with HTTP {status}"))
     }
 }
 
@@ -481,6 +500,10 @@ impl ClaudeAuth {
         Ok(candidates)
     }
 
+    pub(crate) fn credentials_match(&self, expected: &[ClaudeCredentialCandidate]) -> Result<bool> {
+        Ok(self.store.load_candidates()? == expected)
+    }
+
     pub(crate) fn refresh_candidate(
         &self,
         candidate: &ClaudeCredentialCandidate,
@@ -507,8 +530,7 @@ impl ClaudeAuth {
                 "Claude credential changed during refresh; discarding rotation from {}",
                 candidate.source
             );
-            let replacement = latest_candidates.into_iter().next();
-            return Ok(ClaudeRefreshOutcome::Reloaded(replacement));
+            return Ok(ClaudeRefreshOutcome::Reloaded);
         }
 
         self.store
@@ -580,7 +602,10 @@ mod tests {
                 expires_at: 0.0,
                 subscription_type: None,
                 rate_limit_tier: None,
+                scopes: None,
+                extra: serde_json::Map::new(),
             },
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -711,10 +736,23 @@ mod tests {
 
     #[test]
     fn rotation_writes_only_to_the_candidate_source() {
-        let candidate = ClaudeCredentialCandidate {
+        let mut candidate = ClaudeCredentialCandidate {
             source: ClaudeCredentialSource::LegacyKeychain,
             credentials: credentials("old-access", "old-refresh"),
         };
+        candidate.credentials.claude_ai_oauth.scopes = Some(vec![
+            "user:profile".to_string(),
+            "user:sessions:claude_code".to_string(),
+        ]);
+        candidate
+            .credentials
+            .claude_ai_oauth
+            .extra
+            .insert("organizationId".to_string(), serde_json::json!("org-1"));
+        candidate
+            .credentials
+            .extra
+            .insert("installChannel".to_string(), serde_json::json!("stable"));
         let store = Arc::new(MockStore {
             candidates: Mutex::new(vec![candidate.clone()]),
             saved: Mutex::new(Vec::new()),
@@ -730,6 +768,15 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].0, ClaudeCredentialSource::LegacyKeychain);
         assert_eq!(saved[0].1.claude_ai_oauth.access_token, "rotated-access");
+        assert_eq!(
+            saved[0].1.claude_ai_oauth.scopes,
+            candidate.credentials.claude_ai_oauth.scopes
+        );
+        assert_eq!(
+            saved[0].1.claude_ai_oauth.extra,
+            candidate.credentials.claude_ai_oauth.extra
+        );
+        assert_eq!(saved[0].1.extra, candidate.credentials.extra);
     }
 
     #[test]
@@ -754,12 +801,8 @@ mod tests {
             .refresh_candidate(&old_candidate, std::slice::from_ref(&old_candidate))
             .unwrap();
 
-        match outcome {
-            ClaudeRefreshOutcome::Reloaded(Some(candidate)) => {
-                assert_eq!(candidate.credentials, new_candidate.credentials);
-            }
-            _ => panic!("expected reloaded concurrent login"),
-        }
+        assert!(matches!(outcome, ClaudeRefreshOutcome::Reloaded));
+        assert_eq!(store.candidates.lock().unwrap().as_slice(), [new_candidate]);
         assert!(store.saved.lock().unwrap().is_empty());
     }
 
@@ -784,10 +827,59 @@ mod tests {
     }
 
     #[test]
-    fn refresh_request_preserves_profile_scope() {
-        assert!(CLAUDE_CODE_SCOPES
-            .split_whitespace()
-            .any(|scope| scope == "user:profile"));
+    fn refresh_request_reuses_stored_scopes_and_omits_scope_when_unknown() {
+        let mut credentials = credentials("access", "refresh");
+        credentials.claude_ai_oauth.scopes = Some(vec![
+            "user:profile".to_string(),
+            "user:inference".to_string(),
+            "user:sessions:claude_code".to_string(),
+            "user:mcp_servers".to_string(),
+            "user:file_upload".to_string(),
+        ]);
+        assert_eq!(
+            stored_refresh_scope(&credentials).as_deref(),
+            Some(
+                "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+            )
+        );
+
+        credentials.claude_ai_oauth.scopes = None;
+        let scope = stored_refresh_scope(&credentials);
+        let request = RefreshRequest {
+            grant_type: "refresh_token",
+            refresh_token: "refresh",
+            client_id: "client",
+            scope: scope.as_deref(),
+        };
+        let serialized = serde_json::to_value(request).unwrap();
+        assert!(serialized.get("scope").is_none());
+    }
+
+    #[test]
+    fn credential_roundtrip_preserves_scopes_and_unknown_fields() {
+        let mut credentials: ClaudeCredentials = serde_json::from_str(
+            r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"refresh","scopes":["user:profile","user:inference","user:sessions:claude_code","user:mcp_servers","user:file_upload"],"organizationId":"org-1","futureMetadata":{"enabled":true}},"installChannel":"stable"}"#,
+        )
+        .unwrap();
+        credentials.claude_ai_oauth.access_token = "rotated".to_string();
+
+        let serialized = serde_json::to_value(credentials).unwrap();
+        assert_eq!(
+            serialized["claudeAiOauth"]["scopes"],
+            serde_json::json!([
+                "user:profile",
+                "user:inference",
+                "user:sessions:claude_code",
+                "user:mcp_servers",
+                "user:file_upload"
+            ])
+        );
+        assert_eq!(serialized["claudeAiOauth"]["organizationId"], "org-1");
+        assert_eq!(
+            serialized["claudeAiOauth"]["futureMetadata"],
+            serde_json::json!({"enabled": true})
+        );
+        assert_eq!(serialized["installChannel"], "stable");
     }
 
     #[test]
@@ -799,5 +891,24 @@ mod tests {
         ] {
             assert!(response_is_invalid_grant(&body));
         }
+    }
+
+    #[test]
+    fn refresh_http_errors_fall_back_only_for_invalid_grant() {
+        let invalid_grant = serde_json::json!({"error": "invalid_grant"});
+        let invalid_client = serde_json::json!({"error": "invalid_client"});
+
+        assert_eq!(
+            classify_refresh_status(400, Some(&invalid_grant)).kind,
+            ClaudeRefreshFailureKind::Credential
+        );
+        assert_eq!(
+            classify_refresh_status(401, Some(&invalid_client)).kind,
+            ClaudeRefreshFailureKind::Other
+        );
+        assert_eq!(
+            classify_refresh_status(403, None).kind,
+            ClaudeRefreshFailureKind::Other
+        );
     }
 }

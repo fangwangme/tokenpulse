@@ -286,8 +286,10 @@ Credentials on other platforms: ~/.claude/.credentials.json
 
 Token refresh:
   POST https://platform.claude.com/v1/oauth/token
-  Body: grant_type=refresh_token&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&refresh_token=<token>&scope=user:profile user:inference
-  Persist only to the supplying source; discard the rotation if a newer login appears.
+  Body: grant_type=refresh_token&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&refresh_token=<token>
+  Reuse stored scopes unchanged; omit scope when metadata is absent so the original authorization is inherited.
+  Persist only to the supplying source without dropping unknown fields; discard the rotation if a newer login appears.
+  Recheck credentials after the usage response and restart once if the active login changed.
 ```
 
 ### Codex Quota

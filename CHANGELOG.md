@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.10] - 2026-07-13
 
 ### Fixed
-- Claude quota authentication now prefers the current-user macOS Keychain credential, falls back only on credential failures, persists OAuth rotations to their original source, and preserves a newer concurrent Claude Code login.
+- Claude quota authentication now prefers the current-user macOS Keychain credential, falls back only on explicit credential failures, losslessly persists OAuth rotations to their original source without narrowing scopes, and restarts once when a newer concurrent Claude Code login appears during a quota request.
 - Codex quota windows are now labeled from each returned window's duration, so a weekly-only primary window is shown as `Weekly (7d)` without synthesizing a five-hour window.
 
 ## [0.4.9] - 2026-07-08

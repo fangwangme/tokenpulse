@@ -95,7 +95,7 @@ impl ClaudeQuotaFetcher {
     fn refresh_candidate_once(
         &self,
         candidate: ClaudeCredentialCandidate,
-        expected_candidates: &[ClaudeCredentialCandidate],
+        expected_candidates: &mut Vec<ClaudeCredentialCandidate>,
         attempted_refresh_tokens: &mut HashSet<String>,
     ) -> Result<ClaudeCredentialCandidate, CandidateFailure> {
         let refresh_token = &candidate.credentials.claude_ai_oauth.refresh_token;
@@ -111,11 +111,16 @@ impl ClaudeQuotaFetcher {
         }
 
         match self.auth.refresh_candidate(&candidate, expected_candidates) {
-            Ok(ClaudeRefreshOutcome::Updated(updated)) => Ok(updated),
-            Ok(ClaudeRefreshOutcome::Reloaded(Some(reloaded))) => Ok(reloaded),
-            Ok(ClaudeRefreshOutcome::Reloaded(None)) => Err(CandidateFailure::Credential(
-                "Claude credential changed and no replacement was found".to_string(),
-            )),
+            Ok(ClaudeRefreshOutcome::Updated(updated)) => {
+                if let Some(expected) = expected_candidates
+                    .iter_mut()
+                    .find(|expected| expected.source == updated.source)
+                {
+                    *expected = updated.clone();
+                }
+                Ok(updated)
+            }
+            Ok(ClaudeRefreshOutcome::Reloaded) => Err(CandidateFailure::CredentialsChanged),
             Err(error) if error.kind == ClaudeRefreshFailureKind::Credential => {
                 Err(CandidateFailure::Credential(error.to_string()))
             }
@@ -129,6 +134,7 @@ impl ClaudeQuotaFetcher {
         expected_candidates: &[ClaudeCredentialCandidate],
         attempted_refresh_tokens: &mut HashSet<String>,
     ) -> Result<QuotaSnapshot, CandidateFailure> {
+        let mut expected_candidates = expected_candidates.to_vec();
         let mut refreshed = false;
         if self.auth.is_token_expired(&candidate.credentials) {
             debug!(
@@ -137,7 +143,7 @@ impl ClaudeQuotaFetcher {
             );
             candidate = self.refresh_candidate_once(
                 candidate,
-                expected_candidates,
+                &mut expected_candidates,
                 attempted_refresh_tokens,
             )?;
             refreshed = true;
@@ -166,7 +172,7 @@ impl ClaudeQuotaFetcher {
             );
             candidate = self.refresh_candidate_once(
                 candidate,
-                expected_candidates,
+                &mut expected_candidates,
                 attempted_refresh_tokens,
             )?;
             response = self
@@ -203,12 +209,21 @@ impl ClaudeQuotaFetcher {
             )));
         }
 
+        if !self
+            .auth
+            .credentials_match(&expected_candidates)
+            .map_err(CandidateFailure::Other)?
+        {
+            return Err(CandidateFailure::CredentialsChanged);
+        }
+
         quota_snapshot_from_body(&body).map_err(CandidateFailure::Other)
     }
 }
 
 enum CandidateFailure {
     Credential(String),
+    CredentialsChanged,
     Other(anyhow::Error),
 }
 
@@ -236,34 +251,54 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
     }
 
     async fn fetch_quota(&self) -> Result<QuotaSnapshot> {
-        let candidates = self.auth.load_credentials_candidates()?;
-        if candidates.is_empty() {
-            return Err(anyhow!("Claude credentials not found"));
-        }
         let mut attempted_refresh_tokens = HashSet::new();
-        let mut last_credential_error = None;
+        let mut credential_reloads_remaining = 1;
 
-        for candidate in candidates.iter().cloned() {
-            debug!("Trying Claude credential from {}", candidate.source);
-            match self
-                .fetch_candidate(candidate, &candidates, &mut attempted_refresh_tokens)
-                .await
-            {
-                Ok(snapshot) => return Ok(snapshot),
-                Err(CandidateFailure::Credential(error)) => {
-                    debug!("Claude credential candidate failed: {error}");
-                    last_credential_error = Some(error);
-                }
-                Err(CandidateFailure::Other(error)) => return Err(error),
+        loop {
+            let candidates = self.auth.load_credentials_candidates()?;
+            if candidates.is_empty() {
+                return Err(anyhow!("Claude credentials not found"));
             }
-        }
+            let mut last_credential_error = None;
+            let mut credentials_changed = false;
 
-        Err(anyhow!(
-            "Claude credentials were rejected{}",
-            last_credential_error
-                .map(|error| format!(": {error}"))
-                .unwrap_or_default()
-        ))
+            for candidate in candidates.iter().cloned() {
+                debug!("Trying Claude credential from {}", candidate.source);
+                match self
+                    .fetch_candidate(candidate, &candidates, &mut attempted_refresh_tokens)
+                    .await
+                {
+                    Ok(snapshot) => return Ok(snapshot),
+                    Err(CandidateFailure::Credential(error)) => {
+                        debug!("Claude credential candidate failed: {error}");
+                        last_credential_error = Some(error);
+                    }
+                    Err(CandidateFailure::CredentialsChanged) => {
+                        credentials_changed = true;
+                        break;
+                    }
+                    Err(CandidateFailure::Other(error)) => return Err(error),
+                }
+            }
+
+            if credentials_changed {
+                if credential_reloads_remaining == 0 {
+                    return Err(anyhow!(
+                        "Claude credentials changed repeatedly during quota refresh"
+                    ));
+                }
+                credential_reloads_remaining -= 1;
+                debug!("Claude credentials changed during quota request; restarting once");
+                continue;
+            }
+
+            return Err(anyhow!(
+                "Claude credentials were rejected{}",
+                last_credential_error
+                    .map(|error| format!(": {error}"))
+                    .unwrap_or_default()
+            ));
+        }
     }
 }
 
@@ -368,6 +403,7 @@ mod tests {
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn credentials(access: &str, refresh: &str, expires_at: f64) -> ClaudeCredentials {
@@ -378,7 +414,10 @@ mod tests {
                 expires_at,
                 subscription_type: None,
                 rate_limit_tier: None,
+                scopes: None,
+                extra: serde_json::Map::new(),
             },
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -402,6 +441,41 @@ mod tests {
 
     struct InvalidGrantRefresher {
         attempted: Mutex<Vec<String>>,
+    }
+
+    struct GenerationChangingStore {
+        initial: Vec<ClaudeCredentialCandidate>,
+        replacement: Vec<ClaudeCredentialCandidate>,
+        loads: AtomicUsize,
+    }
+
+    impl ClaudeCredentialStore for GenerationChangingStore {
+        fn load_candidates(&self) -> Result<Vec<ClaudeCredentialCandidate>> {
+            if self.loads.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(self.initial.clone())
+            } else {
+                Ok(self.replacement.clone())
+            }
+        }
+
+        fn save_source(
+            &self,
+            _source: &ClaudeCredentialSource,
+            _credentials: &ClaudeCredentials,
+        ) -> Result<()> {
+            panic!("non-expired credentials must not be refreshed")
+        }
+    }
+
+    struct UnexpectedRefresher;
+
+    impl ClaudeTokenRefresher for UnexpectedRefresher {
+        fn refresh(
+            &self,
+            _credentials: &ClaudeCredentials,
+        ) -> Result<RotatedClaudeTokens, ClaudeRefreshError> {
+            panic!("non-expired credentials must not be refreshed")
+        }
     }
 
     impl ClaudeTokenRefresher for InvalidGrantRefresher {
@@ -441,6 +515,35 @@ mod tests {
             .unwrap();
         });
         format!("http://{address}/api/oauth/usage")
+    }
+
+    fn spawn_quota_sequence_server(
+        responses: Vec<(&'static str, f64)>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (expected_token, utilization) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
+                assert!(request.contains(&format!(
+                    "authorization: bearer {}",
+                    expected_token.to_ascii_lowercase()
+                )));
+                let body =
+                    format!(r#"{{"five_hour":{{"utilization":{utilization},"resets_at":null}}}}"#);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        (format!("http://{address}/api/oauth/usage"), server)
     }
 
     #[test]
@@ -524,6 +627,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn credential_change_after_usage_response_restarts_with_new_account() {
+        let initial = ClaudeCredentialCandidate {
+            source: ClaudeCredentialSource::CurrentUserKeychain {
+                account: "alice".to_string(),
+            },
+            credentials: credentials("old-access", "old-refresh", 0.0),
+        };
+        let replacement = ClaudeCredentialCandidate {
+            source: ClaudeCredentialSource::CurrentUserKeychain {
+                account: "alice".to_string(),
+            },
+            credentials: credentials("new-access", "new-refresh", 0.0),
+        };
+        let store = Arc::new(GenerationChangingStore {
+            initial: vec![initial],
+            replacement: vec![replacement],
+            loads: AtomicUsize::new(0),
+        });
+        let auth = ClaudeAuth::with_components(store.clone(), Arc::new(UnexpectedRefresher));
+        let (url, server) =
+            spawn_quota_sequence_server(vec![("old-access", 10.0), ("new-access", 90.0)]);
+        let fetcher = ClaudeQuotaFetcher::with_auth_and_url(auth, url);
+
+        let snapshot = fetcher.fetch_quota().await.unwrap();
+
+        server.join().unwrap();
+        assert_eq!(snapshot.windows[0].used_percent, 90.0);
+        assert_eq!(store.loads.load(Ordering::SeqCst), 4);
+    }
+
     #[test]
     fn same_failed_refresh_token_is_attempted_only_once() {
         let first = ClaudeCredentialCandidate {
@@ -536,7 +670,7 @@ mod tests {
             source: ClaudeCredentialSource::File,
             credentials: credentials("second-access", "shared-refresh", 1.0),
         };
-        let expected_candidates = vec![first.clone(), second.clone()];
+        let mut expected_candidates = vec![first.clone(), second.clone()];
         let store = Arc::new(CandidateStore {
             candidates: expected_candidates.clone(),
         });
@@ -549,11 +683,11 @@ mod tests {
         let mut attempted = HashSet::new();
 
         assert!(matches!(
-            fetcher.refresh_candidate_once(first, &expected_candidates, &mut attempted),
+            fetcher.refresh_candidate_once(first, &mut expected_candidates, &mut attempted),
             Err(CandidateFailure::Credential(_))
         ));
         assert!(matches!(
-            fetcher.refresh_candidate_once(second, &expected_candidates, &mut attempted),
+            fetcher.refresh_candidate_once(second, &mut expected_candidates, &mut attempted),
             Err(CandidateFailure::Credential(_))
         ));
         assert_eq!(

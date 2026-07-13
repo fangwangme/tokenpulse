@@ -36,8 +36,9 @@ pub trait QuotaFetcher: Send + Sync {
    - `grant_type=refresh_token`
    - `client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e`
    - `refresh_token=<token>`
-   - `scope=user:profile user:inference`
-4. Save a successful rotation only to the source that supplied the credential. Before writing, re-read the candidates; a newer Claude Code login wins and the in-flight rotation is discarded.
+   - Reuse the credential's stored `scopes` unchanged. If scope metadata is absent, omit `scope` so the refresh inherits the original authorization.
+4. Save a successful rotation only to the source that supplied the credential, preserving the original scope metadata and all unknown credential fields. Before writing, re-read the candidates; a newer Claude Code login wins and the in-flight rotation is discarded.
+5. After a successful usage response, re-read the credential candidates before publishing the snapshot. If Claude Code logged in again during the request, discard the old response and restart the complete quota fetch once.
 
 Provider detection, initialization hints, credential status, and quota fetching all use this same candidate lookup.
 
