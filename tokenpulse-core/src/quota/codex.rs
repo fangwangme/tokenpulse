@@ -118,12 +118,7 @@ impl CodexQuotaFetcher {
         }
     }
 
-    fn rate_window_from_window(
-        &self,
-        label: &str,
-        window: WindowInfo,
-        fallback_window_seconds: i64,
-    ) -> RateWindow {
+    fn rate_window_from_window(position: WindowPosition, window: WindowInfo) -> RateWindow {
         let resets_at = if let Some(ts) = window.reset_at {
             Utc.timestamp_opt(ts, 0).single()
         } else if let Some(reset_after_seconds) = window.reset_after_seconds {
@@ -133,16 +128,29 @@ impl CodexQuotaFetcher {
         };
 
         RateWindow {
-            label: label.to_string(),
+            label: window_label(position, window.limit_window_seconds),
             used_percent: window.used_percent.0,
             resets_at,
-            period_duration_ms: Some(
-                window
-                    .limit_window_seconds
-                    .unwrap_or(fallback_window_seconds)
-                    * 1000,
-            ),
+            period_duration_ms: window
+                .limit_window_seconds
+                .filter(|seconds| *seconds > 0)
+                .map(|seconds| seconds * 1000),
         }
+    }
+
+    fn rate_windows(rate_limit: Option<RateLimit>) -> Vec<RateWindow> {
+        let Some(rate_limit) = rate_limit else {
+            return Vec::new();
+        };
+        [
+            (WindowPosition::Primary, rate_limit.primary_window),
+            (WindowPosition::Secondary, rate_limit.secondary_window),
+        ]
+        .into_iter()
+        .filter_map(|(position, window)| {
+            window.map(|window| Self::rate_window_from_window(position, window))
+        })
+        .collect()
     }
 
     async fn fetch_reset_credits(&self, access_token: &str) -> Result<Vec<RateLimitResetCredit>> {
@@ -175,6 +183,39 @@ impl CodexQuotaFetcher {
                 expires_at: credit.expires_at,
             })
             .collect())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WindowPosition {
+    Primary,
+    Secondary,
+}
+
+fn window_label(position: WindowPosition, seconds: Option<i64>) -> String {
+    match seconds {
+        Some(18_000) => "Session (5h)".to_string(),
+        Some(604_800) => "Weekly (7d)".to_string(),
+        Some(seconds) if seconds > 0 => format!("Window ({})", format_window_duration(seconds)),
+        _ => match position {
+            WindowPosition::Primary => "Primary window".to_string(),
+            WindowPosition::Secondary => "Secondary window".to_string(),
+        },
+    }
+}
+
+fn format_window_duration(seconds: i64) -> String {
+    const DAY: i64 = 24 * 60 * 60;
+    const HOUR: i64 = 60 * 60;
+    const MINUTE: i64 = 60;
+    if seconds % DAY == 0 {
+        format!("{}d", seconds / DAY)
+    } else if seconds % HOUR == 0 {
+        format!("{}h", seconds / HOUR)
+    } else if seconds % MINUTE == 0 {
+        format!("{}m", seconds / MINUTE)
+    } else {
+        format!("{seconds}s")
     }
 }
 
@@ -247,21 +288,7 @@ impl QuotaFetcher for CodexQuotaFetcher {
             quota.rate_limit.is_some()
         );
 
-        let mut windows = Vec::new();
-
-        if let Some(rate_limit) = quota.rate_limit {
-            if let Some(primary) = rate_limit.primary_window {
-                windows.push(self.rate_window_from_window("Session (5h)", primary, 5 * 60 * 60));
-            }
-
-            if let Some(secondary) = rate_limit.secondary_window {
-                windows.push(self.rate_window_from_window(
-                    "Weekly (7d)",
-                    secondary,
-                    7 * 24 * 60 * 60,
-                ));
-            }
-        }
+        let windows = Self::rate_windows(quota.rate_limit);
 
         let email = self.auth.load_email();
 
@@ -300,16 +327,14 @@ mod tests {
 
     #[test]
     fn rate_window_from_window_uses_reset_at_when_present() {
-        let fetcher = CodexQuotaFetcher::new();
-        let window = fetcher.rate_window_from_window(
-            "Session (5h)",
+        let window = CodexQuotaFetcher::rate_window_from_window(
+            WindowPosition::Primary,
             WindowInfo {
                 used_percent: FlexNumber(63.0),
                 limit_window_seconds: Some(18_000),
                 reset_after_seconds: Some(60),
                 reset_at: Some(1_744_246_400),
             },
-            18_000,
         );
 
         assert_eq!(window.label, "Session (5h)");
@@ -319,6 +344,66 @@ mod tests {
             window.resets_at,
             Utc.timestamp_opt(1_744_246_400, 0).single()
         );
+    }
+
+    fn windows_from_fixture(json: &str) -> Vec<RateWindow> {
+        let response: CodexQuotaResponse = serde_json::from_str(json).unwrap();
+        CodexQuotaFetcher::rate_windows(response.rate_limit)
+    }
+
+    #[test]
+    fn maps_only_returned_five_hour_window() {
+        let windows = windows_from_fixture(
+            r#"{"rate_limit":{"primary_window":{"used_percent":12,"limit_window_seconds":18000},"secondary_window":null}}"#,
+        );
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Session (5h)");
+        assert_eq!(windows[0].period_duration_ms, Some(18_000_000));
+    }
+
+    #[test]
+    fn maps_only_returned_weekly_primary_window_as_weekly() {
+        let windows = windows_from_fixture(
+            r#"{"rate_limit":{"primary_window":{"used_percent":34,"limit_window_seconds":604800},"secondary_window":null}}"#,
+        );
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Weekly (7d)");
+        assert_eq!(windows[0].period_duration_ms, Some(604_800_000));
+    }
+
+    #[test]
+    fn maps_both_returned_windows_by_duration_not_position() {
+        let windows = windows_from_fixture(
+            r#"{"rate_limit":{"primary_window":{"used_percent":50,"limit_window_seconds":604800},"secondary_window":{"used_percent":25,"limit_window_seconds":18000}}}"#,
+        );
+
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Weekly (7d)");
+        assert_eq!(windows[1].label, "Session (5h)");
+    }
+
+    #[test]
+    fn maps_no_windows_to_empty_output() {
+        let windows = windows_from_fixture(
+            r#"{"rate_limit":{"primary_window":null,"secondary_window":null}}"#,
+        );
+
+        assert!(windows.is_empty());
+    }
+
+    #[test]
+    fn maps_unknown_and_missing_durations_to_neutral_labels() {
+        let windows = windows_from_fixture(
+            r#"{"rate_limit":{"primary_window":{"used_percent":9,"limit_window_seconds":86400},"secondary_window":{"used_percent":3}}}"#,
+        );
+
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Window (1d)");
+        assert_eq!(windows[0].period_duration_ms, Some(86_400_000));
+        assert_eq!(windows[1].label, "Secondary window");
+        assert_eq!(windows[1].period_duration_ms, None);
     }
 
     #[test]

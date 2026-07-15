@@ -278,13 +278,18 @@ Headers:
   Authorization: Bearer <token>
   anthropic-beta: oauth-2025-04-20
 
-Credentials: ~/.claude/.credentials.json
-  → claudeAiOauth.accessToken, refreshToken, expiresAt
-  → Fallback: macOS Keychain "Claude Code-credentials"
+Credentials on macOS (ordered candidates):
+  1. Current-user Keychain item "Claude Code-credentials"
+  2. Legacy service-only Keychain lookup
+  3. ~/.claude/.credentials.json
+Credentials on other platforms: ~/.claude/.credentials.json
 
 Token refresh:
   POST https://platform.claude.com/v1/oauth/token
   Body: grant_type=refresh_token&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&refresh_token=<token>
+  Reuse stored scopes unchanged; omit scope when metadata is absent so the original authorization is inherited.
+  Persist only to the supplying source without dropping unknown fields; discard the rotation if a newer login appears.
+  Recheck credentials after the usage response and restart once if the active login changed.
 ```
 
 ### Codex Quota
@@ -300,6 +305,11 @@ Credentials: ~/.config/codex/auth.json or ~/.codex/auth.json
 Token refresh:
   POST https://auth.openai.com/oauth/token
   Body (form): grant_type=refresh_token&client_id=app_EMoamEEZ73f0CkXaXp7hrann&refresh_token=<token>
+
+Quota windows:
+  primary_window and secondary_window are positional only. Emit each non-null
+  window exactly once and derive 5h/7d or neutral labels from
+  limit_window_seconds; never synthesize a missing window.
 ```
 
 ### Session File Locations
