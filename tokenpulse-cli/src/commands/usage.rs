@@ -10,13 +10,13 @@ use std::{
     time::{Duration, Instant},
 };
 use tokenpulse_core::{
-    config::{ConfigManager, QuotaDisplayMode},
+    config::{Config, ConfigManager, QuotaDisplayMode},
     usage::{
         build_usage_summary_from_daily, AntigravitySessionParser, ClaudeSessionParser,
         CodexSessionParser, CopilotSessionParser, DateRange, GeminiSessionParser,
         OpenCodeSessionParser, PiSessionParser, UsageStore,
     },
-    IncrementalIngestMode, SessionParser, UnifiedMessage,
+    IncrementalIngestMode, QuotaSnapshot, SessionParser, UnifiedMessage,
 };
 
 const SUPPORTED_USAGE_PROVIDERS: &[&str] = &[
@@ -372,30 +372,7 @@ pub async fn run(
         );
         let config_manager = ConfigManager::new();
         let config = config_manager.load().unwrap_or_default();
-        let enabled_providers: Vec<String> = config
-            .providers
-            .iter()
-            .filter(|(_, p)| p.enabled)
-            .map(|(k, _)| k.clone())
-            .collect();
-        let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
-        let results = tokenpulse_core::quota::fetch_all(fetchers).await;
-        let mut quota_snapshots = Vec::new();
-        let observed_at = chrono::Utc::now();
-        let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
-        for result in results {
-            if let Ok(snapshot) = result {
-                let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
-                quota_snapshots.push(snapshot);
-            }
-        }
-        for provider in &enabled_providers {
-            if !quota_snapshots.iter().any(|s| &s.provider == provider) {
-                if let Ok(Some(cached)) = cache_store.load_valid(provider, observed_at) {
-                    quota_snapshots.push(cached.snapshot);
-                }
-            }
-        }
+        let quota_snapshots = collect_quota_snapshots(&config).await;
 
         print_json_unified(&summary, quota_snapshots)?;
     } else if let Some(csv_type) = csv {
@@ -452,35 +429,61 @@ pub async fn run(
 
         let config_manager = ConfigManager::new();
         let config = config_manager.load().unwrap_or_default();
-        let enabled_providers: Vec<String> = config
-            .providers
-            .iter()
-            .filter(|(_, p)| p.enabled)
-            .map(|(k, _)| k.clone())
-            .collect();
-        let fetchers = crate::commands::quota::build_quota_fetchers(&enabled_providers);
-        let results = tokenpulse_core::quota::fetch_all(fetchers).await;
-        let mut quota_snapshots = Vec::new();
-        let observed_at = chrono::Utc::now();
-        let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
-        for result in results {
-            if let Ok(snapshot) = result {
-                let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
-                quota_snapshots.push(snapshot);
-            }
-        }
-        for provider in &enabled_providers {
-            if !quota_snapshots.iter().any(|s| &s.provider == provider) {
-                if let Ok(Some(cached)) = cache_store.load_valid(provider, observed_at) {
-                    quota_snapshots.push(cached.snapshot);
-                }
-            }
-        }
+        let quota_snapshots = collect_quota_snapshots(&config).await;
 
         print_quota_summary(&quota_snapshots, &config.display.quota_display_mode);
     }
 
     Ok(())
+}
+
+/// Collect quota snapshots for the non-TUI outputs.
+///
+/// `display.refresh_quota` gates the live fetch here the same way it gates the
+/// TUI's startup, auto-refresh, and manual refresh. When it is off, only
+/// unexpired cached snapshots are shown.
+async fn collect_quota_snapshots(config: &Config) -> Vec<QuotaSnapshot> {
+    let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
+    let observed_at = Utc::now();
+    let mut snapshots = Vec::new();
+
+    let fetchers = crate::commands::quota::build_quota_fetchers(&quota_providers_to_fetch(config));
+    for snapshot in tokenpulse_core::quota::fetch_all(fetchers)
+        .await
+        .into_iter()
+        .flatten()
+    {
+        let _ = cache_store.save(&snapshot.provider, observed_at, &snapshot);
+        snapshots.push(snapshot);
+    }
+
+    for provider in enabled_quota_providers(config) {
+        if !snapshots.iter().any(|s| s.provider == provider) {
+            if let Ok(Some(cached)) = cache_store.load_valid(&provider, observed_at) {
+                snapshots.push(cached.snapshot);
+            }
+        }
+    }
+
+    snapshots
+}
+
+/// Providers whose quota may be fetched live. Empty when `refresh_quota` is
+/// off, so no fetcher is built and no quota API is contacted.
+fn quota_providers_to_fetch(config: &Config) -> Vec<String> {
+    if !config.display.refresh_quota {
+        return Vec::new();
+    }
+    enabled_quota_providers(config)
+}
+
+fn enabled_quota_providers(config: &Config) -> Vec<String> {
+    config
+        .providers
+        .iter()
+        .filter(|(_, provider)| provider.enabled)
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 fn output_since_hint(
@@ -1076,13 +1079,14 @@ fn print_models_csv(summary: &tokenpulse_core::usage::UsageSummary) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_provider_names;
+    use super::{enabled_quota_providers, parse_provider_names, quota_providers_to_fetch};
     use chrono::NaiveDate;
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
     use tokenpulse_core::{
+        config::{Config, DisplayConfig, ProviderConfig},
         provider::{SessionParser, TokenBreakdown, UnifiedMessage},
         usage::UsageStore,
     };
@@ -1211,5 +1215,49 @@ mod tests {
         assert_eq!(remaining[0].parser_version, "gemini-v2");
 
         let _ = fs::remove_file(path);
+    }
+
+    fn config_with_providers(refresh_quota: bool, providers: &[(&str, bool)]) -> Config {
+        Config {
+            providers: providers
+                .iter()
+                .map(|(id, enabled)| {
+                    (
+                        id.to_string(),
+                        ProviderConfig {
+                            enabled: *enabled,
+                            path: None,
+                        },
+                    )
+                })
+                .collect(),
+            display: DisplayConfig {
+                refresh_quota,
+                ..DisplayConfig::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn non_tui_quota_fetch_respects_refresh_quota_setting() {
+        let providers = [("claude", true), ("codex", true), ("copilot", false)];
+
+        let mut enabled = enabled_quota_providers(&config_with_providers(true, &providers));
+        enabled.sort();
+        assert_eq!(enabled, vec!["claude".to_string(), "codex".to_string()]);
+
+        let mut to_fetch = quota_providers_to_fetch(&config_with_providers(true, &providers));
+        to_fetch.sort();
+        assert_eq!(to_fetch, enabled);
+
+        // refresh_quota = false must build no fetchers, so no quota API is
+        // contacted from the --json or plain-text output paths.
+        assert!(quota_providers_to_fetch(&config_with_providers(false, &providers)).is_empty());
+
+        // Cached snapshots are still shown for enabled providers.
+        let mut cached = enabled_quota_providers(&config_with_providers(false, &providers));
+        cached.sort();
+        assert_eq!(cached, enabled);
     }
 }

@@ -48,9 +48,11 @@ pub struct DisplayConfig {
     #[serde(default = "default_true")]
     pub scan_antigravity: bool,
     /// Whether quota refreshes are allowed. When false, the TUI skips
-    /// quota fetches on startup, auto-refresh, and manual `r`. The check
-    /// is read at each refresh trigger, so toggling takes effect on the
-    /// next refresh cycle. Defaults to true.
+    /// quota fetches on startup, auto-refresh, and manual `r`, and the
+    /// non-TUI text and `--json` outputs fall back to cached snapshots
+    /// without contacting any quota API. The check is read at each refresh
+    /// trigger, so toggling takes effect on the next refresh cycle.
+    /// Defaults to true.
     #[serde(default = "default_true")]
     pub refresh_quota: bool,
 }
