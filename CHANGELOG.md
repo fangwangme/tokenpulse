@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.11] - 2026-07-27
+
+### Fixed
+- Antigravity sub-agent usage reported as `gemini-3.6-flash-tiered` is now recorded under the base `gemini-3-6-flash` model instead of a separate tiered model, so it is no longer split from the base model or left at zero cost. A trailing `-tiered` routing suffix is stripped by Antigravity cache normalization, the shared model canonicalizer, and pricing lookup, while `tiered` elsewhere in a model id is preserved.
+- The `refresh_quota` setting is now honored by the plain-text and `--json` outputs, which previously fetched every enabled provider's quota on each run regardless of the setting. When it is off they contact no quota API and show only unexpired cached snapshots, matching the TUI.
+
 ## [0.4.10] - 2026-07-13
 
 ### Fixed
