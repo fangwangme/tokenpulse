@@ -12,6 +12,15 @@ canonicalization. Meaningful variants such as `thinking`, `high`, and `low`
 should remain in the cache; later usage summary/model-table code can aggregate
 those variants when needed.
 
+A trailing `-tiered` segment is the exception: it is a routing suffix used by
+sub-agent generators, not a meaningful model variant. Sub-agent metadata such as
+`{"responseModel": "gemini-3.6-flash-tiered", "model": "MODEL_PLACEHOLDER_M196"}`
+still resolves through `responseModel`, but the final `-tiered` is dropped so the
+cache stores the base model (`gemini-3-6-flash`). Only a final `-tiered` segment
+is removed; occurrences elsewhere in a model ID are preserved. The shared usage
+canonicalizer and the pricing candidate normalizer strip the same suffix, so
+display aggregation and pricing lookup stay aligned with the cache.
+
 The preferred source of truth is the running Antigravity language server:
 `GetUserStatus` returns `clientModelConfigs[]` entries containing both the
 user-facing `label` and the internal `modelOrAlias.model`. TokenPulse should use
@@ -158,6 +167,8 @@ for display and provider detection.
 | `gemini-3-pro-preview-high` | `gemini-3-pro-preview-high` |
 | `gemini-3-pro-preview-low` | `gemini-3-pro-preview-low` |
 | `gemini-3-flash-c` | `gemini-3-flash-preview` |
+| `gemini-3.6-flash-tiered` | `gemini-3-6-flash` |
+| `gemini-3.5-flash-tiered` | `gemini-3.5-flash` |
 
 ## Explicitly not mapped
 

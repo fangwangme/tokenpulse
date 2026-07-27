@@ -230,6 +230,12 @@ Non-TUI output includes:
 
 The daily CSV export (`--csv`) emits separate `cache_read_tokens` and `cache_write_tokens` columns rather than a single combined cache figure.
 
+The plain-text and `--json` outputs also append quota snapshots for enabled
+providers. Both honor `display.refresh_quota`: when it is off they build no
+quota fetcher and contact no quota API, showing only unexpired cached
+snapshots. This matches the TUI, where the same setting gates startup,
+auto-refresh, and manual `r`. `--csv` never fetches quota.
+
 ## TUI Model
 
 The usage TUI is organized into six tabs:

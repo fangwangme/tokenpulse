@@ -357,7 +357,8 @@ fn strip_three_segment_prefix(model_id: &str) -> Option<&str> {
 
 fn strip_quality_tier_suffix(model_id: &str) -> Option<String> {
     let normalized = model_id.trim().replace('_', "-");
-    for suffix in ["-high", "-medium", "-low", "-thinking"] {
+    // `-tiered` is an Antigravity routing suffix; it must price as the base model.
+    for suffix in ["-high", "-medium", "-low", "-thinking", "-tiered"] {
         if normalized.to_ascii_lowercase().ends_with(suffix) {
             let end = normalized.len() - suffix.len();
             return Some(normalized[..end].to_string());
@@ -1176,6 +1177,50 @@ mod tests {
         assert!(
             result.is_some(),
             "gemini-3-pro-high should resolve via alias"
+        );
+    }
+
+    #[test]
+    fn test_lookup_gemini_tiered_routing_suffix_uses_base_model_pricing() {
+        let mut map = HashMap::new();
+        map.insert(
+            "gemini-3-6-flash".to_string(),
+            make_pricing(0.000003, 0.000015),
+        );
+
+        assert_eq!(
+            lookup_model_pricing("gemini-3-6-flash-tiered", &map)
+                .expect("tiered routing suffix should resolve to the base model")
+                .input_cost_per_token,
+            0.000003
+        );
+
+        // Full catalog path with the raw Antigravity `responseModel` value.
+        let mut entries = HashMap::new();
+        entries.insert(
+            "gemini-3-6-flash".to_string(),
+            PricingRecord::new(
+                make_pricing(0.000003, 0.000015),
+                "litellm",
+                "litellm-main-v1",
+            ),
+        );
+        let catalog = PricingCatalog::new(entries);
+        let resolved = catalog
+            .lookup("gemini-3.6-flash-tiered", Some("antigravity"))
+            .expect("tiered routing suffix should resolve to the base model");
+        assert_eq!(resolved.matched_key, "gemini-3-6-flash");
+
+        let tokens = TokenBreakdown {
+            input: 1_000_000,
+            output: 200_000,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        assert!(
+            calculate_cost(&tokens, resolved.pricing) > 0.0,
+            "tiered Antigravity rows must not stay at zero cost"
         );
     }
 

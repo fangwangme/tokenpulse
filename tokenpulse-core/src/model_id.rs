@@ -48,9 +48,11 @@ pub(crate) fn canonical(model_id: &str) -> String {
     }
 
     // strip suffixes repeatedly
+    // `-tiered` is an Antigravity routing suffix, not a model family, so it must
+    // not split usage or pricing away from the base model.
     loop {
         let mut stripped = false;
-        for suffix in ["-high", "-medium", "-low", "-free", "-thinking"] {
+        for suffix in ["-high", "-medium", "-low", "-free", "-thinking", "-tiered"] {
             if let Some(s) = normalized.strip_suffix(suffix) {
                 normalized = s.to_string();
                 stripped = true;
@@ -119,5 +121,15 @@ mod tests {
             canonical("antigravity-claude-opus-4-5-thinking-high-free"),
             "claude-opus-4-5"
         );
+    }
+
+    #[test]
+    fn test_canonical_strips_trailing_tiered_routing_suffix() {
+        assert_eq!(canonical("gemini-3.6-flash-tiered"), "gemini-3-6-flash");
+        assert_eq!(canonical("gemini-3-6-flash-tiered"), "gemini-3-6-flash");
+
+        // `tiered` is only a routing suffix at the end of the id.
+        assert_eq!(canonical("gemini-tiered-flash"), "gemini-tiered-flash");
+        assert_eq!(canonical("tiered-model-x"), "tiered-model-x");
     }
 }
