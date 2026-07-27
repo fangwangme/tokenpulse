@@ -67,6 +67,11 @@ For display and aggregation, TokenPulse strips final tier suffixes:
 - `-high`
 - `-medium`
 - `-low`
+- `-tiered`
+
+`-tiered` is Antigravity's routing suffix for sub-agent generators. It describes
+how the request was routed, not a quality tier and not a separate model family,
+so it is stripped by the same rule.
 
 Examples:
 
@@ -74,6 +79,7 @@ Examples:
 |---|---|
 | `antigravity-claude-opus-4-5-thinking-high` | `antigravity-claude-opus-4-5-thinking` |
 | `gemini-3-pro-medium` | `gemini-3-pro` |
+| `gemini-3.6-flash-tiered` | `gemini-3-6-flash` |
 | `z-ai/glm-5.1-low` | `z-ai/glm-5.1` |
 
 This normalization is intentionally applied only at the end of the model id so names that contain those words in the middle are preserved.

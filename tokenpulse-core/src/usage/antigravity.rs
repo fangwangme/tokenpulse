@@ -1699,6 +1699,15 @@ fn format_normalization_fallback(model_id: &str) -> Option<String> {
         chars_replaced = true;
     }
 
+    // 4. Strip a trailing `-tiered` routing suffix, e.g.
+    // gemini-3.6-flash-tiered -> gemini-3-6-flash. Antigravity uses it for
+    // sub-agent routing, so it must not become a separate model family.
+    let mut tiered_stripped = false;
+    if !flash_a_normalized && normalized.ends_with("-tiered") {
+        normalized.truncate(normalized.len() - "-tiered".len());
+        tiered_stripped = true;
+    }
+
     // 5. Version formatting rule (converting hyphens back to dots for Gemini versions):
     // e.g. gemini-3-0 -> gemini-3, gemini-3-1 -> gemini-3.1, gemini-3-5 -> gemini-3.5
     let mut version_formatted = false;
@@ -1752,6 +1761,7 @@ fn format_normalization_fallback(model_id: &str) -> Option<String> {
 
     if prefix_stripped
         || chars_replaced
+        || tiered_stripped
         || version_formatted
         || preview_processed
         || flash_a_normalized
@@ -3012,6 +3022,34 @@ mod tests {
         assert_eq!(
             resolve_antigravity_model_id("gemini-3-pro-image"),
             "gemini-3-pro-preview-image"
+        );
+    }
+
+    #[test]
+    fn test_antigravity_tiered_response_model_resolves_to_base_model() {
+        // Observed sub-agent generator metadata: responseModel is the concrete
+        // model, with `-tiered` describing routing rather than a model family.
+        assert_eq!(
+            resolve_antigravity_model_id("gemini-3.6-flash-tiered"),
+            "gemini-3-6-flash"
+        );
+        assert_eq!(
+            resolve_antigravity_model_id("gemini-3-6-flash-tiered"),
+            "gemini-3-6-flash"
+        );
+        assert_eq!(
+            resolve_antigravity_model_id("antigravity-gemini-3.6-flash-tiered"),
+            "gemini-3-6-flash"
+        );
+        assert_eq!(
+            resolve_antigravity_model_id("gemini-3.5-flash-tiered"),
+            "gemini-3.5-flash"
+        );
+
+        // Only a final `-tiered` segment is a routing suffix.
+        assert_eq!(
+            resolve_antigravity_model_id("gemini-tiered-flash"),
+            "gemini-tiered-flash"
         );
     }
 
