@@ -300,14 +300,14 @@ fn render_logs_panel(f: &mut ratatui::Frame, area: Rect, state: &UsageState, the
     let title_span = if state.keeper_log_scroll > 0 {
         Span::styled(
             format!(
-                " Live Execution & Heartbeat Stream (Scroll: line {}) [↑↓ / Scroll] ",
+                " Live Execution & Heartbeat Stream (Scroll: line {}) [Mouse Scroll] ",
                 state.keeper_log_scroll
             ),
             Style::default().fg(theme.accent).bold(),
         )
     } else {
         Span::styled(
-            " Live Execution & Heartbeat Stream (Recent) [↑↓ / Scroll] ",
+            " Live Execution & Heartbeat Stream (Newest First) [Mouse Scroll] ",
             Style::default().fg(theme.accent).bold(),
         )
     };

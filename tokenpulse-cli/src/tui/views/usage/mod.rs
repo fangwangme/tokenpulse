@@ -1640,7 +1640,22 @@ where
                         },
                         UsagePage::Keeper => match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => break,
-                            KeyCode::Left | KeyCode::BackTab => {
+                            KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
+                            KeyCode::Right | KeyCode::Char('l') => state.next_page(),
+                            KeyCode::Tab => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    if state.selected_keeper_index > 0 {
+                                        state.selected_keeper_index -= 1;
+                                    } else {
+                                        state.selected_keeper_index =
+                                            keeper::KEEPER_AGENTS.len().saturating_sub(1);
+                                    }
+                                } else {
+                                    state.selected_keeper_index = (state.selected_keeper_index + 1)
+                                        % keeper::KEEPER_AGENTS.len();
+                                }
+                            }
+                            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                                 if state.selected_keeper_index > 0 {
                                     state.selected_keeper_index -= 1;
                                 } else {
@@ -1648,18 +1663,9 @@ where
                                         keeper::KEEPER_AGENTS.len().saturating_sub(1);
                                 }
                             }
-                            KeyCode::Right | KeyCode::Tab => {
+                            KeyCode::Down | KeyCode::Char('j') => {
                                 state.selected_keeper_index =
                                     (state.selected_keeper_index + 1) % keeper::KEEPER_AGENTS.len();
-                            }
-                            KeyCode::Up => {
-                                state.keeper_log_scroll = state.keeper_log_scroll.saturating_sub(1);
-                            }
-                            KeyCode::Down => {
-                                let max_scroll =
-                                    keeper::keeper_logs_total_lines(&state).saturating_sub(4);
-                                state.keeper_log_scroll =
-                                    (state.keeper_log_scroll + 1).min(max_scroll);
                             }
                             KeyCode::Char('1') | KeyCode::Char('d') => {
                                 let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
