@@ -229,7 +229,7 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             session_keeper_enabled: true,
             daily_wakeup_time: "10:30".to_string(),
             weekly_keeper_enabled: true,
-            command: "agy query \"{prompt}\" --model {model}".to_string(),
+            command: "agy --model {model} --prompt \"{prompt}\"".to_string(),
             model: "gemini-3.7-flash-low".to_string(),
             prompt: "Hi".to_string(),
         },
@@ -600,6 +600,10 @@ usage_auto_refresh_secs = 900
         let antigravity = config.keeper.agents.get("antigravity").unwrap();
         assert!(antigravity.session_keeper_enabled);
         assert_eq!(antigravity.model, "gemini-3.7-flash-low");
+        assert_eq!(
+            antigravity.command,
+            "agy --model {model} --prompt \"{prompt}\""
+        );
     }
 
     #[test]
