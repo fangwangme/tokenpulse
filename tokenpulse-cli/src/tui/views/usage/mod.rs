@@ -2771,14 +2771,14 @@ mod tests {
         assert_eq!(UsagePage::Keeper.title(), "Keeper");
     }
 
-    fn keeper_record(id: &str) -> tokenpulse_core::keeper::KeeperExecutionRecord {
+    /// `command_executed` doubles as the record's identity in these tests.
+    fn keeper_record(marker: &str) -> tokenpulse_core::keeper::KeeperExecutionRecord {
         tokenpulse_core::keeper::KeeperExecutionRecord {
-            id: id.to_string(),
             agent: "claude".to_string(),
             trigger_type: tokenpulse_core::keeper::KeeperTriggerType::Manual,
             model: "haiku".to_string(),
             prompt: "Hi".to_string(),
-            command_executed: "claude -p".to_string(),
+            command_executed: marker.to_string(),
             timestamp: Local::now(),
             duration_ms: 1,
             success: true,
@@ -2797,9 +2797,12 @@ mod tests {
         }
 
         assert_eq!(state.keeper_logs.len(), KEEPER_LOG_HISTORY_LIMIT);
-        assert_eq!(state.keeper_logs.first().unwrap().id, "rec-25");
         assert_eq!(
-            state.keeper_logs.last().unwrap().id,
+            state.keeper_logs.first().unwrap().command_executed,
+            "rec-25"
+        );
+        assert_eq!(
+            state.keeper_logs.last().unwrap().command_executed,
             format!("rec-{}", KEEPER_LOG_HISTORY_LIMIT + 24)
         );
     }

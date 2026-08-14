@@ -170,7 +170,7 @@ fn default_keeper_check_interval_secs() -> u32 {
     60
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentKeeperConfig {
     #[serde(default = "default_true")]
     pub session_keeper_enabled: bool,
@@ -200,6 +200,21 @@ fn default_model() -> String {
 
 fn default_prompt() -> String {
     "Hi".to_string()
+}
+
+/// Mirrors the per-field serde defaults, so an agent the config has never seen
+/// still deserializes and toggles consistently.
+impl Default for AgentKeeperConfig {
+    fn default() -> Self {
+        Self {
+            session_keeper_enabled: default_true(),
+            daily_wakeup_time: default_daily_wakeup_time(),
+            weekly_keeper_enabled: default_true(),
+            command: default_command(),
+            model: default_model(),
+            prompt: default_prompt(),
+        }
+    }
 }
 
 pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
@@ -395,52 +410,35 @@ impl ConfigManager {
         self.save(&config)
     }
 
-    pub fn toggle_agent_session_keeper(&self, agent: &str) -> Result<bool> {
+    /// Flips one of an agent's keeper switches and returns its new value,
+    /// seeding the entry from the built-in defaults if the config has never
+    /// mentioned that agent.
+    fn toggle_agent_keeper(
+        &self,
+        agent: &str,
+        switch: fn(&mut AgentKeeperConfig) -> &mut bool,
+    ) -> Result<bool> {
         let mut config = self.load().unwrap_or_default();
-        let agent_entry = config
+        let entry = config
             .keeper
             .agents
             .entry(agent.to_string())
-            .or_insert_with(|| {
-                default_keeper_agents()
-                    .remove(agent)
-                    .unwrap_or(AgentKeeperConfig {
-                        session_keeper_enabled: true,
-                        daily_wakeup_time: "10:30".to_string(),
-                        weekly_keeper_enabled: true,
-                        command: String::new(),
-                        model: String::new(),
-                        prompt: "Hi".to_string(),
-                    })
-            });
-        agent_entry.session_keeper_enabled = !agent_entry.session_keeper_enabled;
-        let new_state = agent_entry.session_keeper_enabled;
+            .or_insert_with(|| default_keeper_agents().remove(agent).unwrap_or_default());
+
+        let flag = switch(entry);
+        *flag = !*flag;
+        let new_state = *flag;
+
         self.save(&config)?;
         Ok(new_state)
     }
 
+    pub fn toggle_agent_session_keeper(&self, agent: &str) -> Result<bool> {
+        self.toggle_agent_keeper(agent, |c| &mut c.session_keeper_enabled)
+    }
+
     pub fn toggle_agent_weekly_keeper(&self, agent: &str) -> Result<bool> {
-        let mut config = self.load().unwrap_or_default();
-        let agent_entry = config
-            .keeper
-            .agents
-            .entry(agent.to_string())
-            .or_insert_with(|| {
-                default_keeper_agents()
-                    .remove(agent)
-                    .unwrap_or(AgentKeeperConfig {
-                        session_keeper_enabled: true,
-                        daily_wakeup_time: "10:30".to_string(),
-                        weekly_keeper_enabled: true,
-                        command: String::new(),
-                        model: String::new(),
-                        prompt: "Hi".to_string(),
-                    })
-            });
-        agent_entry.weekly_keeper_enabled = !agent_entry.weekly_keeper_enabled;
-        let new_state = agent_entry.weekly_keeper_enabled;
-        self.save(&config)?;
-        Ok(new_state)
+        self.toggle_agent_keeper(agent, |c| &mut c.weekly_keeper_enabled)
     }
 }
 

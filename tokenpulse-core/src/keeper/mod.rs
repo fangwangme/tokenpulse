@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::info;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy)]
 pub enum KeeperTriggerType {
     Daily,
     Weekly,
@@ -22,9 +21,8 @@ impl KeeperTriggerType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct KeeperExecutionRecord {
-    pub id: String,
     pub agent: String,
     pub trigger_type: KeeperTriggerType,
     pub model: String,
@@ -96,7 +94,7 @@ pub fn format_keeper_command(template: &str, model: &str, prompt: &str) -> Strin
 /// frame. And truncation must count characters, not bytes — slicing a `String`
 /// at byte 300 panics whenever that offset lands inside a multi-byte codepoint,
 /// which any CJK or emoji reply will eventually do.
-pub fn sanitize_output_snippet(raw: &str) -> String {
+fn sanitize_output_snippet(raw: &str) -> String {
     let without_ansi = strip_ansi_sequences(raw);
     let collapsed = without_ansi
         .chars()
@@ -250,7 +248,7 @@ pub fn compute_next_weekly_trigger(
 }
 
 /// Matches a QuotaSnapshot provider name to a Keeper agent ID.
-pub fn matches_keeper_agent(provider: &str, agent_id: &str) -> bool {
+fn matches_keeper_agent(provider: &str, agent_id: &str) -> bool {
     let p = provider.to_lowercase();
     let a = agent_id.to_lowercase();
     if p == a {
@@ -277,10 +275,9 @@ pub fn extract_weekly_reset_time(
             || label_lower.contains("7 d")
             || label_lower.contains("7-day")
             || label_lower.contains("week")
-            || label_lower.contains("weekly")
             || window
                 .period_duration_ms
-                .map_or(false, |ms| ms >= 6 * 24 * 60 * 60 * 1000);
+                .is_some_and(|ms| ms >= 6 * 24 * 60 * 60 * 1000);
 
         if is_weekly {
             if let Some(resets_at) = window.resets_at {
@@ -391,10 +388,7 @@ pub async fn execute_agent_ping(
         ),
     };
 
-    let record_id = format!("{}-{}-{}", agent, timestamp.timestamp_millis(), duration_ms);
-
     KeeperExecutionRecord {
-        id: record_id,
         agent: agent.to_string(),
         trigger_type,
         model: config.model.clone(),
@@ -417,7 +411,6 @@ pub fn failed_ping_record(
 ) -> KeeperExecutionRecord {
     let timestamp = Local::now();
     KeeperExecutionRecord {
-        id: format!("{}-{}-failed", agent, timestamp.timestamp_millis()),
         agent: agent.to_string(),
         trigger_type,
         model: config.model.clone(),

@@ -14,6 +14,11 @@ use tokenpulse_core::{
 
 pub const KEEPER_AGENTS: &[&str] = &["claude", "codex", "antigravity"];
 
+/// Rows taken by the master-switch bar above the agent cards.
+const HEADER_BAR_HEIGHT: u16 = 3;
+/// Rows taken by the row of agent cards.
+const AGENT_CARDS_HEIGHT: u16 = 12;
+
 pub fn keeper_agent_name(id: &str) -> &'static str {
     match id {
         "claude" => "Claude Code",
@@ -34,9 +39,9 @@ pub fn render_keeper_tab(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header info / Global Master Switch
-            Constraint::Length(12), // Agent cards
-            Constraint::Min(8),     // Logs table
+            Constraint::Length(HEADER_BAR_HEIGHT),
+            Constraint::Length(AGENT_CARDS_HEIGHT),
+            Constraint::Min(8),
         ])
         .split(area);
 
@@ -105,6 +110,9 @@ fn render_agent_cards(
         .split(area);
 
     let default_agents = default_keeper_agents();
+    // Read the clock once so every card on a frame agrees on "now".
+    let now_local = Local::now();
+    let now_utc = Utc::now();
 
     for (idx, &agent_id) in KEEPER_AGENTS.iter().enumerate() {
         let is_selected = state.selected_keeper_index == idx;
@@ -166,7 +174,6 @@ fn render_agent_cards(
         };
 
         // Calculate next daily trigger
-        let now_local = Local::now();
         let next_daily = compute_next_daily_trigger(
             &agent_cfg.daily_wakeup_time,
             state.keeper_daily_triggered.get(agent_id).copied(),
@@ -185,7 +192,7 @@ fn render_agent_cards(
         let next_weekly = compute_next_weekly_trigger(
             resets_at,
             state.keeper_weekly_triggered.get(agent_id).copied(),
-            Utc::now(),
+            now_utc,
         );
         let next_weekly_str = match next_weekly {
             Some(dt) => {
@@ -290,25 +297,18 @@ fn render_agent_cards(
 /// Header + 4 detail rows + blank separator, as emitted by `render_logs_panel`.
 pub const KEEPER_LOG_LINES_PER_RECORD: usize = 6;
 
-pub fn keeper_logs_total_lines(state: &UsageState) -> usize {
-    if state.keeper_logs.is_empty() {
-        return 1;
-    }
-    state.keeper_logs.len() * KEEPER_LOG_LINES_PER_RECORD
-}
-
 /// Largest useful scroll offset: stop once the last record is on screen instead
 /// of letting the view scroll past the end into blank space.
 pub fn keeper_log_scroll_max(state: &UsageState, frame_area: Rect) -> usize {
-    let visible = keeper_logs_visible_height(frame_area);
-    keeper_logs_total_lines(state).saturating_sub(visible)
+    let total = state.keeper_logs.len() * KEEPER_LOG_LINES_PER_RECORD;
+    total.saturating_sub(log_panel_visible_height(frame_area))
 }
 
 /// Height of the log panel's inner area, mirroring `render_keeper_tab`'s layout.
-fn keeper_logs_visible_height(frame_area: Rect) -> usize {
+fn log_panel_visible_height(frame_area: Rect) -> usize {
     let body = super::dashboard_body_area(frame_area);
-    // 3 rows of header bar + 12 rows of agent cards, then the block's borders.
-    usize::from(body.height).saturating_sub(3 + 12 + 2)
+    let chrome = HEADER_BAR_HEIGHT + AGENT_CARDS_HEIGHT + 2; // + the panel's borders
+    usize::from(body.height.saturating_sub(chrome))
 }
 
 fn render_logs_panel(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: &Theme) {
@@ -457,7 +457,6 @@ mod tests {
         let mut state = UsageState::new(&dashboard, vec![]);
 
         state.keeper_logs.push(KeeperExecutionRecord {
-            id: "rec-1".to_string(),
             agent: "claude".to_string(),
             trigger_type: KeeperTriggerType::Daily,
             model: "haiku".to_string(),
