@@ -277,18 +277,38 @@ fn render_agent_cards(
     }
 }
 
+pub fn keeper_logs_total_lines(state: &UsageState) -> usize {
+    if state.keeper_logs.is_empty() {
+        return 1;
+    }
+    // Each log record is 6 lines (header + 4 bullet points + empty line)
+    state.keeper_logs.len() * 6
+}
+
 fn render_logs_panel(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: &Theme) {
-    let block = Block::default()
-        .title(Span::styled(
-            " Execution History & Heartbeat Logs (Recent) ",
+    let title_span = if state.keeper_log_scroll > 0 {
+        Span::styled(
+            format!(
+                " Live Execution & Heartbeat Stream (Scroll: line {}) [↑↓/jk/PgUp/PgDn] ",
+                state.keeper_log_scroll
+            ),
             Style::default().fg(theme.accent).bold(),
-        ))
+        )
+    } else {
+        Span::styled(
+            " Live Execution & Heartbeat Stream (Recent) [↑↓/jk/PgUp/PgDn to scroll] ",
+            Style::default().fg(theme.accent).bold(),
+        )
+    };
+
+    let block = Block::default()
+        .title(title_span)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border));
 
     if state.keeper_logs.is_empty() {
         let msg = Paragraph::new(
-            " No keeper activations recorded yet. Press [p] on any agent to test immediate ping.",
+            "  No keeper activations recorded yet. Press [p] on any agent to trigger an immediate test ping.",
         )
         .style(Style::default().fg(theme.dim))
         .block(block);
@@ -296,56 +316,94 @@ fn render_logs_panel(f: &mut ratatui::Frame, area: Rect, state: &UsageState, the
         return;
     }
 
-    let header_cells = [
-        "Time", "Agent", "Trigger", "Model", "Duration", "Status", "Snippet",
-    ]
-    .iter()
-    .map(|&h| {
-        ratatui::widgets::Cell::from(Span::styled(h, Style::default().fg(theme.accent).bold()))
-    });
+    let mut log_lines: Vec<Line> = Vec::new();
 
-    let header = Row::new(header_cells).height(1).bottom_margin(1);
+    // Render in newest-first or chronological order with clear delimiters
+    for rec in state.keeper_logs.iter().rev() {
+        let (status_text, status_style) = if rec.success {
+            (
+                format!(
+                    "✓ Success ({}ms, exit {})",
+                    rec.duration_ms,
+                    rec.exit_code.unwrap_or(0)
+                ),
+                Style::default().fg(theme.gauge_low).bold(),
+            )
+        } else {
+            (
+                format!(
+                    "✗ Failed ({}ms, exit {})",
+                    rec.duration_ms,
+                    rec.exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "ERR".to_string())
+                ),
+                Style::default().fg(theme.gauge_high).bold(),
+            )
+        };
 
-    let rows: Vec<Row> = state
-        .keeper_logs
-        .iter()
-        .rev()
-        .take(50)
-        .map(|rec| {
-            let status_span = if rec.success {
-                Span::styled("✓ Success", Style::default().fg(theme.gauge_low).bold())
-            } else {
-                Span::styled("✗ Failed", Style::default().fg(theme.gauge_high).bold())
-            };
+        // Header line: [Timestamp] [Agent] (Trigger) Status
+        log_lines.push(Line::from(vec![
+            Span::styled(
+                format!("[{}] ", rec.timestamp.format("%Y-%m-%d %H:%M:%S")),
+                Style::default().fg(theme.dim),
+            ),
+            Span::styled(
+                format!("[{}] ", keeper_agent_name(&rec.agent)),
+                Style::default().fg(theme.provider_color(&rec.agent)).bold(),
+            ),
+            Span::styled(
+                format!("({}) ", rec.trigger_type.label()),
+                Style::default().fg(theme.accent_soft),
+            ),
+            Span::styled(status_text, status_style),
+        ]));
 
-            let cells = vec![
-                ratatui::widgets::Cell::from(rec.timestamp.format("%H:%M:%S").to_string()),
-                ratatui::widgets::Cell::from(Span::styled(
-                    rec.agent.clone(),
-                    Style::default().fg(theme.provider_color(&rec.agent)).bold(),
-                )),
-                ratatui::widgets::Cell::from(rec.trigger_type.label()),
-                ratatui::widgets::Cell::from(rec.model.clone()),
-                ratatui::widgets::Cell::from(format!("{}ms", rec.duration_ms)),
-                ratatui::widgets::Cell::from(status_span),
-                ratatui::widgets::Cell::from(rec.output_snippet.clone()),
-            ];
-            Row::new(cells).style(Style::default().fg(theme.fg))
-        })
-        .collect();
+        // Field 1: Model
+        log_lines.push(Line::from(vec![
+            Span::styled("  ├─ Model:  ", Style::default().fg(theme.dim)),
+            Span::styled(&rec.model, Style::default().fg(theme.fg).bold()),
+        ]));
 
-    let widths = [
-        Constraint::Length(10), // Time
-        Constraint::Length(14), // Agent
-        Constraint::Length(14), // Trigger
-        Constraint::Length(24), // Model
-        Constraint::Length(10), // Duration
-        Constraint::Length(12), // Status
-        Constraint::Min(20),    // Snippet
-    ];
+        // Field 2: Prompt
+        log_lines.push(Line::from(vec![
+            Span::styled("  ├─ Prompt: ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("\"{}\"", rec.prompt),
+                Style::default().fg(theme.accent_soft),
+            ),
+        ]));
 
-    let table = Table::new(rows, widths).header(header).block(block);
-    f.render_widget(table, area);
+        // Field 3: Command
+        log_lines.push(Line::from(vec![
+            Span::styled("  ├─ Cmd:    ", Style::default().fg(theme.dim)),
+            Span::styled(&rec.command_executed, Style::default().fg(theme.dim)),
+        ]));
+
+        // Field 4: Reply / Output
+        let reply_prefix = if rec.success {
+            "  └─ Reply:  "
+        } else {
+            "  └─ Error:  "
+        };
+        let reply_style = if rec.success {
+            Style::default().fg(theme.fg)
+        } else {
+            Style::default().fg(theme.gauge_high)
+        };
+        log_lines.push(Line::from(vec![
+            Span::styled(reply_prefix, Style::default().fg(theme.dim)),
+            Span::styled(&rec.output_snippet, reply_style),
+        ]));
+
+        // Spacing delimiter line
+        log_lines.push(Line::raw(""));
+    }
+
+    let paragraph = Paragraph::new(log_lines)
+        .block(block)
+        .scroll((state.keeper_log_scroll as u16, 0));
+    f.render_widget(paragraph, area);
 }
 
 #[cfg(test)]

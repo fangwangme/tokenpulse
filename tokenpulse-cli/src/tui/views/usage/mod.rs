@@ -703,6 +703,7 @@ pub struct UsageState {
     pub keeper_daily_triggered: HashMap<String, NaiveDate>,
     pub keeper_weekly_triggered: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub keeper_logs: Vec<tokenpulse_core::keeper::KeeperExecutionRecord>,
+    pub keeper_log_scroll: usize,
     pub last_keeper_check: Instant,
 }
 
@@ -762,6 +763,7 @@ impl UsageState {
             keeper_daily_triggered: HashMap::new(),
             keeper_weekly_triggered: HashMap::new(),
             keeper_logs: Vec::new(),
+            keeper_log_scroll: 0,
             last_keeper_check: Instant::now(),
         }
     }
@@ -1637,34 +1639,27 @@ where
                                         keeper::KEEPER_AGENTS.len().saturating_sub(1);
                                 }
                             }
-                            KeyCode::Right | KeyCode::Char('l') => {
+                            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
                                 state.selected_keeper_index =
                                     (state.selected_keeper_index + 1) % keeper::KEEPER_AGENTS.len();
-                            }
-                            KeyCode::Tab => {
-                                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                    if state.selected_keeper_index > 0 {
-                                        state.selected_keeper_index -= 1;
-                                    } else {
-                                        state.selected_keeper_index =
-                                            keeper::KEEPER_AGENTS.len().saturating_sub(1);
-                                    }
-                                } else {
-                                    state.selected_keeper_index = (state.selected_keeper_index + 1)
-                                        % keeper::KEEPER_AGENTS.len();
-                                }
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
-                                if state.selected_keeper_index > 0 {
-                                    state.selected_keeper_index -= 1;
-                                } else {
-                                    state.selected_keeper_index =
-                                        keeper::KEEPER_AGENTS.len().saturating_sub(1);
-                                }
+                                state.keeper_log_scroll = state.keeper_log_scroll.saturating_sub(1);
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
-                                state.selected_keeper_index =
-                                    (state.selected_keeper_index + 1) % keeper::KEEPER_AGENTS.len();
+                                let max_scroll =
+                                    keeper::keeper_logs_total_lines(&state).saturating_sub(4);
+                                state.keeper_log_scroll =
+                                    (state.keeper_log_scroll + 1).min(max_scroll);
+                            }
+                            KeyCode::PageUp => {
+                                state.keeper_log_scroll = state.keeper_log_scroll.saturating_sub(5);
+                            }
+                            KeyCode::PageDown => {
+                                let max_scroll =
+                                    keeper::keeper_logs_total_lines(&state).saturating_sub(4);
+                                state.keeper_log_scroll =
+                                    (state.keeper_log_scroll + 5).min(max_scroll);
                             }
                             KeyCode::Char('1') | KeyCode::Char('d') => {
                                 let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
@@ -1853,7 +1848,9 @@ where
                         && !state.show_source_filter
                         && matches!(mouse.kind, MouseEventKind::ScrollUp) =>
                 {
-                    if state.page == UsagePage::Heatmap {
+                    if state.page == UsagePage::Keeper {
+                        state.keeper_log_scroll = state.keeper_log_scroll.saturating_sub(2);
+                    } else if state.page == UsagePage::Heatmap {
                         let frame = terminal.size()?;
                         let frame_area = Rect::new(0, 0, frame.width, frame.height);
                         let body = dashboard_body_area(frame_area);
@@ -1879,7 +1876,10 @@ where
                         && !state.show_source_filter
                         && matches!(mouse.kind, MouseEventKind::ScrollDown) =>
                 {
-                    if state.page == UsagePage::Heatmap {
+                    if state.page == UsagePage::Keeper {
+                        let max_scroll = keeper::keeper_logs_total_lines(&state).saturating_sub(4);
+                        state.keeper_log_scroll = (state.keeper_log_scroll + 2).min(max_scroll);
+                    } else if state.page == UsagePage::Heatmap {
                         let frame = terminal.size()?;
                         let frame_area = Rect::new(0, 0, frame.width, frame.height);
                         let body = dashboard_body_area(frame_area);
@@ -1888,9 +1888,12 @@ where
                             mouse.column,
                             mouse.row,
                         ) {
-                            state.scroll_heatmap_detail_down(heatmap::heatmap_detail_scroll_max(
-                                &dashboard, &state, frame_area,
-                            ));
+                            let max = heatmap::heatmap_detail_scroll_max(
+                                &dashboard,
+                                &state,
+                                Rect::new(0, 0, frame.width, frame.height),
+                            );
+                            state.scroll_heatmap_detail_down(max);
                         }
                     } else {
                         let frame = terminal.size()?;
