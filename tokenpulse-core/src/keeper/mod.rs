@@ -154,6 +154,60 @@ pub fn compute_next_weekly_trigger(
     Some(trigger_threshold)
 }
 
+/// Matches a QuotaSnapshot provider name to a Keeper agent ID.
+pub fn matches_keeper_agent(provider: &str, agent_id: &str) -> bool {
+    let p = provider.to_lowercase();
+    let a = agent_id.to_lowercase();
+    if p == a {
+        return true;
+    }
+    match a.as_str() {
+        "antigravity" => p == "google" || p == "gemini" || p == "antigravity",
+        "claude" => p == "anthropic" || p == "claude",
+        "codex" => p == "openai" || p == "codex",
+        _ => false,
+    }
+}
+
+/// Extracts the weekly window reset time from a QuotaSnapshot.
+/// Accurately recognizes "7d", "7-day", "week", "weekly", period_duration_ms >= 6 days,
+/// and Antigravity's "Gemini (7d)" / "Claude (7d)" windows.
+pub fn extract_weekly_reset_time(
+    snapshot: &crate::provider::QuotaSnapshot,
+) -> Option<DateTime<Utc>> {
+    // 1. Check explicit 7d/weekly windows first
+    for window in &snapshot.windows {
+        let label_lower = window.label.to_lowercase();
+        let is_weekly = label_lower.contains("7d")
+            || label_lower.contains("7 d")
+            || label_lower.contains("7-day")
+            || label_lower.contains("week")
+            || label_lower.contains("weekly")
+            || window
+                .period_duration_ms
+                .map_or(false, |ms| ms >= 6 * 24 * 60 * 60 * 1000);
+
+        if is_weekly {
+            if let Some(resets_at) = window.resets_at {
+                return Some(resets_at);
+            }
+        }
+    }
+
+    // 2. Fallback to any window with reset_time that is not a short 5h session window
+    snapshot.windows.iter().find_map(|w| {
+        let label_lower = w.label.to_lowercase();
+        if !label_lower.contains("5h")
+            && !label_lower.contains("5-hour")
+            && !label_lower.contains("5 hour")
+        {
+            w.resets_at
+        } else {
+            None
+        }
+    })
+}
+
 /// Asynchronously executes a CLI heartbeat command.
 pub async fn execute_agent_ping(
     agent: &str,
@@ -336,5 +390,44 @@ mod tests {
         let late = Local.with_ymd_and_hms(2026, 8, 15, 11, 0, 0).unwrap();
         let next_tomorrow = compute_next_daily_trigger("10:30", None, late).unwrap();
         assert_eq!(next_tomorrow.day(), 16);
+    }
+
+    #[test]
+    fn test_extract_weekly_reset_time_antigravity_and_standard() {
+        use crate::provider::{QuotaSnapshot, RateWindow};
+
+        let reset_time = Utc.with_ymd_and_hms(2026, 8, 20, 15, 0, 0).unwrap();
+
+        // Antigravity snapshot with "Gemini (7d)"
+        let agy_snapshot = QuotaSnapshot {
+            provider: "antigravity".to_string(),
+            plan: Some("Pro".to_string()),
+            account: None,
+            windows: vec![
+                RateWindow {
+                    label: "Gemini (5h)".to_string(),
+                    used_percent: 10.0,
+                    resets_at: Some(Utc.with_ymd_and_hms(2026, 8, 15, 14, 0, 0).unwrap()),
+                    period_duration_ms: Some(5 * 60 * 60 * 1000),
+                },
+                RateWindow {
+                    label: "Gemini (7d)".to_string(),
+                    used_percent: 50.0,
+                    resets_at: Some(reset_time),
+                    period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
+                },
+            ],
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: Utc::now(),
+        };
+
+        assert_eq!(extract_weekly_reset_time(&agy_snapshot), Some(reset_time));
+        assert!(matches_keeper_agent("antigravity", "antigravity"));
+        assert!(matches_keeper_agent("google", "antigravity"));
+        assert!(matches_keeper_agent("claude", "claude"));
+        assert!(matches_keeper_agent("anthropic", "claude"));
+        assert!(matches_keeper_agent("codex", "codex"));
+        assert!(matches_keeper_agent("openai", "codex"));
     }
 }

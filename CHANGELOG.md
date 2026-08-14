@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-15
+
+### Added
+- **Keeper Dashboard Tab**: Added interactive session keeper & scheduled heartbeat dashboard for managing automated wakeup and synchronization across Claude Code, Codex, and Google Antigravity.
+  - **5h Daily Wakeup**: Automated morning wakeup timer (e.g. 08:30) to initiate session cooldown timers early.
+  - **Weekly Auto-Sync**: Automated quota synchronization timed precisely 1 minute after weekly reset to maximize resource rollover.
+  - **Live Execution Stream**: Multi-line live heartbeat logs showing executed CLI commands, models, prompts, responses, duration, and status with smooth mouse wheel scrolling.
+  - **Single-Key Toggles & Manual Test**: `[1/d]` to toggle 5h keeper, `[2/w]` to toggle weekly sync, and `[p]` for instant test ping with in-flight concurrency locking.
+  - **Automated Configuration Migration**: Transparently detects and upgrades legacy keeper commands to optimal headless, non-interactive flags (`--bare`, `--no-session-persistence`, `--skip-git-repo-check`, `--ephemeral`, `haiku`, `gpt-5.6-luna`).
+  - **Robust Provider & Reset Extraction**: Accurately extracts weekly reset timestamps from all provider formats including Antigravity's `Gemini (7d)` and `Claude (7d)` rate windows.
+
 ## [0.4.11] - 2026-07-27
 
 ### Fixed

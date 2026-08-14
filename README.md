@@ -15,9 +15,13 @@ output for scripting.
 |---|---|
 | ![Models](docs/images/models.png) | ![Daily](docs/images/daily.png) |
 
-| Activity | Settings |
+| Keeper | Activity |
 |---|---|
-| ![Activity](docs/images/activity.png) | ![Settings](docs/images/settings.png) |
+| ![Keeper](docs/images/keeper.png) | ![Activity](docs/images/activity.png) |
+
+| Settings | |
+|---|---|
+| ![Settings](docs/images/settings.png) | |
 
 ## Supported Providers
 
@@ -51,8 +55,13 @@ output for scripting.
 
 ## Features
 
-- **Unified dashboard** — usage (Overview/Models/Daily/Activity) and quota in
+- **Unified dashboard** — usage (Overview/Models/Daily/Keeper/Activity) and quota in
   one TUI, or plain-text/JSON/CSV output
+- **Session Keeper & Automated Heartbeats** — scheduled lightweight heartbeats for
+  Claude Code, Codex, and Google Antigravity to trigger 5h cooldown timers early
+  and auto-sync immediately after weekly quota resets
+- **Live Execution Stream** — real-time heartbeat log panel with executed commands,
+  prompts, replies, durations, status codes, and smooth mouse-wheel scrolling
 - **Ledger-backed** — local SQLite with per-day pricing snapshots so historical
   cost does not silently drift
 - **Quota overview** — up to the top 4 windows per provider; each is a progress
@@ -185,6 +194,17 @@ tokenpulse config set show_account=true
 # Enable / disable quota refresh (default: true)
 tokenpulse config set refresh_quota=false
 ```
+
+### Session Keeper (Heartbeats & Wakeup)
+
+The **Keeper** tab lets you manage scheduled pings and wakeups for Claude Code, Codex, and Google Antigravity to keep sessions warm and trigger cooldown cycles at designated times:
+
+- **`←` / `→` (or `h` / `l`)** — Switch between dashboard tabs
+- **`↑` / `↓` (or `k` / `j` / `Tab`)** — Select agent card (Claude Code / Codex / Antigravity)
+- **`1` / `d`** — Toggle 5h daily morning wakeup timer (e.g. `08:30`)
+- **`2` / `w`** — Toggle weekly auto-sync (fires 1 min after quota resets)
+- **`p`** — Immediately test ping the selected agent
+- **Mouse Wheel** — Scroll the live execution and heartbeat history stream
 
 ## Data Model
 

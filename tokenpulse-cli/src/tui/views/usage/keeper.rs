@@ -171,17 +171,8 @@ fn render_agent_cards(
         let quota_snapshot = state
             .quota_snapshots
             .iter()
-            .find(|s| s.provider.eq_ignore_ascii_case(agent_id));
-        let resets_at = quota_snapshot.and_then(|s| {
-            s.windows
-                .iter()
-                .find(|w| {
-                    w.label.to_lowercase().contains("week")
-                        || w.label.to_lowercase().contains("7-day")
-                        || w.label.to_lowercase().contains("weekly")
-                })
-                .and_then(|w| w.resets_at)
-        });
+            .find(|s| tokenpulse_core::keeper::matches_keeper_agent(&s.provider, agent_id));
+        let resets_at = quota_snapshot.and_then(tokenpulse_core::keeper::extract_weekly_reset_time);
 
         let next_weekly = compute_next_weekly_trigger(
             resets_at,

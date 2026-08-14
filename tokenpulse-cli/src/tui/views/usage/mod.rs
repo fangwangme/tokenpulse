@@ -1317,20 +1317,11 @@ where
                 if agent_cfg.weekly_keeper_enabled
                     && !state.keeper_pings_in_progress.contains(agent_id)
                 {
-                    let quota_snapshot = state
-                        .quota_snapshots
-                        .iter()
-                        .find(|s| s.provider.eq_ignore_ascii_case(agent_id));
-                    let resets_at = quota_snapshot.and_then(|s| {
-                        s.windows
-                            .iter()
-                            .find(|w| {
-                                w.label.to_lowercase().contains("week")
-                                    || w.label.to_lowercase().contains("7-day")
-                                    || w.label.to_lowercase().contains("weekly")
-                            })
-                            .and_then(|w| w.resets_at)
+                    let quota_snapshot = state.quota_snapshots.iter().find(|s| {
+                        tokenpulse_core::keeper::matches_keeper_agent(&s.provider, agent_id)
                     });
+                    let resets_at =
+                        quota_snapshot.and_then(tokenpulse_core::keeper::extract_weekly_reset_time);
 
                     let last_triggered = state.keeper_weekly_triggered.get(agent_id).copied();
                     if tokenpulse_core::keeper::should_trigger_weekly(
