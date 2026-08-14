@@ -1,7 +1,6 @@
 use crate::config::AgentKeeperConfig;
 use chrono::{DateTime, Local, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::time::Instant;
 use tracing::info;
 
@@ -36,25 +35,6 @@ pub struct KeeperExecutionRecord {
     pub success: bool,
     pub exit_code: Option<i32>,
     pub output_snippet: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentKeeperState {
-    pub agent: String,
-    pub last_daily_trigger_date: Option<NaiveDate>,
-    pub last_weekly_trigger_time: Option<DateTime<Utc>>,
-    pub last_execution: Option<KeeperExecutionRecord>,
-}
-
-impl AgentKeeperState {
-    pub fn new(agent: &str) -> Self {
-        Self {
-            agent: agent.to_string(),
-            last_daily_trigger_date: None,
-            last_weekly_trigger_time: None,
-            last_execution: None,
-        }
-    }
 }
 
 /// Formats the command string by replacing `{prompt}` and `{model}` placeholders.
@@ -284,33 +264,6 @@ pub async fn execute_agent_ping(
         success,
         exit_code,
         output_snippet,
-    }
-}
-
-/// In-memory log buffer for Keeper executions.
-#[derive(Debug, Clone, Default)]
-pub struct KeeperLogBuffer {
-    records: VecDeque<KeeperExecutionRecord>,
-    capacity: usize,
-}
-
-impl KeeperLogBuffer {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            records: VecDeque::with_capacity(capacity),
-            capacity: capacity.max(10),
-        }
-    }
-
-    pub fn push(&mut self, record: KeeperExecutionRecord) {
-        if self.records.len() >= self.capacity {
-            self.records.pop_front();
-        }
-        self.records.push_back(record);
-    }
-
-    pub fn records(&self) -> &VecDeque<KeeperExecutionRecord> {
-        &self.records
     }
 }
 
