@@ -703,6 +703,7 @@ pub struct UsageState {
     pub keeper_daily_triggered: HashMap<String, NaiveDate>,
     pub keeper_weekly_triggered: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub keeper_logs: Vec<tokenpulse_core::keeper::KeeperExecutionRecord>,
+    pub keeper_pings_in_progress: BTreeSet<String>,
     pub keeper_log_scroll: usize,
     pub last_keeper_check: Instant,
 }
@@ -763,6 +764,7 @@ impl UsageState {
             keeper_daily_triggered: HashMap::new(),
             keeper_weekly_triggered: HashMap::new(),
             keeper_logs: Vec::new(),
+            keeper_pings_in_progress: BTreeSet::new(),
             keeper_log_scroll: 0,
             last_keeper_check: Instant::now(),
         }
@@ -1197,6 +1199,7 @@ where
                         ),
                         level,
                     );
+                    state.keeper_pings_in_progress.remove(&agent);
                     state.keeper_logs.push(record);
                 }
             }
@@ -1282,7 +1285,9 @@ where
                 };
 
                 // Check 5h Daily
-                if agent_cfg.session_keeper_enabled {
+                if agent_cfg.session_keeper_enabled
+                    && !state.keeper_pings_in_progress.contains(agent_id)
+                {
                     let last_triggered = state.keeper_daily_triggered.get(agent_id).copied();
                     if tokenpulse_core::keeper::should_trigger_daily(
                         &agent_cfg.daily_wakeup_time,
@@ -1292,6 +1297,7 @@ where
                         state
                             .keeper_daily_triggered
                             .insert(agent_id.to_string(), now_local.date_naive());
+                        state.keeper_pings_in_progress.insert(agent_id.to_string());
                         let tx = msg_tx.clone();
                         let agent_cfg = agent_cfg.clone();
                         let agent_str = agent_id.to_string();
@@ -1308,7 +1314,9 @@ where
                 }
 
                 // Check Weekly
-                if agent_cfg.weekly_keeper_enabled {
+                if agent_cfg.weekly_keeper_enabled
+                    && !state.keeper_pings_in_progress.contains(agent_id)
+                {
                     let quota_snapshot = state
                         .quota_snapshots
                         .iter()
@@ -1333,6 +1341,7 @@ where
                         state
                             .keeper_weekly_triggered
                             .insert(agent_id.to_string(), now_utc);
+                        state.keeper_pings_in_progress.insert(agent_id.to_string());
                         let tx = msg_tx.clone();
                         let agent_cfg = agent_cfg.clone();
                         let agent_str = agent_id.to_string();
@@ -1690,33 +1699,45 @@ where
                             }
                             KeyCode::Char('p') => {
                                 let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
-                                let default_agents =
-                                    tokenpulse_core::config::default_keeper_agents();
-                                if let Some(agent_cfg) = config
-                                    .keeper
-                                    .agents
-                                    .get(agent)
-                                    .or_else(|| default_agents.get(agent))
-                                {
-                                    let agent_cfg = agent_cfg.clone();
-                                    let agent_str = agent.to_string();
+                                if state.keeper_pings_in_progress.contains(agent) {
                                     state.set_refresh_status(
                                         format!(
-                                            "Executing ping for {}...",
+                                            "Ping for {} is already in progress...",
                                             keeper::keeper_agent_name(agent)
                                         ),
                                         RefreshStatusLevel::Info,
                                     );
-                                    let tx = msg_tx.clone();
-                                    tokio::spawn(async move {
-                                        let rec = tokenpulse_core::keeper::execute_agent_ping(
-                                            &agent_str,
-                                            &agent_cfg,
-                                            tokenpulse_core::keeper::KeeperTriggerType::Manual,
-                                        )
-                                        .await;
-                                        let _ = tx.send(TuiMessage::KeeperPingCompleted(rec)).await;
-                                    });
+                                } else {
+                                    let default_agents =
+                                        tokenpulse_core::config::default_keeper_agents();
+                                    if let Some(agent_cfg) = config
+                                        .keeper
+                                        .agents
+                                        .get(agent)
+                                        .or_else(|| default_agents.get(agent))
+                                    {
+                                        let agent_cfg = agent_cfg.clone();
+                                        let agent_str = agent.to_string();
+                                        state.keeper_pings_in_progress.insert(agent_str.clone());
+                                        state.set_refresh_status(
+                                            format!(
+                                                "Executing ping for {}...",
+                                                keeper::keeper_agent_name(agent)
+                                            ),
+                                            RefreshStatusLevel::Info,
+                                        );
+                                        let tx = msg_tx.clone();
+                                        tokio::spawn(async move {
+                                            let rec = tokenpulse_core::keeper::execute_agent_ping(
+                                                &agent_str,
+                                                &agent_cfg,
+                                                tokenpulse_core::keeper::KeeperTriggerType::Manual,
+                                            )
+                                            .await;
+                                            let _ =
+                                                tx.send(TuiMessage::KeeperPingCompleted(rec)).await;
+                                        });
+                                    }
                                 }
                             }
                             _ => {}

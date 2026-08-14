@@ -250,9 +250,20 @@ fn render_agent_cards(
             Span::styled(&agent_cfg.model, Style::default().fg(theme.fg).bold()),
         ]));
 
+        let (status_label, status_str, status_style) =
+            if state.keeper_pings_in_progress.contains(agent_id) {
+                (
+                    "Status: ",
+                    "⟳ Ping running...",
+                    Style::default().fg(theme.accent_soft).bold(),
+                )
+            } else {
+                ("Last: ", last_status_str.as_str(), last_status_style)
+            };
+
         lines.push(Line::from(vec![
-            Span::styled("Last: ", Style::default().fg(theme.dim)),
-            Span::styled(last_status_str, last_status_style),
+            Span::styled(status_label, Style::default().fg(theme.dim)),
+            Span::styled(status_str, status_style),
         ]));
 
         lines.push(Line::raw(""));
