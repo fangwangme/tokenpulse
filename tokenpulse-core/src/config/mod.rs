@@ -207,7 +207,8 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             session_keeper_enabled: true,
             daily_wakeup_time: "10:30".to_string(),
             weekly_keeper_enabled: true,
-            command: "claude -p \"{prompt}\" --model {model}".to_string(),
+            command: "claude --bare -p \"{prompt}\" --model {model} --no-session-persistence"
+                .to_string(),
             model: "haiku".to_string(),
             prompt: "Hi".to_string(),
         },
@@ -218,8 +219,9 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             session_keeper_enabled: true,
             daily_wakeup_time: "10:30".to_string(),
             weekly_keeper_enabled: true,
-            command: "codex exec \"{prompt}\" -m {model}".to_string(),
-            model: "gpt-5.6-luna-low".to_string(),
+            command: "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
+                .to_string(),
+            model: "gpt-5.6-luna".to_string(),
             prompt: "Hi".to_string(),
         },
     );
@@ -592,10 +594,18 @@ usage_auto_refresh_secs = 900
         assert_eq!(claude.daily_wakeup_time, "10:30");
         assert!(claude.weekly_keeper_enabled);
         assert_eq!(claude.model, "haiku");
+        assert_eq!(
+            claude.command,
+            "claude --bare -p \"{prompt}\" --model {model} --no-session-persistence"
+        );
 
         let codex = config.keeper.agents.get("codex").unwrap();
         assert!(codex.session_keeper_enabled);
-        assert_eq!(codex.model, "gpt-5.6-luna-low");
+        assert_eq!(codex.model, "gpt-5.6-luna");
+        assert_eq!(
+            codex.command,
+            "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
+        );
 
         let antigravity = config.keeper.agents.get("antigravity").unwrap();
         assert!(antigravity.session_keeper_enabled);
