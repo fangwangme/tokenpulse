@@ -1631,7 +1631,7 @@ where
                         },
                         UsagePage::Keeper => match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => break,
-                            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+                            KeyCode::Left | KeyCode::BackTab => {
                                 if state.selected_keeper_index > 0 {
                                     state.selected_keeper_index -= 1;
                                 } else {
@@ -1639,27 +1639,18 @@ where
                                         keeper::KEEPER_AGENTS.len().saturating_sub(1);
                                 }
                             }
-                            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                            KeyCode::Right | KeyCode::Tab => {
                                 state.selected_keeper_index =
                                     (state.selected_keeper_index + 1) % keeper::KEEPER_AGENTS.len();
                             }
-                            KeyCode::Up | KeyCode::Char('k') => {
+                            KeyCode::Up => {
                                 state.keeper_log_scroll = state.keeper_log_scroll.saturating_sub(1);
                             }
-                            KeyCode::Down | KeyCode::Char('j') => {
+                            KeyCode::Down => {
                                 let max_scroll =
                                     keeper::keeper_logs_total_lines(&state).saturating_sub(4);
                                 state.keeper_log_scroll =
                                     (state.keeper_log_scroll + 1).min(max_scroll);
-                            }
-                            KeyCode::PageUp => {
-                                state.keeper_log_scroll = state.keeper_log_scroll.saturating_sub(5);
-                            }
-                            KeyCode::PageDown => {
-                                let max_scroll =
-                                    keeper::keeper_logs_total_lines(&state).saturating_sub(4);
-                                state.keeper_log_scroll =
-                                    (state.keeper_log_scroll + 5).min(max_scroll);
                             }
                             KeyCode::Char('1') | KeyCode::Char('d') => {
                                 let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
