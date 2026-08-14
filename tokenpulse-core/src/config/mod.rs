@@ -207,8 +207,7 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             session_keeper_enabled: true,
             daily_wakeup_time: "10:30".to_string(),
             weekly_keeper_enabled: true,
-            command: "claude --bare -p \"{prompt}\" --model {model} --no-session-persistence"
-                .to_string(),
+            command: "claude -p \"{prompt}\" --model {model} --no-session-persistence".to_string(),
             model: "haiku".to_string(),
             prompt: "Hi".to_string(),
         },
@@ -304,6 +303,7 @@ impl ConfigManager {
             if let Some(agent_cfg) = config.keeper.agents.get_mut(name) {
                 if agent_cfg.command.is_empty()
                     || agent_cfg.command.contains("agy query")
+                    || agent_cfg.command.contains("--bare")
                     || (name == "claude"
                         && agent_cfg.command == "claude -p \"{prompt}\" --model {model}")
                     || (name == "codex"
@@ -625,7 +625,7 @@ usage_auto_refresh_secs = 900
         assert_eq!(claude.model, "haiku");
         assert_eq!(
             claude.command,
-            "claude --bare -p \"{prompt}\" --model {model} --no-session-persistence"
+            "claude -p \"{prompt}\" --model {model} --no-session-persistence"
         );
 
         let codex = config.keeper.agents.get("codex").unwrap();
@@ -651,10 +651,8 @@ usage_auto_refresh_secs = 900
         let config_path = temp_dir.path().join("config.toml");
         let manager = ConfigManager { config_path };
 
-        let state = manager.toggle_keeper_enabled().unwrap();
-        assert!(!state);
-        let state2 = manager.toggle_keeper_enabled().unwrap();
-        assert!(state2);
+        let keeper_state = manager.toggle_keeper_enabled().unwrap();
+        assert!(!keeper_state);
 
         let session_state = manager.toggle_agent_session_keeper("claude").unwrap();
         assert!(!session_state);
@@ -693,7 +691,7 @@ model = "gpt-5.6-luna-low"
         let claude = loaded.keeper.agents.get("claude").unwrap();
         assert_eq!(
             claude.command,
-            "claude --bare -p \"{prompt}\" --model {model} --no-session-persistence"
+            "claude -p \"{prompt}\" --model {model} --no-session-persistence"
         );
         assert_eq!(claude.model, "haiku");
 

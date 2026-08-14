@@ -236,6 +236,7 @@ pub async fn execute_agent_ping(
         tokio::process::Command::new(program)
             .arg(arg)
             .arg(&command_str)
+            .stdin(std::process::Stdio::null())
             .output(),
     )
     .await;
