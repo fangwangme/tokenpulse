@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 const PARSER_VERSION: &str = "antigravity-v2";
 const MODEL_ALIAS_HISTORY_VERSION: u32 = 1;
@@ -384,14 +384,57 @@ async fn sync_antigravity_with_options_async(
     let sync_start = std::time::Instant::now();
     std::fs::create_dir_all(sessions_dir)?;
 
+    let mut db_conn = open_cache_db(sessions_dir)?;
+
+    if options.rebuild_all_cache {
+        db_conn.execute("DELETE FROM session_usage;", [])?;
+        db_conn.execute("DELETE FROM sessions;", [])?;
+    }
+
+    let mut cached_sessions: HashMap<(String, String), (Option<i64>, Option<i64>)> = HashMap::new();
+    if let Ok(mut stmt) = db_conn.prepare(
+        r#"
+        SELECT client, session_id, last_modified_ms, step_count FROM sessions
+        UNION
+        SELECT session_usage.client, sessions.session_id, sessions.last_modified_ms, sessions.step_count
+        FROM session_usage
+        JOIN sessions ON sessions.session_id = session_usage.session_id
+        "#,
+    ) {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        }) {
+            for row in rows {
+                if let Ok((client, id, last_mod, step_count)) = row {
+                    cached_sessions.insert((client, id), (last_mod, step_count));
+                }
+            }
+        }
+    }
+
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    if let Err(e) = sync_local_cli_conversations(
+        &mut db_conn,
+        &home,
+        &cached_sessions,
+        options.rebuild_all_cache,
+    ) {
+        debug!("Failed to sync local Antigravity CLI db files: {}", e);
+    }
+
     let connections = match detect_antigravity_connections_with_client(client).await {
         Ok(c) => c,
         Err(e) => {
-            warn!(
-                "Antigravity language server process discovery failed: {}",
+            debug!(
+                "Antigravity language server process discovery skipped/failed: {}",
                 e
             );
-            return Ok(());
+            Vec::new()
         }
     };
 
@@ -401,15 +444,8 @@ async fn sync_antigravity_with_options_async(
                 debug!("Failed to seed Antigravity model alias history: {}", e);
             }
         }
-        warn!("No running Antigravity language servers detected; skipping sync and reading cache");
+        debug!("No running Antigravity Desktop language servers detected; local CLI conversations synced");
         return Ok(());
-    }
-
-    let mut db_conn = open_cache_db(sessions_dir)?;
-
-    if options.rebuild_all_cache {
-        db_conn.execute("DELETE FROM session_usage;", [])?;
-        db_conn.execute("DELETE FROM sessions;", [])?;
     }
 
     let cached_rows_before = count_antigravity_session_cache_rows(&db_conn);
@@ -425,8 +461,6 @@ async fn sync_antigravity_with_options_async(
         };
 
     let mut synced_sessions_count = 0;
-
-    let mut cached_sessions: HashMap<(String, String), (Option<i64>, Option<i64>)> = HashMap::new();
     if let Ok(mut stmt) = db_conn.prepare(
         r#"
         SELECT client, session_id, last_modified_ms, step_count FROM sessions
@@ -903,6 +937,109 @@ fn upsert_antigravity_session_row(
             synced_at,
         ],
     )?;
+    Ok(())
+}
+
+fn sync_local_cli_conversations(
+    db_conn: &mut rusqlite::Connection,
+    home: &Path,
+    cached_sessions: &HashMap<(String, String), (Option<i64>, Option<i64>)>,
+    rebuild_all: bool,
+) -> Result<()> {
+    let cli_conv_dir = home
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("conversations");
+    if !cli_conv_dir.exists() {
+        return Ok(());
+    }
+
+    let entries = match std::fs::read_dir(&cli_conv_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+
+    let now_ms = Local::now().timestamp_millis();
+    let tx = db_conn.transaction()?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("db") {
+            if let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) {
+                if session_id.len() < 20 {
+                    continue;
+                }
+                let modified_ms = path
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(system_time_to_millis);
+
+                if !rebuild_all {
+                    if let Some((cached_lm, _)) = cached_sessions
+                        .get(&("antigravity-cli".to_string(), session_id.to_string()))
+                    {
+                        if let (Some(cached), Some(current)) = (cached_lm, modified_ms) {
+                            if *cached >= current {
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                // Read trajectory_meta and steps count from local sqlite db
+                let (trajectory_id, step_count) = if let Ok(local_db) =
+                    rusqlite::Connection::open_with_flags(
+                        &path,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                    ) {
+                    let traj_id: Option<String> = local_db
+                        .query_row(
+                            "SELECT trajectory_id FROM trajectory_meta LIMIT 1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .ok();
+                    let steps: Option<i64> = local_db
+                        .query_row("SELECT count(*) FROM steps", [], |row| row.get(0))
+                        .ok();
+                    (traj_id, steps)
+                } else {
+                    (None, None)
+                };
+
+                let summary = AntigravitySyncSummary {
+                    last_modified_ms: modified_ms,
+                    connections: Vec::new(),
+                    trajectory_id,
+                    title: None,
+                    status: None,
+                    step_count,
+                    created_time_ms: None,
+                    last_user_input_time_ms: None,
+                    project_id: None,
+                    workspace_path: None,
+                    git_root: None,
+                    repository: None,
+                    git_origin_url: None,
+                    branch_name: None,
+                    parent_conversation_id: None,
+                    mendel_experiment_ids: None,
+                };
+
+                upsert_antigravity_session_row(
+                    &tx,
+                    session_id,
+                    "antigravity-cli",
+                    &summary,
+                    "unknown",
+                    now_ms,
+                )?;
+            }
+        }
+    }
+
+    tx.commit()?;
     Ok(())
 }
 
@@ -2125,15 +2262,9 @@ fn discover_local_conversation_ids_from_home(
     active_kinds: &[AntigravityRuntimeKind],
 ) -> Vec<LocalConversationId> {
     let mut dirs = Vec::new();
-    if active_kinds.contains(&AntigravityRuntimeKind::Desktop) {
-        dirs.push((
-            home.join(".gemini")
-                .join("antigravity")
-                .join("conversations"),
-            AntigravityRuntimeKind::Desktop,
-        ));
-    }
-    if active_kinds.contains(&AntigravityRuntimeKind::Cli) {
+    // Only scan Antigravity CLI conversations directory: ~/.gemini/antigravity-cli/conversations
+    // Do not scan legacy or partial ~/.gemini/antigravity/conversations directory.
+    if active_kinds.contains(&AntigravityRuntimeKind::Cli) || active_kinds.is_empty() {
         dirs.push((
             home.join(".gemini")
                 .join("antigravity-cli")
@@ -3165,12 +3296,10 @@ mod tests {
             &[AntigravityRuntimeKind::Desktop, AntigravityRuntimeKind::Cli],
         );
 
-        assert_eq!(discovered.len(), 2);
-        assert!(discovered
+        assert_eq!(discovered.len(), 1);
+        assert!(!discovered
             .iter()
-            .any(|entry| entry.session_id == "12345678901234567890"
-                && entry.modified_ms.is_some()
-                && entry.runtime_kind == AntigravityRuntimeKind::Desktop));
+            .any(|entry| entry.session_id == "12345678901234567890"));
 
         let db_entry = discovered
             .iter()
@@ -3209,5 +3338,49 @@ mod tests {
         assert!(is_pseudo_raw_model("auto-review"));
         assert!(is_pseudo_raw_model("gemini-default"));
         assert!(!is_pseudo_raw_model("gemini-1.5-pro"));
+    }
+
+    #[test]
+    fn test_sync_local_cli_conversations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let cli_conv_dir = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("conversations");
+        std::fs::create_dir_all(&cli_conv_dir).unwrap();
+
+        let session_id = "test-session-12345678901234567890";
+        let db_path = cli_conv_dir.join(format!("{}.db", session_id));
+
+        let local_db = rusqlite::Connection::open(&db_path).unwrap();
+        local_db
+            .execute_batch(
+                "CREATE TABLE trajectory_meta (trajectory_id text, cascade_id text, trajectory_type integer, source integer, PRIMARY KEY (trajectory_id));
+                 CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, status integer);
+                 INSERT INTO trajectory_meta VALUES ('traj-123', 'test-session-12345678901234567890', 1, 1);
+                 INSERT INTO steps VALUES (0, 1, 1);
+                 INSERT INTO steps VALUES (1, 2, 1);",
+            )
+            .unwrap();
+        drop(local_db);
+
+        let cache_dir = temp_dir.path().join("cache");
+        let mut db_conn = open_cache_db(&cache_dir).unwrap();
+        let cached_sessions = HashMap::new();
+
+        sync_local_cli_conversations(&mut db_conn, home, &cached_sessions, false).unwrap();
+
+        let (count, traj_id, step_cnt): (i64, Option<String>, Option<i64>) = db_conn
+            .query_row(
+                "SELECT count(*), trajectory_id, step_count FROM sessions WHERE session_id = ?1 AND client = 'antigravity-cli'",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(traj_id, Some("traj-123".to_string()));
+        assert_eq!(step_cnt, Some(2));
     }
 }

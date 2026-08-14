@@ -236,23 +236,60 @@ impl QuotaFetcher for CodexQuotaFetcher {
     }
 
     async fn fetch_quota(&self) -> Result<QuotaSnapshot> {
-        let creds = self.auth.load_credentials()?;
+        let mut candidate = self.auth.load_auth_candidate()?;
 
-        let tokens = creds
+        if let Some(ref tokens) = candidate.credentials.tokens {
+            if self.auth.is_token_expired(tokens) {
+                debug!("Codex access token expired or near expiry; attempting proactive refresh");
+                match self.auth.refresh_tokens(&candidate, &self.client).await {
+                    Ok(updated) => {
+                        candidate = updated;
+                    }
+                    Err(e) => {
+                        debug!("Proactive Codex token refresh failed: {}", e);
+                    }
+                }
+            }
+        }
+
+        let mut access_token = candidate
+            .credentials
             .tokens
             .as_ref()
+            .map(|t| t.access_token.clone())
             .ok_or_else(|| anyhow!("No tokens found in Codex credentials"))?;
 
         debug!("Fetching Codex quota with access token");
 
-        let response = self
+        let mut response = self
             .client
             .get(QUOTA_API_URL)
-            .bearer_auth(&tokens.access_token)
+            .bearer_auth(&access_token)
             .send()
             .await?;
 
         debug!("Codex quota response status: {}", response.status());
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            debug!("Codex returned 401 Unauthorized; attempting reactive token refresh");
+            match self.auth.refresh_tokens(&candidate, &self.client).await {
+                Ok(updated) => {
+                    candidate = updated;
+                    if let Some(ref refreshed_tokens) = candidate.credentials.tokens {
+                        access_token = refreshed_tokens.access_token.clone();
+                        response = self
+                            .client
+                            .get(QUOTA_API_URL)
+                            .bearer_auth(&access_token)
+                            .send()
+                            .await?;
+                    }
+                }
+                Err(e) => {
+                    debug!("Reactive Codex token refresh failed: {}", e);
+                }
+            }
+        }
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(anyhow!(
@@ -292,7 +329,7 @@ impl QuotaFetcher for CodexQuotaFetcher {
 
         let email = self.auth.load_email();
 
-        let rate_limit_reset_credits = match self.fetch_reset_credits(&tokens.access_token).await {
+        let rate_limit_reset_credits = match self.fetch_reset_credits(&access_token).await {
             Ok(credits) => credits,
             Err(err) => {
                 debug!("Codex reset-credit fetch skipped: {}", err);
