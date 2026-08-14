@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Row, Table},
+    widgets::{Block, Borders, Paragraph},
 };
 use tokenpulse_core::{
     config::{default_keeper_agents, Config},
@@ -434,7 +434,7 @@ mod tests {
             id: "rec-1".to_string(),
             agent: "claude".to_string(),
             trigger_type: KeeperTriggerType::Daily,
-            model: "claude-3-5-haiku-20241022".to_string(),
+            model: "haiku".to_string(),
             prompt: "Hi".to_string(),
             command_executed: "claude -p \"Hi\"".to_string(),
             timestamp: Local::now(),

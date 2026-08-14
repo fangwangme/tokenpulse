@@ -208,7 +208,7 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             daily_wakeup_time: "10:30".to_string(),
             weekly_keeper_enabled: true,
             command: "claude -p \"{prompt}\" --model {model}".to_string(),
-            model: "claude-3-5-haiku-20241022".to_string(),
+            model: "haiku".to_string(),
             prompt: "Hi".to_string(),
         },
     );
@@ -591,7 +591,7 @@ usage_auto_refresh_secs = 900
         assert!(claude.session_keeper_enabled);
         assert_eq!(claude.daily_wakeup_time, "10:30");
         assert!(claude.weekly_keeper_enabled);
-        assert_eq!(claude.model, "claude-3-5-haiku-20241022");
+        assert_eq!(claude.model, "haiku");
 
         let codex = config.keeper.agents.get("codex").unwrap();
         assert!(codex.session_keeper_enabled);
