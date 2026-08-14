@@ -63,7 +63,7 @@ fn render_header_bar(f: &mut ratatui::Frame, area: Rect, config: &Config, theme:
         Span::raw("   "),
         Span::styled("Hint: ", Style::default().fg(theme.accent_soft).bold()),
         Span::styled(
-            "To customize wakeup time/models/commands, edit ~/.config/tokenpulse/config.toml",
+            "To customize wakeup time/models/commands, edit ~/.local/share/tokenpulse/config.toml",
             Style::default().fg(theme.dim),
         ),
     ]);
