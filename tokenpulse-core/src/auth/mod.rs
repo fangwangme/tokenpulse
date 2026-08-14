@@ -112,3 +112,35 @@ pub fn decode_jwt_client_id(token: &str) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
+
+pub fn decode_jwt_exp(token: &str) -> Option<i64> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let payload_bytes = decode_base64(parts[1]).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    json.get("exp").and_then(|v| v.as_i64())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn test_decode_jwt_exp() {
+        let payload = r#"{"exp":1750000000,"email":"test@example.com"}"#;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
+        let token = format!("header.{}.signature", b64);
+
+        assert_eq!(decode_jwt_exp(&token), Some(1750000000));
+        assert_eq!(
+            decode_jwt_email(&token),
+            Some("test@example.com".to_string())
+        );
+
+        let invalid_token = "not.a.valid.jwt";
+        assert_eq!(decode_jwt_exp(invalid_token), None);
+    }
+}

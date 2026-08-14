@@ -206,7 +206,7 @@ impl AntigravityQuotaFetcher {
         })
     }
 
-    fn load_antigravity_creds(&self) -> Result<AntigravityCredentials> {
+    async fn load_antigravity_creds(&self) -> Result<AntigravityCredentials> {
         // 1. Try to read from cache
         let cache_path =
             if let Ok(override_path) = std::env::var("TOKENPULSE_ANTIGRAVITY_AUTH_PATH") {
@@ -253,14 +253,22 @@ impl AntigravityQuotaFetcher {
                     let decoded = crate::auth::decode_base64(b64_payload)?;
                     let keychain_creds: AntigravityCredentials = serde_json::from_slice(&decoded)?;
 
-                    // If keychain token is not expired, we can return it
+                    // If keychain token is not expired, we can cache and return it
                     if !is_antigravity_token_expired(&keychain_creds.token.expiry) {
+                        if let Some(parent) = cache_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Ok(json_data) = serde_json::to_string(&keychain_creds) {
+                            let _ = std::fs::write(&cache_path, json_data);
+                        }
                         return Ok(keychain_creds);
                     }
 
                     // If keychain is expired, but we have a refresh token, we refresh it
                     if let Some(ref refresh) = keychain_creds.token.refresh_token {
-                        return self.refresh_antigravity_token(&keychain_creds, refresh);
+                        return self
+                            .refresh_antigravity_token(&keychain_creds, refresh)
+                            .await;
                     }
                 }
             }
@@ -269,7 +277,7 @@ impl AntigravityQuotaFetcher {
         // If we couldn't get a valid token from keychain but have a cached token with refresh token:
         if let Some(ref creds) = cached_creds {
             if let Some(ref refresh) = creds.token.refresh_token {
-                return self.refresh_antigravity_token(creds, refresh);
+                return self.refresh_antigravity_token(creds, refresh).await;
             }
         }
 
@@ -278,7 +286,7 @@ impl AntigravityQuotaFetcher {
         ))
     }
 
-    fn refresh_antigravity_token(
+    async fn refresh_antigravity_token(
         &self,
         original_creds: &AntigravityCredentials,
         refresh_token: &str,
@@ -295,29 +303,48 @@ impl AntigravityQuotaFetcher {
             refresh_token: Option<String>,
         }
 
-        let response: RefreshResponse = ureq::post("https://oauth2.googleapis.com/token")
-            .send_form(&[
-                ("client_id", client_id),
-                ("client_secret", &client_secret),
-                ("refresh_token", refresh_token),
-                ("grant_type", "refresh_token"),
-            ])
-            .map_err(|e| anyhow!("Google OAuth token refresh failed: {}", e))?
-            .into_json()
+        let params = [
+            ("client_id", client_id),
+            ("client_secret", &client_secret),
+            ("refresh_token", refresh_token),
+            ("grant_type", "refresh_token"),
+        ];
+
+        let response = self
+            .ls_client
+            .post("https://oauth2.googleapis.com/token")
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Google OAuth token refresh failed: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Google OAuth token refresh failed with HTTP {}: {}",
+                status,
+                body
+            ));
+        }
+
+        let parsed: RefreshResponse = response
+            .json()
+            .await
             .map_err(|e| anyhow!("Failed to parse Google OAuth token refresh response: {}", e))?;
 
-        if response.access_token.is_empty() {
+        if parsed.access_token.is_empty() {
             return Err(anyhow!("Received empty access token from Google OAuth"));
         }
 
-        let expires_in = response.expires_in.unwrap_or(3599);
+        let expires_in = parsed.expires_in.unwrap_or(3599);
         let expiry_dt = Utc::now() + chrono::Duration::seconds(expires_in);
         let expiry_str = expiry_dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
 
         let mut new_creds = original_creds.clone();
-        new_creds.token.access_token = response.access_token;
+        new_creds.token.access_token = parsed.access_token;
         new_creds.token.expiry = expiry_str;
-        if let Some(new_refresh) = response.refresh_token {
+        if let Some(new_refresh) = parsed.refresh_token {
             if !new_refresh.is_empty() {
                 new_creds.token.refresh_token = Some(new_refresh);
             }
@@ -344,10 +371,10 @@ impl AntigravityQuotaFetcher {
     }
 
     async fn fetch_quota_via_cloud_code(&self) -> Result<QuotaSnapshot> {
-        let creds = self.load_antigravity_creds()?;
+        let mut creds = self.load_antigravity_creds().await?;
 
         let api_url = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
-        let response = self
+        let mut response = self
             .ls_client
             .post(api_url)
             .bearer_auth(&creds.token.access_token)
@@ -356,6 +383,24 @@ impl AntigravityQuotaFetcher {
             .json(&serde_json::json!({}))
             .send()
             .await?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(ref refresh) = creds.token.refresh_token {
+                debug!("Antigravity returned 401 Unauthorized; attempting token refresh");
+                if let Ok(refreshed) = self.refresh_antigravity_token(&creds, refresh).await {
+                    creds = refreshed;
+                    response = self
+                        .ls_client
+                        .post(api_url)
+                        .bearer_auth(&creds.token.access_token)
+                        .header("User-Agent", "antigravity")
+                        .header("Content-Type", "application/json")
+                        .json(&serde_json::json!({}))
+                        .send()
+                        .await?;
+                }
+            }
+        }
 
         let status = response.status();
         let body = response.text().await?;
@@ -685,5 +730,24 @@ mod tests {
         let metadata = user_metadata_from_status(parsed);
         assert_eq!(metadata.account.as_deref(), Some("user@example.com"));
         assert_eq!(metadata.plan.as_deref(), Some("Pro"));
+    }
+
+    #[test]
+    fn test_is_antigravity_token_expired() {
+        let now = Utc::now();
+        // Expired (1 hour ago)
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(is_antigravity_token_expired(&past));
+
+        // Near-expiry (within 5 minutes buffer)
+        let near = (now + chrono::Duration::minutes(3)).to_rfc3339();
+        assert!(is_antigravity_token_expired(&near));
+
+        // Valid (1 hour in future)
+        let future = (now + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(!is_antigravity_token_expired(&future));
+
+        // Malformed string should be treated as expired
+        assert!(is_antigravity_token_expired("not-a-date"));
     }
 }
