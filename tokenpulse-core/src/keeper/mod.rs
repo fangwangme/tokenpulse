@@ -37,11 +37,125 @@ pub struct KeeperExecutionRecord {
     pub output_snippet: String,
 }
 
+/// Maximum number of characters kept from a ping's combined output.
+const OUTPUT_SNIPPET_MAX_CHARS: usize = 300;
+
+/// How long a single ping may run before it is abandoned and its child killed.
+const PING_TIMEOUT_SECS: u64 = 45;
+
+/// How long after the configured wakeup time a missed daily ping may still fire.
+///
+/// Without an upper bound, opening the TUI at any point later in the day fires a
+/// "10:30" ping immediately, which both wastes quota and anchors the 5h session
+/// window at the wrong time.
+const DAILY_CATCH_UP_MINUTES: i64 = 120;
+
+/// Escapes a value interpolated into a shell command template.
+///
+/// The template is trusted (users write it themselves and may use shell syntax
+/// in it), but the substituted values are data. All three built-in templates
+/// wrap `{prompt}` in double quotes, so a prompt containing `"` would otherwise
+/// close that quote and let the rest of the prompt run as shell code.
+fn escape_shell_value(value: &str) -> String {
+    let stripped: String = value.chars().filter(|c| !c.is_control()).collect();
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        stripped
+            .chars()
+            .flat_map(|c| {
+                let escape = matches!(c, '\\' | '"' | '$' | '`');
+                escape.then_some('\\').into_iter().chain(std::iter::once(c))
+            })
+            .collect()
+    }
+
+    // cmd.exe has no backslash escaping; drop the characters that would let a
+    // value break out of the template instead.
+    #[cfg(target_os = "windows")]
+    {
+        stripped
+            .chars()
+            .filter(|c| !matches!(c, '"' | '&' | '|' | '<' | '>' | '^' | '%'))
+            .collect()
+    }
+}
+
 /// Formats the command string by replacing `{prompt}` and `{model}` placeholders.
 pub fn format_keeper_command(template: &str, model: &str, prompt: &str) -> String {
     template
-        .replace("{model}", model)
-        .replace("{prompt}", prompt)
+        .replace("{model}", &escape_shell_value(model))
+        .replace("{prompt}", &escape_shell_value(prompt))
+}
+
+/// Collapses raw CLI output into a single line that is safe to hand to ratatui.
+///
+/// Two hazards are handled here. Agent CLIs emit carriage-return spinners, tabs
+/// and ANSI escapes; ratatui drops `\n` but writes every other control character
+/// into a buffer cell, which crossterm then prints verbatim and corrupts the
+/// frame. And truncation must count characters, not bytes — slicing a `String`
+/// at byte 300 panics whenever that offset lands inside a multi-byte codepoint,
+/// which any CJK or emoji reply will eventually do.
+pub fn sanitize_output_snippet(raw: &str) -> String {
+    let without_ansi = strip_ansi_sequences(raw);
+    let collapsed = without_ansi
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if collapsed.chars().count() > OUTPUT_SNIPPET_MAX_CHARS {
+        let truncated: String = collapsed.chars().take(OUTPUT_SNIPPET_MAX_CHARS).collect();
+        format!("{truncated}...")
+    } else {
+        collapsed
+    }
+}
+
+/// Removes ANSI CSI/OSC escape sequences so colored CLI output stays readable.
+fn strip_ansi_sequences(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            // CSI: ESC [ ... <final byte in 0x40..=0x7e>
+            Some('[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: ESC ] ... terminated by BEL or ESC \
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // Two-character escape such as ESC c.
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+
+    out
 }
 
 /// Evaluates whether the daily 5h wakeup trigger should fire right now.
@@ -61,8 +175,9 @@ pub fn should_trigger_daily(
         }
     }
 
-    let current_time = now.time();
-    current_time >= target_time
+    let elapsed = now.time().signed_duration_since(target_time);
+    elapsed >= chrono::Duration::zero()
+        && elapsed <= chrono::Duration::minutes(DAILY_CATCH_UP_MINUTES)
 }
 
 /// Calculates the next daily trigger timestamp.
@@ -174,18 +289,39 @@ pub fn extract_weekly_reset_time(
         }
     }
 
-    // 2. Fallback to any window with reset_time that is not a short 5h session window
+    // 2. Fallback to any window with reset_time that is not a short session window.
+    //    A window that declares a sub-day period is never the weekly one, even if
+    //    its label does not say "5h".
     snapshot.windows.iter().find_map(|w| {
         let label_lower = w.label.to_lowercase();
-        if !label_lower.contains("5h")
-            && !label_lower.contains("5-hour")
-            && !label_lower.contains("5 hour")
-        {
-            w.resets_at
-        } else {
+        let looks_short = label_lower.contains("5h")
+            || label_lower.contains("5-hour")
+            || label_lower.contains("5 hour")
+            || w.period_duration_ms
+                .is_some_and(|ms| ms < 24 * 60 * 60 * 1000);
+        if looks_short {
             None
+        } else {
+            w.resets_at
         }
     })
+}
+
+/// Finds the quota snapshot backing a Keeper agent, preferring an exact
+/// provider match over an alias so a future `gemini` provider cannot be picked
+/// up by the `antigravity` agent just because it appears earlier in the list.
+pub fn find_snapshot_for_agent<'a>(
+    snapshots: &'a [crate::provider::QuotaSnapshot],
+    agent_id: &str,
+) -> Option<&'a crate::provider::QuotaSnapshot> {
+    snapshots
+        .iter()
+        .find(|s| s.provider.eq_ignore_ascii_case(agent_id))
+        .or_else(|| {
+            snapshots
+                .iter()
+                .find(|s| matches_keeper_agent(&s.provider, agent_id))
+        })
 }
 
 /// Asynchronously executes a CLI heartbeat command.
@@ -211,12 +347,15 @@ pub async fn execute_agent_ping(
     #[cfg(not(target_os = "windows"))]
     let (program, arg) = ("sh", "-c");
 
+    // `kill_on_drop` matters here: on timeout the `output()` future is dropped,
+    // and without it the spawned CLI keeps running detached forever.
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(45),
+        std::time::Duration::from_secs(PING_TIMEOUT_SECS),
         tokio::process::Command::new(program)
             .arg(arg)
             .arg(&command_str)
             .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
             .output(),
     )
     .await;
@@ -230,24 +369,26 @@ pub async fn execute_agent_ping(
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let combined = if !stderr.trim().is_empty() {
-                format!("{}\n{}", stdout.trim(), stderr.trim())
+                format!("{} {}", stdout.trim(), stderr.trim())
             } else {
                 stdout.trim().to_string()
             };
-            let snippet = if combined.is_empty() {
-                "Command executed (empty output)".to_string()
-            } else {
-                let trimmed = combined.trim();
-                if trimmed.len() > 300 {
-                    format!("{}...", &trimmed[..300])
-                } else {
-                    trimmed.to_string()
-                }
+            let snippet = match sanitize_output_snippet(&combined) {
+                s if s.is_empty() => "Command executed (empty output)".to_string(),
+                s => s,
             };
             (is_success, code, snippet)
         }
-        Ok(Err(e)) => (false, None, format!("Execution failed: {}", e)),
-        Err(_) => (false, None, "Execution timed out after 45s".to_string()),
+        Ok(Err(e)) => (
+            false,
+            None,
+            sanitize_output_snippet(&format!("Execution failed: {e}")),
+        ),
+        Err(_) => (
+            false,
+            None,
+            format!("Execution timed out after {PING_TIMEOUT_SECS}s"),
+        ),
     };
 
     let record_id = format!("{}-{}-{}", agent, timestamp.timestamp_millis(), duration_ms);
@@ -267,6 +408,73 @@ pub async fn execute_agent_ping(
     }
 }
 
+/// Builds a failure record for a ping that never produced one of its own.
+pub fn failed_ping_record(
+    agent: &str,
+    config: &AgentKeeperConfig,
+    trigger_type: KeeperTriggerType,
+    reason: &str,
+) -> KeeperExecutionRecord {
+    let timestamp = Local::now();
+    KeeperExecutionRecord {
+        id: format!("{}-{}-failed", agent, timestamp.timestamp_millis()),
+        agent: agent.to_string(),
+        trigger_type,
+        model: config.model.clone(),
+        prompt: config.prompt.clone(),
+        command_executed: format_keeper_command(&config.command, &config.model, &config.prompt),
+        timestamp,
+        duration_ms: 0,
+        success: false,
+        exit_code: None,
+        output_snippet: sanitize_output_snippet(reason),
+    }
+}
+
+/// Last-fired bookkeeping for the scheduled triggers.
+///
+/// This has to outlive the process: the maps used to be in-memory only, so every
+/// TUI restart after the configured wakeup time fired another daily ping.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KeeperTriggerState {
+    #[serde(default)]
+    pub daily_triggered: std::collections::HashMap<String, NaiveDate>,
+    #[serde(default)]
+    pub weekly_triggered: std::collections::HashMap<String, DateTime<Utc>>,
+}
+
+impl KeeperTriggerState {
+    /// Reads the state file, falling back to empty state if it is missing or
+    /// unreadable — a corrupt file must not stop the TUI from starting.
+    pub fn load(path: &std::path::Path) -> Self {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        serde_json::from_str(&content).unwrap_or_else(|e| {
+            tracing::warn!("Failed to parse keeper state at {}: {e}", path.display());
+            Self::default()
+        })
+    }
+
+    /// Best-effort persist; failures are logged, never surfaced to the UI.
+    pub fn save(&self, path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!("Failed to create keeper state dir: {e}");
+                return;
+            }
+        }
+        match serde_json::to_string_pretty(self) {
+            Ok(content) => {
+                if let Err(e) = std::fs::write(path, content) {
+                    tracing::warn!("Failed to write keeper state: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("Failed to serialize keeper state: {e}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +488,107 @@ mod tests {
             formatted,
             "claude -p \"Hello World\" --model claude-3-5-haiku-20241022"
         );
+    }
+
+    #[test]
+    fn test_sanitize_output_snippet_handles_multibyte_and_control_chars() {
+        // Byte 300 lands inside a multi-byte codepoint; slicing here used to panic.
+        let cjk = format!("Hello! {}", "你好，很高兴见到你。".repeat(40));
+        let snippet = sanitize_output_snippet(&cjk);
+        assert_eq!(snippet.chars().count(), OUTPUT_SNIPPET_MAX_CHARS + 3);
+        assert!(snippet.ends_with("..."));
+
+        // ratatui only filters `\n`; every other control char reaches the terminal.
+        let noisy = "A\rB\tC\u{7}D\nE";
+        let cleaned = sanitize_output_snippet(noisy);
+        assert!(!cleaned.chars().any(char::is_control));
+        assert_eq!(cleaned, "A B C D E");
+
+        // ANSI colour sequences are dropped rather than shown as `[31m`.
+        assert_eq!(sanitize_output_snippet("\u{1b}[31mred\u{1b}[0m"), "red");
+        assert_eq!(sanitize_output_snippet("   "), "");
+    }
+
+    #[test]
+    fn test_format_keeper_command_escapes_substituted_values() {
+        // A prompt containing a double quote used to close the template's quote
+        // and run the remainder as shell code.
+        let cmd =
+            format_keeper_command("echo \"{prompt}\"", "m", "hi\"; touch /tmp/pwned; echo \"");
+        assert!(!cmd.contains("; touch /tmp/pwned; echo \"\""));
+        assert!(cmd.contains("\\\""));
+
+        // Ordinary prompts are untouched.
+        assert_eq!(
+            format_keeper_command("claude -p \"{prompt}\" --model {model}", "haiku", "Hi"),
+            "claude -p \"Hi\" --model haiku"
+        );
+    }
+
+    #[test]
+    fn test_daily_trigger_does_not_fire_long_after_the_window() {
+        let target = "10:30";
+        // Opening the TUI late at night must not fire a "10:30" ping.
+        let late = Local.with_ymd_and_hms(2026, 8, 15, 23, 0, 0).unwrap();
+        assert!(!should_trigger_daily(target, None, late));
+
+        // Still fires inside the catch-up window.
+        let within = Local.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        assert!(should_trigger_daily(target, None, within));
+    }
+
+    #[test]
+    fn test_find_snapshot_prefers_exact_provider_match() {
+        use crate::provider::QuotaSnapshot;
+
+        let make = |provider: &str| QuotaSnapshot {
+            provider: provider.to_string(),
+            plan: None,
+            account: None,
+            windows: vec![],
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: Utc::now(),
+        };
+
+        // `gemini` aliases to the antigravity agent, but an exact match wins even
+        // when the alias appears first.
+        let snapshots = vec![make("gemini"), make("antigravity")];
+        assert_eq!(
+            find_snapshot_for_agent(&snapshots, "antigravity")
+                .unwrap()
+                .provider,
+            "antigravity"
+        );
+        assert!(find_snapshot_for_agent(&snapshots, "codex").is_none());
+    }
+
+    #[test]
+    fn test_keeper_trigger_state_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("keeper_state.json");
+
+        let mut state = KeeperTriggerState::default();
+        state.daily_triggered.insert(
+            "claude".to_string(),
+            NaiveDate::from_ymd_opt(2026, 8, 15).unwrap(),
+        );
+        state.save(&path);
+
+        let loaded = KeeperTriggerState::load(&path);
+        assert_eq!(
+            loaded.daily_triggered.get("claude"),
+            Some(&NaiveDate::from_ymd_opt(2026, 8, 15).unwrap())
+        );
+
+        // Missing and corrupt files degrade to empty state instead of failing.
+        assert!(
+            KeeperTriggerState::load(dir.path().join("nope.json").as_path())
+                .daily_triggered
+                .is_empty()
+        );
+        std::fs::write(&path, "not json").unwrap();
+        assert!(KeeperTriggerState::load(&path).daily_triggered.is_empty());
     }
 
     #[test]
@@ -383,5 +692,83 @@ mod tests {
         assert!(matches_keeper_agent("anthropic", "claude"));
         assert!(matches_keeper_agent("codex", "codex"));
         assert!(matches_keeper_agent("openai", "codex"));
+    }
+
+    fn ping_config(command: &str) -> AgentKeeperConfig {
+        AgentKeeperConfig {
+            session_keeper_enabled: true,
+            daily_wakeup_time: "10:30".to_string(),
+            weekly_keeper_enabled: true,
+            command: command.to_string(),
+            model: "m".to_string(),
+            prompt: "p".to_string(),
+        }
+    }
+
+    /// A CJK reply is over 300 bytes long well before it is 300 characters long;
+    /// the old byte slice panicked on exactly this input.
+    #[tokio::test]
+    async fn test_ping_survives_multibyte_reply() {
+        let reply = "你好，很高兴见到你。".repeat(10);
+        let record = execute_agent_ping(
+            "claude",
+            &ping_config(&format!("printf '%s' 'Hello! {reply}'")),
+            KeeperTriggerType::Manual,
+        )
+        .await;
+
+        assert!(record.success);
+        assert!(record.output_snippet.starts_with("Hello! 你好"));
+        assert_eq!(record.output_snippet.chars().count(), 107);
+    }
+
+    #[tokio::test]
+    async fn test_ping_output_is_single_line_without_control_chars() {
+        let record = execute_agent_ping(
+            "claude",
+            &ping_config("printf 'line1\\nline2'; printf '\\x1b[31mwarn\\x1b[0m' 1>&2"),
+            KeeperTriggerType::Manual,
+        )
+        .await;
+
+        assert_eq!(record.output_snippet, "line1 line2 warn");
+    }
+
+    /// A prompt containing a double quote used to close the template's quoting
+    /// and run whatever followed as shell code.
+    #[tokio::test]
+    async fn test_prompt_cannot_break_out_of_command_template() {
+        let marker = std::env::temp_dir().join("tokenpulse_keeper_injection_test");
+        let _ = std::fs::remove_file(&marker);
+
+        let mut config = ping_config("echo \"{prompt}\"");
+        config.prompt = format!("hi\"; touch {}; echo \"", marker.display());
+        execute_agent_ping("claude", &config, KeeperTriggerType::Manual).await;
+
+        assert!(!marker.exists(), "prompt escaped the command template");
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// Dropping the `output()` future on timeout must not leave the CLI running.
+    #[tokio::test]
+    async fn test_timed_out_ping_kills_its_child() {
+        let marker = std::env::temp_dir().join("tokenpulse_keeper_kill_test");
+        let _ = std::fs::remove_file(&marker);
+
+        let started = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("sleep 2 && touch {}", marker.display()))
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        assert!(started.is_err(), "command should have timed out");
+
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert!(!marker.exists(), "child outlived the timeout");
+        let _ = std::fs::remove_file(&marker);
     }
 }

@@ -28,6 +28,7 @@ pub fn render_keeper_tab(
     area: Rect,
     state: &UsageState,
     config: &Config,
+    config_path: &std::path::Path,
     theme: &Theme,
 ) {
     let chunks = Layout::default()
@@ -39,12 +40,18 @@ pub fn render_keeper_tab(
         ])
         .split(area);
 
-    render_header_bar(f, chunks[0], config, theme);
+    render_header_bar(f, chunks[0], config, config_path, theme);
     render_agent_cards(f, chunks[1], state, config, theme);
     render_logs_panel(f, chunks[2], state, theme);
 }
 
-fn render_header_bar(f: &mut ratatui::Frame, area: Rect, config: &Config, theme: &Theme) {
+fn render_header_bar(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    config: &Config,
+    config_path: &std::path::Path,
+    theme: &Theme,
+) {
     let global_enabled = config.keeper.enabled;
     let status_str = if global_enabled {
         " [ENABLED] "
@@ -63,7 +70,10 @@ fn render_header_bar(f: &mut ratatui::Frame, area: Rect, config: &Config, theme:
         Span::raw("   "),
         Span::styled("Hint: ", Style::default().fg(theme.accent_soft).bold()),
         Span::styled(
-            "To customize wakeup time/models/commands, edit ~/.local/share/tokenpulse/config.toml",
+            format!(
+                "To customize wakeup time/models/commands, edit {}",
+                config_path.display()
+            ),
             Style::default().fg(theme.dim),
         ),
     ]);
@@ -168,11 +178,9 @@ fn render_agent_cards(
         };
 
         // Find quota snapshot for weekly reset
-        let quota_snapshot = state
-            .quota_snapshots
-            .iter()
-            .find(|s| tokenpulse_core::keeper::matches_keeper_agent(&s.provider, agent_id));
-        let resets_at = quota_snapshot.and_then(tokenpulse_core::keeper::extract_weekly_reset_time);
+        let resets_at =
+            tokenpulse_core::keeper::find_snapshot_for_agent(&state.quota_snapshots, agent_id)
+                .and_then(tokenpulse_core::keeper::extract_weekly_reset_time);
 
         let next_weekly = compute_next_weekly_trigger(
             resets_at,
@@ -279,12 +287,28 @@ fn render_agent_cards(
     }
 }
 
+/// Header + 4 detail rows + blank separator, as emitted by `render_logs_panel`.
+pub const KEEPER_LOG_LINES_PER_RECORD: usize = 6;
+
 pub fn keeper_logs_total_lines(state: &UsageState) -> usize {
     if state.keeper_logs.is_empty() {
         return 1;
     }
-    // Each log record is 6 lines (header + 4 bullet points + empty line)
-    state.keeper_logs.len() * 6
+    state.keeper_logs.len() * KEEPER_LOG_LINES_PER_RECORD
+}
+
+/// Largest useful scroll offset: stop once the last record is on screen instead
+/// of letting the view scroll past the end into blank space.
+pub fn keeper_log_scroll_max(state: &UsageState, frame_area: Rect) -> usize {
+    let visible = keeper_logs_visible_height(frame_area);
+    keeper_logs_total_lines(state).saturating_sub(visible)
+}
+
+/// Height of the log panel's inner area, mirroring `render_keeper_tab`'s layout.
+fn keeper_logs_visible_height(frame_area: Rect) -> usize {
+    let body = super::dashboard_body_area(frame_area);
+    // 3 rows of header bar + 12 rows of agent cards, then the block's borders.
+    usize::from(body.height).saturating_sub(3 + 12 + 2)
 }
 
 fn render_logs_panel(f: &mut ratatui::Frame, area: Rect, state: &UsageState, theme: &Theme) {
@@ -448,7 +472,14 @@ mod tests {
 
         terminal
             .draw(|f| {
-                render_keeper_tab(f, f.area(), &state, &config, &theme);
+                render_keeper_tab(
+                    f,
+                    f.area(),
+                    &state,
+                    &config,
+                    std::path::Path::new("/tmp/tokenpulse/config.toml"),
+                    &theme,
+                );
             })
             .unwrap();
     }

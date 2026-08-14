@@ -13,8 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Weekly Auto-Sync**: Automated quota synchronization timed precisely 1 minute after weekly reset to maximize resource rollover.
   - **Live Execution Stream**: Multi-line live heartbeat logs showing executed CLI commands, models, prompts, responses, duration, and status with smooth mouse wheel scrolling.
   - **Single-Key Toggles & Manual Test**: `[1/d]` to toggle 5h keeper, `[2/w]` to toggle weekly sync, and `[p]` for instant test ping with in-flight concurrency locking.
-  - **Automated Configuration Migration**: Transparently detects and upgrades legacy keeper commands to optimal headless, non-interactive flags (`--bare`, `--no-session-persistence`, `--skip-git-repo-check`, `--ephemeral`, `haiku`, `gpt-5.6-luna`).
+  - **Opt-In by Design**: The engine is disabled by default and is turned on from the Settings tab, since running it spends real quota on every scheduled ping.
+  - **Automated Configuration Migration**: Transparently detects and upgrades the exact keeper commands shipped by earlier builds to optimal headless, non-interactive flags (`--no-session-persistence`, `--skip-git-repo-check`, `--ephemeral`, `haiku`, `gpt-5.6-luna`), leaving hand-written commands untouched.
+  - **Persistent Trigger History**: Last-fired timestamps are stored in `keeper_state.json` next to the config, so restarting the TUI no longer re-fires a scheduled ping, and a missed daily wakeup is only caught up within two hours of its configured time.
   - **Robust Provider & Reset Extraction**: Accurately extracts weekly reset timestamps from all provider formats including Antigravity's `Gemini (7d)` and `Claude (7d)` rate windows.
+
+### Fixed
+- Keeper pings no longer panic when an agent replies with non-ASCII text. The output snippet was truncated on a byte offset, which splits multi-byte characters; a panicking ping task never reported back, leaving that agent stuck on "Ping running..." and blocked from every later ping.
+- Keeper output is sanitized before display: carriage returns, tabs, ANSI escapes and other control characters from agent CLIs are stripped instead of being written straight into the terminal, and multi-line replies are collapsed onto one line.
+- Prompts and models are shell-escaped when substituted into a keeper command template, so a value containing a quote can no longer break out of the template and run as a command.
+- A keeper ping that hits its 45s timeout now kills the CLI it started instead of leaving it running detached.
 
 ## [0.4.11] - 2026-07-27
 

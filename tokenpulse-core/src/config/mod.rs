@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -155,7 +155,10 @@ impl Default for DisplayConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeeperConfig {
-    #[serde(default = "default_true")]
+    /// Off by default: the engine spends real quota by driving the agent CLIs,
+    /// so it has to be something the user turns on rather than something an
+    /// upgrade turns on for them.
+    #[serde(default)]
     pub enabled: bool,
     #[serde(default = "default_keeper_check_interval_secs")]
     pub check_interval_secs: u32,
@@ -238,10 +241,30 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
     map
 }
 
+/// Commands that shipped as defaults in earlier builds and should be replaced.
+///
+/// These are matched exactly rather than by substring: an earlier `contains("--bare")`
+/// check also clobbered any hand-written command that happened to use that flag.
+const LEGACY_KEEPER_COMMANDS: &[(&str, &str)] = &[
+    ("claude", "claude -p \"{prompt}\" --model {model}"),
+    (
+        "claude",
+        "claude --bare -p \"{prompt}\" --model {model} --no-session-persistence",
+    ),
+    ("codex", "codex exec \"{prompt}\" -m {model}"),
+    ("antigravity", "agy query \"{prompt}\" --model {model}"),
+];
+
+fn is_legacy_keeper_command(agent: &str, command: &str) -> bool {
+    LEGACY_KEEPER_COMMANDS
+        .iter()
+        .any(|(name, legacy)| *name == agent && *legacy == command.trim())
+}
+
 impl Default for KeeperConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             check_interval_secs: default_keeper_check_interval_secs(),
             agents: default_keeper_agents(),
         }
@@ -279,6 +302,14 @@ impl ConfigManager {
         &self.config_path
     }
 
+    /// Where the Keeper's last-fired bookkeeping lives, alongside the config.
+    pub fn keeper_state_path(&self) -> PathBuf {
+        self.config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("keeper_state.json")
+    }
+
     pub fn exists(&self) -> bool {
         self.config_path.exists()
     }
@@ -302,12 +333,7 @@ impl ConfigManager {
         for (name, default_cfg) in &default_agents {
             if let Some(agent_cfg) = config.keeper.agents.get_mut(name) {
                 if agent_cfg.command.is_empty()
-                    || agent_cfg.command.contains("agy query")
-                    || agent_cfg.command.contains("--bare")
-                    || (name == "claude"
-                        && agent_cfg.command == "claude -p \"{prompt}\" --model {model}")
-                    || (name == "codex"
-                        && agent_cfg.command == "codex exec \"{prompt}\" -m {model}")
+                    || is_legacy_keeper_command(name, &agent_cfg.command)
                 {
                     agent_cfg.command = default_cfg.command.clone();
                     modified = true;
@@ -367,14 +393,6 @@ impl ConfigManager {
             p.enabled = false;
         }
         self.save(&config)
-    }
-
-    pub fn toggle_keeper_enabled(&self) -> Result<bool> {
-        let mut config = self.load().unwrap_or_default();
-        config.keeper.enabled = !config.keeper.enabled;
-        let new_state = config.keeper.enabled;
-        self.save(&config)?;
-        Ok(new_state)
     }
 
     pub fn toggle_agent_session_keeper(&self, agent: &str) -> Result<bool> {
@@ -614,7 +632,8 @@ usage_auto_refresh_secs = 900
     #[test]
     fn test_keeper_config_defaults() {
         let config = Config::default();
-        assert!(config.keeper.enabled);
+        // The engine spends real quota, so it must be opt-in.
+        assert!(!config.keeper.enabled);
         assert_eq!(config.keeper.check_interval_secs, 60);
         assert_eq!(config.keeper.agents.len(), 3);
 
@@ -651,14 +670,48 @@ usage_auto_refresh_secs = 900
         let config_path = temp_dir.path().join("config.toml");
         let manager = ConfigManager { config_path };
 
-        let keeper_state = manager.toggle_keeper_enabled().unwrap();
-        assert!(!keeper_state);
-
         let session_state = manager.toggle_agent_session_keeper("claude").unwrap();
         assert!(!session_state);
 
         let weekly_state = manager.toggle_agent_weekly_keeper("codex").unwrap();
         assert!(!weekly_state);
+    }
+
+    #[test]
+    fn test_custom_keeper_command_is_not_clobbered() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+
+        // A hand-written command that merely mentions `--bare` used to be
+        // overwritten by the substring-based migration.
+        let custom = r#"
+version = 3
+[keeper]
+enabled = true
+[keeper.agents.claude]
+command = 'claude --bare -p "{prompt}" --model {model} --my-flag'
+model = "haiku"
+"#;
+        fs::write(&config_path, custom).unwrap();
+
+        let manager = ConfigManager { config_path };
+        let loaded = manager.load().unwrap();
+
+        assert_eq!(
+            loaded.keeper.agents.get("claude").unwrap().command,
+            "claude --bare -p \"{prompt}\" --model {model} --my-flag"
+        );
+    }
+
+    #[test]
+    fn test_keeper_state_path_is_next_to_config() {
+        let manager = ConfigManager {
+            config_path: PathBuf::from("/tmp/tp/config.toml"),
+        };
+        assert_eq!(
+            manager.keeper_state_path(),
+            PathBuf::from("/tmp/tp/keeper_state.json")
+        );
     }
 
     #[test]
