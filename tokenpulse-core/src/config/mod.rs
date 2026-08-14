@@ -12,6 +12,8 @@ pub struct Config {
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
     pub display: DisplayConfig,
+    #[serde(default)]
+    pub keeper: KeeperConfig,
 }
 
 fn default_version() -> u32 {
@@ -123,6 +125,7 @@ impl Default for Config {
             version: 3,
             providers,
             display: DisplayConfig::default(),
+            keeper: KeeperConfig::default(),
         }
     }
 }
@@ -146,6 +149,100 @@ impl Default for DisplayConfig {
             show_account: true,
             scan_antigravity: true,
             refresh_quota: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeeperConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_keeper_check_interval_secs")]
+    pub check_interval_secs: u32,
+    #[serde(default = "default_keeper_agents")]
+    pub agents: HashMap<String, AgentKeeperConfig>,
+}
+
+fn default_keeper_check_interval_secs() -> u32 {
+    60
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentKeeperConfig {
+    #[serde(default = "default_true")]
+    pub session_keeper_enabled: bool,
+    #[serde(default = "default_daily_wakeup_time")]
+    pub daily_wakeup_time: String,
+    #[serde(default = "default_true")]
+    pub weekly_keeper_enabled: bool,
+    #[serde(default = "default_command")]
+    pub command: String,
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default = "default_prompt")]
+    pub prompt: String,
+}
+
+fn default_daily_wakeup_time() -> String {
+    "10:30".to_string()
+}
+
+fn default_command() -> String {
+    String::new()
+}
+
+fn default_model() -> String {
+    String::new()
+}
+
+fn default_prompt() -> String {
+    "Hi".to_string()
+}
+
+pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
+    let mut map = HashMap::new();
+    map.insert(
+        "claude".to_string(),
+        AgentKeeperConfig {
+            session_keeper_enabled: true,
+            daily_wakeup_time: "10:30".to_string(),
+            weekly_keeper_enabled: true,
+            command: "claude -p \"{prompt}\" --model {model}".to_string(),
+            model: "claude-3-5-haiku-20241022".to_string(),
+            prompt: "Hi".to_string(),
+        },
+    );
+    map.insert(
+        "codex".to_string(),
+        AgentKeeperConfig {
+            session_keeper_enabled: true,
+            daily_wakeup_time: "10:30".to_string(),
+            weekly_keeper_enabled: true,
+            command: "codex exec \"{prompt}\" -m {model}".to_string(),
+            model: "gpt-5.6-luna-low".to_string(),
+            prompt: "Hi".to_string(),
+        },
+    );
+    map.insert(
+        "antigravity".to_string(),
+        AgentKeeperConfig {
+            session_keeper_enabled: true,
+            daily_wakeup_time: "10:30".to_string(),
+            weekly_keeper_enabled: true,
+            command: "agy query \"{prompt}\" --model {model}".to_string(),
+            model: "gemini-3.7-flash-low".to_string(),
+            prompt: "Hi".to_string(),
+        },
+    );
+    map
+}
+
+impl Default for KeeperConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            check_interval_secs: default_keeper_check_interval_secs(),
+            agents: default_keeper_agents(),
         }
     }
 }
@@ -239,6 +336,62 @@ impl ConfigManager {
             p.enabled = false;
         }
         self.save(&config)
+    }
+
+    pub fn toggle_keeper_enabled(&self) -> Result<bool> {
+        let mut config = self.load().unwrap_or_default();
+        config.keeper.enabled = !config.keeper.enabled;
+        let new_state = config.keeper.enabled;
+        self.save(&config)?;
+        Ok(new_state)
+    }
+
+    pub fn toggle_agent_session_keeper(&self, agent: &str) -> Result<bool> {
+        let mut config = self.load().unwrap_or_default();
+        let agent_entry = config
+            .keeper
+            .agents
+            .entry(agent.to_string())
+            .or_insert_with(|| {
+                default_keeper_agents()
+                    .remove(agent)
+                    .unwrap_or(AgentKeeperConfig {
+                        session_keeper_enabled: true,
+                        daily_wakeup_time: "10:30".to_string(),
+                        weekly_keeper_enabled: true,
+                        command: String::new(),
+                        model: String::new(),
+                        prompt: "Hi".to_string(),
+                    })
+            });
+        agent_entry.session_keeper_enabled = !agent_entry.session_keeper_enabled;
+        let new_state = agent_entry.session_keeper_enabled;
+        self.save(&config)?;
+        Ok(new_state)
+    }
+
+    pub fn toggle_agent_weekly_keeper(&self, agent: &str) -> Result<bool> {
+        let mut config = self.load().unwrap_or_default();
+        let agent_entry = config
+            .keeper
+            .agents
+            .entry(agent.to_string())
+            .or_insert_with(|| {
+                default_keeper_agents()
+                    .remove(agent)
+                    .unwrap_or(AgentKeeperConfig {
+                        session_keeper_enabled: true,
+                        daily_wakeup_time: "10:30".to_string(),
+                        weekly_keeper_enabled: true,
+                        command: String::new(),
+                        model: String::new(),
+                        prompt: "Hi".to_string(),
+                    })
+            });
+        agent_entry.weekly_keeper_enabled = !agent_entry.weekly_keeper_enabled;
+        let new_state = agent_entry.weekly_keeper_enabled;
+        self.save(&config)?;
+        Ok(new_state)
     }
 }
 
@@ -425,5 +578,45 @@ usage_auto_refresh_secs = 900
         assert!(written_content.contains("auto_refresh_secs = 120"));
         assert!(!written_content.contains("quota_auto_refresh_secs"));
         assert!(!written_content.contains("usage_auto_refresh_secs"));
+    }
+
+    #[test]
+    fn test_keeper_config_defaults() {
+        let config = Config::default();
+        assert!(config.keeper.enabled);
+        assert_eq!(config.keeper.check_interval_secs, 60);
+        assert_eq!(config.keeper.agents.len(), 3);
+
+        let claude = config.keeper.agents.get("claude").unwrap();
+        assert!(claude.session_keeper_enabled);
+        assert_eq!(claude.daily_wakeup_time, "10:30");
+        assert!(claude.weekly_keeper_enabled);
+        assert_eq!(claude.model, "claude-3-5-haiku-20241022");
+
+        let codex = config.keeper.agents.get("codex").unwrap();
+        assert!(codex.session_keeper_enabled);
+        assert_eq!(codex.model, "gpt-5.6-luna-low");
+
+        let antigravity = config.keeper.agents.get("antigravity").unwrap();
+        assert!(antigravity.session_keeper_enabled);
+        assert_eq!(antigravity.model, "gemini-3.7-flash-low");
+    }
+
+    #[test]
+    fn test_keeper_toggle_helpers() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        let manager = ConfigManager { config_path };
+
+        let state = manager.toggle_keeper_enabled().unwrap();
+        assert!(!state);
+        let state2 = manager.toggle_keeper_enabled().unwrap();
+        assert!(state2);
+
+        let session_state = manager.toggle_agent_session_keeper("claude").unwrap();
+        assert!(!session_state);
+
+        let weekly_state = manager.toggle_agent_weekly_keeper("codex").unwrap();
+        assert!(!weekly_state);
     }
 }

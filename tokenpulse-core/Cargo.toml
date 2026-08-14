@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "http2"] }
 ureq = { version = "2", features = ["json"] }
 serde.workspace = true

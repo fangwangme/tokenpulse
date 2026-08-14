@@ -1,5 +1,6 @@
 pub mod daily;
 pub mod heatmap;
+pub mod keeper;
 pub mod models;
 pub mod overview;
 pub mod quota;
@@ -45,17 +46,19 @@ pub enum UsagePage {
     Daily,
     Heatmap,
     Quota,
+    Keeper,
     Settings,
 }
 
 impl UsagePage {
-    pub fn all() -> [UsagePage; 6] {
+    pub fn all() -> [UsagePage; 7] {
         [
             UsagePage::Overview,
             UsagePage::Models,
             UsagePage::Daily,
             UsagePage::Heatmap,
             UsagePage::Quota,
+            UsagePage::Keeper,
             UsagePage::Settings,
         ]
     }
@@ -67,6 +70,7 @@ impl UsagePage {
             UsagePage::Daily => "Daily",
             UsagePage::Heatmap => "Activity",
             UsagePage::Quota => "Quota",
+            UsagePage::Keeper => "Keeper",
             UsagePage::Settings => "Settings",
         }
     }
@@ -694,6 +698,12 @@ pub struct UsageState {
     pub last_refresh: Instant,
     pub usage_refresh_in_progress: bool,
     pub quota_refresh_in_progress: bool,
+    // Keeper state
+    pub selected_keeper_index: usize,
+    pub keeper_daily_triggered: HashMap<String, NaiveDate>,
+    pub keeper_weekly_triggered: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    pub keeper_logs: Vec<tokenpulse_core::keeper::KeeperExecutionRecord>,
+    pub last_keeper_check: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -748,6 +758,11 @@ impl UsageState {
             last_refresh: Instant::now(),
             usage_refresh_in_progress: false,
             quota_refresh_in_progress: false,
+            selected_keeper_index: 0,
+            keeper_daily_triggered: HashMap::new(),
+            keeper_weekly_triggered: HashMap::new(),
+            keeper_logs: Vec::new(),
+            last_keeper_check: Instant::now(),
         }
     }
 
@@ -890,7 +905,7 @@ pub fn scrollable_item_count(dashboard: &UsageDashboard, state: &UsageState) -> 
         UsagePage::Overview => dashboard.filtered_models(&state.enabled_sources).len(),
         UsagePage::Models => models::filtered_models_for_state(dashboard, state).len(),
         UsagePage::Daily => daily::visible_daily_rows(dashboard, &state.enabled_sources).len(),
-        UsagePage::Heatmap | UsagePage::Quota | UsagePage::Settings => 0,
+        UsagePage::Heatmap | UsagePage::Quota | UsagePage::Keeper | UsagePage::Settings => 0,
     }
 }
 
@@ -903,7 +918,7 @@ pub fn visible_rows_for_page(page: UsagePage, frame_area: Rect) -> usize {
         }
         UsagePage::Models => table_data_rows(body, 1),
         UsagePage::Daily => table_data_rows(body, 1),
-        UsagePage::Heatmap | UsagePage::Quota | UsagePage::Settings => 0,
+        UsagePage::Heatmap | UsagePage::Quota | UsagePage::Keeper | UsagePage::Settings => 0,
     }
 }
 
@@ -935,6 +950,7 @@ pub enum TuiMessage {
     UsageReloadFailed(String),
     QuotaReloadSuccess(Vec<tokenpulse_core::QuotaSnapshot>, Vec<String>),
     QuotaReloadFailed(String),
+    KeeperPingCompleted(tokenpulse_core::keeper::KeeperExecutionRecord),
 }
 
 fn spawn_quota_reload(
@@ -1153,6 +1169,34 @@ where
                         RefreshStatusLevel::Error,
                     );
                 }
+                TuiMessage::KeeperPingCompleted(record) => {
+                    let agent = record.agent.clone();
+                    let success = record.success;
+                    let trigger_type = record.trigger_type;
+                    if trigger_type == tokenpulse_core::keeper::KeeperTriggerType::Daily {
+                        state
+                            .keeper_daily_triggered
+                            .insert(agent.clone(), Local::now().date_naive());
+                    } else if trigger_type == tokenpulse_core::keeper::KeeperTriggerType::Weekly {
+                        state
+                            .keeper_weekly_triggered
+                            .insert(agent.clone(), chrono::Utc::now());
+                    }
+                    let level = if success {
+                        RefreshStatusLevel::Success
+                    } else {
+                        RefreshStatusLevel::Error
+                    };
+                    state.set_refresh_status(
+                        format!(
+                            "Keeper {}: {}",
+                            keeper::keeper_agent_name(&agent),
+                            if success { "Success" } else { "Failed" }
+                        ),
+                        level,
+                    );
+                    state.keeper_logs.push(record);
+                }
             }
         }
 
@@ -1212,6 +1256,95 @@ where
                     .map(|(k, _)| k.clone())
                     .collect();
                 spawn_quota_reload(msg_tx.clone(), enabled_providers);
+            }
+        }
+
+        // Keeper automated background check
+        if config.keeper.enabled
+            && state.last_keeper_check.elapsed()
+                >= StdDuration::from_secs(config.keeper.check_interval_secs.max(10) as u64)
+        {
+            state.last_keeper_check = Instant::now();
+            let now_local = Local::now();
+            let now_utc = chrono::Utc::now();
+            let default_agents = tokenpulse_core::config::default_keeper_agents();
+
+            for &agent_id in keeper::KEEPER_AGENTS {
+                let Some(agent_cfg) = config
+                    .keeper
+                    .agents
+                    .get(agent_id)
+                    .or_else(|| default_agents.get(agent_id))
+                else {
+                    continue;
+                };
+
+                // Check 5h Daily
+                if agent_cfg.session_keeper_enabled {
+                    let last_triggered = state.keeper_daily_triggered.get(agent_id).copied();
+                    if tokenpulse_core::keeper::should_trigger_daily(
+                        &agent_cfg.daily_wakeup_time,
+                        last_triggered,
+                        now_local,
+                    ) {
+                        state
+                            .keeper_daily_triggered
+                            .insert(agent_id.to_string(), now_local.date_naive());
+                        let tx = msg_tx.clone();
+                        let agent_cfg = agent_cfg.clone();
+                        let agent_str = agent_id.to_string();
+                        tokio::spawn(async move {
+                            let rec = tokenpulse_core::keeper::execute_agent_ping(
+                                &agent_str,
+                                &agent_cfg,
+                                tokenpulse_core::keeper::KeeperTriggerType::Daily,
+                            )
+                            .await;
+                            let _ = tx.send(TuiMessage::KeeperPingCompleted(rec)).await;
+                        });
+                    }
+                }
+
+                // Check Weekly
+                if agent_cfg.weekly_keeper_enabled {
+                    let quota_snapshot = state
+                        .quota_snapshots
+                        .iter()
+                        .find(|s| s.provider.eq_ignore_ascii_case(agent_id));
+                    let resets_at = quota_snapshot.and_then(|s| {
+                        s.windows
+                            .iter()
+                            .find(|w| {
+                                w.label.to_lowercase().contains("week")
+                                    || w.label.to_lowercase().contains("7-day")
+                                    || w.label.to_lowercase().contains("weekly")
+                            })
+                            .and_then(|w| w.resets_at)
+                    });
+
+                    let last_triggered = state.keeper_weekly_triggered.get(agent_id).copied();
+                    if tokenpulse_core::keeper::should_trigger_weekly(
+                        resets_at,
+                        last_triggered,
+                        now_utc,
+                    ) {
+                        state
+                            .keeper_weekly_triggered
+                            .insert(agent_id.to_string(), now_utc);
+                        let tx = msg_tx.clone();
+                        let agent_cfg = agent_cfg.clone();
+                        let agent_str = agent_id.to_string();
+                        tokio::spawn(async move {
+                            let rec = tokenpulse_core::keeper::execute_agent_ping(
+                                &agent_str,
+                                &agent_cfg,
+                                tokenpulse_core::keeper::KeeperTriggerType::Weekly,
+                            )
+                            .await;
+                            let _ = tx.send(TuiMessage::KeeperPingCompleted(rec)).await;
+                        });
+                    }
+                }
             }
         }
 
@@ -1494,6 +1627,114 @@ where
                             }
                             _ => {}
                         },
+                        UsagePage::Keeper => match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+                                if state.selected_keeper_index > 0 {
+                                    state.selected_keeper_index -= 1;
+                                } else {
+                                    state.selected_keeper_index =
+                                        keeper::KEEPER_AGENTS.len().saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Right | KeyCode::Char('l') => {
+                                state.selected_keeper_index =
+                                    (state.selected_keeper_index + 1) % keeper::KEEPER_AGENTS.len();
+                            }
+                            KeyCode::Tab => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    if state.selected_keeper_index > 0 {
+                                        state.selected_keeper_index -= 1;
+                                    } else {
+                                        state.selected_keeper_index =
+                                            keeper::KEEPER_AGENTS.len().saturating_sub(1);
+                                    }
+                                } else {
+                                    state.selected_keeper_index = (state.selected_keeper_index + 1)
+                                        % keeper::KEEPER_AGENTS.len();
+                                }
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if state.selected_keeper_index > 0 {
+                                    state.selected_keeper_index -= 1;
+                                } else {
+                                    state.selected_keeper_index =
+                                        keeper::KEEPER_AGENTS.len().saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                state.selected_keeper_index =
+                                    (state.selected_keeper_index + 1) % keeper::KEEPER_AGENTS.len();
+                            }
+                            KeyCode::Char('1') | KeyCode::Char('d') => {
+                                let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
+                                if let Ok(new_state) =
+                                    config_manager.toggle_agent_session_keeper(agent)
+                                {
+                                    if let Some(agent_cfg) = config.keeper.agents.get_mut(agent) {
+                                        agent_cfg.session_keeper_enabled = new_state;
+                                    }
+                                    state.set_refresh_status(
+                                        format!(
+                                            "{} 5h keeper {}",
+                                            keeper::keeper_agent_name(agent),
+                                            if new_state { "enabled" } else { "disabled" }
+                                        ),
+                                        RefreshStatusLevel::Success,
+                                    );
+                                }
+                            }
+                            KeyCode::Char('2') | KeyCode::Char('w') => {
+                                let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
+                                if let Ok(new_state) =
+                                    config_manager.toggle_agent_weekly_keeper(agent)
+                                {
+                                    if let Some(agent_cfg) = config.keeper.agents.get_mut(agent) {
+                                        agent_cfg.weekly_keeper_enabled = new_state;
+                                    }
+                                    state.set_refresh_status(
+                                        format!(
+                                            "{} Weekly keeper {}",
+                                            keeper::keeper_agent_name(agent),
+                                            if new_state { "enabled" } else { "disabled" }
+                                        ),
+                                        RefreshStatusLevel::Success,
+                                    );
+                                }
+                            }
+                            KeyCode::Char('p') => {
+                                let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
+                                let default_agents =
+                                    tokenpulse_core::config::default_keeper_agents();
+                                if let Some(agent_cfg) = config
+                                    .keeper
+                                    .agents
+                                    .get(agent)
+                                    .or_else(|| default_agents.get(agent))
+                                {
+                                    let agent_cfg = agent_cfg.clone();
+                                    let agent_str = agent.to_string();
+                                    state.set_refresh_status(
+                                        format!(
+                                            "Executing ping for {}...",
+                                            keeper::keeper_agent_name(agent)
+                                        ),
+                                        RefreshStatusLevel::Info,
+                                    );
+                                    let tx = msg_tx.clone();
+                                    tokio::spawn(async move {
+                                        let rec = tokenpulse_core::keeper::execute_agent_ping(
+                                            &agent_str,
+                                            &agent_cfg,
+                                            tokenpulse_core::keeper::KeeperTriggerType::Manual,
+                                        )
+                                        .await;
+                                        let _ = tx.send(TuiMessage::KeeperPingCompleted(rec)).await;
+                                    });
+                                }
+                            }
+                            _ => {}
+                        },
                         UsagePage::Settings => match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => break,
                             KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
@@ -1707,6 +1948,7 @@ fn render_dashboard(
         UsagePage::Daily => daily::render_daily_page(f, root[2], dashboard, state, theme),
         UsagePage::Heatmap => heatmap::render_heatmap_page(f, root[2], dashboard, state, theme),
         UsagePage::Quota => quota::render_quota_tab(f, root[2], state, config, theme),
+        UsagePage::Keeper => keeper::render_keeper_tab(f, root[2], state, config, theme),
         UsagePage::Settings => {
             settings::render_settings_tab(f, root[2], state, config, config_manager, theme)
         }
@@ -2000,6 +2242,17 @@ fn render_footer(
                 spans.extend(key_help("?", "help", theme));
                 Line::from(spans)
             }
+            UsagePage::Keeper => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("←→/Tab", "select", theme));
+                spans.extend(key_help("1/d", "toggle 5h", theme));
+                spans.extend(key_help("2/w", "toggle weekly", theme));
+                spans.extend(key_help("p", "ping now", theme));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
+            }
             UsagePage::Settings => {
                 let mut spans = Vec::new();
                 spans.push(Span::raw(" "));
@@ -2209,6 +2462,14 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
                 ("pgup/pgdn", "scroll selected day details"),
             ]);
         }
+        UsagePage::Keeper => {
+            keybindings.extend([
+                ("1 / d", "toggle 5h daily wakeup keeper"),
+                ("2 / w", "toggle weekly auto-sync keeper"),
+                ("p", "trigger immediate test ping"),
+                ("←→ / Tab", "switch selected agent card"),
+            ]);
+        }
         _ => {}
     }
 
@@ -2408,5 +2669,32 @@ pub fn empty_data_message(state: &UsageState, fallback: &str) -> String {
         )
     } else {
         fallback.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_usage_page_navigation() {
+        let pages = UsagePage::all();
+        assert_eq!(pages.len(), 7);
+        assert_eq!(pages[0], UsagePage::Overview);
+        assert_eq!(pages[1], UsagePage::Models);
+        assert_eq!(pages[2], UsagePage::Daily);
+        assert_eq!(pages[3], UsagePage::Heatmap);
+        assert_eq!(pages[4], UsagePage::Quota);
+        assert_eq!(pages[5], UsagePage::Keeper);
+        assert_eq!(pages[6], UsagePage::Settings);
+
+        assert_eq!(UsagePage::Quota.next(), UsagePage::Keeper);
+        assert_eq!(UsagePage::Keeper.next(), UsagePage::Settings);
+        assert_eq!(UsagePage::Settings.next(), UsagePage::Overview);
+
+        assert_eq!(UsagePage::Keeper.previous(), UsagePage::Quota);
+        assert_eq!(UsagePage::Overview.previous(), UsagePage::Settings);
+
+        assert_eq!(UsagePage::Keeper.title(), "Keeper");
     }
 }

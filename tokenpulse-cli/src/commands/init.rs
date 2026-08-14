@@ -3,7 +3,7 @@ use dialoguer::{theme::ColorfulTheme, MultiSelect, Select};
 use std::collections::HashMap;
 use tokenpulse_core::auth::detect_providers;
 use tokenpulse_core::config::{
-    Config, ConfigManager, DisplayConfig, ProviderConfig, QuotaDisplayMode,
+    Config, ConfigManager, DisplayConfig, KeeperConfig, ProviderConfig, QuotaDisplayMode,
 };
 
 /// Supported providers — init selection is based on this list,
@@ -115,13 +115,14 @@ pub fn run(use_defaults: bool) -> Result<()> {
     }
 
     let config = Config {
-        version: 2,
+        version: 3,
         providers,
         display: DisplayConfig {
             show_empty_providers: false,
             quota_display_mode: display_mode,
             ..DisplayConfig::default()
         },
+        keeper: KeeperConfig::default(),
     };
 
     config_manager.save(&config)?;
