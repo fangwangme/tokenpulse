@@ -2125,15 +2125,9 @@ fn discover_local_conversation_ids_from_home(
     active_kinds: &[AntigravityRuntimeKind],
 ) -> Vec<LocalConversationId> {
     let mut dirs = Vec::new();
-    if active_kinds.contains(&AntigravityRuntimeKind::Desktop) {
-        dirs.push((
-            home.join(".gemini")
-                .join("antigravity")
-                .join("conversations"),
-            AntigravityRuntimeKind::Desktop,
-        ));
-    }
-    if active_kinds.contains(&AntigravityRuntimeKind::Cli) {
+    // Only scan Antigravity CLI conversations directory: ~/.gemini/antigravity-cli/conversations
+    // Do not scan legacy or partial ~/.gemini/antigravity/conversations directory.
+    if active_kinds.contains(&AntigravityRuntimeKind::Cli) || active_kinds.is_empty() {
         dirs.push((
             home.join(".gemini")
                 .join("antigravity-cli")
@@ -3165,12 +3159,10 @@ mod tests {
             &[AntigravityRuntimeKind::Desktop, AntigravityRuntimeKind::Cli],
         );
 
-        assert_eq!(discovered.len(), 2);
-        assert!(discovered
+        assert_eq!(discovered.len(), 1);
+        assert!(!discovered
             .iter()
-            .any(|entry| entry.session_id == "12345678901234567890"
-                && entry.modified_ms.is_some()
-                && entry.runtime_kind == AntigravityRuntimeKind::Desktop));
+            .any(|entry| entry.session_id == "12345678901234567890"));
 
         let db_entry = discovered
             .iter()
