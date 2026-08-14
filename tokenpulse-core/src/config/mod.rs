@@ -297,10 +297,39 @@ impl ConfigManager {
         let content = fs::read_to_string(&self.config_path)?;
         let mut config: Config = toml::from_str(&content)?;
 
-        if config.version < 3 {
-            // v3 unified the separate quota/usage auto-refresh intervals into a
-            // single `auto_refresh_secs`. The old `quota_auto_refresh_secs` value
-            // is carried over via serde alias; re-saving drops the legacy keys.
+        let default_agents = default_keeper_agents();
+        let mut modified = false;
+
+        for (name, default_cfg) in &default_agents {
+            if let Some(agent_cfg) = config.keeper.agents.get_mut(name) {
+                if agent_cfg.command.is_empty()
+                    || agent_cfg.command.contains("agy query")
+                    || (name == "claude"
+                        && agent_cfg.command == "claude -p \"{prompt}\" --model {model}")
+                    || (name == "codex"
+                        && agent_cfg.command == "codex exec \"{prompt}\" -m {model}")
+                {
+                    agent_cfg.command = default_cfg.command.clone();
+                    modified = true;
+                }
+                if agent_cfg.model == "claude-3-5-haiku-20241022" {
+                    agent_cfg.model = "haiku".to_string();
+                    modified = true;
+                }
+                if agent_cfg.model == "gpt-5.6-luna-low" {
+                    agent_cfg.model = "gpt-5.6-luna".to_string();
+                    modified = true;
+                }
+            } else {
+                config
+                    .keeper
+                    .agents
+                    .insert(name.clone(), default_cfg.clone());
+                modified = true;
+            }
+        }
+
+        if config.version < 3 || modified {
             config.version = 3;
             if let Err(e) = self.save(&config) {
                 tracing::warn!("Failed to save migrated config: {}", e);
@@ -632,5 +661,47 @@ usage_auto_refresh_secs = 900
 
         let weekly_state = manager.toggle_agent_weekly_keeper("codex").unwrap();
         assert!(!weekly_state);
+    }
+
+    #[test]
+    fn test_legacy_keeper_command_migration() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+
+        let legacy_toml = r#"
+version = 3
+[keeper]
+enabled = true
+[keeper.agents.antigravity]
+command = 'agy query "{prompt}" --model {model}'
+model = "gemini-3.7-flash-low"
+[keeper.agents.claude]
+command = 'claude -p "{prompt}" --model {model}'
+model = "claude-3-5-haiku-20241022"
+[keeper.agents.codex]
+command = 'codex exec "{prompt}" -m {model}'
+model = "gpt-5.6-luna-low"
+"#;
+        fs::write(&config_path, legacy_toml).unwrap();
+
+        let manager = ConfigManager { config_path };
+        let loaded = manager.load().unwrap();
+
+        let agy = loaded.keeper.agents.get("antigravity").unwrap();
+        assert_eq!(agy.command, "agy --model {model} --prompt \"{prompt}\"");
+
+        let claude = loaded.keeper.agents.get("claude").unwrap();
+        assert_eq!(
+            claude.command,
+            "claude --bare -p \"{prompt}\" --model {model} --no-session-persistence"
+        );
+        assert_eq!(claude.model, "haiku");
+
+        let codex = loaded.keeper.agents.get("codex").unwrap();
+        assert_eq!(
+            codex.command,
+            "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
+        );
+        assert_eq!(codex.model, "gpt-5.6-luna");
     }
 }
