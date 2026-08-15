@@ -289,6 +289,8 @@ impl CopilotQuotaFetcher {
 
                 RateWindow {
                     label,
+                    // Copilot meters request types, not model families.
+                    model_family: None,
                     used_percent,
                     resets_at,
                     period_duration_ms: Some(period_ms),
@@ -328,6 +330,7 @@ impl CopilotQuotaFetcher {
 
                 RateWindow {
                     label: format!("{} ({})", pretty_label(name), total as i64),
+                    model_family: None,
                     used_percent,
                     resets_at,
                     period_duration_ms: Some(period_ms),

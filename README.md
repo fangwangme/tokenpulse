@@ -15,9 +15,13 @@ output for scripting.
 |---|---|
 | ![Models](docs/images/models.png) | ![Daily](docs/images/daily.png) |
 
-| Activity | Settings |
+| Keeper | Activity |
 |---|---|
-| ![Activity](docs/images/activity.png) | ![Settings](docs/images/settings.png) |
+| ![Keeper](docs/images/keeper.png) | ![Activity](docs/images/activity.png) |
+
+| Settings | |
+|---|---|
+| ![Settings](docs/images/settings.png) | |
 
 ## Supported Providers
 
@@ -51,8 +55,14 @@ output for scripting.
 
 ## Features
 
-- **Unified dashboard** — usage (Overview/Models/Daily/Activity) and quota in
+- **Unified dashboard** — usage (Overview/Models/Daily/Keeper/Activity) and quota in
   one TUI, or plain-text/JSON/CSV output
+- **Session Keeper & Automated Heartbeats** — scheduled lightweight heartbeats for
+  Claude Code, Codex, and Google Antigravity to trigger 5h cooldown timers early
+  and auto-sync immediately after weekly quota resets. Off by default; each ping
+  spends real quota, so you opt in per agent
+- **Live Execution Stream** — real-time heartbeat log panel with executed commands,
+  prompts, replies, durations, status codes, and smooth mouse-wheel scrolling
 - **Ledger-backed** — local SQLite with per-day pricing snapshots so historical
   cost does not silently drift
 - **Quota overview** — up to the top 4 windows per provider; each is a progress
@@ -75,30 +85,46 @@ output for scripting.
 - **Plain-text mode** — for scripting and remote shells
 - **JSON output** — usage summary + quota snapshots in one payload
 - **CSV output** — per-model or daily breakdown for further analysis
+- **Observation history** — every quota poll (per provider, rate window, and
+  model family) and every Keeper run is appended to a local SQLite database for
+  your own trend analysis
 
 ## Install
 
-Requirements:
+TokenPulse reads agent session data from the local filesystem, so install it on
+the same machine the agents run on.
 
-- Rust toolchain (1.75+)
-- Local agent / session data on the same machine
+### npm (prebuilt binary, no Rust toolchain needed)
 
 ```bash
-cargo install tokenpulse
+npm install -g @fangwangme/tokenpulse
+tokenpulse
 ```
 
-Or build from source:
+Or run it without installing:
+
+```bash
+npx @fangwangme/tokenpulse
+```
+
+Prebuilt binaries are published for macOS (Intel and Apple Silicon) and Linux
+(x64 and arm64). npm resolves the one matching your machine; on any other
+platform, build from source instead.
+
+### From source
+
+Requires a Rust toolchain (1.75+):
+
+```bash
+cargo install --git https://github.com/fangwangme/tokenpulse tokenpulse-cli
+```
+
+Or clone and build:
 
 ```bash
 git clone https://github.com/fangwangme/tokenpulse
 cd tokenpulse
 cargo install --path tokenpulse-cli
-```
-
-Or build the workspace manually:
-
-```bash
-cargo build --release --workspace
 ```
 
 ## Quick Start
@@ -186,6 +212,25 @@ tokenpulse config set show_account=true
 tokenpulse config set refresh_quota=false
 ```
 
+### Session Keeper (Heartbeats & Wakeup)
+
+The **Keeper** tab lets you manage scheduled pings and wakeups for Claude Code, Codex, and Google Antigravity to keep sessions warm and trigger cooldown cycles at designated times.
+
+Every ping spends real quota, so the engine ships **disabled**. Turn it on with
+the `keeper_engine` row in the Settings tab, then enable the switches you want
+per agent. Wakeup times, models, prompts, and commands live in `config.toml`
+under `[keeper]`; the tab header shows the exact path.
+
+- **`←` / `→` (or `h` / `l`)** — Switch between dashboard tabs
+- **`↑` / `↓` (or `k` / `j` / `Tab`)** — Select agent card (Claude Code / Codex / Antigravity)
+- **`1` / `d`** — Toggle 5h daily morning wakeup timer (default `10:30`; a missed run is only caught up within 2 hours of it)
+- **`2` / `w`** — Toggle weekly auto-sync (fires 1 min after quota resets)
+- **`p`** — Immediately test ping the selected agent
+- **Mouse Wheel** — Scroll the live execution and heartbeat history stream
+
+The panel shows the newest 50 runs and is restored on launch; the full history
+is kept in `tokenpulse.db`.
+
 ## Data Model
 
 TokenPulse tracks two distinct concepts:
@@ -205,11 +250,17 @@ All local state lives under a single directory:
 ```
 ~/.local/share/tokenpulse/
 ├── config.toml        # user configuration
+├── keeper_state.json  # Keeper last-fired bookkeeping
 ├── usage.db           # SQLite usage ledger
+├── tokenpulse.db      # quota cache + quota/Keeper observation history
 ├── pricing.json       # cached model pricing
 ├── antigravity-cache/ # raw Antigravity session cache
-└── log/               # performance diagnostics
+└── log/               # daily rotating diagnostics log
 ```
+
+`tokenpulse.db` keeps an append-only record of every quota poll (per provider,
+per rate window, per model family) and every Keeper run, for later analysis. It
+has no retention policy — delete old rows yourself if it grows too large.
 
 ## Project Structure
 
@@ -221,6 +272,8 @@ tokenpulse/
 │   └── src/
 │       ├── auth/               # provider credential detection
 │       ├── config/             # config model & persistence
+│       ├── history/            # quota + Keeper observation history (SQLite)
+│       ├── keeper/             # scheduled agent pings
 │       ├── pricing/            # model pricing (LiteLLM, OpenRouter, Models.dev)
 │       ├── quota/              # live quota fetchers
 │       └── usage/              # session parsers & SQLite store
@@ -229,7 +282,7 @@ tokenpulse/
 │   └── src/
 │       ├── commands/           # init, config, usage, quota registry
 │       ├── tui/                # ratatui dashboard
-│       │   ├── views/usage/    # Overview, Models, Daily, Activity, Quota, Settings
+│       │   ├── views/usage/    # Overview, Models, Daily, Activity, Quota, Keeper, Settings
 │       │   └── widgets/        # barchart, heatmap, gauge, trend
 │       └── main.rs
 └── docs/

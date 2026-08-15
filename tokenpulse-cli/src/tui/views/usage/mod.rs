@@ -1,5 +1,6 @@
 pub mod daily;
 pub mod heatmap;
+pub mod keeper;
 pub mod models;
 pub mod overview;
 pub mod quota;
@@ -34,6 +35,11 @@ use tokenpulse_core::{
 };
 use tracing::{info, warn};
 
+/// How many Keeper executions the log panel holds. Every execution is also
+/// appended to `keeper_executions` in the database, so this only bounds what is
+/// rendered and re-read on startup, not what is retained.
+const KEEPER_LOG_DISPLAY_LIMIT: usize = 50;
+
 // ---------------------------------------------------------------------------
 // Pages
 // ---------------------------------------------------------------------------
@@ -45,17 +51,19 @@ pub enum UsagePage {
     Daily,
     Heatmap,
     Quota,
+    Keeper,
     Settings,
 }
 
 impl UsagePage {
-    pub fn all() -> [UsagePage; 6] {
+    pub fn all() -> [UsagePage; 7] {
         [
             UsagePage::Overview,
             UsagePage::Models,
             UsagePage::Daily,
             UsagePage::Heatmap,
             UsagePage::Quota,
+            UsagePage::Keeper,
             UsagePage::Settings,
         ]
     }
@@ -67,6 +75,7 @@ impl UsagePage {
             UsagePage::Daily => "Daily",
             UsagePage::Heatmap => "Activity",
             UsagePage::Quota => "Quota",
+            UsagePage::Keeper => "Keeper",
             UsagePage::Settings => "Settings",
         }
     }
@@ -694,6 +703,14 @@ pub struct UsageState {
     pub last_refresh: Instant,
     pub usage_refresh_in_progress: bool,
     pub quota_refresh_in_progress: bool,
+    // Keeper state
+    pub selected_keeper_index: usize,
+    pub keeper_daily_triggered: HashMap<String, NaiveDate>,
+    pub keeper_weekly_triggered: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    pub keeper_logs: Vec<tokenpulse_core::keeper::KeeperExecutionRecord>,
+    pub keeper_pings_in_progress: BTreeSet<String>,
+    pub keeper_log_scroll: usize,
+    pub last_keeper_check: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -748,6 +765,13 @@ impl UsageState {
             last_refresh: Instant::now(),
             usage_refresh_in_progress: false,
             quota_refresh_in_progress: false,
+            selected_keeper_index: 0,
+            keeper_daily_triggered: HashMap::new(),
+            keeper_weekly_triggered: HashMap::new(),
+            keeper_logs: Vec::new(),
+            keeper_pings_in_progress: BTreeSet::new(),
+            keeper_log_scroll: 0,
+            last_keeper_check: Instant::now(),
         }
     }
 
@@ -866,6 +890,46 @@ impl UsageState {
         }
     }
 
+    /// Carries the Keeper's runtime state onto a freshly rebuilt dashboard state.
+    ///
+    /// A usage refresh replaces `UsageState` wholesale and then restores fields
+    /// one by one. The Keeper's fields were never on that list, so every refresh
+    /// emptied the execution log (making the history cap moot), dropped the
+    /// in-flight ping locks, and cleared the last-fired dates — which re-armed
+    /// the daily trigger so it fired again on the next check.
+    fn adopt_keeper_state(&mut self, previous: &mut UsageState) {
+        self.keeper_logs = std::mem::take(&mut previous.keeper_logs);
+        self.keeper_daily_triggered = std::mem::take(&mut previous.keeper_daily_triggered);
+        self.keeper_weekly_triggered = std::mem::take(&mut previous.keeper_weekly_triggered);
+        self.keeper_pings_in_progress = std::mem::take(&mut previous.keeper_pings_in_progress);
+        self.selected_keeper_index = previous.selected_keeper_index;
+        self.keeper_log_scroll = previous.keeper_log_scroll;
+        self.last_keeper_check = previous.last_keeper_check;
+    }
+
+    /// Appends a Keeper log entry, capping history and keeping a scrolled view
+    /// anchored on the same record (the panel renders newest-first, so a new
+    /// entry shifts everything below it down by one record).
+    pub fn push_keeper_log(&mut self, record: tokenpulse_core::keeper::KeeperExecutionRecord) {
+        self.keeper_logs.push(record);
+        if self.keeper_logs.len() > KEEPER_LOG_DISPLAY_LIMIT {
+            let overflow = self.keeper_logs.len() - KEEPER_LOG_DISPLAY_LIMIT;
+            self.keeper_logs.drain(0..overflow);
+        }
+        if self.keeper_log_scroll > 0 {
+            self.keeper_log_scroll += keeper::KEEPER_LOG_LINES_PER_RECORD;
+        }
+    }
+
+    /// Writes the scheduled-trigger bookkeeping so a restart does not re-fire pings.
+    pub fn persist_keeper_triggers(&self, path: &std::path::Path) {
+        tokenpulse_core::keeper::KeeperTriggerState {
+            daily_triggered: self.keeper_daily_triggered.clone(),
+            weekly_triggered: self.keeper_weekly_triggered.clone(),
+        }
+        .save(path);
+    }
+
     pub fn set_refresh_status(&mut self, message: impl Into<String>, level: RefreshStatusLevel) {
         self.refresh_status = Some(RefreshStatus {
             message: message.into(),
@@ -890,7 +954,7 @@ pub fn scrollable_item_count(dashboard: &UsageDashboard, state: &UsageState) -> 
         UsagePage::Overview => dashboard.filtered_models(&state.enabled_sources).len(),
         UsagePage::Models => models::filtered_models_for_state(dashboard, state).len(),
         UsagePage::Daily => daily::visible_daily_rows(dashboard, &state.enabled_sources).len(),
-        UsagePage::Heatmap | UsagePage::Quota | UsagePage::Settings => 0,
+        UsagePage::Heatmap | UsagePage::Quota | UsagePage::Keeper | UsagePage::Settings => 0,
     }
 }
 
@@ -903,7 +967,7 @@ pub fn visible_rows_for_page(page: UsagePage, frame_area: Rect) -> usize {
         }
         UsagePage::Models => table_data_rows(body, 1),
         UsagePage::Daily => table_data_rows(body, 1),
-        UsagePage::Heatmap | UsagePage::Quota | UsagePage::Settings => 0,
+        UsagePage::Heatmap | UsagePage::Quota | UsagePage::Keeper | UsagePage::Settings => 0,
     }
 }
 
@@ -935,6 +999,58 @@ pub enum TuiMessage {
     UsageReloadFailed(String),
     QuotaReloadSuccess(Vec<tokenpulse_core::QuotaSnapshot>, Vec<String>),
     QuotaReloadFailed(String),
+    KeeperPingCompleted(tokenpulse_core::keeper::KeeperExecutionRecord),
+}
+
+/// Runs one Keeper ping and always reports back.
+///
+/// The completion message is what clears `keeper_pings_in_progress`, so a task
+/// that dies without sending would leave that agent permanently locked out of
+/// every future ping — the card would sit on "Ping running..." forever. Running
+/// the ping in a nested task and inspecting its `JoinHandle` means even a panic
+/// still produces a record.
+fn spawn_keeper_ping(
+    msg_tx: tokio::sync::mpsc::Sender<TuiMessage>,
+    agent: String,
+    agent_cfg: tokenpulse_core::config::AgentKeeperConfig,
+    trigger_type: tokenpulse_core::keeper::KeeperTriggerType,
+) {
+    tokio::spawn(async move {
+        let ping_agent = agent.clone();
+        let ping_cfg = agent_cfg.clone();
+        let handle = tokio::spawn(async move {
+            tokenpulse_core::keeper::execute_agent_ping(&ping_agent, &ping_cfg, trigger_type).await
+        });
+
+        let record = match handle.await {
+            Ok(record) => record,
+            Err(e) => {
+                warn!(
+                    "Keeper: ping task for agent '{}' did not finish: {}",
+                    agent, e
+                );
+                tokenpulse_core::keeper::failed_ping_record(
+                    &agent,
+                    &agent_cfg,
+                    trigger_type,
+                    "Internal error while running the ping",
+                )
+            }
+        };
+        // Persist before notifying the UI, off the event loop's thread: the log
+        // panel only holds the newest few, the database keeps every run.
+        let to_store = record.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(e) =
+                tokenpulse_core::history::HistoryStore::new().record_keeper_execution(&to_store)
+            {
+                warn!("Keeper: failed to record execution history: {}", e);
+            }
+        })
+        .await;
+
+        let _ = msg_tx.send(TuiMessage::KeeperPingCompleted(record)).await;
+    });
 }
 
 fn spawn_quota_reload(
@@ -954,18 +1070,34 @@ fn spawn_quota_reload(
             total_fetchers
         );
 
+        let fetcher_ids = crate::commands::quota::quota_fetcher_ids(&enabled_providers);
         let mut snapshots = Vec::new();
         let mut errors = Vec::new();
-        for result in results {
+        let mut failures: Vec<(String, String)> = Vec::new();
+        for (idx, result) in results.into_iter().enumerate() {
             match result {
                 Ok(snapshot) => {
                     snapshots.push(snapshot);
                 }
                 Err(e) => {
-                    warn!("Quota fetch failed for provider: {}", e);
+                    let provider = fetcher_ids.get(idx).copied().unwrap_or("unknown");
+                    warn!("Quota fetch failed for provider {}: {}", provider, e);
+                    failures.push((provider.to_string(), e.to_string()));
                     errors.push(e.to_string());
                 }
             }
+        }
+
+        if !failures.is_empty() {
+            let _ = tokio::task::spawn_blocking(move || {
+                let history = tokenpulse_core::history::HistoryStore::new();
+                for (provider, error) in &failures {
+                    if let Err(e) = history.record_quota_failure(provider, observed_at, error) {
+                        warn!("Failed to record quota failure for {}: {}", provider, e);
+                    }
+                }
+            })
+            .await;
         }
 
         if !snapshots.is_empty() {
@@ -1037,6 +1169,22 @@ where
     let mut dashboard = UsageDashboard::build(&summary, &daily_rows);
     let mut state = UsageState::new(&dashboard, quota_snapshots);
 
+    // Restore scheduled-trigger bookkeeping; without it every restart after the
+    // configured wakeup time fires another daily ping.
+    let keeper_state_path = config_manager.keeper_state_path();
+    let keeper_state = tokenpulse_core::keeper::KeeperTriggerState::load(&keeper_state_path);
+    state.keeper_daily_triggered = keeper_state.daily_triggered;
+    state.keeper_weekly_triggered = keeper_state.weekly_triggered;
+
+    // Seed the log panel from the database so the last runs are visible right
+    // away instead of the panel starting empty on every launch.
+    match tokenpulse_core::history::HistoryStore::new()
+        .recent_keeper_executions(KEEPER_LOG_DISPLAY_LIMIT)
+    {
+        Ok(records) => state.keeper_logs = records,
+        Err(e) => warn!("Failed to load keeper execution history: {}", e),
+    }
+
     // Initial background reload on startup
     state.set_refresh_status("Refreshing...", RefreshStatusLevel::Info);
     state.usage_refresh_in_progress = true;
@@ -1087,7 +1235,11 @@ where
                     let saved_last_refresh = state.last_refresh;
                     let saved_quota_refresh_in_progress = state.quota_refresh_in_progress;
 
-                    state = UsageState::new(&dashboard, saved_quota_snapshots);
+                    let mut previous = std::mem::replace(
+                        &mut state,
+                        UsageState::new(&dashboard, saved_quota_snapshots),
+                    );
+                    state.adopt_keeper_state(&mut previous);
                     state.last_refresh = saved_last_refresh;
                     state.quota_refresh_in_progress = saved_quota_refresh_in_progress;
                     state.usage_refresh_in_progress = false;
@@ -1153,6 +1305,28 @@ where
                         RefreshStatusLevel::Error,
                     );
                 }
+                TuiMessage::KeeperPingCompleted(record) => {
+                    // The scheduler stamps the trigger maps before spawning, so nothing
+                    // is recorded here: re-stamping on completion would push a ping that
+                    // started at 23:59 into the next day and skip tomorrow's run.
+                    let agent = record.agent.clone();
+                    let success = record.success;
+                    let level = if success {
+                        RefreshStatusLevel::Success
+                    } else {
+                        RefreshStatusLevel::Error
+                    };
+                    state.set_refresh_status(
+                        format!(
+                            "Keeper {}: {}",
+                            keeper::keeper_agent_name(&agent),
+                            if success { "Success" } else { "Failed" }
+                        ),
+                        level,
+                    );
+                    state.keeper_pings_in_progress.remove(&agent);
+                    state.push_keeper_log(record);
+                }
             }
         }
 
@@ -1212,6 +1386,82 @@ where
                     .map(|(k, _)| k.clone())
                     .collect();
                 spawn_quota_reload(msg_tx.clone(), enabled_providers);
+            }
+        }
+
+        // Keeper automated background check
+        if config.keeper.enabled
+            && state.last_keeper_check.elapsed()
+                >= StdDuration::from_secs(config.keeper.check_interval_secs.max(10) as u64)
+        {
+            state.last_keeper_check = Instant::now();
+            let now_local = Local::now();
+            let now_utc = chrono::Utc::now();
+            let default_agents = tokenpulse_core::config::default_keeper_agents();
+
+            for &agent_id in keeper::KEEPER_AGENTS {
+                let Some(agent_cfg) = config
+                    .keeper
+                    .agents
+                    .get(agent_id)
+                    .or_else(|| default_agents.get(agent_id))
+                else {
+                    continue;
+                };
+
+                // Check 5h Daily
+                if agent_cfg.session_keeper_enabled
+                    && !state.keeper_pings_in_progress.contains(agent_id)
+                {
+                    let last_triggered = state.keeper_daily_triggered.get(agent_id).copied();
+                    if tokenpulse_core::keeper::should_trigger_daily(
+                        &agent_cfg.daily_wakeup_time,
+                        last_triggered,
+                        now_local,
+                    ) {
+                        state
+                            .keeper_daily_triggered
+                            .insert(agent_id.to_string(), now_local.date_naive());
+                        state.persist_keeper_triggers(&keeper_state_path);
+                        state.keeper_pings_in_progress.insert(agent_id.to_string());
+                        spawn_keeper_ping(
+                            msg_tx.clone(),
+                            agent_id.to_string(),
+                            agent_cfg.clone(),
+                            tokenpulse_core::keeper::KeeperTriggerType::Daily,
+                        );
+                    }
+                }
+
+                // Check Weekly
+                if agent_cfg.weekly_keeper_enabled
+                    && !state.keeper_pings_in_progress.contains(agent_id)
+                {
+                    let resets_at = tokenpulse_core::keeper::find_snapshot_for_agent(
+                        &state.quota_snapshots,
+                        agent_id,
+                    )
+                    .and_then(tokenpulse_core::keeper::extract_weekly_reset_time);
+
+                    let last_triggered = state.keeper_weekly_triggered.get(agent_id).copied();
+                    if tokenpulse_core::keeper::should_trigger_weekly(
+                        resets_at,
+                        last_triggered,
+                        now_utc,
+                    ) {
+                        state
+                            .keeper_weekly_triggered
+                            .insert(agent_id.to_string(), now_utc);
+                        state.persist_keeper_triggers(&keeper_state_path);
+                        state.keeper_pings_in_progress.insert(agent_id.to_string());
+                        spawn_keeper_ping(
+                            msg_tx.clone(),
+                            agent_id.to_string(),
+                            agent_cfg.clone(),
+                            tokenpulse_core::keeper::KeeperTriggerType::Weekly,
+                        );
+                    }
+                }
             }
         }
 
@@ -1494,6 +1744,109 @@ where
                             }
                             _ => {}
                         },
+                        UsagePage::Keeper => match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
+                            KeyCode::Right | KeyCode::Char('l') => state.next_page(),
+                            KeyCode::Tab => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    if state.selected_keeper_index > 0 {
+                                        state.selected_keeper_index -= 1;
+                                    } else {
+                                        state.selected_keeper_index =
+                                            keeper::KEEPER_AGENTS.len().saturating_sub(1);
+                                    }
+                                } else {
+                                    state.selected_keeper_index = (state.selected_keeper_index + 1)
+                                        % keeper::KEEPER_AGENTS.len();
+                                }
+                            }
+                            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                                if state.selected_keeper_index > 0 {
+                                    state.selected_keeper_index -= 1;
+                                } else {
+                                    state.selected_keeper_index =
+                                        keeper::KEEPER_AGENTS.len().saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                state.selected_keeper_index =
+                                    (state.selected_keeper_index + 1) % keeper::KEEPER_AGENTS.len();
+                            }
+                            KeyCode::Char('1') | KeyCode::Char('d') => {
+                                let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
+                                if let Ok(new_state) =
+                                    config_manager.toggle_agent_session_keeper(agent)
+                                {
+                                    if let Some(agent_cfg) = config.keeper.agents.get_mut(agent) {
+                                        agent_cfg.session_keeper_enabled = new_state;
+                                    }
+                                    state.set_refresh_status(
+                                        format!(
+                                            "{} 5h keeper {}",
+                                            keeper::keeper_agent_name(agent),
+                                            if new_state { "enabled" } else { "disabled" }
+                                        ),
+                                        RefreshStatusLevel::Success,
+                                    );
+                                }
+                            }
+                            KeyCode::Char('2') | KeyCode::Char('w') => {
+                                let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
+                                if let Ok(new_state) =
+                                    config_manager.toggle_agent_weekly_keeper(agent)
+                                {
+                                    if let Some(agent_cfg) = config.keeper.agents.get_mut(agent) {
+                                        agent_cfg.weekly_keeper_enabled = new_state;
+                                    }
+                                    state.set_refresh_status(
+                                        format!(
+                                            "{} Weekly keeper {}",
+                                            keeper::keeper_agent_name(agent),
+                                            if new_state { "enabled" } else { "disabled" }
+                                        ),
+                                        RefreshStatusLevel::Success,
+                                    );
+                                }
+                            }
+                            KeyCode::Char('p') => {
+                                let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
+                                if state.keeper_pings_in_progress.contains(agent) {
+                                    state.set_refresh_status(
+                                        format!(
+                                            "Ping for {} is already in progress...",
+                                            keeper::keeper_agent_name(agent)
+                                        ),
+                                        RefreshStatusLevel::Info,
+                                    );
+                                } else {
+                                    let default_agents =
+                                        tokenpulse_core::config::default_keeper_agents();
+                                    if let Some(agent_cfg) = config
+                                        .keeper
+                                        .agents
+                                        .get(agent)
+                                        .or_else(|| default_agents.get(agent))
+                                    {
+                                        state.keeper_pings_in_progress.insert(agent.to_string());
+                                        state.set_refresh_status(
+                                            format!(
+                                                "Executing ping for {}...",
+                                                keeper::keeper_agent_name(agent)
+                                            ),
+                                            RefreshStatusLevel::Info,
+                                        );
+                                        spawn_keeper_ping(
+                                            msg_tx.clone(),
+                                            agent.to_string(),
+                                            agent_cfg.clone(),
+                                            tokenpulse_core::keeper::KeeperTriggerType::Manual,
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {}
+                        },
                         UsagePage::Settings => match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => break,
                             KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
@@ -1612,7 +1965,9 @@ where
                         && !state.show_source_filter
                         && matches!(mouse.kind, MouseEventKind::ScrollUp) =>
                 {
-                    if state.page == UsagePage::Heatmap {
+                    if state.page == UsagePage::Keeper {
+                        state.keeper_log_scroll = state.keeper_log_scroll.saturating_sub(2);
+                    } else if state.page == UsagePage::Heatmap {
                         let frame = terminal.size()?;
                         let frame_area = Rect::new(0, 0, frame.width, frame.height);
                         let body = dashboard_body_area(frame_area);
@@ -1638,7 +1993,14 @@ where
                         && !state.show_source_filter
                         && matches!(mouse.kind, MouseEventKind::ScrollDown) =>
                 {
-                    if state.page == UsagePage::Heatmap {
+                    if state.page == UsagePage::Keeper {
+                        let frame = terminal.size()?;
+                        let max_scroll = keeper::keeper_log_scroll_max(
+                            &state,
+                            Rect::new(0, 0, frame.width, frame.height),
+                        );
+                        state.keeper_log_scroll = (state.keeper_log_scroll + 2).min(max_scroll);
+                    } else if state.page == UsagePage::Heatmap {
                         let frame = terminal.size()?;
                         let frame_area = Rect::new(0, 0, frame.width, frame.height);
                         let body = dashboard_body_area(frame_area);
@@ -1647,9 +2009,12 @@ where
                             mouse.column,
                             mouse.row,
                         ) {
-                            state.scroll_heatmap_detail_down(heatmap::heatmap_detail_scroll_max(
-                                &dashboard, &state, frame_area,
-                            ));
+                            let max = heatmap::heatmap_detail_scroll_max(
+                                &dashboard,
+                                &state,
+                                Rect::new(0, 0, frame.width, frame.height),
+                            );
+                            state.scroll_heatmap_detail_down(max);
                         }
                     } else {
                         let frame = terminal.size()?;
@@ -1707,6 +2072,14 @@ fn render_dashboard(
         UsagePage::Daily => daily::render_daily_page(f, root[2], dashboard, state, theme),
         UsagePage::Heatmap => heatmap::render_heatmap_page(f, root[2], dashboard, state, theme),
         UsagePage::Quota => quota::render_quota_tab(f, root[2], state, config, theme),
+        UsagePage::Keeper => keeper::render_keeper_tab(
+            f,
+            root[2],
+            state,
+            config,
+            config_manager.config_path(),
+            theme,
+        ),
         UsagePage::Settings => {
             settings::render_settings_tab(f, root[2], state, config, config_manager, theme)
         }
@@ -2000,6 +2373,17 @@ fn render_footer(
                 spans.extend(key_help("?", "help", theme));
                 Line::from(spans)
             }
+            UsagePage::Keeper => {
+                let mut spans = Vec::new();
+                spans.push(Span::raw(" "));
+                spans.extend(key_help("q", "quit", theme));
+                spans.extend(key_help("↑↓/Tab", "select agent", theme));
+                spans.extend(key_help("1/d", "toggle 5h", theme));
+                spans.extend(key_help("2/w", "toggle weekly", theme));
+                spans.extend(key_help("p", "ping now", theme));
+                spans.extend(key_help("?", "help", theme));
+                Line::from(spans)
+            }
             UsagePage::Settings => {
                 let mut spans = Vec::new();
                 spans.push(Span::raw(" "));
@@ -2209,6 +2593,16 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
                 ("pgup/pgdn", "scroll selected day details"),
             ]);
         }
+        UsagePage::Keeper => {
+            keybindings.extend([
+                ("1 / d", "toggle 5h daily wakeup keeper"),
+                ("2 / w", "toggle weekly auto-sync keeper"),
+                ("p", "trigger immediate test ping"),
+                ("↑↓ / Tab", "switch selected agent card"),
+                ("←→", "switch dashboard tab"),
+                ("mouse scroll", "scroll execution log"),
+            ]);
+        }
         _ => {}
     }
 
@@ -2408,5 +2802,124 @@ pub fn empty_data_message(state: &UsageState, fallback: &str) -> String {
         )
     } else {
         fallback.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_usage_page_navigation() {
+        let pages = UsagePage::all();
+        assert_eq!(pages.len(), 7);
+        assert_eq!(pages[0], UsagePage::Overview);
+        assert_eq!(pages[1], UsagePage::Models);
+        assert_eq!(pages[2], UsagePage::Daily);
+        assert_eq!(pages[3], UsagePage::Heatmap);
+        assert_eq!(pages[4], UsagePage::Quota);
+        assert_eq!(pages[5], UsagePage::Keeper);
+        assert_eq!(pages[6], UsagePage::Settings);
+
+        assert_eq!(UsagePage::Quota.next(), UsagePage::Keeper);
+        assert_eq!(UsagePage::Keeper.next(), UsagePage::Settings);
+        assert_eq!(UsagePage::Settings.next(), UsagePage::Overview);
+
+        assert_eq!(UsagePage::Keeper.previous(), UsagePage::Quota);
+        assert_eq!(UsagePage::Overview.previous(), UsagePage::Settings);
+
+        assert_eq!(UsagePage::Keeper.title(), "Keeper");
+    }
+
+    /// `command_executed` doubles as the record's identity in these tests.
+    fn keeper_record(marker: &str) -> tokenpulse_core::keeper::KeeperExecutionRecord {
+        tokenpulse_core::keeper::KeeperExecutionRecord {
+            agent: "claude".to_string(),
+            trigger_type: tokenpulse_core::keeper::KeeperTriggerType::Manual,
+            model: "haiku".to_string(),
+            prompt: "Hi".to_string(),
+            command_executed: marker.to_string(),
+            timestamp: Local::now(),
+            duration_ms: 1,
+            success: true,
+            exit_code: Some(0),
+            output_snippet: "ok".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_keeper_log_history_is_capped_and_keeps_newest() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+
+        for i in 0..(KEEPER_LOG_DISPLAY_LIMIT + 25) {
+            state.push_keeper_log(keeper_record(&format!("rec-{i}")));
+        }
+
+        assert_eq!(state.keeper_logs.len(), KEEPER_LOG_DISPLAY_LIMIT);
+        assert_eq!(
+            state.keeper_logs.first().unwrap().command_executed,
+            "rec-25"
+        );
+        assert_eq!(
+            state.keeper_logs.last().unwrap().command_executed,
+            format!("rec-{}", KEEPER_LOG_DISPLAY_LIMIT + 24)
+        );
+    }
+
+    /// A usage refresh rebuilds `UsageState`; the Keeper's history, locks and
+    /// last-fired dates have to survive it. Losing the dates re-armed the daily
+    /// trigger, so a "10:30" ping fired again on the next check.
+    #[test]
+    fn test_keeper_state_survives_a_usage_refresh() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+
+        state.push_keeper_log(keeper_record("before-refresh"));
+        state
+            .keeper_daily_triggered
+            .insert("claude".to_string(), Local::now().date_naive());
+        state.keeper_pings_in_progress.insert("codex".to_string());
+        state.selected_keeper_index = 2;
+        state.keeper_log_scroll = 12;
+        let check_mark = state.last_keeper_check;
+
+        // What the UsageReloadSuccess handler does.
+        let mut previous = std::mem::replace(&mut state, UsageState::new(&dashboard, vec![]));
+        state.adopt_keeper_state(&mut previous);
+
+        assert_eq!(state.keeper_logs.len(), 1);
+        assert_eq!(
+            state.keeper_logs[0].command_executed, "before-refresh",
+            "execution history must not be dropped by a refresh"
+        );
+        assert!(
+            state.keeper_daily_triggered.contains_key("claude"),
+            "losing this re-arms the daily trigger and re-fires the ping"
+        );
+        assert!(state.keeper_pings_in_progress.contains("codex"));
+        assert_eq!(state.selected_keeper_index, 2);
+        assert_eq!(state.keeper_log_scroll, 12);
+        assert_eq!(state.last_keeper_check, check_mark);
+    }
+
+    #[test]
+    fn test_keeper_log_scroll_follows_the_record_being_read() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+        state.push_keeper_log(keeper_record("first"));
+
+        // Not scrolled: stay pinned to the newest entry.
+        state.push_keeper_log(keeper_record("second"));
+        assert_eq!(state.keeper_log_scroll, 0);
+
+        // Scrolled back: shift down so the same record stays under the cursor,
+        // since the panel renders newest-first.
+        state.keeper_log_scroll = 6;
+        state.push_keeper_log(keeper_record("third"));
+        assert_eq!(
+            state.keeper_log_scroll,
+            6 + keeper::KEEPER_LOG_LINES_PER_RECORD
+        );
     }
 }

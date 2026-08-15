@@ -480,6 +480,9 @@ fn windows_from_summary(summary: &LsQuotaSummary) -> Vec<RateWindow> {
                 window_rank,
                 RateWindow {
                     label: format!("{} ({})", group_label, window_suffix),
+                    // Antigravity meters each model family separately, and the
+                    // group label already is that family.
+                    model_family: model_family_from_group(&group_label),
                     used_percent: used,
                     resets_at,
                     period_duration_ms,
@@ -493,6 +496,16 @@ fn windows_from_summary(summary: &LsQuotaSummary) -> Vec<RateWindow> {
 }
 
 /// Turn a server group display name into a short, clean label.
+/// `clean_group_label` falls back to "Usage" when a group has no usable name;
+/// that is a placeholder, not a model family, so it is reported as absent.
+fn model_family_from_group(group_label: &str) -> Option<String> {
+    if group_label == "Usage" {
+        None
+    } else {
+        Some(group_label.to_string())
+    }
+}
+
 fn clean_group_label(display_name: &str) -> String {
     let lower = display_name.to_lowercase();
     if lower.contains("gemini") {

@@ -16,7 +16,7 @@ that file and link to it from elsewhere rather than copying content.
 | [`modules/tui.md`](modules/tui.md) | Contributors | TUI tabs, key bindings, settings, rendering widgets. |
 | [`specs/`](specs/) | Contributors | Product/feature specs (named by feature, no dates). See `specs/README.md`. |
 | [`model-pricing-mapping.md`](model-pricing-mapping.md) | Contributors | Reference: model id → pricing/provider mapping rules. |
-| [`RELEASING.md`](RELEASING.md) | Maintainers | Versioning, tagging, GitHub release, npm publishing. |
+| [`RELEASING.md`](RELEASING.md) | Maintainers | The release runbook: versioning, writing the release note, tagging, and what CI publishes to GitHub and npm. |
 | [`archive/`](archive/) | — | Historical/superseded plans; not maintained. |
 
 ## Where things live (to prevent duplication)
@@ -24,8 +24,11 @@ that file and link to it from elsewhere rather than copying content.
 - **Key bindings, tab behaviour, settings** → `modules/tui.md` only.
 - **Quota window labels / durations / per-provider endpoints** → `modules/quota.md` only.
 - **Config keys and defaults** → described where they are consumed
-  (`modules/tui.md` for the settings tab, `modules/usage.md`/`modules/quota.md`
-  for behaviour); the authoritative list is the `DisplayConfig` struct.
+  (`modules/tui.md` for the settings tab and the Keeper tab, `modules/usage.md`/
+  `modules/quota.md` for behaviour); the authoritative lists are the
+  `DisplayConfig` and `KeeperConfig` structs.
+- **Observation history schema** (`quota_observations`, `keeper_executions`, …)
+  → `modules/quota.md` only.
 - **Release/packaging steps** → `RELEASING.md` only.
 - **Working notes, dated decisions, plans** → `.agents/notes/` and
   `.agents/plans/` (not committed to `docs/`).

@@ -129,6 +129,8 @@ impl CodexQuotaFetcher {
 
         RateWindow {
             label: window_label(position, window.limit_window_seconds),
+            // Codex pools all models into one quota.
+            model_family: None,
             used_percent: window.used_percent.0,
             resets_at,
             period_duration_ms: window

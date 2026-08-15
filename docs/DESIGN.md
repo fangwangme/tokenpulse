@@ -51,6 +51,8 @@ tokenpulse/
 │       ├── lib.rs
 │       ├── provider.rs           # UnifiedMessage, TokenBreakdown, provider traits
 │       ├── auth/                 # credential loading and token refresh
+│       ├── history/              # append-only quota + Keeper observation history
+│       ├── keeper/               # scheduled agent pings and trigger evaluation
 │       ├── quota/                # API-based quota fetching and cache
 │       ├── usage/
 │       │   ├── mod.rs            # dashboard contracts and summary builders

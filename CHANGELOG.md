@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-15
+
+### Added
+- **Keeper Dashboard Tab**: Added interactive session keeper & scheduled heartbeat dashboard for managing automated wakeup and synchronization across Claude Code, Codex, and Google Antigravity.
+  - **5h Daily Wakeup**: Automated morning wakeup timer (default 10:30) to initiate session cooldown timers early.
+  - **Weekly Auto-Sync**: Automated quota synchronization timed precisely 1 minute after weekly reset to maximize resource rollover.
+  - **Live Execution Stream**: Multi-line live heartbeat logs showing executed CLI commands, models, prompts, responses, duration, and status with smooth mouse wheel scrolling.
+  - **Single-Key Toggles & Manual Test**: `[1/d]` to toggle 5h keeper, `[2/w]` to toggle weekly sync, and `[p]` for instant test ping with in-flight concurrency locking.
+  - **Opt-In by Design**: The engine is disabled by default and is turned on from the Settings tab, since running it spends real quota on every scheduled ping.
+  - **Automated Configuration Migration**: Transparently detects and upgrades the exact keeper commands shipped by earlier builds to optimal headless, non-interactive flags (`--no-session-persistence`, `--skip-git-repo-check`, `--ephemeral`, `haiku`, `gpt-5.6-luna`), leaving hand-written commands untouched.
+  - **Persistent Trigger History**: Last-fired timestamps are stored in `keeper_state.json` next to the config, so restarting the TUI no longer re-fires a scheduled ping, and a missed daily wakeup is only caught up within two hours of its configured time.
+  - **Robust Provider & Reset Extraction**: Accurately extracts weekly reset timestamps from all provider formats including Antigravity's `Gemini (7d)` and `Claude (7d)` rate windows.
+
+- **Observation History Database**: `tokenpulse.db` gained append-only history alongside the existing quota cache, which only ever kept one overwritten row per provider.
+  - `quota_observations`: one row per rate window per poll (provider, timestamps, plan, account, window label, model family, full-precision used percent, reset time, period), giving an evenly spaced time series for later analysis.
+  - **Model family dimension**: `RateWindow` now carries the model family a window meters, so Antigravity's separate Gemini and Claude quotas — and Claude's per-family Opus/Sonnet/Fable weekly windows — can be grouped without parsing display labels. Providers with a single pooled quota (Codex) and per-request-type quotas (Copilot) leave it empty.
+  - `quota_credit_observations`: credit balances for providers that report them.
+  - `quota_fetch_failures`: failed polls with the provider attributed, so recurring auth or network problems stay visible after the status bar clears.
+  - `keeper_executions`: every ping with its trigger, model, prompt, command, duration, exit code and output. The Keeper panel now seeds itself from the database on launch and shows the newest 50, while the database keeps everything.
+  - The database is now WAL-mode with a `user_version` migration path, matching `usage.db`.
+- **npm Distribution**: `npm install -g @fangwangme/tokenpulse` installs a prebuilt binary with no Rust toolchain required. A launcher package resolves one of four per-platform binary packages through `optionalDependencies` (macOS x64/arm64, Linux x64/arm64). The release workflow builds, assembles, and publishes them from the `v*` tag; re-running a failed publish skips whatever already reached the registry. The unscoped name `tokenpulse` belongs to an unrelated npm package, hence the scope.
+- **Release notes from the CHANGELOG**: the GitHub Release body is now the curated `CHANGELOG.md` section for that version rather than an auto-generated list of PR titles, falling back to generated notes when a version has no section.
+- **Linux release binaries**: the release build matrix gained `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, built on `ubuntu-22.04` so they need only glibc 2.35.
+- **File Logging**: tracing output goes to a daily rolling file in `~/.local/share/tokenpulse/log/`. Previously logging was only initialised when `RUST_LOG` was set and wrote to stdout, which is unusable under the TUI — a misbehaving background task left no evidence at all. Level is overridable via `TOKENPULSE_LOG` or `RUST_LOG`.
+
+### Fixed
+- The README's `cargo install tokenpulse` never worked — the crate is not published on crates.io. Install instructions now cover npm and `cargo install --git`.
+- `tokenpulse config show` now prints the Keeper section, and `config set keeper_engine=true|false` toggles the master switch, so the CLI matches what the Settings tab already exposed.
+- The Keeper's next-trigger time no longer shows `--:--` on daylight-saving transition days. Resolving a wall-clock time returned nothing both when an hour is skipped and when it repeats.
+- The log directory is resolved with `dirs::home_dir()` rather than `$HOME`, which is routinely unset on Windows and in slim containers and would have put the log under the working directory.
+- Keeper pings no longer panic when an agent replies with non-ASCII text. The output snippet was truncated on a byte offset, which splits multi-byte characters; a panicking ping task never reported back, leaving that agent stuck on "Ping running..." and blocked from every later ping.
+- Keeper output is sanitized before display: carriage returns, tabs, ANSI escapes and other control characters from agent CLIs are stripped instead of being written straight into the terminal, and multi-line replies are collapsed onto one line.
+- Prompts and models are shell-escaped when substituted into a keeper command template, so a value containing a quote can no longer break out of the template and run as a command.
+- A keeper ping that hits its 45s timeout now kills the CLI it started instead of leaving it running detached.
+
 ## [0.4.11] - 2026-07-27
 
 ### Fixed

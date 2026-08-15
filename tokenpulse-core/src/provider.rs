@@ -20,6 +20,14 @@ pub struct QuotaSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateWindow {
     pub label: String,
+    /// Model family this window meters, when the provider splits quota by one.
+    ///
+    /// Antigravity bills Gemini and Claude separately, and Claude tracks Opus,
+    /// Sonnet and Fable on their own weekly windows. Providers with a single
+    /// pooled quota leave this empty. Kept out of `label` so history can group
+    /// by family without re-parsing display text.
+    #[serde(default)]
+    pub model_family: Option<String>,
     pub used_percent: f64,
     pub resets_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -211,6 +219,7 @@ mod tests {
     fn test_rate_window_creation() {
         let window = RateWindow {
             label: "Session (5h)".to_string(),
+            model_family: None,
             used_percent: 42.5,
             resets_at: None,
             period_duration_ms: Some(5 * 60 * 60 * 1000),
@@ -257,12 +266,14 @@ mod tests {
             windows: vec![
                 RateWindow {
                     label: "Session".to_string(),
+                    model_family: None,
                     used_percent: 50.0,
                     resets_at: None,
                     period_duration_ms: Some(5 * 60 * 60 * 1000),
                 },
                 RateWindow {
                     label: "Weekly".to_string(),
+                    model_family: None,
                     used_percent: 25.0,
                     resets_at: None,
                     period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),

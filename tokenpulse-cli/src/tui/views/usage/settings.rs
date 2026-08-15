@@ -73,6 +73,20 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
             label: config.display.refresh_quota.to_string(),
             value_color: theme.accent_soft,
         },
+        SettingItem {
+            key: "keeper_engine",
+            label: if config.keeper.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+            .to_string(),
+            value_color: if config.keeper.enabled {
+                theme.gauge_low
+            } else {
+                theme.dim
+            },
+        },
     ];
 
     // Add provider checkboxes!
@@ -120,7 +134,7 @@ fn next_refresh_interval(curr: u32) -> u32 {
 
 pub fn settings_row_count(_state: &UsageState) -> usize {
     let providers_count = ALL_PROVIDERS.len();
-    7 + providers_count
+    8 + providers_count
 }
 
 pub fn handle_settings_action(
@@ -149,8 +163,10 @@ pub fn handle_settings_action(
         config.display.scan_antigravity = !config.display.scan_antigravity;
     } else if idx == 6 {
         config.display.refresh_quota = !config.display.refresh_quota;
+    } else if idx == 7 {
+        config.keeper.enabled = !config.keeper.enabled;
     } else {
-        let provider_idx = idx - 7;
+        let provider_idx = idx - 8;
         let providers = ALL_PROVIDERS.to_vec();
 
         if provider_idx < providers.len() {

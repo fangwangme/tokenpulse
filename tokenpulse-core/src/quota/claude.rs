@@ -310,6 +310,7 @@ fn quota_snapshot_from_body(body: &str) -> Result<QuotaSnapshot> {
     if let Some(five_hour) = quota.five_hour {
         windows.push(RateWindow {
             label: "Session (5h)".to_string(),
+            model_family: None,
             used_percent: five_hour.utilization,
             resets_at: five_hour.resets_at.and_then(|s| {
                 DateTime::parse_from_rfc3339(&s)
@@ -323,6 +324,7 @@ fn quota_snapshot_from_body(body: &str) -> Result<QuotaSnapshot> {
     if let Some(seven_day) = quota.seven_day {
         windows.push(RateWindow {
             label: "Weekly (7d)".to_string(),
+            model_family: None,
             used_percent: seven_day.utilization,
             resets_at: seven_day.resets_at.and_then(|s| {
                 DateTime::parse_from_rfc3339(&s)
@@ -336,6 +338,7 @@ fn quota_snapshot_from_body(body: &str) -> Result<QuotaSnapshot> {
     if let Some(sonnet) = quota.seven_day_sonnet {
         windows.push(RateWindow {
             label: "Sonnet (7d)".to_string(),
+            model_family: Some("Sonnet".to_string()),
             used_percent: sonnet.utilization,
             resets_at: sonnet.resets_at.and_then(|s| {
                 DateTime::parse_from_rfc3339(&s)
@@ -349,6 +352,7 @@ fn quota_snapshot_from_body(body: &str) -> Result<QuotaSnapshot> {
     if let Some(opus) = quota.seven_day_opus {
         windows.push(RateWindow {
             label: "Opus (7d)".to_string(),
+            model_family: Some("Opus".to_string()),
             used_percent: opus.utilization,
             resets_at: opus.resets_at.and_then(|s| {
                 DateTime::parse_from_rfc3339(&s)
@@ -371,6 +375,7 @@ fn quota_snapshot_from_body(body: &str) -> Result<QuotaSnapshot> {
         if is_fable && is_weekly {
             windows.push(RateWindow {
                 label: "Fable (7d)".to_string(),
+                model_family: Some("Fable".to_string()),
                 used_percent: limit.percent,
                 resets_at: limit.resets_at.and_then(|s| {
                     DateTime::parse_from_rfc3339(&s)

@@ -13,8 +13,11 @@ quota/
 ├── codex.rs        # Codex quota fetcher
 ├── copilot.rs      # GitHub Copilot quota fetcher
 ├── antigravity.rs  # Antigravity quota fetcher
-└── cache.rs        # Quota response caching
+└── cache.rs        # Quota response caching (one overwritten row per provider)
 ```
+
+Observation history lives outside this module in `core/src/history/`, because it
+also stores Keeper executions. See [Observation history](#observation-history).
 
 ## QuotaFetcher Trait
 
@@ -54,9 +57,12 @@ anthropic-beta: oauth-2025-04-20
 | -------------------------------------- | ---------------------------------------------- |
 | `five_hour.utilization`                | Session (5h); `used_percent = utilization`     |
 | `seven_day.utilization`                | Weekly (7d)                                    |
-| `seven_day_sonnet.utilization`         | Sonnet (7d)                                    |
-| `seven_day_opus.utilization`           | Opus (7d)                                      |
-| `limits[]` where `kind == "weekly_scoped"` and `scope.model.display_name == "Fable"` | Fable (7d); `used_percent = percent`           |
+| `seven_day_sonnet.utilization`         | Sonnet (7d); `model_family = "Sonnet"`         |
+| `seven_day_opus.utilization`           | Opus (7d); `model_family = "Opus"`             |
+| `limits[]` where `kind == "weekly_scoped"` and `scope.model.display_name == "Fable"` | Fable (7d); `used_percent = percent`; `model_family = "Fable"` |
+
+The Session and Weekly windows meter the pooled quota, so they leave
+`model_family` empty; only the per-family weekly windows set it.
 
 `utilization` and `percent` are already 0–100 values; TokenPulse stores them directly as `used_percent` without rescaling.
 
@@ -163,7 +169,7 @@ No external auth lookup. Antigravity quota is read from a running local Antigrav
 
 | Bucket field                 | → RateWindow                                                    |
 | ---------------------------- | --------------------------------------------------------------- |
-| group `displayName`          | Label prefix (`Gemini Models` → `Gemini`, `Claude and GPT models` → `Claude`) |
+| group `displayName`          | Label prefix and `model_family` (`Gemini Models` → `Gemini`, `Claude and GPT models` → `Claude`). An unnamed group falls back to the label `Usage` with an empty `model_family`. |
 | `window` (`5h` / `weekly`)   | Label suffix `(5h)` / `(7d)` and period duration (5h / 7d)      |
 | `remainingFraction`          | `used_percent = round((1 - remainingFraction) * 100)`           |
 | `resetTime`                  | `resets_at`                                                     |
@@ -182,6 +188,34 @@ pub async fn fetch_all(providers: &[Box<dyn QuotaFetcher>]) -> Vec<Result<QuotaS
     futures::future::join_all(futures).await
 }
 ```
+
+## Observation history
+
+The cache in `cache.rs` keeps exactly one row per provider and overwrites it on
+every poll, so it answers "what is the balance now" and nothing else. Durable
+history is appended separately by `core/src/history/`, into the same
+`~/.local/share/tokenpulse/tokenpulse.db` (WAL, `PRAGMA user_version = 2`).
+
+Writes hang off `QuotaCacheStore::save`, the one point that knows a fresh
+snapshot was observed, so both the TUI's background reload and the plain-text /
+JSON commands are covered without per-call-site wiring.
+
+| Table                        | One row per                                             |
+| ---------------------------- | ------------------------------------------------------- |
+| `quota_observations`         | rate window per poll — provider, `observed_at`, `fetched_at`, plan, account, `window_label`, `model_family`, `used_percent`, `resets_at`, `period_duration_ms` |
+| `quota_credit_observations`  | poll, when the provider reports credits                 |
+| `quota_fetch_failures`       | failed poll, with the provider attributed               |
+| `keeper_executions`          | Keeper ping — agent, trigger, model, prompt, command, duration, exit code, output |
+
+Every poll is written, including unchanged values, so the series is an evenly
+spaced grid that needs no gap filling to query. `used_percent` is stored at full
+precision; the TUI rounds only for display.
+
+`fetch_all` returns bare `Result`s with no provider id, so failures are
+attributed by zipping against `commands::quota::quota_fetcher_ids`, which
+reproduces the fetcher order.
+
+There is no retention policy — the tables grow until pruned by hand.
 
 ## Error Handling
 

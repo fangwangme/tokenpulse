@@ -78,11 +78,49 @@ enum ConfigAction {
     },
 }
 
+/// Sends tracing output to a daily file under the data directory.
+///
+/// Logging must never go to stdout: the dashboard owns the terminal in raw mode
+/// and any stray line corrupts the frame. A file also means a misbehaving
+/// background task (a keeper ping, a quota fetch) leaves evidence behind instead
+/// of vanishing with the status bar message.
+///
+/// Returns the appender guard, which has to stay alive for the whole process or
+/// buffered lines are dropped on exit.
+fn init_file_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    // `dirs` rather than $HOME: the variable is routinely unset on Windows and
+    // in slim containers, which would drop this under the working directory.
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let log_dir = home
+        .join(".local")
+        .join("share")
+        .join("tokenpulse")
+        .join("log");
+    std::fs::create_dir_all(&log_dir).ok()?;
+
+    let filter = EnvFilter::try_from_env("TOKENPULSE_LOG")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let appender = tracing_appender::rolling::daily(&log_dir, "tokenpulse.log");
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+
+    let subscriber = fmt()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_target(true)
+        .with_env_filter(filter)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).ok()?;
+    Some(guard)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if std::env::var_os("RUST_LOG").is_some() || std::env::var_os("TOKENPULSE_LOG").is_some() {
-        let _ = tracing_subscriber::fmt::try_init();
-    }
+    let _log_guard = init_file_logging();
 
     let cli = Cli::parse();
 

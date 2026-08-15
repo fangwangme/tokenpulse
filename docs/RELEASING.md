@@ -6,141 +6,245 @@ release process — keep it in sync with `.github/workflows/release.yml`.
 
 ---
 
-## 1. Versioning
+## How a release works
 
-- The workspace uses a single version in the root `Cargo.toml`
-  (`[workspace.package] version`); both `tokenpulse-core` and `tokenpulse-cli`
-  inherit it via `version.workspace = true`.
-- Follow [SemVer](https://semver.org/): bump **patch** for fixes, **minor** for
-  backward-compatible features, **major** for breaking changes.
-- The config schema has its own `version` integer (`tokenpulse-core/src/config`);
-  bump it and add a migration when the on-disk config layout changes.
+A release happens in two phases, and the split matters:
 
-## 2. Cut a release
+| Phase | Where | What |
+| --- | --- | --- |
+| **A. Release PR** | a branch, reviewed and merged like any other change | version bump, CHANGELOG, verification |
+| **B. Tag** | on `main`, after the merge | `git tag` + push; CI does the rest |
 
-1. Make sure `main` is green (`cargo fmt --all -- --check`, `cargo test --workspace --locked`, `cargo build --release`).
-2. Bump the version in the root `Cargo.toml`.
-3. Move the `CHANGELOG.md` `## [Unreleased]`/in-flight notes into a dated
-   `## [X.Y.Z] - YYYY-MM-DD` section.
-4. Refresh the lockfile: `cargo build --workspace` (so `Cargo.lock` records the
-   new version; CI builds with `--locked`).
-5. Commit (e.g. `chore: release vX.Y.Z`) and merge to `main` via PR.
-6. Tag and push:
-   ```bash
-   git tag vX.Y.Z
-   git push origin vX.Y.Z
-   ```
-7. The **Release** workflow (`.github/workflows/release.yml`) triggers on the
-   `v*` tag: it builds the release binaries, packages `*.tar.gz` archives, and
-   publishes a GitHub Release with auto-generated notes.
+Nothing is ever committed straight to `main` — the release commit goes through
+a PR the same as a feature does. The tag in phase B is the one thing done on
+`main` directly, and a tag adds no commit: it just points at what was merged.
 
-> Current `release.yml` builds macOS only (`x86_64-apple-darwin`,
-> `aarch64-apple-darwin`). Add Linux (`x86_64-unknown-linux-gnu`,
-> `aarch64-unknown-linux-gnu`) and Windows (`x86_64-pc-windows-msvc`) targets to
-> the build matrix before advertising those platforms on npm (see §3).
+Two version numbers exist and they are unrelated. The **release** version lives
+once in the root `Cargo.toml` and is what this document is about. The **config
+schema** version is an integer in `tokenpulse-core/src/config`, bumped with a
+migration whenever the on-disk config layout changes — independently of any
+release. The database schemas in `history/` and `usage/store.rs` are versioned
+the same way, via `PRAGMA user_version`.
 
-## 3. Publishing to npm
+---
 
-TokenPulse is a compiled Rust binary, so the npm package ships **prebuilt
-binaries** rather than source. Use the **per-platform `optionalDependencies`**
-pattern (the approach used by esbuild, SWC, and Biome): a thin launcher package
-depends on one binary package per platform, and npm installs only the package
-matching the user's `os`/`cpu`.
+## 1. Phase A — the release PR
+
+Everything in this phase happens on a branch. Per the project convention, work
+in a worktree rather than switching `main` in place:
+
+```bash
+git switch main && git pull
+mkdir -p .worktrees
+git worktree add .worktrees/release-vX.Y.Z -b chore/release-vX.Y.Z
+cd .worktrees/release-vX.Y.Z
+```
+
+### Step 1 — Decide the version
+
+Look at what landed since the last tag and pick per [SemVer](https://semver.org/):
+
+```bash
+git log --oneline "$(git describe --tags --abbrev=0)"..main
+```
+
+- **patch** (`0.5.0` → `0.5.1`) — fixes only, no new behaviour.
+- **minor** (`0.5.0` → `0.6.0`) — new features, existing setups keep working.
+- **major** — anything that breaks an existing config, database, or command.
+
+### Step 2 — Write the release note
+
+`CHANGELOG.md` **is** the release note: CI publishes that section verbatim as
+the GitHub Release body. Nothing else needs writing.
+
+Ideally each feature PR already added its lines under `## [Unreleased]` as it
+merged, and this step is just renaming that heading to `## [X.Y.Z] - YYYY-MM-DD`
+and tidying it. When entries are missing, write them now from the commit log.
+
+```markdown
+## [X.Y.Z] - YYYY-MM-DD
+
+### Added
+- **Short bold label**: what it does, and why it exists.
+
+### Changed
+- What behaves differently now, and what a user has to do about it.
+
+### Fixed
+- What was broken, what the symptom was, and what fixes it.
+```
+
+Write for someone deciding whether to upgrade. Name the user-visible symptom,
+not the internal function. Call out anything that changes existing behaviour,
+needs a manual step, or alters a default — those are the lines people actually
+need. Use `Added` / `Changed` / `Fixed` / `Removed` and omit empty ones.
+
+### Step 3 — Bump the version
+
+Only one place holds it; both crates inherit from the workspace:
+
+```bash
+# edit [workspace.package] version in the root Cargo.toml
+cargo build --workspace          # refreshes Cargo.lock — CI builds with --locked
+```
+
+Commit `Cargo.lock` too. CI builds with `--locked` and fails if it is stale.
+
+### Step 4 — Verify locally
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace --locked
+cargo build --release --workspace
+```
+
+### Step 5 — Open the PR and merge it
+
+```bash
+git commit -am "chore: release vX.Y.Z"
+git push -u origin chore/release-vX.Y.Z
+gh pr create --fill
+```
+
+Wait for CI to pass, then merge. Do not tag yet — the tag has to point at the
+merge commit on `main`, not at the branch.
+
+```bash
+gh pr merge --squash --delete-branch
+```
+
+---
+
+## 2. Phase B — tag the merged commit
+
+```bash
+cd <repo root> && git switch main && git pull
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+The tag must be `vX.Y.Z` and must match the version in `Cargo.toml`, or the npm
+job stops before publishing anything.
+
+### Step 6 — CI takes over
+
+`.github/workflows/release.yml` fires on the `v*` tag:
+
+| Job | Does |
+| --- | --- |
+| `build` | One release binary per target, uploaded as an artifact |
+| `publish-release` | GitHub Release with the `*.tar.gz` archives, body taken from the CHANGELOG section |
+| `publish-npm` | Assembles and publishes the five npm packages (§3) |
+
+Targets: `x86_64-apple-darwin`, `aarch64-apple-darwin`,
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`. Linux builds run on
+`ubuntu-22.04`, so the binaries need only glibc 2.35 and still run on distros a
+couple of releases behind.
+
+`publish-release` and `publish-npm` both wait on `build`, so a failure on any
+platform stops the release before anything is published.
+
+### Step 7 — Verify the result
+
+```bash
+gh run watch                                        # follow the release run
+gh release view vX.Y.Z                              # archives + notes present?
+npx @fangwangme/tokenpulse@X.Y.Z --version          # in a clean directory
+```
+
+Then clean up the worktree from phase A:
+
+```bash
+git worktree remove .worktrees/release-vX.Y.Z
+```
+
+### If something fails
+
+Anything that goes wrong before `publish-*` runs leaves nothing published, so
+the fix is always: delete the tag, correct the branch through a normal PR, and
+tag again.
+
+```bash
+git tag -d vX.Y.Z && git push --delete origin vX.Y.Z
+```
+
+| Failure | What to do |
+| --- | --- |
+| A build job fails | Nothing was published. Fix on a branch, merge, delete the tag, re-tag. |
+| `publish-npm` fails on version mismatch | The tag and `Cargo.toml` disagree. Nothing was published — delete the tag and re-tag correctly. |
+| `publish-npm` fails midway | Some packages are live. Re-run the job; it skips what already published (§3c). |
+| A bad build reached npm | A version can never be replaced. `npm deprecate` it and release a patch. |
+| Wrong release notes | Edit the GitHub Release body directly, and fix `CHANGELOG.md` through a PR. |
+
+## 3. npm packaging reference
+
+Automated by `release.yml`; the `v*` tag that builds the binaries also publishes
+them. Nothing here needs running by hand.
+
+The plain name `tokenpulse` is taken on npm by an unrelated package, so
+everything ships under the `@fangwangme` scope.
 
 ### 3a. Package layout
 
+TokenPulse is a compiled binary, so npm ships **prebuilt binaries** using the
+per-platform `optionalDependencies` pattern (as esbuild, SWC, and Biome do): a
+thin launcher depends on one binary package per platform, and npm installs only
+the one matching the user's `os`/`cpu`.
+
 ```
-tokenpulse/                      # launcher package (what users install)
-  package.json                   # bin + optionalDependencies, version = crate version
-  bin/tokenpulse.js              # resolves & execs the platform binary
-
-@tokenpulse/cli-darwin-arm64/    # one package per target
-  package.json                   # "os": ["darwin"], "cpu": ["arm64"]
-  bin/tokenpulse                 # the prebuilt binary
-@tokenpulse/cli-darwin-x64/
-@tokenpulse/cli-linux-x64/
-@tokenpulse/cli-linux-arm64/
-@tokenpulse/cli-win32-x64/       # bin/tokenpulse.exe
-```
-
-Launcher `package.json` (key fields):
-
-```json
-{
-  "name": "tokenpulse",
-  "version": "X.Y.Z",
-  "bin": { "tokenpulse": "bin/tokenpulse.js" },
-  "optionalDependencies": {
-    "@tokenpulse/cli-darwin-arm64": "X.Y.Z",
-    "@tokenpulse/cli-darwin-x64": "X.Y.Z",
-    "@tokenpulse/cli-linux-x64": "X.Y.Z",
-    "@tokenpulse/cli-linux-arm64": "X.Y.Z",
-    "@tokenpulse/cli-win32-x64": "X.Y.Z"
-  }
-}
+@fangwangme/tokenpulse                  launcher — what users install
+  bin/tokenpulse.js                     resolves and execs the platform binary
+@fangwangme/tokenpulse-darwin-arm64     one per target, holds the binary
+@fangwangme/tokenpulse-darwin-x64
+@fangwangme/tokenpulse-linux-arm64
+@fangwangme/tokenpulse-linux-x64
 ```
 
-Platform `package.json` (npm skips it on non-matching machines):
+Sources live in `npm/`:
 
-```json
-{
-  "name": "@tokenpulse/cli-darwin-arm64",
-  "version": "X.Y.Z",
-  "os": ["darwin"],
-  "cpu": ["arm64"],
-  "files": ["bin/tokenpulse"]
-}
-```
+| Path | Role |
+| --- | --- |
+| `npm/launcher/` | Launcher `package.json` template and `bin/tokenpulse.js`. The template's `optionalDependencies` are the authoritative list of platforms we claim to support. |
+| `npm/scripts/build-packages.mjs` | Turns the CI build artifacts into ready-to-publish package directories. |
+| `npm/scripts/publish-packages.mjs` | Publishes them in dependency order. |
 
-Launcher `bin/tokenpulse.js`:
+All package versions equal the crate version, so the launcher's pinned
+`optionalDependencies` resolve. `build-packages.mjs` refuses to run when the tag
+and `Cargo.toml` disagree — check that first if the npm job fails immediately.
 
-```js
-#!/usr/bin/env node
-const { spawnSync } = require("node:child_process");
-const pkg = `@tokenpulse/cli-${process.platform}-${process.arch}`;
-const exe = process.platform === "win32" ? "tokenpulse.exe" : "tokenpulse";
-let binary;
-try {
-  binary = require.resolve(`${pkg}/bin/${exe}`);
-} catch {
-  console.error(`tokenpulse: no prebuilt binary for ${process.platform}-${process.arch}`);
-  process.exit(1);
-}
-process.exit(spawnSync(binary, process.argv.slice(2), { stdio: "inherit" }).status ?? 1);
-```
+### 3b. Adding a platform
 
-All package versions must equal the crate version so the launcher's pinned
-`optionalDependencies` resolve.
+Three places have to agree, and the build fails loudly if they do not:
 
-### 3b. Publish steps
+1. `release.yml` — add a `runner` / `target` pair to the `build` matrix.
+2. `npm/scripts/build-packages.mjs` — add the triple to `TARGETS`.
+3. `npm/launcher/package.json` — add the package to `optionalDependencies`.
 
-1. Download the release archives built by `release.yml` (or rebuild locally per
-   target with `cargo build --release -p tokenpulse-cli --target <triple>`).
-2. For each target, assemble `@tokenpulse/cli-<platform>-<arch>` with the binary
-   and a generated `package.json`, then `npm publish --access public`.
-3. Publish the launcher `tokenpulse` package last (so its
-   `optionalDependencies` already exist): `npm publish --access public`.
-4. Smoke-test in a clean dir: `npx tokenpulse@X.Y.Z --help`.
+Windows is deliberately absent: the code has `cfg(windows)` branches but has
+never been built or exercised there, so it is not advertised on npm.
 
-### 3c. Turnkey alternative — `dist` (cargo-dist)
+### 3c. Recovering a partial publish
 
-[`dist`](https://opensource.axo.dev/cargo-dist/) automates all of the above. It
-builds every target in CI, creates the GitHub Release, and can emit an npm
-installer package directly:
+`publish-packages.mjs` skips any package already on the registry at this
+version, so re-running the failed job finishes the release. A published version
+can never be replaced — if a bad build reached the registry, `npm deprecate` it
+and cut a new patch version.
+
+To rehearse the whole thing without touching the registry:
 
 ```bash
-cargo install cargo-dist
-dist init                       # choose targets + "npm" installer
-# commit the generated CI + Cargo.toml [workspace.metadata.dist] config
-git tag vX.Y.Z && git push origin vX.Y.Z   # dist's CI builds + publishes
+node npm/scripts/build-packages.mjs --version 0.5.0 --artifacts dist --out .local/npm-dist
+node npm/scripts/publish-packages.mjs .local/npm-dist --dry-run
 ```
 
-Set `NPM_TOKEN` as a CI secret for automated `npm publish`. This is the
-recommended path if we want to support npm long-term, since it keeps the
-per-platform packages and versions in sync automatically.
+### 3d. Prerequisites
+
+`NPM_TOKEN` must exist as a repository secret, from an npm automation token with
+publish rights on the `@fangwangme` scope. Scoped packages default to private,
+so the scripts pass `--access public`.
 
 ## 4. After release
 
-- Verify the GitHub Release lists every expected archive.
-- Verify `npx tokenpulse` / `npm i -g tokenpulse` runs the new version.
-- Open the next `## [Unreleased]` CHANGELOG section for ongoing work.
+Verification is Step 7 above. The only thing left is to open a fresh
+`## [Unreleased]` section at the top of `CHANGELOG.md`, so the next change has
+somewhere to go.

@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -12,6 +12,8 @@ pub struct Config {
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
     pub display: DisplayConfig,
+    #[serde(default)]
+    pub keeper: KeeperConfig,
 }
 
 fn default_version() -> u32 {
@@ -123,6 +125,7 @@ impl Default for Config {
             version: 3,
             providers,
             display: DisplayConfig::default(),
+            keeper: KeeperConfig::default(),
         }
     }
 }
@@ -146,6 +149,139 @@ impl Default for DisplayConfig {
             show_account: true,
             scan_antigravity: true,
             refresh_quota: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeeperConfig {
+    /// Off by default: the engine spends real quota by driving the agent CLIs,
+    /// so it has to be something the user turns on rather than something an
+    /// upgrade turns on for them.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_keeper_check_interval_secs")]
+    pub check_interval_secs: u32,
+    #[serde(default = "default_keeper_agents")]
+    pub agents: HashMap<String, AgentKeeperConfig>,
+}
+
+fn default_keeper_check_interval_secs() -> u32 {
+    60
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentKeeperConfig {
+    #[serde(default = "default_true")]
+    pub session_keeper_enabled: bool,
+    #[serde(default = "default_daily_wakeup_time")]
+    pub daily_wakeup_time: String,
+    #[serde(default = "default_true")]
+    pub weekly_keeper_enabled: bool,
+    #[serde(default = "default_command")]
+    pub command: String,
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default = "default_prompt")]
+    pub prompt: String,
+}
+
+fn default_daily_wakeup_time() -> String {
+    "10:30".to_string()
+}
+
+fn default_command() -> String {
+    String::new()
+}
+
+fn default_model() -> String {
+    String::new()
+}
+
+fn default_prompt() -> String {
+    "Hi".to_string()
+}
+
+/// Mirrors the per-field serde defaults, so an agent the config has never seen
+/// still deserializes and toggles consistently.
+impl Default for AgentKeeperConfig {
+    fn default() -> Self {
+        Self {
+            session_keeper_enabled: default_true(),
+            daily_wakeup_time: default_daily_wakeup_time(),
+            weekly_keeper_enabled: default_true(),
+            command: default_command(),
+            model: default_model(),
+            prompt: default_prompt(),
+        }
+    }
+}
+
+pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
+    let mut map = HashMap::new();
+    map.insert(
+        "claude".to_string(),
+        AgentKeeperConfig {
+            session_keeper_enabled: true,
+            daily_wakeup_time: "10:30".to_string(),
+            weekly_keeper_enabled: true,
+            command: "claude -p \"{prompt}\" --model {model} --no-session-persistence".to_string(),
+            model: "haiku".to_string(),
+            prompt: "Hi".to_string(),
+        },
+    );
+    map.insert(
+        "codex".to_string(),
+        AgentKeeperConfig {
+            session_keeper_enabled: true,
+            daily_wakeup_time: "10:30".to_string(),
+            weekly_keeper_enabled: true,
+            command: "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
+                .to_string(),
+            model: "gpt-5.6-luna".to_string(),
+            prompt: "Hi".to_string(),
+        },
+    );
+    map.insert(
+        "antigravity".to_string(),
+        AgentKeeperConfig {
+            session_keeper_enabled: true,
+            daily_wakeup_time: "10:30".to_string(),
+            weekly_keeper_enabled: true,
+            command: "agy --model {model} --prompt \"{prompt}\"".to_string(),
+            model: "gemini-3.7-flash-low".to_string(),
+            prompt: "Hi".to_string(),
+        },
+    );
+    map
+}
+
+/// Commands that shipped as defaults in earlier builds and should be replaced.
+///
+/// These are matched exactly rather than by substring: an earlier `contains("--bare")`
+/// check also clobbered any hand-written command that happened to use that flag.
+const LEGACY_KEEPER_COMMANDS: &[(&str, &str)] = &[
+    ("claude", "claude -p \"{prompt}\" --model {model}"),
+    (
+        "claude",
+        "claude --bare -p \"{prompt}\" --model {model} --no-session-persistence",
+    ),
+    ("codex", "codex exec \"{prompt}\" -m {model}"),
+    ("antigravity", "agy query \"{prompt}\" --model {model}"),
+];
+
+fn is_legacy_keeper_command(agent: &str, command: &str) -> bool {
+    LEGACY_KEEPER_COMMANDS
+        .iter()
+        .any(|(name, legacy)| *name == agent && *legacy == command.trim())
+}
+
+impl Default for KeeperConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            check_interval_secs: default_keeper_check_interval_secs(),
+            agents: default_keeper_agents(),
         }
     }
 }
@@ -181,6 +317,14 @@ impl ConfigManager {
         &self.config_path
     }
 
+    /// Where the Keeper's last-fired bookkeeping lives, alongside the config.
+    pub fn keeper_state_path(&self) -> PathBuf {
+        self.config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("keeper_state.json")
+    }
+
     pub fn exists(&self) -> bool {
         self.config_path.exists()
     }
@@ -198,10 +342,35 @@ impl ConfigManager {
         let content = fs::read_to_string(&self.config_path)?;
         let mut config: Config = toml::from_str(&content)?;
 
-        if config.version < 3 {
-            // v3 unified the separate quota/usage auto-refresh intervals into a
-            // single `auto_refresh_secs`. The old `quota_auto_refresh_secs` value
-            // is carried over via serde alias; re-saving drops the legacy keys.
+        let default_agents = default_keeper_agents();
+        let mut modified = false;
+
+        for (name, default_cfg) in &default_agents {
+            if let Some(agent_cfg) = config.keeper.agents.get_mut(name) {
+                if agent_cfg.command.is_empty()
+                    || is_legacy_keeper_command(name, &agent_cfg.command)
+                {
+                    agent_cfg.command = default_cfg.command.clone();
+                    modified = true;
+                }
+                if agent_cfg.model == "claude-3-5-haiku-20241022" {
+                    agent_cfg.model = "haiku".to_string();
+                    modified = true;
+                }
+                if agent_cfg.model == "gpt-5.6-luna-low" {
+                    agent_cfg.model = "gpt-5.6-luna".to_string();
+                    modified = true;
+                }
+            } else {
+                config
+                    .keeper
+                    .agents
+                    .insert(name.clone(), default_cfg.clone());
+                modified = true;
+            }
+        }
+
+        if config.version < 3 || modified {
             config.version = 3;
             if let Err(e) = self.save(&config) {
                 tracing::warn!("Failed to save migrated config: {}", e);
@@ -239,6 +408,37 @@ impl ConfigManager {
             p.enabled = false;
         }
         self.save(&config)
+    }
+
+    /// Flips one of an agent's keeper switches and returns its new value,
+    /// seeding the entry from the built-in defaults if the config has never
+    /// mentioned that agent.
+    fn toggle_agent_keeper(
+        &self,
+        agent: &str,
+        switch: fn(&mut AgentKeeperConfig) -> &mut bool,
+    ) -> Result<bool> {
+        let mut config = self.load().unwrap_or_default();
+        let entry = config
+            .keeper
+            .agents
+            .entry(agent.to_string())
+            .or_insert_with(|| default_keeper_agents().remove(agent).unwrap_or_default());
+
+        let flag = switch(entry);
+        *flag = !*flag;
+        let new_state = *flag;
+
+        self.save(&config)?;
+        Ok(new_state)
+    }
+
+    pub fn toggle_agent_session_keeper(&self, agent: &str) -> Result<bool> {
+        self.toggle_agent_keeper(agent, |c| &mut c.session_keeper_enabled)
+    }
+
+    pub fn toggle_agent_weekly_keeper(&self, agent: &str) -> Result<bool> {
+        self.toggle_agent_keeper(agent, |c| &mut c.weekly_keeper_enabled)
     }
 }
 
@@ -425,5 +625,132 @@ usage_auto_refresh_secs = 900
         assert!(written_content.contains("auto_refresh_secs = 120"));
         assert!(!written_content.contains("quota_auto_refresh_secs"));
         assert!(!written_content.contains("usage_auto_refresh_secs"));
+    }
+
+    #[test]
+    fn test_keeper_config_defaults() {
+        let config = Config::default();
+        // The engine spends real quota, so it must be opt-in.
+        assert!(!config.keeper.enabled);
+        assert_eq!(config.keeper.check_interval_secs, 60);
+        assert_eq!(config.keeper.agents.len(), 3);
+
+        let claude = config.keeper.agents.get("claude").unwrap();
+        assert!(claude.session_keeper_enabled);
+        assert_eq!(claude.daily_wakeup_time, "10:30");
+        assert!(claude.weekly_keeper_enabled);
+        assert_eq!(claude.model, "haiku");
+        assert_eq!(
+            claude.command,
+            "claude -p \"{prompt}\" --model {model} --no-session-persistence"
+        );
+
+        let codex = config.keeper.agents.get("codex").unwrap();
+        assert!(codex.session_keeper_enabled);
+        assert_eq!(codex.model, "gpt-5.6-luna");
+        assert_eq!(
+            codex.command,
+            "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
+        );
+
+        let antigravity = config.keeper.agents.get("antigravity").unwrap();
+        assert!(antigravity.session_keeper_enabled);
+        assert_eq!(antigravity.model, "gemini-3.7-flash-low");
+        assert_eq!(
+            antigravity.command,
+            "agy --model {model} --prompt \"{prompt}\""
+        );
+    }
+
+    #[test]
+    fn test_keeper_toggle_helpers() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        let manager = ConfigManager { config_path };
+
+        let session_state = manager.toggle_agent_session_keeper("claude").unwrap();
+        assert!(!session_state);
+
+        let weekly_state = manager.toggle_agent_weekly_keeper("codex").unwrap();
+        assert!(!weekly_state);
+    }
+
+    #[test]
+    fn test_custom_keeper_command_is_not_clobbered() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+
+        // A hand-written command that merely mentions `--bare` used to be
+        // overwritten by the substring-based migration.
+        let custom = r#"
+version = 3
+[keeper]
+enabled = true
+[keeper.agents.claude]
+command = 'claude --bare -p "{prompt}" --model {model} --my-flag'
+model = "haiku"
+"#;
+        fs::write(&config_path, custom).unwrap();
+
+        let manager = ConfigManager { config_path };
+        let loaded = manager.load().unwrap();
+
+        assert_eq!(
+            loaded.keeper.agents.get("claude").unwrap().command,
+            "claude --bare -p \"{prompt}\" --model {model} --my-flag"
+        );
+    }
+
+    #[test]
+    fn test_keeper_state_path_is_next_to_config() {
+        let manager = ConfigManager {
+            config_path: PathBuf::from("/tmp/tp/config.toml"),
+        };
+        assert_eq!(
+            manager.keeper_state_path(),
+            PathBuf::from("/tmp/tp/keeper_state.json")
+        );
+    }
+
+    #[test]
+    fn test_legacy_keeper_command_migration() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+
+        let legacy_toml = r#"
+version = 3
+[keeper]
+enabled = true
+[keeper.agents.antigravity]
+command = 'agy query "{prompt}" --model {model}'
+model = "gemini-3.7-flash-low"
+[keeper.agents.claude]
+command = 'claude -p "{prompt}" --model {model}'
+model = "claude-3-5-haiku-20241022"
+[keeper.agents.codex]
+command = 'codex exec "{prompt}" -m {model}'
+model = "gpt-5.6-luna-low"
+"#;
+        fs::write(&config_path, legacy_toml).unwrap();
+
+        let manager = ConfigManager { config_path };
+        let loaded = manager.load().unwrap();
+
+        let agy = loaded.keeper.agents.get("antigravity").unwrap();
+        assert_eq!(agy.command, "agy --model {model} --prompt \"{prompt}\"");
+
+        let claude = loaded.keeper.agents.get("claude").unwrap();
+        assert_eq!(
+            claude.command,
+            "claude -p \"{prompt}\" --model {model} --no-session-persistence"
+        );
+        assert_eq!(claude.model, "haiku");
+
+        let codex = loaded.keeper.agents.get("codex").unwrap();
+        assert_eq!(
+            codex.command,
+            "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
+        );
+        assert_eq!(codex.model, "gpt-5.6-luna");
     }
 }
