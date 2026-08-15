@@ -19,6 +19,25 @@ impl KeeperTriggerType {
             Self::Manual => "Manual Ping",
         }
     }
+
+    /// Stable identifier used as a database column value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::Weekly => "weekly",
+            Self::Manual => "manual",
+        }
+    }
+
+    /// Unknown values fall back to `Manual` so a hand-edited or future row
+    /// still renders instead of dropping the record.
+    pub fn from_db_str(value: &str) -> Self {
+        match value {
+            "daily" => Self::Daily,
+            "weekly" => Self::Weekly,
+            _ => Self::Manual,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

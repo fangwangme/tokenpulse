@@ -89,3 +89,15 @@ pub fn build_quota_fetchers(enabled_providers: &[String]) -> Vec<Box<dyn QuotaFe
         .map(|e| (e.make_fetcher)())
         .collect()
 }
+
+/// Provider ids in the same order `build_quota_fetchers` returns fetchers.
+///
+/// `fetch_all` yields bare `Result`s, so a failure carries no provider id;
+/// zipping against this list is what lets a failed poll be attributed.
+pub fn quota_fetcher_ids(enabled_providers: &[String]) -> Vec<&'static str> {
+    QUOTA_PROVIDERS
+        .iter()
+        .filter(|e| enabled_providers.contains(&e.id.to_string()))
+        .map(|e| e.id)
+        .collect()
+}

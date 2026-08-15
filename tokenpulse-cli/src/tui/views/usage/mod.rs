@@ -35,8 +35,10 @@ use tokenpulse_core::{
 };
 use tracing::{info, warn};
 
-/// How many Keeper executions are kept in memory before the oldest are dropped.
-const KEEPER_LOG_HISTORY_LIMIT: usize = 200;
+/// How many Keeper executions the log panel holds. Every execution is also
+/// appended to `keeper_executions` in the database, so this only bounds what is
+/// rendered and re-read on startup, not what is retained.
+const KEEPER_LOG_DISPLAY_LIMIT: usize = 50;
 
 // ---------------------------------------------------------------------------
 // Pages
@@ -910,8 +912,8 @@ impl UsageState {
     /// entry shifts everything below it down by one record).
     pub fn push_keeper_log(&mut self, record: tokenpulse_core::keeper::KeeperExecutionRecord) {
         self.keeper_logs.push(record);
-        if self.keeper_logs.len() > KEEPER_LOG_HISTORY_LIMIT {
-            let overflow = self.keeper_logs.len() - KEEPER_LOG_HISTORY_LIMIT;
+        if self.keeper_logs.len() > KEEPER_LOG_DISPLAY_LIMIT {
+            let overflow = self.keeper_logs.len() - KEEPER_LOG_DISPLAY_LIMIT;
             self.keeper_logs.drain(0..overflow);
         }
         if self.keeper_log_scroll > 0 {
@@ -1035,6 +1037,18 @@ fn spawn_keeper_ping(
                 )
             }
         };
+        // Persist before notifying the UI, off the event loop's thread: the log
+        // panel only holds the newest few, the database keeps every run.
+        let to_store = record.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(e) =
+                tokenpulse_core::history::HistoryStore::new().record_keeper_execution(&to_store)
+            {
+                warn!("Keeper: failed to record execution history: {}", e);
+            }
+        })
+        .await;
+
         let _ = msg_tx.send(TuiMessage::KeeperPingCompleted(record)).await;
     });
 }
@@ -1056,18 +1070,34 @@ fn spawn_quota_reload(
             total_fetchers
         );
 
+        let fetcher_ids = crate::commands::quota::quota_fetcher_ids(&enabled_providers);
         let mut snapshots = Vec::new();
         let mut errors = Vec::new();
-        for result in results {
+        let mut failures: Vec<(String, String)> = Vec::new();
+        for (idx, result) in results.into_iter().enumerate() {
             match result {
                 Ok(snapshot) => {
                     snapshots.push(snapshot);
                 }
                 Err(e) => {
-                    warn!("Quota fetch failed for provider: {}", e);
+                    let provider = fetcher_ids.get(idx).copied().unwrap_or("unknown");
+                    warn!("Quota fetch failed for provider {}: {}", provider, e);
+                    failures.push((provider.to_string(), e.to_string()));
                     errors.push(e.to_string());
                 }
             }
+        }
+
+        if !failures.is_empty() {
+            let _ = tokio::task::spawn_blocking(move || {
+                let history = tokenpulse_core::history::HistoryStore::new();
+                for (provider, error) in &failures {
+                    if let Err(e) = history.record_quota_failure(provider, observed_at, error) {
+                        warn!("Failed to record quota failure for {}: {}", provider, e);
+                    }
+                }
+            })
+            .await;
         }
 
         if !snapshots.is_empty() {
@@ -1145,6 +1175,15 @@ where
     let keeper_state = tokenpulse_core::keeper::KeeperTriggerState::load(&keeper_state_path);
     state.keeper_daily_triggered = keeper_state.daily_triggered;
     state.keeper_weekly_triggered = keeper_state.weekly_triggered;
+
+    // Seed the log panel from the database so the last runs are visible right
+    // away instead of the panel starting empty on every launch.
+    match tokenpulse_core::history::HistoryStore::new()
+        .recent_keeper_executions(KEEPER_LOG_DISPLAY_LIMIT)
+    {
+        Ok(records) => state.keeper_logs = records,
+        Err(e) => warn!("Failed to load keeper execution history: {}", e),
+    }
 
     // Initial background reload on startup
     state.set_refresh_status("Refreshing...", RefreshStatusLevel::Info);
@@ -2813,18 +2852,18 @@ mod tests {
         let dashboard = UsageDashboard { daily: vec![] };
         let mut state = UsageState::new(&dashboard, vec![]);
 
-        for i in 0..(KEEPER_LOG_HISTORY_LIMIT + 25) {
+        for i in 0..(KEEPER_LOG_DISPLAY_LIMIT + 25) {
             state.push_keeper_log(keeper_record(&format!("rec-{i}")));
         }
 
-        assert_eq!(state.keeper_logs.len(), KEEPER_LOG_HISTORY_LIMIT);
+        assert_eq!(state.keeper_logs.len(), KEEPER_LOG_DISPLAY_LIMIT);
         assert_eq!(
             state.keeper_logs.first().unwrap().command_executed,
             "rec-25"
         );
         assert_eq!(
             state.keeper_logs.last().unwrap().command_executed,
-            format!("rec-{}", KEEPER_LOG_HISTORY_LIMIT + 24)
+            format!("rec-{}", KEEPER_LOG_DISPLAY_LIMIT + 24)
         );
     }
 

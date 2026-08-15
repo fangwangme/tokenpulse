@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Persistent Trigger History**: Last-fired timestamps are stored in `keeper_state.json` next to the config, so restarting the TUI no longer re-fires a scheduled ping, and a missed daily wakeup is only caught up within two hours of its configured time.
   - **Robust Provider & Reset Extraction**: Accurately extracts weekly reset timestamps from all provider formats including Antigravity's `Gemini (7d)` and `Claude (7d)` rate windows.
 
+- **Observation History Database**: `tokenpulse.db` gained append-only history alongside the existing quota cache, which only ever kept one overwritten row per provider.
+  - `quota_observations`: one row per rate window per poll (provider, timestamps, plan, account, window label, full-precision used percent, reset time, period), giving an evenly spaced time series for later analysis.
+  - `quota_credit_observations`: credit balances for providers that report them.
+  - `quota_fetch_failures`: failed polls with the provider attributed, so recurring auth or network problems stay visible after the status bar clears.
+  - `keeper_executions`: every ping with its trigger, model, prompt, command, duration, exit code and output. The Keeper panel now seeds itself from the database on launch and shows the newest 50, while the database keeps everything.
+  - The database is now WAL-mode with a `user_version` migration path, matching `usage.db`.
+- **File Logging**: tracing output goes to a daily rolling file in `~/.local/share/tokenpulse/log/`. Previously logging was only initialised when `RUST_LOG` was set and wrote to stdout, which is unusable under the TUI — a misbehaving background task left no evidence at all. Level is overridable via `TOKENPULSE_LOG` or `RUST_LOG`.
+
 ### Fixed
 - Keeper pings no longer panic when an agent replies with non-ASCII text. The output snippet was truncated on a byte offset, which splits multi-byte characters; a panicking ping task never reported back, leaving that agent stuck on "Ping running..." and blocked from every later ping.
 - Keeper output is sanitized before display: carriage returns, tabs, ANSI escapes and other control characters from agent CLIs are stripped instead of being written straight into the terminal, and multi-line replies are collapsed onto one line.

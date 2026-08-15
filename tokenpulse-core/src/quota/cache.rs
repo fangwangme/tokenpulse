@@ -80,7 +80,23 @@ impl QuotaCacheStore {
             ],
         )?;
 
+        // `save` is the one place that knows a fresh snapshot was observed, so
+        // appending history here covers every caller — the TUI's background
+        // reload and the plain-text/JSON commands alike.
+        if let Err(e) = self
+            .history()
+            .record_quota_snapshot(provider, observed_at, snapshot)
+        {
+            tracing::warn!("Failed to record quota history for {provider}: {e}");
+        }
+
         Ok(())
+    }
+
+    /// History lives in the same database file, so tests pointing the cache at a
+    /// temp directory keep their observations there too.
+    pub fn history(&self) -> crate::history::HistoryStore {
+        crate::history::HistoryStore::with_path(self.db_path.clone())
     }
 
     fn open(&self) -> Result<Connection> {
