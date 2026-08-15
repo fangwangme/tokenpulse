@@ -164,6 +164,7 @@ between consecutive windows. Compact cards collapse to a single bar + percentage
   - `keeper_engine` (master switch for the Keeper tab's scheduled pings: true / false, default false)
   - Individual provider enabled/disabled switches
 - Controls: use Up/Down (`j`/`k`) to navigate settings, and Space or Enter to cycle/toggle the selected setting.
+- The same values are readable and writable outside the TUI with `tokenpulse config show` and `tokenpulse config set KEY=VALUE`.
 
 ### Source Filter Overlay
 - Press `s` on any tab to open provider filter popup

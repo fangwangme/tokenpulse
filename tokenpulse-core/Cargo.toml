@@ -24,3 +24,5 @@ base64 = "0.22"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
+# Fixed-zone DST fixtures, so the timezone tests do not depend on the host.
+chrono-tz = "0.10"

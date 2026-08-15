@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **File Logging**: tracing output goes to a daily rolling file in `~/.local/share/tokenpulse/log/`. Previously logging was only initialised when `RUST_LOG` was set and wrote to stdout, which is unusable under the TUI — a misbehaving background task left no evidence at all. Level is overridable via `TOKENPULSE_LOG` or `RUST_LOG`.
 
 ### Fixed
+- `tokenpulse config show` now prints the Keeper section, and `config set keeper_engine=true|false` toggles the master switch, so the CLI matches what the Settings tab already exposed.
+- The Keeper's next-trigger time no longer shows `--:--` on daylight-saving transition days. Resolving a wall-clock time returned nothing both when an hour is skipped and when it repeats.
+- The log directory is resolved with `dirs::home_dir()` rather than `$HOME`, which is routinely unset on Windows and in slim containers and would have put the log under the working directory.
 - Keeper pings no longer panic when an agent replies with non-ASCII text. The output snippet was truncated on a byte offset, which splits multi-byte characters; a panicking ping task never reported back, leaving that agent stuck on "Ping running..." and blocked from every later ping.
 - Keeper output is sanitized before display: carriage returns, tabs, ANSI escapes and other control characters from agent CLIs are stripped instead of being written straight into the terminal, and multi-line replies are collapsed onto one line.
 - Prompts and models are shell-escaped when substituted into a keeper command template, so a value containing a quote can no longer break out of the template and run as a command.

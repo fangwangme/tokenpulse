@@ -192,6 +192,9 @@ pub fn should_trigger_daily(
         }
     }
 
+    // Clock-based on purpose: comparing times of day means a wakeup configured
+    // late at night is not "caught up" after midnight, when the anchor it exists
+    // to set would land on the wrong day entirely.
     let elapsed = now.time().signed_duration_since(target_time);
     elapsed >= chrono::Duration::zero()
         && elapsed <= chrono::Duration::minutes(DAILY_CATCH_UP_MINUTES)
@@ -217,10 +220,35 @@ pub fn compute_next_daily_trigger(
         today
     };
 
-    target_date
-        .and_time(target_time)
-        .and_local_timezone(Local)
-        .single()
+    local_datetime_at(target_date, target_time)
+}
+
+/// Resolves a wall-clock date and time to a local instant across DST boundaries.
+///
+/// `.single()` alone returns `None` twice a year: once when the clock springs
+/// forward and the requested time never happens, and once when it falls back and
+/// the time happens twice. Either way the card would show `--:--` rather than a
+/// trigger time.
+fn local_datetime_at(date: NaiveDate, time: NaiveTime) -> Option<DateTime<Local>> {
+    use chrono::offset::LocalResult;
+
+    match date.and_time(time).and_local_timezone(Local) {
+        LocalResult::Single(dt) => Some(dt),
+        // Repeated hour: the first occurrence is the one that arrives sooner.
+        LocalResult::Ambiguous(earliest, _) => Some(earliest),
+        // Skipped hour: that wall-clock time does not exist on this date, so
+        // report the first minute that does rather than nothing. Gaps are an
+        // hour at most in every current zone; scanning past that would run into
+        // the next day, where the caller's date no longer applies.
+        LocalResult::None => (1..=120).find_map(|minutes| {
+            let shifted = time.overflowing_add_signed(chrono::Duration::minutes(minutes));
+            // A non-zero second element means the addition wrapped past midnight.
+            if shifted.1 != 0 {
+                return None;
+            }
+            date.and_time(shifted.0).and_local_timezone(Local).single()
+        }),
+    }
 }
 
 /// Evaluates whether the Weekly auto-sync trigger should fire.
@@ -535,6 +563,64 @@ mod tests {
             format_keeper_command("claude -p \"{prompt}\" --model {model}", "haiku", "Hi"),
             "claude -p \"Hi\" --model haiku"
         );
+    }
+
+    /// Resolves a wall clock time in a zone with DST, independent of the host's
+    /// own timezone, by checking the two transition shapes directly.
+    #[test]
+    fn test_local_datetime_at_handles_dst_transitions() {
+        use chrono::offset::LocalResult;
+        use chrono::TimeZone;
+        use chrono_tz::America::New_York;
+
+        // Spring forward 2026-03-08: 02:00 -> 03:00, so 02:30 never happens.
+        let gap_date = NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
+        let gap_time = NaiveTime::from_hms_opt(2, 30, 0).unwrap();
+        assert!(matches!(
+            New_York.from_local_datetime(&gap_date.and_time(gap_time)),
+            LocalResult::None
+        ));
+
+        // Fall back 2026-11-01: 02:00 -> 01:00, so 01:30 happens twice.
+        let dup_date = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let dup_time = NaiveTime::from_hms_opt(1, 30, 0).unwrap();
+        assert!(matches!(
+            New_York.from_local_datetime(&dup_date.and_time(dup_time)),
+            LocalResult::Ambiguous(_, _)
+        ));
+
+        // Both shapes must resolve rather than leaving the card blank. The
+        // skipped hour in particular is not covered by `.earliest()`, which
+        // returns `None` for `LocalResult::None`.
+        assert!(resolve_in(&New_York, gap_date, gap_time).is_some());
+        assert!(resolve_in(&New_York, dup_date, dup_time).is_some());
+    }
+
+    /// Mirrors `local_datetime_at` for an explicit zone, so the DST test does
+    /// not depend on where it runs.
+    #[cfg(test)]
+    fn resolve_in<Tz: chrono::TimeZone>(
+        tz: &Tz,
+        date: NaiveDate,
+        time: NaiveTime,
+    ) -> Option<chrono::DateTime<Tz>> {
+        use chrono::offset::LocalResult;
+        use chrono::TimeZone;
+
+        match tz.from_local_datetime(&date.and_time(time)) {
+            LocalResult::Single(dt) => Some(dt),
+            LocalResult::Ambiguous(earliest, _) => Some(earliest),
+            LocalResult::None => (1..=120).find_map(|minutes| {
+                let shifted = time.overflowing_add_signed(chrono::Duration::minutes(minutes));
+                if shifted.1 != 0 {
+                    return None;
+                }
+                match tz.from_local_datetime(&date.and_time(shifted.0)) {
+                    LocalResult::Single(dt) => Some(dt),
+                    _ => None,
+                }
+            }),
+        }
     }
 
     #[test]

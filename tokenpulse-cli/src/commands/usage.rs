@@ -823,9 +823,9 @@ fn open_usage_perf_log(path: &PathBuf) -> std::io::Result<File> {
 }
 
 fn usage_perf_log_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // `dirs` rather than $HOME: the variable is routinely unset on Windows and
+    // in slim containers, which would drop this under the working directory.
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let filename = format!("usage-{}.log", Utc::now().format("%Y-%m-%d"));
     home.join(".local")
         .join("share")

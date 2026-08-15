@@ -90,9 +90,9 @@ enum ConfigAction {
 fn init_file_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // `dirs` rather than $HOME: the variable is routinely unset on Windows and
+    // in slim containers, which would drop this under the working directory.
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let log_dir = home
         .join(".local")
         .join("share")
