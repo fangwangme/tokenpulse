@@ -888,6 +888,23 @@ impl UsageState {
         }
     }
 
+    /// Carries the Keeper's runtime state onto a freshly rebuilt dashboard state.
+    ///
+    /// A usage refresh replaces `UsageState` wholesale and then restores fields
+    /// one by one. The Keeper's fields were never on that list, so every refresh
+    /// emptied the execution log (making the history cap moot), dropped the
+    /// in-flight ping locks, and cleared the last-fired dates — which re-armed
+    /// the daily trigger so it fired again on the next check.
+    fn adopt_keeper_state(&mut self, previous: &mut UsageState) {
+        self.keeper_logs = std::mem::take(&mut previous.keeper_logs);
+        self.keeper_daily_triggered = std::mem::take(&mut previous.keeper_daily_triggered);
+        self.keeper_weekly_triggered = std::mem::take(&mut previous.keeper_weekly_triggered);
+        self.keeper_pings_in_progress = std::mem::take(&mut previous.keeper_pings_in_progress);
+        self.selected_keeper_index = previous.selected_keeper_index;
+        self.keeper_log_scroll = previous.keeper_log_scroll;
+        self.last_keeper_check = previous.last_keeper_check;
+    }
+
     /// Appends a Keeper log entry, capping history and keeping a scrolled view
     /// anchored on the same record (the panel renders newest-first, so a new
     /// entry shifts everything below it down by one record).
@@ -1179,7 +1196,11 @@ where
                     let saved_last_refresh = state.last_refresh;
                     let saved_quota_refresh_in_progress = state.quota_refresh_in_progress;
 
-                    state = UsageState::new(&dashboard, saved_quota_snapshots);
+                    let mut previous = std::mem::replace(
+                        &mut state,
+                        UsageState::new(&dashboard, saved_quota_snapshots),
+                    );
+                    state.adopt_keeper_state(&mut previous);
                     state.last_refresh = saved_last_refresh;
                     state.quota_refresh_in_progress = saved_quota_refresh_in_progress;
                     state.usage_refresh_in_progress = false;
@@ -2805,6 +2826,42 @@ mod tests {
             state.keeper_logs.last().unwrap().command_executed,
             format!("rec-{}", KEEPER_LOG_HISTORY_LIMIT + 24)
         );
+    }
+
+    /// A usage refresh rebuilds `UsageState`; the Keeper's history, locks and
+    /// last-fired dates have to survive it. Losing the dates re-armed the daily
+    /// trigger, so a "10:30" ping fired again on the next check.
+    #[test]
+    fn test_keeper_state_survives_a_usage_refresh() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+
+        state.push_keeper_log(keeper_record("before-refresh"));
+        state
+            .keeper_daily_triggered
+            .insert("claude".to_string(), Local::now().date_naive());
+        state.keeper_pings_in_progress.insert("codex".to_string());
+        state.selected_keeper_index = 2;
+        state.keeper_log_scroll = 12;
+        let check_mark = state.last_keeper_check;
+
+        // What the UsageReloadSuccess handler does.
+        let mut previous = std::mem::replace(&mut state, UsageState::new(&dashboard, vec![]));
+        state.adopt_keeper_state(&mut previous);
+
+        assert_eq!(state.keeper_logs.len(), 1);
+        assert_eq!(
+            state.keeper_logs[0].command_executed, "before-refresh",
+            "execution history must not be dropped by a refresh"
+        );
+        assert!(
+            state.keeper_daily_triggered.contains_key("claude"),
+            "losing this re-arms the daily trigger and re-fires the ping"
+        );
+        assert!(state.keeper_pings_in_progress.contains("codex"));
+        assert_eq!(state.selected_keeper_index, 2);
+        assert_eq!(state.keeper_log_scroll, 12);
+        assert_eq!(state.last_keeper_check, check_mark);
     }
 
     #[test]
