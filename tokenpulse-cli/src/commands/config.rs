@@ -1,6 +1,27 @@
 use crate::ConfigAction;
 use anyhow::Result;
-use tokenpulse_core::config::{ConfigManager, QuotaDisplayMode, ThemePreference};
+use tokenpulse_core::config::{
+    ConfigManager, NotificationLevel, QuotaDisplayMode, ThemePreference,
+};
+use tokenpulse_core::notification::{self, QuotaRecovery, SOUND_CHIME, SOUND_NONE};
+
+/// Rejects sound names that would silently never play, so a typo surfaces at
+/// `config set` time rather than as a missing chime hours later.
+fn validate_notification_sound(value: &str) -> Result<()> {
+    if value.eq_ignore_ascii_case(SOUND_CHIME) || value.eq_ignore_ascii_case(SOUND_NONE) {
+        return Ok(());
+    }
+    if std::path::Path::new(&format!("/System/Library/Sounds/{value}.aiff")).is_file() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Invalid value '{}' for notification_sound. Expected: {} (built-in), {} (silent), \
+         or the name of a sound under /System/Library/Sounds (e.g. Hero, Glass, Submarine)",
+        value,
+        SOUND_CHIME,
+        SOUND_NONE
+    )
+}
 
 pub fn run(action: ConfigAction) -> Result<()> {
     let manager = ConfigManager::new();
@@ -42,6 +63,10 @@ pub fn run(action: ConfigAction) -> Result<()> {
             println!(
                 "  notification_level: {}",
                 config.display.notification_level.label()
+            );
+            println!(
+                "  notification_sound: {}",
+                config.display.notification_sound
             );
             println!();
             println!("Keeper:");
@@ -209,13 +234,56 @@ pub fn run(action: ConfigAction) -> Result<()> {
                         config.display.notification_level.label()
                     );
                 }
+                "notification_sound" => {
+                    validate_notification_sound(value)?;
+                    config.display.notification_sound = value.to_string();
+                    manager.save(&config)?;
+                    println!("notification_sound = {value}");
+                }
                 _ => {
                     anyhow::bail!(
-                        "Unknown setting '{}'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  show_account           (true | false)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)\n  notification_level     (off | in_app | terminal | system)\n  keeper_engine          (true | false)",
+                        "Unknown setting '{}'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  show_account           (true | false)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)\n  notification_level     (off | in_app | terminal | system)\n  notification_sound     (chime | none | a name under /System/Library/Sounds, e.g. Hero)\n  keeper_engine          (true | false)",
                         key
                     );
                 }
             }
+        }
+        ConfigAction::TestNotification => {
+            let config = manager.load()?;
+            let level = config.display.notification_level;
+            let sound = &config.display.notification_sound;
+
+            println!("notification_level: {}", level.label());
+            println!("notification_sound: {sound}");
+            if level == NotificationLevel::Off {
+                println!();
+                println!(
+                    "Level is 'off', so nothing will fire. \
+                     Try: tokenpulse config set notification_level=system"
+                );
+                return Ok(());
+            }
+
+            notification::notify_quota_restored(
+                level,
+                sound,
+                &[QuotaRecovery {
+                    provider: "claude".to_string(),
+                    window_label: "5h".to_string(),
+                    remaining_percent: 100.0,
+                }],
+            );
+            println!();
+            println!("Sent a sample notification.");
+            if level == NotificationLevel::System {
+                println!(
+                    "No banner? Allow your terminal to post notifications in \
+                     System Settings > Notifications."
+                );
+            }
+            // Sound and banner run on background threads; give them time to
+            // finish before the process exits and kills them.
+            std::thread::sleep(std::time::Duration::from_millis(2500));
         }
     }
 

@@ -59,14 +59,30 @@ pub struct DisplayConfig {
     pub refresh_quota: bool,
     #[serde(default)]
     pub notification_level: NotificationLevel,
+    /// Sound played by every notification level except `off`. Either `chime`
+    /// (the built-in sound), `none` to stay silent, or the base name of a
+    /// sound under `/System/Library/Sounds` such as `Hero`.
+    #[serde(default = "default_notification_sound")]
+    pub notification_sound: String,
 }
 
+fn default_notification_sound() -> String {
+    crate::notification::SOUND_CHIME.to_string()
+}
+
+/// How far a quota recovery notification reaches. Every level except `Off`
+/// plays the alert sound — the levels differ only in how far the *visual*
+/// notification travels beyond the TUI.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationLevel {
+    /// Nothing at all: no sound, no visuals.
     Off,
+    /// Sound plus the in-TUI toast and ambient animation.
     InApp,
+    /// Adds a terminal bell and an OSC 9 desktop notification.
     Terminal,
+    /// Adds a macOS Notification Center banner.
     System,
 }
 
@@ -205,6 +221,7 @@ impl Default for DisplayConfig {
             scan_antigravity: true,
             refresh_quota: true,
             notification_level: NotificationLevel::default(),
+            notification_sound: default_notification_sound(),
         }
     }
 }
