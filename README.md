@@ -91,27 +91,40 @@ output for scripting.
 
 ## Install
 
-Requirements:
+TokenPulse reads agent session data from the local filesystem, so install it on
+the same machine the agents run on.
 
-- Rust toolchain (1.75+)
-- Local agent / session data on the same machine
+### npm (prebuilt binary, no Rust toolchain needed)
 
 ```bash
-cargo install tokenpulse
+npm install -g @fangwangme/tokenpulse
+tokenpulse
 ```
 
-Or build from source:
+Or run it without installing:
+
+```bash
+npx @fangwangme/tokenpulse
+```
+
+Prebuilt binaries are published for macOS (Intel and Apple Silicon) and Linux
+(x64 and arm64). npm resolves the one matching your machine; on any other
+platform, build from source instead.
+
+### From source
+
+Requires a Rust toolchain (1.75+):
+
+```bash
+cargo install --git https://github.com/fangwangme/tokenpulse tokenpulse-cli
+```
+
+Or clone and build:
 
 ```bash
 git clone https://github.com/fangwangme/tokenpulse
 cd tokenpulse
 cargo install --path tokenpulse-cli
-```
-
-Or build the workspace manually:
-
-```bash
-cargo build --release --workspace
 ```
 
 ## Quick Start

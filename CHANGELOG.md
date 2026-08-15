@@ -25,9 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `quota_fetch_failures`: failed polls with the provider attributed, so recurring auth or network problems stay visible after the status bar clears.
   - `keeper_executions`: every ping with its trigger, model, prompt, command, duration, exit code and output. The Keeper panel now seeds itself from the database on launch and shows the newest 50, while the database keeps everything.
   - The database is now WAL-mode with a `user_version` migration path, matching `usage.db`.
+- **npm Distribution**: `npm install -g @fangwangme/tokenpulse` installs a prebuilt binary with no Rust toolchain required. A launcher package resolves one of four per-platform binary packages through `optionalDependencies` (macOS x64/arm64, Linux x64/arm64). The release workflow builds, assembles, and publishes them from the `v*` tag; re-running a failed publish skips whatever already reached the registry. The unscoped name `tokenpulse` belongs to an unrelated npm package, hence the scope.
+- **Linux release binaries**: the release build matrix gained `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, built on `ubuntu-22.04` so they need only glibc 2.35.
 - **File Logging**: tracing output goes to a daily rolling file in `~/.local/share/tokenpulse/log/`. Previously logging was only initialised when `RUST_LOG` was set and wrote to stdout, which is unusable under the TUI — a misbehaving background task left no evidence at all. Level is overridable via `TOKENPULSE_LOG` or `RUST_LOG`.
 
 ### Fixed
+- The README's `cargo install tokenpulse` never worked — the crate is not published on crates.io. Install instructions now cover npm and `cargo install --git`.
 - `tokenpulse config show` now prints the Keeper section, and `config set keeper_engine=true|false` toggles the master switch, so the CLI matches what the Settings tab already exposed.
 - The Keeper's next-trigger time no longer shows `--:--` on daylight-saving transition days. Resolving a wall-clock time returned nothing both when an hour is skipped and when it repeats.
 - The log directory is resolved with `dirs::home_dir()` rather than `$HOME`, which is routinely unset on Windows and in slim containers and would have put the log under the working directory.

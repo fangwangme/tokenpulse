@@ -13,17 +13,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-macos:
+  build:
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: macos-13
             target: x86_64-apple-darwin
-            artifact_name: tokenpulse-x86_64-apple-darwin
           - runner: macos-14
             target: aarch64-apple-darwin
-            artifact_name: tokenpulse-aarch64-apple-darwin
+          # 22.04 rather than latest: the binary then needs only glibc 2.35,
+          # so it also runs on distros a couple of releases behind.
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -42,18 +46,20 @@ jobs:
 
       - name: Package archive
         run: |
-          mkdir -p .local/release/${{ matrix.artifact_name }}
-          cp .local/target/${{ matrix.target }}/release/tokenpulse .local/release/${{ matrix.artifact_name }}/tokenpulse
-          tar -C .local/release/${{ matrix.artifact_name }} -czf .local/release/${{ matrix.artifact_name }}.tar.gz tokenpulse
+          mkdir -p .local/release/tokenpulse-${{ matrix.target }}
+          cp .local/target/${{ matrix.target }}/release/tokenpulse \
+            .local/release/tokenpulse-${{ matrix.target }}/tokenpulse
+          tar -C .local/release/tokenpulse-${{ matrix.target }} \
+            -czf .local/release/tokenpulse-${{ matrix.target }}.tar.gz tokenpulse
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: .local/release/${{ matrix.artifact_name }}.tar.gz
+          name: tokenpulse-${{ matrix.target }}
+          path: .local/release/tokenpulse-${{ matrix.target }}.tar.gz
 
   publish-release:
-    needs: build-macos
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
@@ -68,3 +74,35 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" dist/*/*.tar.gz \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes
+
+  publish-npm:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # Fails loudly when the tag and the crate version disagree, before
+      # anything reaches the registry — a published version cannot be replaced.
+      - name: Assemble packages
+        run: |
+          node npm/scripts/build-packages.mjs \
+            --version "${GITHUB_REF_NAME#v}" \
+            --artifacts dist \
+            --out .local/npm-dist
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node npm/scripts/publish-packages.mjs .local/npm-dist

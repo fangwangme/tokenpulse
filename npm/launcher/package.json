@@ -1,0 +1,38 @@
+{
+  "name": "@fangwangme/tokenpulse",
+  "version": "0.0.0-managed-by-release-workflow",
+  "description": "Token usage and quota dashboard for coding agents (Claude Code, Codex, Copilot, Gemini CLI, Antigravity)",
+  "bin": {
+    "tokenpulse": "bin/tokenpulse.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "optionalDependencies": {
+    "@fangwangme/tokenpulse-darwin-arm64": "0.0.0-managed-by-release-workflow",
+    "@fangwangme/tokenpulse-darwin-x64": "0.0.0-managed-by-release-workflow",
+    "@fangwangme/tokenpulse-linux-arm64": "0.0.0-managed-by-release-workflow",
+    "@fangwangme/tokenpulse-linux-x64": "0.0.0-managed-by-release-workflow"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "copilot",
+    "llm",
+    "quota",
+    "token-usage",
+    "tui"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fangwangme/tokenpulse.git"
+  },
+  "homepage": "https://github.com/fangwangme/tokenpulse#readme",
+  "bugs": {
+    "url": "https://github.com/fangwangme/tokenpulse/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

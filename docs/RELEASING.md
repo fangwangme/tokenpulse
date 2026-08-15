@@ -31,116 +31,85 @@ release process — keep it in sync with `.github/workflows/release.yml`.
    git push origin vX.Y.Z
    ```
 7. The **Release** workflow (`.github/workflows/release.yml`) triggers on the
-   `v*` tag: it builds the release binaries, packages `*.tar.gz` archives, and
-   publishes a GitHub Release with auto-generated notes.
+   `v*` tag. It builds one binary per target, publishes a GitHub Release with
+   the `*.tar.gz` archives and auto-generated notes, and publishes the npm
+   packages (see §3).
 
-> Current `release.yml` builds macOS only (`x86_64-apple-darwin`,
-> `aarch64-apple-darwin`). Add Linux (`x86_64-unknown-linux-gnu`,
-> `aarch64-unknown-linux-gnu`) and Windows (`x86_64-pc-windows-msvc`) targets to
-> the build matrix before advertising those platforms on npm (see §3).
+Targets built: `x86_64-apple-darwin`, `aarch64-apple-darwin`,
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`. Linux builds run on
+`ubuntu-22.04` so the binaries need only glibc 2.35 and still run on distros a
+couple of releases behind.
 
 ## 3. Publishing to npm
 
-TokenPulse is a compiled Rust binary, so the npm package ships **prebuilt
-binaries** rather than source. Use the **per-platform `optionalDependencies`**
-pattern (the approach used by esbuild, SWC, and Biome): a thin launcher package
-depends on one binary package per platform, and npm installs only the package
-matching the user's `os`/`cpu`.
+Automated by `release.yml`; the `v*` tag that builds the binaries also publishes
+them. Nothing here needs running by hand.
+
+The plain name `tokenpulse` is taken on npm by an unrelated package, so
+everything ships under the `@fangwangme` scope.
 
 ### 3a. Package layout
 
+TokenPulse is a compiled binary, so npm ships **prebuilt binaries** using the
+per-platform `optionalDependencies` pattern (as esbuild, SWC, and Biome do): a
+thin launcher depends on one binary package per platform, and npm installs only
+the one matching the user's `os`/`cpu`.
+
 ```
-tokenpulse/                      # launcher package (what users install)
-  package.json                   # bin + optionalDependencies, version = crate version
-  bin/tokenpulse.js              # resolves & execs the platform binary
-
-@tokenpulse/cli-darwin-arm64/    # one package per target
-  package.json                   # "os": ["darwin"], "cpu": ["arm64"]
-  bin/tokenpulse                 # the prebuilt binary
-@tokenpulse/cli-darwin-x64/
-@tokenpulse/cli-linux-x64/
-@tokenpulse/cli-linux-arm64/
-@tokenpulse/cli-win32-x64/       # bin/tokenpulse.exe
-```
-
-Launcher `package.json` (key fields):
-
-```json
-{
-  "name": "tokenpulse",
-  "version": "X.Y.Z",
-  "bin": { "tokenpulse": "bin/tokenpulse.js" },
-  "optionalDependencies": {
-    "@tokenpulse/cli-darwin-arm64": "X.Y.Z",
-    "@tokenpulse/cli-darwin-x64": "X.Y.Z",
-    "@tokenpulse/cli-linux-x64": "X.Y.Z",
-    "@tokenpulse/cli-linux-arm64": "X.Y.Z",
-    "@tokenpulse/cli-win32-x64": "X.Y.Z"
-  }
-}
+@fangwangme/tokenpulse                  launcher — what users install
+  bin/tokenpulse.js                     resolves and execs the platform binary
+@fangwangme/tokenpulse-darwin-arm64     one per target, holds the binary
+@fangwangme/tokenpulse-darwin-x64
+@fangwangme/tokenpulse-linux-arm64
+@fangwangme/tokenpulse-linux-x64
 ```
 
-Platform `package.json` (npm skips it on non-matching machines):
+Sources live in `npm/`:
 
-```json
-{
-  "name": "@tokenpulse/cli-darwin-arm64",
-  "version": "X.Y.Z",
-  "os": ["darwin"],
-  "cpu": ["arm64"],
-  "files": ["bin/tokenpulse"]
-}
-```
+| Path | Role |
+| --- | --- |
+| `npm/launcher/` | Launcher `package.json` template and `bin/tokenpulse.js`. The template's `optionalDependencies` are the authoritative list of platforms we claim to support. |
+| `npm/scripts/build-packages.mjs` | Turns the CI build artifacts into ready-to-publish package directories. |
+| `npm/scripts/publish-packages.mjs` | Publishes them in dependency order. |
 
-Launcher `bin/tokenpulse.js`:
+All package versions equal the crate version, so the launcher's pinned
+`optionalDependencies` resolve. `build-packages.mjs` refuses to run when the tag
+and `Cargo.toml` disagree — check that first if the npm job fails immediately.
 
-```js
-#!/usr/bin/env node
-const { spawnSync } = require("node:child_process");
-const pkg = `@tokenpulse/cli-${process.platform}-${process.arch}`;
-const exe = process.platform === "win32" ? "tokenpulse.exe" : "tokenpulse";
-let binary;
-try {
-  binary = require.resolve(`${pkg}/bin/${exe}`);
-} catch {
-  console.error(`tokenpulse: no prebuilt binary for ${process.platform}-${process.arch}`);
-  process.exit(1);
-}
-process.exit(spawnSync(binary, process.argv.slice(2), { stdio: "inherit" }).status ?? 1);
-```
+### 3b. Adding a platform
 
-All package versions must equal the crate version so the launcher's pinned
-`optionalDependencies` resolve.
+Three places have to agree, and the build fails loudly if they do not:
 
-### 3b. Publish steps
+1. `release.yml` — add a `runner` / `target` pair to the `build` matrix.
+2. `npm/scripts/build-packages.mjs` — add the triple to `TARGETS`.
+3. `npm/launcher/package.json` — add the package to `optionalDependencies`.
 
-1. Download the release archives built by `release.yml` (or rebuild locally per
-   target with `cargo build --release -p tokenpulse-cli --target <triple>`).
-2. For each target, assemble `@tokenpulse/cli-<platform>-<arch>` with the binary
-   and a generated `package.json`, then `npm publish --access public`.
-3. Publish the launcher `tokenpulse` package last (so its
-   `optionalDependencies` already exist): `npm publish --access public`.
-4. Smoke-test in a clean dir: `npx tokenpulse@X.Y.Z --help`.
+Windows is deliberately absent: the code has `cfg(windows)` branches but has
+never been built or exercised there, so it is not advertised on npm.
 
-### 3c. Turnkey alternative — `dist` (cargo-dist)
+### 3c. Recovering a partial publish
 
-[`dist`](https://opensource.axo.dev/cargo-dist/) automates all of the above. It
-builds every target in CI, creates the GitHub Release, and can emit an npm
-installer package directly:
+`publish-packages.mjs` skips any package already on the registry at this
+version, so re-running the failed job finishes the release. A published version
+can never be replaced — if a bad build reached the registry, `npm deprecate` it
+and cut a new patch version.
+
+To rehearse the whole thing without touching the registry:
 
 ```bash
-cargo install cargo-dist
-dist init                       # choose targets + "npm" installer
-# commit the generated CI + Cargo.toml [workspace.metadata.dist] config
-git tag vX.Y.Z && git push origin vX.Y.Z   # dist's CI builds + publishes
+node npm/scripts/build-packages.mjs --version 0.5.0 --artifacts dist --out .local/npm-dist
+node npm/scripts/publish-packages.mjs .local/npm-dist --dry-run
 ```
 
-Set `NPM_TOKEN` as a CI secret for automated `npm publish`. This is the
-recommended path if we want to support npm long-term, since it keeps the
-per-platform packages and versions in sync automatically.
+### 3d. Prerequisites
+
+`NPM_TOKEN` must exist as a repository secret, from an npm automation token with
+publish rights on the `@fangwangme` scope. Scoped packages default to private,
+so the scripts pass `--access public`.
 
 ## 4. After release
 
 - Verify the GitHub Release lists every expected archive.
-- Verify `npx tokenpulse` / `npm i -g tokenpulse` runs the new version.
+- Verify the npm publish landed: `npx @fangwangme/tokenpulse@X.Y.Z --version`
+  in a clean directory, ideally on both macOS and Linux.
 - Open the next `## [Unreleased]` CHANGELOG section for ongoing work.
