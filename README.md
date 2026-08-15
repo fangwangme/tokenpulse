@@ -210,7 +210,29 @@ tokenpulse config set show_account=true
 
 # Enable / disable quota refresh (default: true)
 tokenpulse config set refresh_quota=false
+
+# Quota recovery alerts: how far the notification reaches
+#   off       nothing at all
+#   in_app    sound + the in-TUI toast and ambient pulse
+#   terminal  ... plus a terminal bell and an OSC 9 desktop notification
+#   system    ... plus a macOS Notification Center banner
+tokenpulse config set notification_level=system
+
+# The sound every level except `off` plays. Either `chime` (built in),
+# `none` to stay silent, or any name under /System/Library/Sounds.
+tokenpulse config set notification_sound=chime
+
+# Fire a sample alert to check the whole chain without waiting for a real reset
+tokenpulse config test-notification
 ```
+
+> **Note on audibility.** The sound goes through `afplay` rather than the
+> terminal bell, because most terminals ship with the audible bell disabled
+> (Ghostty, for example, defaults to `bell-features = no-system,no-audio`). The
+> built-in chime is normalised to roughly 11 dB above macOS `Ping.aiff` so it is
+> hard to miss over headphones. If `notification_level=system` shows no banner,
+> allow your terminal to post notifications in System Settings > Notifications;
+> the sound plays regardless.
 
 ### Session Keeper (Heartbeats & Wakeup)
 

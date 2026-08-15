@@ -161,6 +161,8 @@ between consecutive windows. Compact cards collapse to a single bar + percentage
   - `theme` (cycle through auto / dark / light)
   - `scan_antigravity` (toggle active Antigravity session scanning and alias synchronization: true / false)
   - `refresh_quota` (enable / disable quota balance refresh on startup, auto-refresh, and manual `r`: true / false, default true)
+  - `notification_level` (how far a quota recovery alert reaches: `off` / `in_app` / `terminal` / `system`, default `system`)
+  - `notification_sound` (cycle `chime` / `Hero` / `Glass` / `Submarine` / `none`; the selected sound plays immediately so it can be judged by ear)
   - `keeper_engine` (master switch for the Keeper tab's scheduled pings: true / false, default false)
   - Individual provider enabled/disabled switches
 - Controls: use Up/Down (`j`/`k`) to navigate settings, and Space or Enter to cycle/toggle the selected setting.

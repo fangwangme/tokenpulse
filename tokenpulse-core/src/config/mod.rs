@@ -57,6 +57,77 @@ pub struct DisplayConfig {
     /// Defaults to true.
     #[serde(default = "default_true")]
     pub refresh_quota: bool,
+    #[serde(default)]
+    pub notification_level: NotificationLevel,
+    /// Sound played by every notification level except `off`. Either `chime`
+    /// (the built-in sound), `none` to stay silent, or the base name of a
+    /// sound under `/System/Library/Sounds` such as `Hero`.
+    #[serde(default = "default_notification_sound")]
+    pub notification_sound: String,
+}
+
+fn default_notification_sound() -> String {
+    crate::notification::SOUND_CHIME.to_string()
+}
+
+/// How far a quota recovery notification reaches. Every level except `Off`
+/// plays the alert sound — the levels differ only in how far the *visual*
+/// notification travels beyond the TUI.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationLevel {
+    /// Nothing at all: no sound, no visuals.
+    Off,
+    /// Sound plus the in-TUI toast and ambient animation.
+    InApp,
+    /// Adds a terminal bell and an OSC 9 desktop notification.
+    Terminal,
+    /// Adds a macOS Notification Center banner.
+    System,
+}
+
+impl NotificationLevel {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::InApp,
+            Self::InApp => Self::Terminal,
+            Self::Terminal => Self::System,
+            Self::System => Self::Off,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Off => Self::System,
+            Self::InApp => Self::Off,
+            Self::Terminal => Self::InApp,
+            Self::System => Self::Terminal,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::InApp => "in_app",
+            Self::Terminal => "terminal",
+            Self::System => "system",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::InApp => "in-app (toast)",
+            Self::Terminal => "terminal",
+            Self::System => "system",
+        }
+    }
+}
+
+impl Default for NotificationLevel {
+    fn default() -> Self {
+        NotificationLevel::System
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -149,6 +220,8 @@ impl Default for DisplayConfig {
             show_account: true,
             scan_antigravity: true,
             refresh_quota: true,
+            notification_level: NotificationLevel::default(),
+            notification_sound: default_notification_sound(),
         }
     }
 }
@@ -529,6 +602,56 @@ enabled = true
         assert!(config.display.show_account);
         assert!(config.display.scan_antigravity);
         assert!(config.display.refresh_quota);
+        assert_eq!(config.display.notification_level, NotificationLevel::System);
+    }
+
+    #[test]
+    fn test_notification_level_cycling() {
+        let level = NotificationLevel::Off;
+        assert_eq!(level.next(), NotificationLevel::InApp);
+        assert_eq!(level.next().next(), NotificationLevel::Terminal);
+        assert_eq!(level.next().next().next(), NotificationLevel::System);
+        assert_eq!(level.next().next().next().next(), NotificationLevel::Off);
+
+        assert_eq!(level.prev(), NotificationLevel::System);
+        assert_eq!(level.prev().prev(), NotificationLevel::Terminal);
+        assert_eq!(level.prev().prev().prev(), NotificationLevel::InApp);
+        assert_eq!(level.prev().prev().prev().prev(), NotificationLevel::Off);
+    }
+
+    #[test]
+    fn test_notification_level_labels() {
+        assert_eq!(NotificationLevel::Off.label(), "off");
+        assert_eq!(NotificationLevel::InApp.label(), "in_app");
+        assert_eq!(NotificationLevel::Terminal.label(), "terminal");
+        assert_eq!(NotificationLevel::System.label(), "system");
+
+        assert_eq!(NotificationLevel::Off.display_label(), "off");
+        assert_eq!(NotificationLevel::InApp.display_label(), "in-app (toast)");
+        assert_eq!(NotificationLevel::Terminal.display_label(), "terminal");
+        assert_eq!(NotificationLevel::System.display_label(), "system");
+    }
+
+    #[test]
+    fn test_notification_level_serde_roundtrip() {
+        for level in [
+            NotificationLevel::Off,
+            NotificationLevel::InApp,
+            NotificationLevel::Terminal,
+            NotificationLevel::System,
+        ] {
+            let serialized = serde_json::to_string(&level).unwrap();
+            let deserialized: NotificationLevel = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, level);
+        }
+
+        let toml_str = r#"
+version = 3
+[display]
+notification_level = "in_app"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.display.notification_level, NotificationLevel::InApp);
     }
 
     #[test]

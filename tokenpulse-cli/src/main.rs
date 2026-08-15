@@ -76,6 +76,12 @@ enum ConfigAction {
         /// Key=value pair
         setting: String,
     },
+    /// Fire a sample quota recovery notification at the configured level.
+    ///
+    /// Real recoveries only happen when an exhausted window resets while the
+    /// TUI is open, which makes the feature nearly impossible to verify by
+    /// hand; this exercises the same code path on demand.
+    TestNotification,
 }
 
 /// Sends tracing output to a daily file under the data directory.

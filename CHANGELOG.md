@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-08-15
+
+### Added
+- **Quota Recovery Notification System**: Alerts you when an exhausted quota window recovers (`used_percent < 100%`).
+  - **4 Notification Levels**, every one of which plays the alert sound — they differ only in how far the visual notification travels:
+    - `off`: nothing at all.
+    - `in_app`: sound + ambient emerald background pulse, perimeter glow, and a bottom-right toast card with a countdown bar.
+    - `terminal`: adds a terminal bell and an OSC 9 desktop notification.
+    - `system`: adds a macOS Notification Center banner.
+  - **Audible by default**: sound plays through `afplay`, not the terminal bell — most terminals ship with the audible bell turned off (Ghostty defaults to `bell-features = no-audio`), which makes a `\x07`-based chime silent on a stock setup. The built-in chime is normalised to roughly 11 dB above macOS `Ping.aiff`.
+  - **Configurable sound**: `notification_sound` accepts `chime` (built in), `none`, or any name under `/System/Library/Sounds`. The TUI Settings row plays each sound as you cycle it.
+  - **`tokenpulse config test-notification`**: fires a sample alert through the real code path, so the feature can be verified without waiting for a quota window to actually reset.
+  - **Edge-Triggered State Tracking**: Tracks exhausted rate windows across Claude, Codex, Gemini, Antigravity, and Copilot. Windows that recover in the same refresh are announced together, so a batch reset produces one sound and one banner rather than a burst.
+  - **TUI Settings & CLI Support**: Cycle `notification_level` and `notification_sound` in the TUI Settings tab, or configure via `tokenpulse config set notification_level=<level>`.
+
 ## [0.5.1] - 2026-08-15
 
 
