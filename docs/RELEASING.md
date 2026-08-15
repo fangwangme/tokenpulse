@@ -141,6 +141,12 @@ Targets: `x86_64-apple-darwin`, `aarch64-apple-darwin`,
 `ubuntu-22.04`, so the binaries need only glibc 2.35 and still run on distros a
 couple of releases behind.
 
+Both macOS targets build on `macos-14`; the x86_64 one is cross-compiled. Do not
+reintroduce the Intel `macos-13` runner — GitHub no longer allocates it, and a
+job requesting it does not fail fast. It sits queued for the full 24-hour limit
+and is then cancelled, taking the whole release with it. Every release before
+v0.5.0 was lost this way.
+
 `publish-release` and `publish-npm` both wait on `build`, so a failure on any
 platform stops the release before anything is published.
 

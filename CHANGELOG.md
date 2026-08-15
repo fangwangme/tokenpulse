@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **File Logging**: tracing output goes to a daily rolling file in `~/.local/share/tokenpulse/log/`. Previously logging was only initialised when `RUST_LOG` was set and wrote to stdout, which is unusable under the TUI — a misbehaving background task left no evidence at all. Level is overridable via `TOKENPULSE_LOG` or `RUST_LOG`.
 
 ### Fixed
+- The release workflow now builds both macOS targets on `macos-14`, cross-compiling the x86_64 one. It previously asked for the Intel `macos-13` runner, which GitHub no longer allocates: the job stayed queued for the 24-hour limit and was then cancelled, blocking the jobs that publish. No release had ever completed as a result.
 - The README's `cargo install tokenpulse` never worked — the crate is not published on crates.io. Install instructions now cover npm and `cargo install --git`.
 - `tokenpulse config show` now prints the Keeper section, and `config set keeper_engine=true|false` toggles the master switch, so the CLI matches what the Settings tab already exposed.
 - The Keeper's next-trigger time no longer shows `--:--` on daylight-saving transition days. Resolving a wall-clock time returned nothing both when an hour is skipped and when it repeats.
