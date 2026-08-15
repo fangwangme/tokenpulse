@@ -62,18 +62,30 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
 
+      # The curated CHANGELOG entry is the release note. Fall back to generated
+      # notes only when a version has no section, rather than failing the release.
       - name: Publish GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/*/*.tar.gz \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+          if .github/scripts/extract-release-notes.sh "${GITHUB_REF_NAME#v}" > release-notes.md; then
+            gh release create "${GITHUB_REF_NAME}" dist/*/*.tar.gz \
+              --title "${GITHUB_REF_NAME}" \
+              --notes-file release-notes.md
+          else
+            echo "::warning::No CHANGELOG section for ${GITHUB_REF_NAME}; using generated notes."
+            gh release create "${GITHUB_REF_NAME}" dist/*/*.tar.gz \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
 
   publish-npm:
     needs: build

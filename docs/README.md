@@ -16,7 +16,7 @@ that file and link to it from elsewhere rather than copying content.
 | [`modules/tui.md`](modules/tui.md) | Contributors | TUI tabs, key bindings, settings, rendering widgets. |
 | [`specs/`](specs/) | Contributors | Product/feature specs (named by feature, no dates). See `specs/README.md`. |
 | [`model-pricing-mapping.md`](model-pricing-mapping.md) | Contributors | Reference: model id → pricing/provider mapping rules. |
-| [`RELEASING.md`](RELEASING.md) | Maintainers | Versioning, tagging, GitHub release, npm publishing. |
+| [`RELEASING.md`](RELEASING.md) | Maintainers | The release runbook: versioning, writing the release note, tagging, and what CI publishes to GitHub and npm. |
 | [`archive/`](archive/) | — | Historical/superseded plans; not maintained. |
 
 ## Where things live (to prevent duplication)
