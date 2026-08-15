@@ -5,7 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] - 2026-08-15
+## [0.5.1] - 2026-08-15
+
 
 ### Added
 - **Keeper Dashboard Tab**: Added interactive session keeper & scheduled heartbeat dashboard for managing automated wakeup and synchronization across Claude Code, Codex, and Google Antigravity.
@@ -40,6 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keeper output is sanitized before display: carriage returns, tabs, ANSI escapes and other control characters from agent CLIs are stripped instead of being written straight into the terminal, and multi-line replies are collapsed onto one line.
 - Prompts and models are shell-escaped when substituted into a keeper command template, so a value containing a quote can no longer break out of the template and run as a command.
 - A keeper ping that hits its 45s timeout now kills the CLI it started instead of leaving it running detached.
+
+## [0.5.0] - 2026-08-15
+
+Tagged but never published: the release workflow could not complete, so no
+GitHub Release or npm package exists for this version. Everything intended for
+it ships in 0.5.1.
 
 ## [0.4.11] - 2026-07-27
 
