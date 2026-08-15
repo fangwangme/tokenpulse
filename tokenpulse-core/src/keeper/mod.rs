@@ -605,7 +605,6 @@ mod tests {
         time: NaiveTime,
     ) -> Option<chrono::DateTime<Tz>> {
         use chrono::offset::LocalResult;
-        use chrono::TimeZone;
 
         match tz.from_local_datetime(&date.and_time(time)) {
             LocalResult::Single(dt) => Some(dt),

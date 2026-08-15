@@ -65,9 +65,11 @@ fn render_overview(
     }
 
     if snapshots.len() == 1 {
+        let card_height = area.height.min(14).max(8);
+        let card_area = Rect::new(area.x, area.y, area.width, card_height);
         render_snapshot_card(
             f,
-            area,
+            card_area,
             snapshots[0],
             display_mode,
             theme,
@@ -80,13 +82,22 @@ fn render_overview(
 
     let columns = if area.width >= 110 { 2 } else { 1 };
     let rows = snapshots.len().div_ceil(columns);
-    let row_constraints = vec![Constraint::Min(6); rows];
+    let row_height = if area.height >= rows as u16 * 10 {
+        (area.height / rows as u16).min(13)
+    } else {
+        area.height / rows as u16
+    };
+    let mut row_constraints: Vec<Constraint> = vec![Constraint::Length(row_height); rows];
+    row_constraints.push(Constraint::Min(0));
     let row_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(row_constraints)
         .split(area);
 
     for (row_idx, row_area) in row_areas.iter().enumerate() {
+        if row_idx >= rows {
+            break;
+        }
         let col_constraints = vec![Constraint::Ratio(1, columns as u32); columns];
         let col_areas = Layout::default()
             .direction(Direction::Horizontal)
@@ -150,9 +161,9 @@ fn render_snapshot_card(
 
     let fixed_rows =
         if show_account_row { 1 } else { 0 } + if snapshot.credits.is_some() { 1 } else { 0 };
-    let compact = compact || inner.height < (base_windows.len() * 3 + fixed_rows) as u16;
+    let compact = compact || inner.height < (base_windows.len() * 2 + fixed_rows) as u16;
 
-    let lines_per_window = if compact { 1 } else { 3 };
+    let lines_per_window = if compact { 1 } else { 2 };
     let available_for_windows = inner.height.saturating_sub(fixed_rows as u16);
     let max_allowed_windows = (available_for_windows as usize / lines_per_window).max(1);
 
@@ -171,23 +182,40 @@ fn render_snapshot_card(
         .max()
         .unwrap_or(10);
     let fixed_label_width = max_label_len.min(inner.width.saturating_sub(30) as usize);
-    let used_window_lines = windows.len() * lines_per_window;
-    let reset_credit_rows = inner
-        .height
-        .saturating_sub((fixed_rows + used_window_lines) as u16)
-        as usize;
-    let reset_credit_lines = format_reset_credit_lines(snapshot, reset_credit_rows);
 
+    // Build vertical constraints with balanced spacing between sections and windows
+    let add_spacing = !compact && inner.height >= (windows.len() * 3 + fixed_rows) as u16;
     let mut constraints = Vec::new();
     if show_account_row {
         constraints.push(Constraint::Length(1));
+        if add_spacing {
+            constraints.push(Constraint::Length(1));
+        }
     }
-    for _ in &windows {
-        constraints.push(Constraint::Length(if compact { 1 } else { 3 }));
+    for (idx, _) in windows.iter().enumerate() {
+        constraints.push(Constraint::Length(if compact { 1 } else { 2 }));
+        if add_spacing
+            && (idx + 1 < windows.len()
+                || snapshot.credits.is_some()
+                || !snapshot.rate_limit_reset_credits.is_empty())
+        {
+            constraints.push(Constraint::Length(1));
+        }
     }
     if snapshot.credits.is_some() {
         constraints.push(Constraint::Length(1));
     }
+
+    let used_lines: u16 = constraints
+        .iter()
+        .map(|c| match c {
+            Constraint::Length(l) => *l,
+            _ => 0,
+        })
+        .sum();
+    let reset_credit_rows = inner.height.saturating_sub(used_lines) as usize;
+    let reset_credit_lines = format_reset_credit_lines(snapshot, reset_credit_rows);
+
     for _ in &reset_credit_lines {
         constraints.push(Constraint::Length(1));
     }
@@ -232,9 +260,12 @@ fn render_snapshot_card(
                 cursor += 1;
             }
         }
+        if add_spacing && cursor < sections.len() {
+            cursor += 1; // skip spacing line
+        }
     }
 
-    for window in &windows {
+    for (idx, window) in windows.iter().enumerate() {
         if cursor < sections.len() {
             let gauge_area = sections[cursor];
             cursor += 1;
@@ -247,6 +278,14 @@ fn render_snapshot_card(
                 compact,
                 fixed_label_width,
             );
+        }
+        if add_spacing
+            && (idx + 1 < windows.len()
+                || snapshot.credits.is_some()
+                || !snapshot.rate_limit_reset_credits.is_empty())
+            && cursor < sections.len()
+        {
+            cursor += 1; // skip spacing line
         }
     }
 
@@ -558,5 +597,91 @@ fn calculate_pace(window: &RateWindow) -> Option<(&'static str, String, f64)> {
             format!("{:.0}% under pace", deficit.abs()),
             expected_usage,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use tokenpulse_core::provider::RateWindow;
+    use tokenpulse_core::QuotaSnapshot;
+
+    fn sample_snapshot(provider: &str) -> QuotaSnapshot {
+        QuotaSnapshot {
+            provider: provider.to_string(),
+            account: Some("user@example.com".to_string()),
+            plan: Some("Pro".to_string()),
+            windows: vec![
+                RateWindow {
+                    label: "5-hour Window".to_string(),
+                    used_percent: 45.0,
+                    resets_at: Some(chrono::Utc::now() + chrono::Duration::hours(2)),
+                    period_duration_ms: Some(5 * 3600 * 1000),
+                    model_family: None,
+                },
+                RateWindow {
+                    label: "Weekly Window".to_string(),
+                    used_percent: 20.0,
+                    resets_at: Some(chrono::Utc::now() + chrono::Duration::days(4)),
+                    period_duration_ms: Some(7 * 24 * 3600 * 1000),
+                    model_family: None,
+                },
+            ],
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_render_quota_tab_half_screen() {
+        let backend = TestBackend::new(95, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut config = Config::default();
+        let theme = Theme::default();
+        let dashboard = crate::tui::views::usage::UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+
+        state.quota_snapshots = vec![
+            sample_snapshot("claude"),
+            sample_snapshot("codex"),
+            sample_snapshot("antigravity"),
+        ];
+        for p in ["claude", "codex", "antigravity"] {
+            config.providers.entry(p.to_string()).or_default().enabled = true;
+        }
+
+        terminal
+            .draw(|f| {
+                render_quota_tab(f, f.area(), &state, &config, &theme);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_quota_tab_full_screen() {
+        let backend = TestBackend::new(130, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut config = Config::default();
+        let theme = Theme::default();
+        let dashboard = crate::tui::views::usage::UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+
+        state.quota_snapshots = vec![
+            sample_snapshot("claude"),
+            sample_snapshot("codex"),
+            sample_snapshot("antigravity"),
+        ];
+        for p in ["claude", "codex", "antigravity"] {
+            config.providers.entry(p.to_string()).or_default().enabled = true;
+        }
+
+        terminal
+            .draw(|f| {
+                render_quota_tab(f, f.area(), &state, &config, &theme);
+            })
+            .unwrap();
     }
 }
