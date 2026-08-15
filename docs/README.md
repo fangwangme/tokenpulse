@@ -24,8 +24,11 @@ that file and link to it from elsewhere rather than copying content.
 - **Key bindings, tab behaviour, settings** → `modules/tui.md` only.
 - **Quota window labels / durations / per-provider endpoints** → `modules/quota.md` only.
 - **Config keys and defaults** → described where they are consumed
-  (`modules/tui.md` for the settings tab, `modules/usage.md`/`modules/quota.md`
-  for behaviour); the authoritative list is the `DisplayConfig` struct.
+  (`modules/tui.md` for the settings tab and the Keeper tab, `modules/usage.md`/
+  `modules/quota.md` for behaviour); the authoritative lists are the
+  `DisplayConfig` and `KeeperConfig` structs.
+- **Observation history schema** (`quota_observations`, `keeper_executions`, …)
+  → `modules/quota.md` only.
 - **Release/packaging steps** → `RELEASING.md` only.
 - **Working notes, dated decisions, plans** → `.agents/notes/` and
   `.agents/plans/` (not committed to `docs/`).

@@ -99,7 +99,7 @@ between consecutive windows. Compact cards collapse to a single bar + percentage
 
 ## Usage View Layout
 
-6 tabs switchable with ←/→:
+7 tabs switchable with ←/→:
 
 ### Tab 1: Overview
 - Top: stacked bar chart switchable between daily tokens and daily cost, last 60 days, colored by model company
@@ -139,7 +139,18 @@ between consecutive windows. Compact cards collapse to a single bar + percentage
 - Codex quota cards show each available manual rate-limit reset credit with its expiry when the reset-credit endpoint returns them, ordered by earliest expiry and collapsing later-expiring rows only when the terminal height is too constrained.
 - The bar fill reflects remaining balance or used amount depending on the active display mode.
 
-### Tab 6: Settings
+### Tab 6: Keeper
+- Scheduled activation engine for Claude Code, Codex, and Antigravity — keeps sessions warm and anchors rate-limit windows at a chosen time.
+- Disabled by default: every ping spends real quota, so the master switch (`keeper_engine` in Settings) must be turned on explicitly.
+- Header bar shows the master switch state and the path to the config file, where wakeup times, models, prompts, and commands are edited.
+- One card per agent with two independent switches, the next trigger time, the configured model, and the status of the last (or in-flight) run:
+  - **5h daily wakeup** — fires at `daily_wakeup_time` (default `10:30`). A missed run is only caught up within 2 hours of that time, so launching the TUI late in the day does not fire a stale ping at the wrong hour.
+  - **Weekly auto-sync** — fires 1 minute after the provider's weekly quota reset, read from the live quota snapshot.
+- Last-fired dates persist to `keeper_state.json` beside the config, so restarting the TUI does not re-fire a trigger that already ran.
+- Bottom panel is a scrollable execution stream: timestamp, agent, trigger, status, model, prompt, command, and reply. It is seeded from the `keeper_executions` table on launch and holds the newest 50 runs; the database keeps every run.
+- Only one ping per agent runs at a time; a second trigger is skipped while one is in flight.
+
+### Tab 7: Settings
 - Live settings configuration panel for the application.
 - Shows the read-only TokenPulse package version near the config file path.
 - Configurable settings include:
@@ -150,6 +161,7 @@ between consecutive windows. Compact cards collapse to a single bar + percentage
   - `theme` (cycle through auto / dark / light)
   - `scan_antigravity` (toggle active Antigravity session scanning and alias synchronization: true / false)
   - `refresh_quota` (enable / disable quota balance refresh on startup, auto-refresh, and manual `r`: true / false, default true)
+  - `keeper_engine` (master switch for the Keeper tab's scheduled pings: true / false, default false)
   - Individual provider enabled/disabled switches
 - Controls: use Up/Down (`j`/`k`) to navigate settings, and Space or Enter to cycle/toggle the selected setting.
 
@@ -182,6 +194,15 @@ between consecutive windows. Compact cards collapse to a single bar + percentage
 | `Space` / `Enter`     | Toggle source (in filter overlay)        |
 | `b`                   | Cycle and save theme (auto/dark/light)   |
 | `?`                   | Open page help overlay                   |
+
+Keeper tab only (`←` / `→` still switch tabs; agent cards are selected with `↑` / `↓` / `Tab`):
+
+| Key         | Action                                        |
+| ----------- | --------------------------------------------- |
+| `1` / `d`   | Toggle the selected agent's 5h daily wakeup   |
+| `2` / `w`   | Toggle the selected agent's weekly auto-sync  |
+| `p`         | Run an immediate test ping for the selected agent |
+| Mouse wheel | Scroll the execution stream                   |
 
 ## Event Loop
 

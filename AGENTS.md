@@ -21,5 +21,8 @@
 ## Architecture
 - **Workspace**: `tokenpulse-core` (library) + `tokenpulse-cli` (binary)
 - **TUI**: ratatui 0.29 + crossterm 0.28 (with mouse capture)
-- **Data**: SQLite via rusqlite (bundled)
-- **Tests**: 218 passing
+- **Data**: SQLite via rusqlite (bundled) — `usage.db` (usage ledger) and
+  `tokenpulse.db` (quota cache + observation history)
+- **Logging**: tracing to a daily rotating file under
+  `~/.local/share/tokenpulse/log/`; never stdout, which would corrupt the TUI
+- **Tests**: 283 passing

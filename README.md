@@ -59,7 +59,8 @@ output for scripting.
   one TUI, or plain-text/JSON/CSV output
 - **Session Keeper & Automated Heartbeats** — scheduled lightweight heartbeats for
   Claude Code, Codex, and Google Antigravity to trigger 5h cooldown timers early
-  and auto-sync immediately after weekly quota resets
+  and auto-sync immediately after weekly quota resets. Off by default; each ping
+  spends real quota, so you opt in per agent
 - **Live Execution Stream** — real-time heartbeat log panel with executed commands,
   prompts, replies, durations, status codes, and smooth mouse-wheel scrolling
 - **Ledger-backed** — local SQLite with per-day pricing snapshots so historical
@@ -84,6 +85,9 @@ output for scripting.
 - **Plain-text mode** — for scripting and remote shells
 - **JSON output** — usage summary + quota snapshots in one payload
 - **CSV output** — per-model or daily breakdown for further analysis
+- **Observation history** — every quota poll (per provider, rate window, and
+  model family) and every Keeper run is appended to a local SQLite database for
+  your own trend analysis
 
 ## Install
 
@@ -197,14 +201,22 @@ tokenpulse config set refresh_quota=false
 
 ### Session Keeper (Heartbeats & Wakeup)
 
-The **Keeper** tab lets you manage scheduled pings and wakeups for Claude Code, Codex, and Google Antigravity to keep sessions warm and trigger cooldown cycles at designated times:
+The **Keeper** tab lets you manage scheduled pings and wakeups for Claude Code, Codex, and Google Antigravity to keep sessions warm and trigger cooldown cycles at designated times.
+
+Every ping spends real quota, so the engine ships **disabled**. Turn it on with
+the `keeper_engine` row in the Settings tab, then enable the switches you want
+per agent. Wakeup times, models, prompts, and commands live in `config.toml`
+under `[keeper]`; the tab header shows the exact path.
 
 - **`←` / `→` (or `h` / `l`)** — Switch between dashboard tabs
 - **`↑` / `↓` (or `k` / `j` / `Tab`)** — Select agent card (Claude Code / Codex / Antigravity)
-- **`1` / `d`** — Toggle 5h daily morning wakeup timer (e.g. `08:30`)
+- **`1` / `d`** — Toggle 5h daily morning wakeup timer (default `10:30`; a missed run is only caught up within 2 hours of it)
 - **`2` / `w`** — Toggle weekly auto-sync (fires 1 min after quota resets)
 - **`p`** — Immediately test ping the selected agent
 - **Mouse Wheel** — Scroll the live execution and heartbeat history stream
+
+The panel shows the newest 50 runs and is restored on launch; the full history
+is kept in `tokenpulse.db`.
 
 ## Data Model
 
@@ -225,11 +237,17 @@ All local state lives under a single directory:
 ```
 ~/.local/share/tokenpulse/
 ├── config.toml        # user configuration
+├── keeper_state.json  # Keeper last-fired bookkeeping
 ├── usage.db           # SQLite usage ledger
+├── tokenpulse.db      # quota cache + quota/Keeper observation history
 ├── pricing.json       # cached model pricing
 ├── antigravity-cache/ # raw Antigravity session cache
-└── log/               # performance diagnostics
+└── log/               # daily rotating diagnostics log
 ```
+
+`tokenpulse.db` keeps an append-only record of every quota poll (per provider,
+per rate window, per model family) and every Keeper run, for later analysis. It
+has no retention policy — delete old rows yourself if it grows too large.
 
 ## Project Structure
 
@@ -241,6 +259,8 @@ tokenpulse/
 │   └── src/
 │       ├── auth/               # provider credential detection
 │       ├── config/             # config model & persistence
+│       ├── history/            # quota + Keeper observation history (SQLite)
+│       ├── keeper/             # scheduled agent pings
 │       ├── pricing/            # model pricing (LiteLLM, OpenRouter, Models.dev)
 │       ├── quota/              # live quota fetchers
 │       └── usage/              # session parsers & SQLite store
@@ -249,7 +269,7 @@ tokenpulse/
 │   └── src/
 │       ├── commands/           # init, config, usage, quota registry
 │       ├── tui/                # ratatui dashboard
-│       │   ├── views/usage/    # Overview, Models, Daily, Activity, Quota, Settings
+│       │   ├── views/usage/    # Overview, Models, Daily, Activity, Quota, Keeper, Settings
 │       │   └── widgets/        # barchart, heatmap, gauge, trend
 │       └── main.rs
 └── docs/
