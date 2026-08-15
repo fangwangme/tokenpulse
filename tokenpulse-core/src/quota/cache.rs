@@ -196,6 +196,7 @@ mod tests {
             account: None,
             windows: vec![RateWindow {
                 label: "Session".to_string(),
+                model_family: None,
                 used_percent: 25.0,
                 resets_at: None,
                 period_duration_ms: Some(5 * 60 * 60 * 1000),

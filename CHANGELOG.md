@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Robust Provider & Reset Extraction**: Accurately extracts weekly reset timestamps from all provider formats including Antigravity's `Gemini (7d)` and `Claude (7d)` rate windows.
 
 - **Observation History Database**: `tokenpulse.db` gained append-only history alongside the existing quota cache, which only ever kept one overwritten row per provider.
-  - `quota_observations`: one row per rate window per poll (provider, timestamps, plan, account, window label, full-precision used percent, reset time, period), giving an evenly spaced time series for later analysis.
+  - `quota_observations`: one row per rate window per poll (provider, timestamps, plan, account, window label, model family, full-precision used percent, reset time, period), giving an evenly spaced time series for later analysis.
+  - **Model family dimension**: `RateWindow` now carries the model family a window meters, so Antigravity's separate Gemini and Claude quotas — and Claude's per-family Opus/Sonnet/Fable weekly windows — can be grouped without parsing display labels. Providers with a single pooled quota (Codex) and per-request-type quotas (Copilot) leave it empty.
   - `quota_credit_observations`: credit balances for providers that report them.
   - `quota_fetch_failures`: failed polls with the provider attributed, so recurring auth or network problems stay visible after the status bar clears.
   - `keeper_executions`: every ping with its trigger, model, prompt, command, duration, exit code and output. The Keeper panel now seeds itself from the database on launch and shows the newest 50, while the database keeps everything.

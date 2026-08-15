@@ -13,10 +13,10 @@ use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;
 
-/// Bumped whenever `SCHEMA_V1` below gains a migration step.
-const SCHEMA_VERSION: i32 = 1;
+/// Bumped whenever a migration step is added below.
+const SCHEMA_VERSION: i32 = 2;
 
-const SCHEMA_V1: &str = "
+const SCHEMA_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS quota_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     provider TEXT NOT NULL,
@@ -25,14 +25,11 @@ CREATE TABLE IF NOT EXISTS quota_observations (
     plan TEXT,
     account TEXT,
     window_label TEXT NOT NULL,
+    model_family TEXT,
     used_percent REAL NOT NULL,
     resets_at TEXT,
     period_duration_ms INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_quota_observations_provider_time
-    ON quota_observations(provider, observed_at);
-CREATE INDEX IF NOT EXISTS idx_quota_observations_window_time
-    ON quota_observations(provider, window_label, observed_at);
 
 CREATE TABLE IF NOT EXISTS quota_credit_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,8 +39,6 @@ CREATE TABLE IF NOT EXISTS quota_credit_observations (
     credit_limit REAL,
     currency TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_quota_credit_observations_provider_time
-    ON quota_credit_observations(provider, observed_at);
 
 CREATE TABLE IF NOT EXISTS quota_fetch_failures (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,8 +46,6 @@ CREATE TABLE IF NOT EXISTS quota_fetch_failures (
     observed_at TEXT NOT NULL,
     error TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_quota_fetch_failures_provider_time
-    ON quota_fetch_failures(provider, observed_at);
 
 CREATE TABLE IF NOT EXISTS keeper_executions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,6 +60,21 @@ CREATE TABLE IF NOT EXISTS keeper_executions (
     exit_code INTEGER,
     output_snippet TEXT NOT NULL
 );
+";
+
+/// Created after the column checks below, so an index can safely name a
+/// column that an older database is only gaining during this same upgrade.
+const SCHEMA_INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS idx_quota_observations_provider_time
+    ON quota_observations(provider, observed_at);
+CREATE INDEX IF NOT EXISTS idx_quota_observations_window_time
+    ON quota_observations(provider, window_label, observed_at);
+CREATE INDEX IF NOT EXISTS idx_quota_observations_family_time
+    ON quota_observations(provider, model_family, observed_at);
+CREATE INDEX IF NOT EXISTS idx_quota_credit_observations_provider_time
+    ON quota_credit_observations(provider, observed_at);
+CREATE INDEX IF NOT EXISTS idx_quota_fetch_failures_provider_time
+    ON quota_fetch_failures(provider, observed_at);
 CREATE INDEX IF NOT EXISTS idx_keeper_executions_time
     ON keeper_executions(executed_at);
 CREATE INDEX IF NOT EXISTS idx_keeper_executions_agent_time
@@ -123,8 +131,9 @@ impl HistoryStore {
             let mut stmt = tx.prepare(
                 "INSERT INTO quota_observations (
                     provider, observed_at, fetched_at, plan, account,
-                    window_label, used_percent, resets_at, period_duration_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    window_label, model_family, used_percent, resets_at,
+                    period_duration_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
             for window in &snapshot.windows {
                 stmt.execute(params![
@@ -134,6 +143,7 @@ impl HistoryStore {
                     snapshot.plan,
                     snapshot.account,
                     window.label,
+                    window.model_family,
                     window.used_percent,
                     window.resets_at.map(|t| t.to_rfc3339()),
                     window.period_duration_ms,
@@ -251,10 +261,31 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
-    conn.execute_batch(SCHEMA_V1)?;
+
+    // `CREATE TABLE IF NOT EXISTS` is a no-op on an existing database, so the
+    // added column is applied separately. Checking for the column rather than
+    // branching on the version number also repairs a database left half-built
+    // by an interrupted upgrade.
+    conn.execute_batch(SCHEMA_TABLES)?;
+    if !has_column(conn, "quota_observations", "model_family")? {
+        conn.execute_batch("ALTER TABLE quota_observations ADD COLUMN model_family TEXT;")?;
+    }
+    conn.execute_batch(SCHEMA_INDEXES)?;
+
     // PRAGMA does not accept bound parameters.
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
     Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -276,12 +307,14 @@ mod tests {
             windows: vec![
                 RateWindow {
                     label: "Session (5h)".to_string(),
+                    model_family: Some("Gemini".to_string()),
                     used_percent: used,
                     resets_at: Some(Utc::now()),
                     period_duration_ms: Some(5 * 60 * 60 * 1000),
                 },
                 RateWindow {
                     label: "Weekly (7d)".to_string(),
+                    model_family: Some("Claude".to_string()),
                     used_percent: 71.0,
                     resets_at: None,
                     period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
@@ -332,6 +365,92 @@ mod tests {
             })
             .unwrap();
         assert_eq!(credits, 2);
+    }
+
+    #[test]
+    fn model_family_is_stored_and_groupable() {
+        let (_dir, store) = store();
+        store
+            .record_quota_snapshot("antigravity", Utc::now(), &snapshot(5.0))
+            .unwrap();
+
+        let conn = store.open().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT model_family, COUNT(*) FROM quota_observations
+                 GROUP BY model_family ORDER BY model_family",
+            )
+            .unwrap();
+        let rows: Vec<(Option<String>, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (Some("Claude".to_string()), 1),
+                (Some("Gemini".to_string()), 1)
+            ]
+        );
+    }
+
+    /// Databases written before the column existed must gain it rather than
+    /// start failing every insert.
+    #[test]
+    fn v1_database_gains_the_model_family_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokenpulse.db");
+
+        // Rebuild the v1 shape: same table without `model_family`.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE quota_observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    plan TEXT,
+                    account TEXT,
+                    window_label TEXT NOT NULL,
+                    used_percent REAL NOT NULL,
+                    resets_at TEXT,
+                    period_duration_ms INTEGER
+                 );
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO quota_observations
+                   (provider, observed_at, fetched_at, window_label, used_percent)
+                 VALUES ('claude', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', 'Weekly (7d)', 10.0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = HistoryStore::with_path(path);
+        store
+            .record_quota_snapshot("antigravity", Utc::now(), &snapshot(1.0))
+            .unwrap();
+
+        let conn = store.open().unwrap();
+        assert!(has_column(&conn, "quota_observations", "model_family").unwrap());
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // The pre-migration row survives with a NULL family.
+        let legacy: Option<String> = conn
+            .query_row(
+                "SELECT model_family FROM quota_observations WHERE provider = 'claude'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(legacy.is_none());
     }
 
     #[test]

@@ -681,12 +681,14 @@ mod tests {
             windows: vec![
                 RateWindow {
                     label: "Gemini (5h)".to_string(),
+                    model_family: Some("Gemini".to_string()),
                     used_percent: 10.0,
                     resets_at: Some(Utc.with_ymd_and_hms(2026, 8, 15, 14, 0, 0).unwrap()),
                     period_duration_ms: Some(5 * 60 * 60 * 1000),
                 },
                 RateWindow {
                     label: "Gemini (7d)".to_string(),
+                    model_family: Some("Gemini".to_string()),
                     used_percent: 50.0,
                     resets_at: Some(reset_time),
                     period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
