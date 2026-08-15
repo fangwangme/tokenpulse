@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-15
+
 ### Changed
 - **Half-Screen TUI Layout Optimization**:
   - **Activity Heatmap View**: Kept cells fixed at 2-char width (`██`) and made columns responsive (`display_cols = (grid_width / 2).min(total_weeks)`) showing recent weeks ending at today. Aligned month labels, grid border, and footer date range strictly within rendered bounds.
