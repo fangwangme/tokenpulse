@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.3] - 2026-08-15
+
+### Changed
+- **Half-Screen TUI Layout Optimization**:
+  - **Activity Heatmap View**: Kept cells fixed at 2-char width (`██`) and made columns responsive (`display_cols = (grid_width / 2).min(total_weeks)`) showing recent weeks ending at today. Aligned month labels, grid border, and footer date range strictly within rendered bounds.
+  - **Quota View**: Balanced vertical spacing within provider snapshot cards with breathing room between account details, rate limit windows, and stats. Optimized card row height distribution to prevent empty bottom voids.
+  - **Keeper View**: Wrapped agent cards into a responsive multi-row grid on width-constrained displays (~90-110 cols) with adaptive height allocation and mouse click selection support.
+
 ## [0.5.2] - 2026-08-15
 
 ### Added

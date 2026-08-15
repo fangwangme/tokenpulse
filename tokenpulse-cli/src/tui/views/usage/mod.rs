@@ -2084,6 +2084,13 @@ where
                         ) {
                             state.set_selected_heatmap_date(Some(date));
                         }
+                    } else if state.page == UsagePage::Keeper {
+                        let body = dashboard_body_area(area);
+                        if let Some(agent_idx) =
+                            keeper::keeper_agent_at_position(body, mouse.column, mouse.row)
+                        {
+                            state.selected_keeper_index = agent_idx;
+                        }
                     }
                 }
                 Event::Mouse(mouse)

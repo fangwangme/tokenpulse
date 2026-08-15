@@ -241,7 +241,7 @@ fn compute_layout(area: Rect, range: Option<(NaiveDate, NaiveDate)>) -> Option<H
         return None;
     }
 
-    let cell_width = if grid_width >= total_weeks * 2 { 2 } else { 1 };
+    let cell_width = 2;
     let display_cols = (grid_width / cell_width).min(total_weeks).max(1);
     let first_week_idx = total_weeks.saturating_sub(display_cols);
     let rendered_width = display_cols * cell_width;
@@ -482,7 +482,7 @@ impl<'a> Widget for YearHeatmap<'a> {
         }
 
         let label_positions =
-            distribute_month_label_positions(&month_labels, &layout, area.x + area.width);
+            distribute_month_label_positions(&month_labels, &layout, grid_x + grid_width as u16);
         for (x, label) in label_positions {
             let label_width = label.chars().count() as u16;
             if x + label_width <= area.x + area.width {
@@ -490,11 +490,7 @@ impl<'a> Widget for YearHeatmap<'a> {
             }
         }
 
-        let (sym_cell, sym_selected) = if cell_width >= 2 {
-            ("██", " ◆")
-        } else {
-            ("█", "◆")
-        };
+        let (sym_cell, sym_selected) = ("██", " ◆");
 
         for col in 0..display_cols {
             for row in 0..7 {
@@ -605,12 +601,9 @@ mod tests {
         let layout = compute_layout(area, Some((start, end))).unwrap();
         let selected_x = display_col_x(&layout, 9);
         let selected_y = area.y + 1;
-        if layout.cell_width >= 2 {
-            assert_eq!(buf[(selected_x, selected_y)].symbol(), " ");
-            assert_eq!(buf[(selected_x + 1, selected_y)].symbol(), "◆");
-        } else {
-            assert_eq!(buf[(selected_x, selected_y)].symbol(), "◆");
-        }
+        assert_eq!(layout.cell_width, 2);
+        assert_eq!(buf[(selected_x, selected_y)].symbol(), " ");
+        assert_eq!(buf[(selected_x + 1, selected_y)].symbol(), "◆");
     }
 
     #[test]
@@ -656,7 +649,7 @@ mod tests {
             .render(area, &mut buf);
 
         let layout = compute_layout(area, Some((start, end))).unwrap();
-        assert_eq!(layout.cell_width, 1);
+        assert_eq!(layout.cell_width, 2);
         assert!(layout.first_week_idx > 0);
 
         let first_visible_date =
@@ -702,8 +695,8 @@ mod tests {
 
     #[test]
     fn close_month_labels_are_shifted_not_dropped() {
-        let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
-        let end = NaiveDate::from_ymd_opt(2026, 4, 25).unwrap();
+        let start = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 5, 25).unwrap();
         let area = Rect::new(0, 0, 70, 10);
         let mut buf = Buffer::empty(area);
 
@@ -731,7 +724,7 @@ mod tests {
             end: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
             first_week_idx: 0,
             display_cols: 10,
-            cell_width: 1,
+            cell_width: 2,
             grid_width: 36,
             grid_x: 4,
             grid_y: 1,
@@ -780,6 +773,24 @@ mod tests {
                 .value_to_color(10.0, &thresholds),
             palette[4]
         );
+    }
+
+    #[test]
+    fn narrow_heatmap_month_labels_stay_within_grid() {
+        let start = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+
+        YearHeatmap::new(&[], HeatmapMetric::TotalTokens)
+            .range_opt(Some((start, end)))
+            .render(area, &mut buf);
+
+        let layout = compute_layout(area, Some((start, end))).unwrap();
+        let grid_right = layout.grid_x + layout.grid_width as u16;
+        for x in grid_right..area.width {
+            assert_eq!(buf[(x, area.y)].symbol(), " ");
+        }
     }
 
     #[test]
