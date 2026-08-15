@@ -5,7 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] - 2026-08-15
+## [0.5.1] - 2026-08-15
+
 
 ### Added
 - **Keeper Dashboard Tab**: Added interactive session keeper & scheduled heartbeat dashboard for managing automated wakeup and synchronization across Claude Code, Codex, and Google Antigravity.
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **File Logging**: tracing output goes to a daily rolling file in `~/.local/share/tokenpulse/log/`. Previously logging was only initialised when `RUST_LOG` was set and wrote to stdout, which is unusable under the TUI — a misbehaving background task left no evidence at all. Level is overridable via `TOKENPULSE_LOG` or `RUST_LOG`.
 
 ### Fixed
+- The release workflow now builds both macOS targets on `macos-14`, cross-compiling the x86_64 one. It previously asked for the Intel `macos-13` runner, which GitHub no longer allocates: the job stayed queued for the 24-hour limit and was then cancelled, blocking the jobs that publish. No release had ever completed as a result.
 - The README's `cargo install tokenpulse` never worked — the crate is not published on crates.io. Install instructions now cover npm and `cargo install --git`.
 - `tokenpulse config show` now prints the Keeper section, and `config set keeper_engine=true|false` toggles the master switch, so the CLI matches what the Settings tab already exposed.
 - The Keeper's next-trigger time no longer shows `--:--` on daylight-saving transition days. Resolving a wall-clock time returned nothing both when an hour is skipped and when it repeats.
@@ -39,6 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keeper output is sanitized before display: carriage returns, tabs, ANSI escapes and other control characters from agent CLIs are stripped instead of being written straight into the terminal, and multi-line replies are collapsed onto one line.
 - Prompts and models are shell-escaped when substituted into a keeper command template, so a value containing a quote can no longer break out of the template and run as a command.
 - A keeper ping that hits its 45s timeout now kills the CLI it started instead of leaving it running detached.
+
+## [0.5.0] - 2026-08-15
+
+Tagged but never published: the release workflow could not complete, so no
+GitHub Release or npm package exists for this version. Everything intended for
+it ships in 0.5.1.
 
 ## [0.4.11] - 2026-07-27
 
