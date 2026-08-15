@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Quota Recovery Notification System**: Added intelligent multi-tier alert system when exhausted quota windows recover (`used_percent < 100%`).
+  - **4-Level Notification Matrix**:
+    - `off`: Mute visual and audible notifications.
+    - `in_app`: Full-screen ambient emerald background pulse + perimeter border animation + bottom-right floating animated Toast card with countdown progress bar and cycling beacon icon.
+    - `terminal`: Full-screen visual effects + Terminal Bell (`\x07`) audible chime + OSC 9 terminal notification.
+    - `system`: Full-screen visual effects + Terminal Bell + macOS native Notification Center alert with system chime (`sound name "default"`).
+  - **Edge-Triggered State Tracking**: Tracks exhausted rate windows across Claude, Codex, Gemini, Antigravity, and Copilot, firing non-duplicating notifications immediately upon quota restoration.
+  - **TUI Settings & CLI Support**: Toggle between `off`, `in_app`, `terminal`, `system` in the TUI Settings tab or configure via `tokenpulse config set notification_level=<level>`.
+
 ## [0.5.1] - 2026-08-15
 
 

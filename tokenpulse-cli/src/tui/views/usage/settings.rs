@@ -74,6 +74,18 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
             value_color: theme.accent_soft,
         },
         SettingItem {
+            key: "notification_level",
+            label: config
+                .display
+                .notification_level
+                .display_label()
+                .to_string(),
+            value_color: match config.display.notification_level {
+                tokenpulse_core::config::NotificationLevel::Off => theme.dim,
+                _ => theme.gauge_low,
+            },
+        },
+        SettingItem {
             key: "keeper_engine",
             label: if config.keeper.enabled {
                 "enabled"
@@ -134,7 +146,7 @@ fn next_refresh_interval(curr: u32) -> u32 {
 
 pub fn settings_row_count(_state: &UsageState) -> usize {
     let providers_count = ALL_PROVIDERS.len();
-    8 + providers_count
+    9 + providers_count
 }
 
 pub fn handle_settings_action(
@@ -164,9 +176,11 @@ pub fn handle_settings_action(
     } else if idx == 6 {
         config.display.refresh_quota = !config.display.refresh_quota;
     } else if idx == 7 {
+        config.display.notification_level = config.display.notification_level.next();
+    } else if idx == 8 {
         config.keeper.enabled = !config.keeper.enabled;
     } else {
-        let provider_idx = idx - 8;
+        let provider_idx = idx - 9;
         let providers = ALL_PROVIDERS.to_vec();
 
         if provider_idx < providers.len() {

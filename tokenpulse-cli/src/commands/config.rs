@@ -39,6 +39,10 @@ pub fn run(action: ConfigAction) -> Result<()> {
             };
             println!("  auto_refresh_interval: {}", refresh_str);
             println!("  refresh_quota: {}", config.display.refresh_quota);
+            println!(
+                "  notification_level: {}",
+                config.display.notification_level.label()
+            );
             println!();
             println!("Keeper:");
             println!("  keeper_engine: {}", config.keeper.enabled);
@@ -186,9 +190,28 @@ pub fn run(action: ConfigAction) -> Result<()> {
                     manager.save(&config)?;
                     println!("refresh_quota = {value}");
                 }
+                "notification_level" => {
+                    config.display.notification_level = match value {
+                        "off" => tokenpulse_core::config::NotificationLevel::Off,
+                        "in_app" => tokenpulse_core::config::NotificationLevel::InApp,
+                        "terminal" => tokenpulse_core::config::NotificationLevel::Terminal,
+                        "system" => tokenpulse_core::config::NotificationLevel::System,
+                        _ => {
+                            anyhow::bail!(
+                                "Invalid value '{}' for notification_level. Expected: off, in_app, terminal, system",
+                                value
+                            );
+                        }
+                    };
+                    manager.save(&config)?;
+                    println!(
+                        "notification_level = {}",
+                        config.display.notification_level.label()
+                    );
+                }
                 _ => {
                     anyhow::bail!(
-                        "Unknown setting '{}'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  show_account           (true | false)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)\n  keeper_engine          (true | false)",
+                        "Unknown setting '{}'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  show_account           (true | false)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)\n  notification_level     (off | in_app | terminal | system)\n  keeper_engine          (true | false)",
                         key
                     );
                 }

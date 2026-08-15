@@ -26,7 +26,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Terminal,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 use tokenpulse_core::{
@@ -711,6 +711,29 @@ pub struct UsageState {
     pub keeper_pings_in_progress: BTreeSet<String>,
     pub keeper_log_scroll: usize,
     pub last_keeper_check: Instant,
+    // Quota recovery notification & ambient animation state
+    pub exhausted_windows: HashSet<String>,
+    pub notification_toast: Option<NotificationToast>,
+    pub recovery_animation: Option<RecoveryAnimationState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NotificationToast {
+    pub provider: String,
+    pub window_label: String,
+    pub remaining_percent: f64,
+    pub created_at: Instant,
+    pub duration_millis: u64,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct RecoveryAnimationState {
+    pub provider: String,
+    pub window_label: String,
+    pub remaining_percent: f64,
+    pub started_at: Instant,
+    pub duration_millis: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -739,6 +762,16 @@ impl UsageState {
             .day(today)
             .map(|day| day.date)
             .or_else(|| dashboard.latest_date());
+
+        let mut exhausted_windows = HashSet::new();
+        for snap in &quota_snapshots {
+            for window in &snap.windows {
+                if window.used_percent >= 100.0 {
+                    exhausted_windows.insert(format!("{}:{}", snap.provider, window.label));
+                }
+            }
+        }
+
         Self {
             page: UsagePage::Overview,
             overview_metric: OverviewMetric::Tokens,
@@ -772,6 +805,9 @@ impl UsageState {
             keeper_pings_in_progress: BTreeSet::new(),
             keeper_log_scroll: 0,
             last_keeper_check: Instant::now(),
+            exhausted_windows,
+            notification_toast: None,
+            recovery_animation: None,
         }
     }
 
@@ -905,6 +941,9 @@ impl UsageState {
         self.selected_keeper_index = previous.selected_keeper_index;
         self.keeper_log_scroll = previous.keeper_log_scroll;
         self.last_keeper_check = previous.last_keeper_check;
+        self.exhausted_windows = std::mem::take(&mut previous.exhausted_windows);
+        self.notification_toast = previous.notification_toast.take();
+        self.recovery_animation = previous.recovery_animation.take();
     }
 
     /// Appends a Keeper log entry, capping history and keeping a scrolled view
@@ -1275,15 +1314,57 @@ where
                     );
                 }
                 TuiMessage::QuotaReloadSuccess(new_snapshots, errors) => {
-                    for snap in new_snapshots {
+                    for snap in &new_snapshots {
+                        for window in &snap.windows {
+                            let key = format!("{}:{}", snap.provider, window.label);
+                            let remaining_percent = (100.0 - window.used_percent).max(0.0);
+                            if window.used_percent >= 100.0 {
+                                state.exhausted_windows.insert(key);
+                            } else if state.exhausted_windows.remove(&key) {
+                                let level = config.display.notification_level;
+                                if level != tokenpulse_core::config::NotificationLevel::Off {
+                                    state.recovery_animation = Some(RecoveryAnimationState {
+                                        provider: snap.provider.clone(),
+                                        window_label: window.label.clone(),
+                                        remaining_percent,
+                                        started_at: Instant::now(),
+                                        duration_millis: 2500,
+                                    });
+                                    state.notification_toast = Some(NotificationToast {
+                                        provider: snap.provider.clone(),
+                                        window_label: window.label.clone(),
+                                        remaining_percent,
+                                        created_at: Instant::now(),
+                                        duration_millis: 5000,
+                                    });
+                                }
+                                if level == tokenpulse_core::config::NotificationLevel::Terminal
+                                    || level == tokenpulse_core::config::NotificationLevel::System
+                                {
+                                    tokenpulse_core::notification::send_terminal_notification(
+                                        &snap.provider,
+                                        &window.label,
+                                        remaining_percent,
+                                    );
+                                }
+                                if level == tokenpulse_core::config::NotificationLevel::System {
+                                    tokenpulse_core::notification::send_system_notification(
+                                        &snap.provider,
+                                        &window.label,
+                                        remaining_percent,
+                                    );
+                                }
+                            }
+                        }
+
                         if let Some(existing) = state
                             .quota_snapshots
                             .iter_mut()
                             .find(|s| s.provider == snap.provider)
                         {
-                            *existing = snap;
+                            *existing = snap.clone();
                         } else {
-                            state.quota_snapshots.push(snap);
+                            state.quota_snapshots.push(snap.clone());
                         }
                     }
                     state.quota_refresh_in_progress = false;
@@ -1330,6 +1411,18 @@ where
             }
         }
 
+        // Clear expired notification toast and animation
+        if let Some(toast) = &state.notification_toast {
+            if toast.created_at.elapsed().as_millis() >= toast.duration_millis as u128 {
+                state.notification_toast = None;
+            }
+        }
+        if let Some(anim) = &state.recovery_animation {
+            if anim.started_at.elapsed().as_millis() >= anim.duration_millis as u128 {
+                state.recovery_animation = None;
+            }
+        }
+
         state.clear_expired_refresh_status();
         terminal.draw(|f| {
             let size = f.area();
@@ -1348,6 +1441,9 @@ where
             }
             if state.show_help {
                 render_help_overlay(f, size, &state, &theme);
+            }
+            if let Some(toast) = &state.notification_toast {
+                render_notification_toast(f, size, toast, &theme);
             }
         })?;
 
@@ -1465,7 +1561,12 @@ where
             }
         }
 
-        if event::poll(std::time::Duration::from_millis(100))? {
+        let poll_ms = if state.notification_toast.is_some() || state.recovery_animation.is_some() {
+            50
+        } else {
+            100
+        };
+        if event::poll(std::time::Duration::from_millis(poll_ms))? {
             let ev = event::read()?;
             if state.is_refreshing() {
                 if let Event::Key(key) = &ev {
@@ -2055,7 +2156,17 @@ fn render_dashboard(
     config: &Config,
     config_manager: &ConfigManager,
 ) {
-    f.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
+    let bg_color = if let Some(anim) = &state.recovery_animation {
+        let elapsed = anim.started_at.elapsed().as_millis() as f64;
+        let duration = anim.duration_millis.max(1) as f64;
+        let t = (elapsed / duration).clamp(0.0, 1.0);
+        let pulse = ((1.0 - t) * (t * std::f64::consts::PI * 4.0).sin().abs()).clamp(0.0, 1.0);
+        interpolate_color(theme.bg, Color::Rgb(6, 78, 59), pulse * 0.45)
+    } else {
+        theme.bg
+    };
+
+    f.render_widget(Block::default().style(Style::default().bg(bg_color)), area);
 
     let root = dashboard_root_sections(area);
 
@@ -2086,6 +2197,21 @@ fn render_dashboard(
     }
 
     render_footer(f, root[3], state, theme, config);
+
+    // Full-screen outer perimeter border pulse when recovery animation is active
+    if let Some(anim) = &state.recovery_animation {
+        let elapsed = anim.started_at.elapsed().as_millis() as f64;
+        let duration = anim.duration_millis.max(1) as f64;
+        let t = (elapsed / duration).clamp(0.0, 1.0);
+        let pulse = ((1.0 - t) * (t * std::f64::consts::PI * 4.0).sin().abs()).clamp(0.0, 1.0);
+        let border_color = interpolate_color(theme.border, Color::Rgb(52, 211, 153), pulse);
+        f.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color)),
+            area,
+        );
+    }
 }
 
 pub fn dashboard_body_area(area: Rect) -> Rect {
@@ -2645,6 +2771,105 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+fn render_notification_toast(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    toast: &NotificationToast,
+    theme: &Theme,
+) {
+    const TOAST_WIDTH: u16 = 46;
+    const TOAST_HEIGHT: u16 = 5;
+
+    let width = TOAST_WIDTH.min(area.width.saturating_sub(2));
+    let height = TOAST_HEIGHT.min(area.height.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(width + 2);
+    let y = area.y + area.height.saturating_sub(height + 2);
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+
+    const FRAMES: &[&str] = &["●", "◉", "⦿", "✦"];
+    let elapsed_ms = toast.created_at.elapsed().as_millis() as f64;
+    let frame_idx = ((elapsed_ms / 250.0) as usize) % FRAMES.len();
+    let beacon_icon = FRAMES[frame_idx];
+
+    let border_color = Color::Rgb(52, 211, 153);
+    let block = Block::default()
+        .title(Span::styled(
+            " Quota Restored ",
+            Style::default().fg(border_color).bold(),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let duration_ms = toast.duration_millis.max(1) as f64;
+    let rem_secs = (duration_ms - elapsed_ms).max(0.0) / 1000.0;
+    let ratio = (1.0 - (elapsed_ms / duration_ms)).clamp(0.0, 1.0);
+
+    let bar_len = 16usize;
+    let filled = (ratio * bar_len as f64).round() as usize;
+    let empty = bar_len.saturating_sub(filled);
+    let filled_str = "█".repeat(filled);
+    let empty_str = "░".repeat(empty);
+
+    let provider_name = display_source_name(&toast.provider);
+    let line1 = Line::from(vec![
+        Span::styled(
+            format!("{} ", beacon_icon),
+            Style::default().fg(Color::Rgb(52, 211, 153)).bold(),
+        ),
+        Span::styled(
+            provider_name,
+            Style::default()
+                .fg(theme.provider_color(&toast.provider))
+                .bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("({} window)", toast.window_label),
+            Style::default().fg(theme.fg),
+        ),
+    ]);
+
+    let line2 = Line::from(vec![
+        Span::styled(
+            format!("{:.0}% remaining  ", toast.remaining_percent),
+            Style::default().fg(Color::Rgb(52, 211, 153)).bold(),
+        ),
+        Span::styled("[", Style::default().fg(theme.dim)),
+        Span::styled(filled_str, Style::default().fg(Color::Rgb(52, 211, 153))),
+        Span::styled(empty_str, Style::default().fg(theme.dim)),
+        Span::styled(
+            format!("] {:.1}s", rem_secs),
+            Style::default().fg(theme.dim),
+        ),
+    ]);
+
+    let paragraph = Paragraph::new(vec![line1, line2]);
+    f.render_widget(paragraph, inner);
+}
+
+pub fn interpolate_color(c1: Color, c2: Color, factor: f64) -> Color {
+    let factor = factor.clamp(0.0, 1.0);
+    match (c1, c2) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            let r = (r1 as f64 + (r2 as f64 - r1 as f64) * factor).round() as u8;
+            let g = (g1 as f64 + (g2 as f64 - g1 as f64) * factor).round() as u8;
+            let b = (b1 as f64 + (b2 as f64 - b1 as f64) * factor).round() as u8;
+            Color::Rgb(r, g, b)
+        }
+        _ => {
+            if factor > 0.5 {
+                c2
+            } else {
+                c1
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -2921,5 +3146,42 @@ mod tests {
             state.keeper_log_scroll,
             6 + keeper::KEEPER_LOG_LINES_PER_RECORD
         );
+    }
+
+    #[test]
+    fn test_notification_state_survives_usage_refresh() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+        state.exhausted_windows.insert("claude:5h".to_string());
+        state.notification_toast = Some(NotificationToast {
+            provider: "claude".to_string(),
+            window_label: "5h".to_string(),
+            remaining_percent: 100.0,
+            created_at: Instant::now(),
+            duration_millis: 5000,
+        });
+        state.recovery_animation = Some(RecoveryAnimationState {
+            provider: "claude".to_string(),
+            window_label: "5h".to_string(),
+            remaining_percent: 100.0,
+            started_at: Instant::now(),
+            duration_millis: 2500,
+        });
+
+        let mut previous = std::mem::replace(&mut state, UsageState::new(&dashboard, vec![]));
+        state.adopt_keeper_state(&mut previous);
+
+        assert!(state.exhausted_windows.contains("claude:5h"));
+        assert!(state.notification_toast.is_some());
+        assert!(state.recovery_animation.is_some());
+    }
+
+    #[test]
+    fn test_interpolate_color() {
+        let c1 = Color::Rgb(0, 0, 0);
+        let c2 = Color::Rgb(100, 200, 50);
+        assert_eq!(interpolate_color(c1, c2, 0.0), Color::Rgb(0, 0, 0));
+        assert_eq!(interpolate_color(c1, c2, 1.0), Color::Rgb(100, 200, 50));
+        assert_eq!(interpolate_color(c1, c2, 0.5), Color::Rgb(50, 100, 25));
     }
 }
