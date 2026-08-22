@@ -346,7 +346,36 @@ fn open_cache_db(sessions_dir: &Path) -> Result<rusqlite::Connection> {
         [],
     )?;
 
+    migrate_legacy_usage_rows(&conn)?;
+
     Ok(conn)
+}
+
+/// Rewrites `antigravity-v2` usage rows in place.
+///
+/// v2 rows all came from the language-server RPC, which stored `outputTokens`
+/// — thinking tokens included — in `output_tokens`, double-counting reasoning
+/// in cost. Splitting them here fixes those rows and, just as importantly,
+/// leaves no row behind at an old `parser_version`: a single one that the local
+/// parser can never re-read (an encrypted `.pb` session) would otherwise mark
+/// the source stale on every launch, forcing a full ledger re-read forever.
+/// `antigravity-v2` is the only version that ever shipped, so this closes the
+/// set.
+fn migrate_legacy_usage_rows(conn: &rusqlite::Connection) -> Result<()> {
+    let migrated = conn.execute(
+        "UPDATE session_usage
+            SET output_tokens = MAX(output_tokens - reasoning_tokens, 0),
+                parser_version = ?1
+          WHERE parser_version = 'antigravity-v2';",
+        [PARSER_VERSION],
+    )?;
+    if migrated > 0 {
+        info!(
+            "Antigravity cache: migrated {} usage rows from antigravity-v2 to {}",
+            migrated, PARSER_VERSION
+        );
+    }
+    Ok(())
 }
 
 fn count_antigravity_session_cache_rows(conn: &rusqlite::Connection) -> usize {
@@ -791,11 +820,25 @@ async fn sync_antigravity_with_options_async(
             if let Some(retry_infos) = chat_model.get("retryInfos").and_then(Value::as_array) {
                 for retry in retry_infos {
                     let usage = retry.get("usage").unwrap_or(retry);
-                    let input = to_safe_i64(usage.get("inputTokens"));
-                    let output = to_safe_i64(usage.get("outputTokens"));
-                    let cache_read = to_safe_i64(usage.get("cacheReadTokens"));
-                    let cache_write = to_safe_i64(usage.get("cacheWriteTokens"));
-                    let reasoning = to_safe_i64(usage.get("thinkingOutputTokens"));
+                    let Some(tokens) = normalize_antigravity_tokens(
+                        to_safe_i64(usage.get("inputTokens")),
+                        to_safe_i64(usage.get("outputTokens")),
+                        usage
+                            .get("responseOutputTokens")
+                            .map(|v| to_safe_i64(Some(v))),
+                        to_safe_i64(usage.get("cacheReadTokens")),
+                        to_safe_i64(usage.get("cacheWriteTokens")),
+                        to_safe_i64(usage.get("thinkingOutputTokens")),
+                    ) else {
+                        continue;
+                    };
+                    let AntigravityTokens {
+                        input,
+                        output,
+                        cache_read,
+                        cache_write,
+                        reasoning,
+                    } = tokens;
                     let timestamp = usage
                         .get("createdAt")
                         .or_else(|| usage.get("timestamp"))
@@ -888,6 +931,62 @@ async fn sync_antigravity_with_options_async(
     Ok(())
 }
 
+/// Disjoint token columns for one Antigravity generation.
+///
+/// Antigravity reports `outputTokens` as the *total* output, thinking included,
+/// while `calculate_cost` bills `input + output + cache_read + cache_write +
+/// reasoning`. Storing the total as `output` therefore charges the thinking
+/// tokens twice. Both the local `gen_metadata` parser and the language-server
+/// RPC funnel through here so the two can never drift apart again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AntigravityTokens {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+}
+
+/// `total_output` is `outputTokens` (`1.4.3`); `response_output` is
+/// `responseOutputTokens` (`1.4.10`) when the source provides it.
+///
+/// Returns `None` when the two disagree — `thinking + response == total` held
+/// on every one of 20,729 real records, so a mismatch means the field map
+/// drifted and the record must not be stored. All arithmetic is checked: these
+/// values come from third-party blobs and JSON.
+fn normalize_antigravity_tokens(
+    input: i64,
+    total_output: i64,
+    response_output: Option<i64>,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+) -> Option<AntigravityTokens> {
+    let output = match response_output {
+        Some(response_output) => {
+            let partition = reasoning.checked_add(response_output);
+            if partition != Some(total_output) {
+                warn!(
+                    "Antigravity usage integrity check failed: thinking {} + response {} != total {}",
+                    reasoning, response_output, total_output
+                );
+                return None;
+            }
+            response_output
+        }
+        // Older RPC responses carry only the total; recover the disjoint part.
+        None => total_output.saturating_sub(reasoning).max(0),
+    };
+
+    Some(AntigravityTokens {
+        input,
+        output,
+        cache_read,
+        cache_write,
+        reasoning,
+    })
+}
+
 fn client_str_for_runtime_kind(runtime_kind: AntigravityRuntimeKind) -> &'static str {
     match runtime_kind {
         AntigravityRuntimeKind::Cli => "antigravity-cli",
@@ -912,23 +1011,32 @@ fn upsert_antigravity_session_row(
             parent_conversation_id, mendel_experiment_ids, synced_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_id, client) DO UPDATE SET
-            trajectory_id = excluded.trajectory_id,
-            client = excluded.client,
-            title = excluded.title,
-            model_id = excluded.model_id,
-            status = excluded.status,
-            step_count = excluded.step_count,
-            created_time_ms = excluded.created_time_ms,
-            last_modified_ms = excluded.last_modified_ms,
-            last_user_input_time_ms = excluded.last_user_input_time_ms,
-            project_id = excluded.project_id,
-            workspace_path = excluded.workspace_path,
-            git_root = excluded.git_root,
-            repository = excluded.repository,
-            git_origin_url = excluded.git_origin_url,
-            branch_name = excluded.branch_name,
-            parent_conversation_id = excluded.parent_conversation_id,
-            mendel_experiment_ids = excluded.mendel_experiment_ids,
+            -- COALESCE, not plain assignment: the local scan can only fill the
+            -- fields a conversation database actually holds and leaves the rest
+            -- NULL. Overwriting would wipe the richer metadata the language
+            -- server supplied, which nothing can re-derive offline.
+            trajectory_id = COALESCE(excluded.trajectory_id, sessions.trajectory_id),
+            title = COALESCE(excluded.title, sessions.title),
+            model_id = CASE
+                WHEN excluded.model_id = 'unknown' THEN sessions.model_id
+                ELSE excluded.model_id
+            END,
+            status = COALESCE(excluded.status, sessions.status),
+            step_count = COALESCE(excluded.step_count, sessions.step_count),
+            created_time_ms = COALESCE(excluded.created_time_ms, sessions.created_time_ms),
+            last_modified_ms = COALESCE(excluded.last_modified_ms, sessions.last_modified_ms),
+            last_user_input_time_ms =
+                COALESCE(excluded.last_user_input_time_ms, sessions.last_user_input_time_ms),
+            project_id = COALESCE(excluded.project_id, sessions.project_id),
+            workspace_path = COALESCE(excluded.workspace_path, sessions.workspace_path),
+            git_root = COALESCE(excluded.git_root, sessions.git_root),
+            repository = COALESCE(excluded.repository, sessions.repository),
+            git_origin_url = COALESCE(excluded.git_origin_url, sessions.git_origin_url),
+            branch_name = COALESCE(excluded.branch_name, sessions.branch_name),
+            parent_conversation_id =
+                COALESCE(excluded.parent_conversation_id, sessions.parent_conversation_id),
+            mendel_experiment_ids =
+                COALESCE(excluded.mendel_experiment_ids, sessions.mendel_experiment_ids),
             synced_at = excluded.synced_at",
         rusqlite::params![
             session_id,
@@ -1068,10 +1176,7 @@ struct AntigravityLocalUsage {
     request_uuid: Option<String>,
     response_id: Option<String>,
     raw_model_id: Option<String>,
-    input_tokens: i64,
-    output_tokens: i64,
-    cache_read_tokens: i64,
-    reasoning_tokens: i64,
+    tokens: AntigravityTokens,
 }
 
 /// Decodes one `gen_metadata.data` blob.
@@ -1093,19 +1198,18 @@ fn parse_gen_metadata_usage(blob: &[u8]) -> Option<AntigravityLocalUsage> {
 
     let total_output = proto_token_count(usage, 3);
     if total_output == 0 {
+        // Non-generation step, not a parse failure.
         return None;
     }
-    let reasoning_tokens = proto_token_count(usage, 9);
-    // `.3` already includes `.9`, and `calculate_cost` adds reasoning on top of
-    // output, so the disjoint `.10` is what belongs in `output_tokens`.
-    let output_tokens = proto_token_count(usage, 10);
-    if reasoning_tokens + output_tokens != total_output {
-        warn!(
-            "Antigravity gen_metadata integrity check failed: thinking {} + response {} != total {}",
-            reasoning_tokens, output_tokens, total_output
-        );
-        return None;
-    }
+    // Antigravity reports no cache-write tokens in the local blob.
+    let tokens = normalize_antigravity_tokens(
+        proto_token_count(usage, 2),
+        total_output,
+        Some(proto_token_count(usage, 10)),
+        proto_token_count(usage, 5),
+        0,
+        proto_token_count(usage, 9),
+    )?;
 
     // `.19` carries a resolved plaintext name but is sometimes a placeholder
     // like `gemini-default`; the `model_enum` pair resolves through the alias
@@ -1121,10 +1225,7 @@ fn parse_gen_metadata_usage(blob: &[u8]) -> Option<AntigravityLocalUsage> {
         request_uuid: proto_string(blob, 4),
         response_id: proto_string(usage, 11),
         raw_model_id,
-        input_tokens: proto_token_count(usage, 2),
-        output_tokens,
-        cache_read_tokens: proto_token_count(usage, 5),
-        reasoning_tokens,
+        tokens,
     })
 }
 
@@ -1166,8 +1267,16 @@ fn local_step_timestamps(local_db: &rusqlite::Connection) -> HashMap<String, i64
         let Ok(seconds) = i64::try_from(proto_varint(timestamp, 1).unwrap_or(0)) else {
             continue;
         };
-        let nanos = i64::try_from(proto_varint(timestamp, 2).unwrap_or(0)).unwrap_or(0);
-        if let Some(millis) = seconds.checked_mul(1000).map(|ms| ms + nanos / 1_000_000) {
+        // A protobuf `Timestamp` keeps nanos in [0, 1e9); anything else is not
+        // one, and would otherwise overflow the millisecond conversion.
+        let nanos = proto_varint(timestamp, 2).unwrap_or(0);
+        if nanos >= 1_000_000_000 {
+            continue;
+        }
+        if let Some(millis) = seconds
+            .checked_mul(1000)
+            .and_then(|ms| ms.checked_add(nanos as i64 / 1_000_000))
+        {
             timestamps.insert(request_uuid, millis);
         }
     }
@@ -1417,13 +1526,11 @@ fn sync_local_conversations(
                         detect_provider_from_model(model_id),
                         timestamp,
                         step_index as i64,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        usage.cache_read_tokens,
-                        // Antigravity reports no cache-write tokens, locally or
-                        // over RPC.
-                        0_i64,
-                        usage.reasoning_tokens,
+                        usage.tokens.input,
+                        usage.tokens.output,
+                        usage.tokens.cache_read,
+                        usage.tokens.cache_write,
+                        usage.tokens.reasoning,
                         message_key,
                         local_date_string_from_timestamp(*timestamp),
                         PARSER_VERSION,
@@ -3112,7 +3219,7 @@ mod tests {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 "resp-456", "sess-123", "antigravity-cli", "gemini-3-pro-preview", "google", 1672531201000_i64, 0_i64,
-                150_i64, 50_i64, 20_i64, 0_i64, 10_i64, "resp-456", "2023-01-01", "antigravity-v2"
+                150_i64, 50_i64, 20_i64, 0_i64, 10_i64, "resp-456", "2023-01-01", PARSER_VERSION
             ],
         ).unwrap();
 
@@ -3156,7 +3263,7 @@ mod tests {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 "resp-historical", "sess-historical", "antigravity-desktop", "gemini-3.5-flash", "google", 1672531201000_i64, 0_i64,
-                100_i64, 20_i64, 5_i64, 0_i64, 0_i64, "resp-historical", "2023-01-01", "antigravity-v2"
+                100_i64, 20_i64, 5_i64, 0_i64, 0_i64, "resp-historical", "2023-01-01", PARSER_VERSION
             ],
         ).unwrap();
 
@@ -3189,7 +3296,7 @@ mod tests {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 "resp-456", "sess-123", "antigravity-cli", "gemini-3-pro-preview", "google", 1672531201000_i64, 0_i64,
-                150_i64, 50_i64, 20_i64, 0_i64, 10_i64, "resp-456", "2023-01-01", "antigravity-v2"
+                150_i64, 50_i64, 20_i64, 0_i64, 10_i64, "resp-456", "2023-01-01", PARSER_VERSION
             ],
         ).unwrap();
 
@@ -3198,7 +3305,7 @@ mod tests {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 "resp-456", "sess-123", "antigravity-cli", "gemini-3-pro-preview", "google", 1672531202000_i64, 0_i64,
-                200_i64, 60_i64, 30_i64, 0_i64, 15_i64, "resp-456", "2023-01-01", "antigravity-v2"
+                200_i64, 60_i64, 30_i64, 0_i64, 15_i64, "resp-456", "2023-01-01", PARSER_VERSION
             ],
         ).unwrap();
 
@@ -3238,7 +3345,7 @@ mod tests {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     storage_id, "sess-dup", client, "gemini-3-pro-preview", "google", 1672531201000_i64, 0_i64,
-                    150_i64, 50_i64, 20_i64, 0_i64, 10_i64, &logical_key, "2023-01-01", "antigravity-v2"
+                    150_i64, 50_i64, 20_i64, 0_i64, 10_i64, &logical_key, "2023-01-01", PARSER_VERSION
                 ],
             ).unwrap();
         }
@@ -3283,7 +3390,7 @@ mod tests {
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["msg-1", "sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M26", "anthropic", 1672531201000_i64, 0_i64, 150_i64, 50_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
+            rusqlite::params!["msg-1", "sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M26", "anthropic", 1672531201000_i64, 0_i64, 150_i64, 50_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", PARSER_VERSION],
         ).unwrap();
 
         conn.execute(
@@ -3300,7 +3407,7 @@ mod tests {
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["msg-2", "sess-2", "antigravity-cli", "MODEL_PLACEHOLDER_M20", "google", 1672531202000_i64, 0_i64, 200_i64, 60_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
+            rusqlite::params!["msg-2", "sess-2", "antigravity-cli", "MODEL_PLACEHOLDER_M20", "google", 1672531202000_i64, 0_i64, 200_i64, 60_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", PARSER_VERSION],
         ).unwrap();
 
         conn.execute(
@@ -3317,7 +3424,7 @@ mod tests {
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["msg-3", "sess-3", "antigravity-cli", "claude-opus-4.6-thinking", "anthropic", 1672531203000_i64, 0_i64, 300_i64, 70_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
+            rusqlite::params!["msg-3", "sess-3", "antigravity-cli", "claude-opus-4.6-thinking", "anthropic", 1672531203000_i64, 0_i64, 300_i64, 70_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", PARSER_VERSION],
         ).unwrap();
 
         normalize_cached_antigravity_artifacts(&sessions_dir, &HashMap::new()).unwrap();
@@ -3357,7 +3464,7 @@ mod tests {
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["msg-1", "sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M20", "google", 1672531201000_i64, 0_i64, 1_i64, 2_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
+            rusqlite::params!["msg-1", "sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M20", "google", 1672531201000_i64, 0_i64, 1_i64, 2_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", PARSER_VERSION],
         ).unwrap();
 
         normalize_cached_antigravity_artifacts(&sessions_dir, &HashMap::new()).unwrap();
@@ -3864,13 +3971,13 @@ mod tests {
         let fixture = GenMetadataFixture::default();
         let usage = parse_gen_metadata_usage(&fixture.encode()).expect("blob should parse");
 
-        assert_eq!(usage.input_tokens, 5911);
-        assert_eq!(usage.cache_read_tokens, 8138);
-        assert_eq!(usage.reasoning_tokens, 614);
+        assert_eq!(usage.tokens.input, 5911);
+        assert_eq!(usage.tokens.cache_read, 8138);
+        assert_eq!(usage.tokens.reasoning, 614);
         // `responseOutputTokens` (1.4.10), never `outputTokens` (1.4.3 = 669),
         // which already contains the thinking tokens.
-        assert_eq!(usage.output_tokens, 55);
-        assert_ne!(usage.output_tokens, fixture.total_output_tokens as i64);
+        assert_eq!(usage.tokens.output, 55);
+        assert_ne!(usage.tokens.output, fixture.total_output_tokens as i64);
         assert_eq!(
             usage.response_id.as_deref(),
             Some("bGZmapHNJ8XVz7IPxtDuoAo")
@@ -3988,6 +4095,236 @@ mod tests {
             .unwrap();
         assert_eq!(rows_after, 1);
         assert_eq!(input_after, -1);
+    }
+
+    #[test]
+    fn test_normalize_antigravity_tokens_never_double_counts_reasoning() {
+        // The shape both sources report: total 669 = thinking 614 + response 55.
+        let tokens = normalize_antigravity_tokens(5911, 669, Some(55), 8138, 0, 614).unwrap();
+        assert_eq!(tokens.output, 55);
+        assert_eq!(tokens.reasoning, 614);
+        // Billing sums output and reasoning, so together they must equal the
+        // reported total exactly once.
+        assert_eq!(tokens.output + tokens.reasoning, 669);
+
+        // A source that reports only the total still yields the disjoint split.
+        let legacy = normalize_antigravity_tokens(5911, 669, None, 8138, 0, 614).unwrap();
+        assert_eq!(legacy.output, 55);
+        assert_eq!(legacy.reasoning, 614);
+
+        // Disagreement means the field map drifted: reject, do not guess.
+        assert_eq!(
+            normalize_antigravity_tokens(1, 700, Some(55), 0, 0, 614),
+            None
+        );
+
+        // Values large enough to overflow an i64 sum must not panic.
+        assert_eq!(
+            normalize_antigravity_tokens(0, 1, Some(i64::MAX), 0, 0, i64::MAX),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rpc_and_local_paths_agree_on_the_same_usage_record() {
+        // Same generation seen through both sources must produce identical
+        // columns; this is the drift guard the two paths previously lacked.
+        let local = parse_gen_metadata_usage(&GenMetadataFixture::default().encode()).unwrap();
+        let rpc_usage = serde_json::json!({
+            "inputTokens": 5911,
+            "outputTokens": 669,
+            "responseOutputTokens": 55,
+            "cacheReadTokens": 8138,
+            "thinkingOutputTokens": 614,
+        });
+        let rpc = normalize_antigravity_tokens(
+            to_safe_i64(rpc_usage.get("inputTokens")),
+            to_safe_i64(rpc_usage.get("outputTokens")),
+            rpc_usage
+                .get("responseOutputTokens")
+                .map(|v| to_safe_i64(Some(v))),
+            to_safe_i64(rpc_usage.get("cacheReadTokens")),
+            to_safe_i64(rpc_usage.get("cacheWriteTokens")),
+            to_safe_i64(rpc_usage.get("thinkingOutputTokens")),
+        )
+        .unwrap();
+        assert_eq!(local.tokens, rpc);
+    }
+
+    #[test]
+    fn test_local_step_timestamps_rejects_out_of_range_nanos() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("conversation.db");
+        let local_db = rusqlite::Connection::open(&path).unwrap();
+        local_db
+            .execute_batch("CREATE TABLE steps (idx integer PRIMARY KEY, metadata blob);")
+            .unwrap();
+
+        // nanos outside [0, 1e9) is not a protobuf Timestamp, and the naive
+        // millisecond conversion would overflow on it.
+        let mut overflowing = Vec::new();
+        overflowing.extend(proto_varint_field(1, (i64::MAX / 1000) as u64));
+        overflowing.extend(proto_varint_field(2, i64::MAX as u64));
+        let mut bad = Vec::new();
+        bad.extend(proto_bytes_field(1, &overflowing));
+        bad.extend(proto_bytes_field(12, b"bad-uuid-0000-0000-000000000000"));
+        local_db
+            .execute("INSERT INTO steps VALUES (0, ?)", rusqlite::params![bad])
+            .unwrap();
+
+        let good = encode_step_metadata(
+            "good-uuid-0000-0000-000000000000",
+            1_767_225_600,
+            500_000_000,
+        );
+        local_db
+            .execute("INSERT INTO steps VALUES (1, ?)", rusqlite::params![good])
+            .unwrap();
+
+        let timestamps = local_step_timestamps(&local_db);
+        assert_eq!(timestamps.len(), 1);
+        assert_eq!(
+            timestamps.get("good-uuid-0000-0000-000000000000"),
+            Some(&1_767_225_600_500)
+        );
+    }
+
+    #[test]
+    fn test_local_sync_preserves_language_server_session_metadata() {
+        // The local scan knows nothing about titles or workspaces; a
+        // `PARSER_VERSION` bump rescans every session, so a plain overwrite
+        // would wipe metadata only a live language server can supply.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let cli_conv_dir = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("conversations");
+        std::fs::create_dir_all(&cli_conv_dir).unwrap();
+
+        let session_id = "cli-session-12345678901234567890";
+        let request_uuid = "11111111-1111-4111-8111-111111111111";
+        write_conversation_db(
+            &cli_conv_dir.join(format!("{}.db", session_id)),
+            &[GenMetadataFixture {
+                request_uuid: request_uuid.to_string(),
+                ..GenMetadataFixture::default()
+            }
+            .encode()],
+            &[(request_uuid.to_string(), 1_767_225_600)],
+        );
+
+        let cache_dir = temp_dir.path().join("cache");
+        let mut db_conn = open_cache_db(&cache_dir).unwrap();
+        db_conn
+            .execute(
+                "INSERT INTO sessions (session_id, client, title, status, workspace_path, git_root,
+                                       branch_name, model_id, step_count, last_modified_ms, synced_at)
+                 VALUES (?, 'antigravity-cli', 'Real title', 'DONE', '/home/me/proj', '/home/me/proj',
+                         'main', 'gemini-3-7-flash', 9, 1, 1)",
+                [session_id],
+            )
+            .unwrap();
+
+        sync_local_conversations(
+            &mut db_conn,
+            home,
+            &HashMap::new(),
+            false,
+            &static_model_aliases(),
+        )
+        .unwrap();
+
+        let (title, status, workspace, git_root, branch): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = db_conn
+            .query_row(
+                "SELECT title, status, workspace_path, git_root, branch_name
+                 FROM sessions WHERE session_id = ?",
+                [session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(title.as_deref(), Some("Real title"));
+        assert_eq!(status.as_deref(), Some("DONE"));
+        assert_eq!(workspace.as_deref(), Some("/home/me/proj"));
+        assert_eq!(git_root.as_deref(), Some("/home/me/proj"));
+        assert_eq!(branch.as_deref(), Some("main"));
+
+        // The fields the local scan does own are still updated.
+        let (trajectory_id, usage_rows): (Option<String>, i64) = db_conn
+            .query_row(
+                "SELECT (SELECT trajectory_id FROM sessions WHERE session_id = ?1),
+                        (SELECT count(*) FROM session_usage WHERE session_id = ?1)",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(trajectory_id.as_deref(), Some("traj-123"));
+        assert_eq!(usage_rows, 1);
+    }
+
+    #[test]
+    fn test_legacy_v2_usage_rows_are_migrated_on_cache_open() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().join("cache");
+        let conn = open_cache_db(&cache_dir).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, client, model_id, synced_at)
+             VALUES ('sess-legacy', 'antigravity-cli', 'gemini-3-7-flash', 1)",
+            [],
+        )
+        .unwrap();
+        // A v2 row as the RPC wrote it: output_tokens is the total, thinking
+        // included.
+        conn.execute(
+            "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp,
+                                        step_index, input_tokens, output_tokens, cache_read_tokens,
+                                        cache_write_tokens, reasoning_tokens, response_id,
+                                        pricing_day, parser_version)
+             VALUES ('legacy', 'sess-legacy', 'antigravity-cli', 'gemini-3-7-flash', 'google',
+                     1672531201000, 0, 5911, 669, 8138, 0, 614, 'resp', '2023-01-01',
+                     'antigravity-v2')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open_cache_db(&cache_dir).unwrap();
+        let (output, reasoning, version): (i64, i64, String) = conn
+            .query_row(
+                "SELECT output_tokens, reasoning_tokens, parser_version FROM session_usage",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(output, 55);
+        assert_eq!(reasoning, 614);
+        // No row may linger at an old version: one that the local parser can
+        // never re-read would mark the source stale on every launch.
+        assert_eq!(version, PARSER_VERSION);
+
+        // Idempotent — reopening must not subtract twice.
+        drop(conn);
+        let conn = open_cache_db(&cache_dir).unwrap();
+        let output_again: i64 = conn
+            .query_row("SELECT output_tokens FROM session_usage", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(output_again, 55);
     }
 
     #[test]

@@ -33,6 +33,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The Antigravity `parser_version` moves to `antigravity-v3`, so the first run
     after upgrading re-reads cached conversations and backfills their tokens; no
     `--rebuild-all` is needed.
+- **Antigravity reasoning tokens were billed twice over the language server**:
+  the RPC path stored `outputTokens` — which already contains the thinking
+  tokens — in `output_tokens`, while cost adds reasoning on top of output. Both
+  sources now normalize through one function that prefers the disjoint
+  `responseOutputTokens` and verifies `thinking + response == total`, so the two
+  can no longer drift apart. Existing `antigravity-v2` rows are corrected in
+  place on first open, which also leaves no row behind at an outdated
+  `parser_version` — a single un-re-readable one would otherwise have marked the
+  source stale on every launch, forcing a full ledger re-read forever.
+- **Antigravity session metadata is no longer wiped by a local rescan**: titles,
+  workspace paths, and the other fields only a running language server can
+  supply were overwritten with `NULL` whenever the local scan re-read a
+  conversation. The local upsert now fills in what it owns and leaves the rest
+  untouched.
+- **Malformed Antigravity conversation blobs can no longer panic the sync**:
+  token totals and protobuf `Timestamp` conversion use checked arithmetic and
+  reject out-of-range nanoseconds, so a corrupt record is skipped as intended
+  rather than aborting on overflow.
 
 ## [0.5.3] - 2026-08-15
 
