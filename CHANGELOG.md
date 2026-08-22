@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Antigravity token usage is now recorded**: TokenPulse tracked Antigravity
+  sessions but never their tokens — the usage ledger held zero `antigravity`
+  rows because token data was only ever fetched over a language-server RPC that
+  does not connect on Linux.
+  - **Parse `gen_metadata` directly**: each local conversation database carries
+    its own token counts in a protobuf `gen_metadata` table, which the local
+    scan opened but never read. It is now decoded per generation, so usage
+    arrives without a running language server. On the development machine this
+    recovered 20,701 records spanning 2026-05-20 to 2026-08-22.
+  - **Scan the Desktop conversation directory**:
+    `~/.gemini/antigravity/conversations` was excluded wholesale; it holds real
+    conversations in the same schema and is now scanned alongside the CLI
+    directory. Its rows are labelled `antigravity-desktop` rather than being
+    mislabelled `antigravity-cli`, which is what keeps CLI and Desktop copies of
+    a session deduplicating against each other.
+  - **No reasoning double-count**: `output_tokens` comes from
+    `responseOutputTokens`, which excludes thinking tokens, so cost is not
+    inflated by adding reasoning twice. A `thinking + response == total`
+    integrity check rejects any blob where that no longer holds.
+  - **RPC no longer deletes locally parsed rows**: the language-server path
+    replaces usage rows in place instead of clearing a session first, so a
+    partial RPC response cannot drop tokens read from disk.
+  - The Antigravity `parser_version` moves to `antigravity-v3`, so the first run
+    after upgrading re-reads cached conversations and backfills their tokens; no
+    `--rebuild-all` is needed.
+
 ## [0.5.3] - 2026-08-15
 
 ### Changed
