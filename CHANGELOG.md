@@ -7,50 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-08-23
+
 ### Fixed
-- **Antigravity token usage is now recorded**: TokenPulse tracked Antigravity
-  sessions but never their tokens — the usage ledger held zero `antigravity`
-  rows because token data was only ever fetched over a language-server RPC that
-  does not connect on Linux.
-  - **Parse `gen_metadata` directly**: each local conversation database carries
-    its own token counts in a protobuf `gen_metadata` table, which the local
-    scan opened but never read. It is now decoded per generation, so usage
-    arrives without a running language server. On the development machine this
-    recovered 20,701 records spanning 2026-05-20 to 2026-08-22.
-  - **Scan the Desktop conversation directory**:
-    `~/.gemini/antigravity/conversations` was excluded wholesale; it holds real
-    conversations in the same schema and is now scanned alongside the CLI
-    directory. Its rows are labelled `antigravity-desktop` rather than being
-    mislabelled `antigravity-cli`, which is what keeps CLI and Desktop copies of
-    a session deduplicating against each other.
-  - **No reasoning double-count**: `output_tokens` comes from
-    `responseOutputTokens`, which excludes thinking tokens, so cost is not
-    inflated by adding reasoning twice. A `thinking + response == total`
-    integrity check rejects any blob where that no longer holds.
-  - **RPC no longer deletes locally parsed rows**: the language-server path
-    replaces usage rows in place instead of clearing a session first, so a
-    partial RPC response cannot drop tokens read from disk.
-  - The Antigravity `parser_version` moves to `antigravity-v3`, so the first run
-    after upgrading re-reads cached conversations and backfills their tokens; no
-    `--rebuild-all` is needed.
-- **Antigravity reasoning tokens were billed twice over the language server**:
-  the RPC path stored `outputTokens` — which already contains the thinking
-  tokens — in `output_tokens`, while cost adds reasoning on top of output. Both
-  sources now normalize through one function that prefers the disjoint
-  `responseOutputTokens` and verifies `thinking + response == total`, so the two
-  can no longer drift apart. Existing `antigravity-v2` rows are corrected in
-  place on first open, which also leaves no row behind at an outdated
-  `parser_version` — a single un-re-readable one would otherwise have marked the
-  source stale on every launch, forcing a full ledger re-read forever.
-- **Antigravity session metadata is no longer wiped by a local rescan**: titles,
-  workspace paths, and the other fields only a running language server can
-  supply were overwritten with `NULL` whenever the local scan re-read a
-  conversation. The local upsert now fills in what it owns and leaves the rest
-  untouched.
-- **Malformed Antigravity conversation blobs can no longer panic the sync**:
-  token totals and protobuf `Timestamp` conversion use checked arithmetic and
-  reject out-of-range nanoseconds, so a corrupt record is skipped as intended
-  rather than aborting on overflow.
+- **Antigravity token usage is recorded at all**: the usage ledger held zero
+  `antigravity` rows. Tokens were only ever fetched over a language-server RPC
+  that never connects on Linux, while the token counts sitting in every local
+  conversation database went unread. They are now parsed directly, so usage
+  arrives whether or not Antigravity is running. On the development machine the
+  first run recovered ~21,000 generations going back to 2026-05-20. This happens
+  automatically on upgrade — no `--rebuild-all`, no flag.
+- **Antigravity costs no longer double-count reasoning tokens**: Antigravity
+  reports total output with the thinking tokens already inside it, and TokenPulse
+  then billed reasoning again on top. Anyone whose Antigravity data came from a
+  running language server (in practice, macOS) has been overcharged for every
+  thinking model. Existing rows are corrected in place on first launch, so
+  reported Antigravity cost will drop.
+- **Antigravity Desktop and CLI are told apart**: conversations under
+  `~/.gemini/antigravity/` were skipped entirely, and the ones that were read got
+  labelled as CLI regardless of origin. Both runtimes are now scanned and
+  labelled correctly, which is also what stops a session that exists in both
+  places from being counted twice.
+- **Antigravity session titles and workspace paths survive a resync**: a local
+  rescan overwrote the details only a running language server can supply,
+  and nothing could restore them afterwards.
+- **A corrupt Antigravity conversation file can no longer abort the sync**: a
+  malformed record is skipped, as was always intended, instead of overflowing on
+  an oversized value.
 
 ## [0.5.3] - 2026-08-15
 
