@@ -10,9 +10,13 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-const PARSER_VERSION: &str = "antigravity-v2";
+/// Bumped from `antigravity-v2` when local `gen_metadata` parsing landed. Both
+/// the local and the RPC path stamp rows with it, so the ledger's staleness
+/// check sees one version per source, and a bump re-reads every cached
+/// conversation instead of only the ones whose files changed.
+const PARSER_VERSION: &str = "antigravity-v3";
 const MODEL_ALIAS_HISTORY_VERSION: u32 = 1;
 const MODEL_ALIAS_HISTORY_FILE_NAME: &str = "model-aliases.json";
 const ANTIGRAVITY_LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
@@ -342,7 +346,36 @@ fn open_cache_db(sessions_dir: &Path) -> Result<rusqlite::Connection> {
         [],
     )?;
 
+    migrate_legacy_usage_rows(&conn)?;
+
     Ok(conn)
+}
+
+/// Rewrites `antigravity-v2` usage rows in place.
+///
+/// v2 rows all came from the language-server RPC, which stored `outputTokens`
+/// — thinking tokens included — in `output_tokens`, double-counting reasoning
+/// in cost. Splitting them here fixes those rows and, just as importantly,
+/// leaves no row behind at an old `parser_version`: a single one that the local
+/// parser can never re-read (an encrypted `.pb` session) would otherwise mark
+/// the source stale on every launch, forcing a full ledger re-read forever.
+/// `antigravity-v2` is the only version that ever shipped, so this closes the
+/// set.
+fn migrate_legacy_usage_rows(conn: &rusqlite::Connection) -> Result<()> {
+    let migrated = conn.execute(
+        "UPDATE session_usage
+            SET output_tokens = MAX(output_tokens - reasoning_tokens, 0),
+                parser_version = ?1
+          WHERE parser_version = 'antigravity-v2';",
+        [PARSER_VERSION],
+    )?;
+    if migrated > 0 {
+        info!(
+            "Antigravity cache: migrated {} usage rows from antigravity-v2 to {}",
+            migrated, PARSER_VERSION
+        );
+    }
+    Ok(())
 }
 
 fn count_antigravity_session_cache_rows(conn: &rusqlite::Connection) -> usize {
@@ -418,13 +451,24 @@ async fn sync_antigravity_with_options_async(
     }
 
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    if let Err(e) = sync_local_cli_conversations(
+    // The local scan runs before the language server is probed, so only the
+    // persisted alias history is available; `normalize_cached_antigravity_artifacts`
+    // reconciles anything the live server later renames.
+    let persisted_model_aliases = load_model_alias_history_map(sessions_dir).unwrap_or_else(|e| {
+        debug!("Failed to load Antigravity model alias history: {}", e);
+        static_model_aliases()
+    });
+    if let Err(e) = sync_local_conversations(
         &mut db_conn,
         &home,
         &cached_sessions,
         options.rebuild_all_cache,
+        &persisted_model_aliases,
     ) {
-        debug!("Failed to sync local Antigravity CLI db files: {}", e);
+        debug!(
+            "Failed to sync local Antigravity conversation databases: {}",
+            e
+        );
     }
 
     let connections = match detect_antigravity_connections_with_client(client).await {
@@ -733,11 +777,11 @@ async fn sync_antigravity_with_options_async(
             }
         }
 
+        // No DELETE before re-inserting: `INSERT OR REPLACE` on the shared
+        // `{client}:{session_id}:{responseId}` key already overwrites in place,
+        // and deleting first would drop rows the local parser produced whenever
+        // the RPC returns a subset of them.
         let tx = db_conn.transaction()?;
-        tx.execute(
-            "DELETE FROM session_usage WHERE client = ? AND session_id = ?;",
-            rusqlite::params![client_str, &session_id],
-        )?;
 
         upsert_antigravity_session_row(
             &tx,
@@ -776,11 +820,25 @@ async fn sync_antigravity_with_options_async(
             if let Some(retry_infos) = chat_model.get("retryInfos").and_then(Value::as_array) {
                 for retry in retry_infos {
                     let usage = retry.get("usage").unwrap_or(retry);
-                    let input = to_safe_i64(usage.get("inputTokens"));
-                    let output = to_safe_i64(usage.get("outputTokens"));
-                    let cache_read = to_safe_i64(usage.get("cacheReadTokens"));
-                    let cache_write = to_safe_i64(usage.get("cacheWriteTokens"));
-                    let reasoning = to_safe_i64(usage.get("thinkingOutputTokens"));
+                    let Some(tokens) = normalize_antigravity_tokens(
+                        to_safe_i64(usage.get("inputTokens")),
+                        to_safe_i64(usage.get("outputTokens")),
+                        usage
+                            .get("responseOutputTokens")
+                            .map(|v| to_safe_i64(Some(v))),
+                        to_safe_i64(usage.get("cacheReadTokens")),
+                        to_safe_i64(usage.get("cacheWriteTokens")),
+                        to_safe_i64(usage.get("thinkingOutputTokens")),
+                    ) else {
+                        continue;
+                    };
+                    let AntigravityTokens {
+                        input,
+                        output,
+                        cache_read,
+                        cache_write,
+                        reasoning,
+                    } = tokens;
                     let timestamp = usage
                         .get("createdAt")
                         .or_else(|| usage.get("timestamp"))
@@ -873,6 +931,62 @@ async fn sync_antigravity_with_options_async(
     Ok(())
 }
 
+/// Disjoint token columns for one Antigravity generation.
+///
+/// Antigravity reports `outputTokens` as the *total* output, thinking included,
+/// while `calculate_cost` bills `input + output + cache_read + cache_write +
+/// reasoning`. Storing the total as `output` therefore charges the thinking
+/// tokens twice. Both the local `gen_metadata` parser and the language-server
+/// RPC funnel through here so the two can never drift apart again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AntigravityTokens {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+}
+
+/// `total_output` is `outputTokens` (`1.4.3`); `response_output` is
+/// `responseOutputTokens` (`1.4.10`) when the source provides it.
+///
+/// Returns `None` when the two disagree — `thinking + response == total` held
+/// on every one of 20,729 real records, so a mismatch means the field map
+/// drifted and the record must not be stored. All arithmetic is checked: these
+/// values come from third-party blobs and JSON.
+fn normalize_antigravity_tokens(
+    input: i64,
+    total_output: i64,
+    response_output: Option<i64>,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+) -> Option<AntigravityTokens> {
+    let output = match response_output {
+        Some(response_output) => {
+            let partition = reasoning.checked_add(response_output);
+            if partition != Some(total_output) {
+                warn!(
+                    "Antigravity usage integrity check failed: thinking {} + response {} != total {}",
+                    reasoning, response_output, total_output
+                );
+                return None;
+            }
+            response_output
+        }
+        // Older RPC responses carry only the total; recover the disjoint part.
+        None => total_output.saturating_sub(reasoning).max(0),
+    };
+
+    Some(AntigravityTokens {
+        input,
+        output,
+        cache_read,
+        cache_write,
+        reasoning,
+    })
+}
+
 fn client_str_for_runtime_kind(runtime_kind: AntigravityRuntimeKind) -> &'static str {
     match runtime_kind {
         AntigravityRuntimeKind::Cli => "antigravity-cli",
@@ -897,23 +1011,32 @@ fn upsert_antigravity_session_row(
             parent_conversation_id, mendel_experiment_ids, synced_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_id, client) DO UPDATE SET
-            trajectory_id = excluded.trajectory_id,
-            client = excluded.client,
-            title = excluded.title,
-            model_id = excluded.model_id,
-            status = excluded.status,
-            step_count = excluded.step_count,
-            created_time_ms = excluded.created_time_ms,
-            last_modified_ms = excluded.last_modified_ms,
-            last_user_input_time_ms = excluded.last_user_input_time_ms,
-            project_id = excluded.project_id,
-            workspace_path = excluded.workspace_path,
-            git_root = excluded.git_root,
-            repository = excluded.repository,
-            git_origin_url = excluded.git_origin_url,
-            branch_name = excluded.branch_name,
-            parent_conversation_id = excluded.parent_conversation_id,
-            mendel_experiment_ids = excluded.mendel_experiment_ids,
+            -- COALESCE, not plain assignment: the local scan can only fill the
+            -- fields a conversation database actually holds and leaves the rest
+            -- NULL. Overwriting would wipe the richer metadata the language
+            -- server supplied, which nothing can re-derive offline.
+            trajectory_id = COALESCE(excluded.trajectory_id, sessions.trajectory_id),
+            title = COALESCE(excluded.title, sessions.title),
+            model_id = CASE
+                WHEN excluded.model_id = 'unknown' THEN sessions.model_id
+                ELSE excluded.model_id
+            END,
+            status = COALESCE(excluded.status, sessions.status),
+            step_count = COALESCE(excluded.step_count, sessions.step_count),
+            created_time_ms = COALESCE(excluded.created_time_ms, sessions.created_time_ms),
+            last_modified_ms = COALESCE(excluded.last_modified_ms, sessions.last_modified_ms),
+            last_user_input_time_ms =
+                COALESCE(excluded.last_user_input_time_ms, sessions.last_user_input_time_ms),
+            project_id = COALESCE(excluded.project_id, sessions.project_id),
+            workspace_path = COALESCE(excluded.workspace_path, sessions.workspace_path),
+            git_root = COALESCE(excluded.git_root, sessions.git_root),
+            repository = COALESCE(excluded.repository, sessions.repository),
+            git_origin_url = COALESCE(excluded.git_origin_url, sessions.git_origin_url),
+            branch_name = COALESCE(excluded.branch_name, sessions.branch_name),
+            parent_conversation_id =
+                COALESCE(excluded.parent_conversation_id, sessions.parent_conversation_id),
+            mendel_experiment_ids =
+                COALESCE(excluded.mendel_experiment_ids, sessions.mendel_experiment_ids),
             synced_at = excluded.synced_at",
         rusqlite::params![
             session_id,
@@ -940,106 +1063,493 @@ fn upsert_antigravity_session_row(
     Ok(())
 }
 
-fn sync_local_cli_conversations(
+/// Minimal protobuf wire-format reader for Antigravity's local `gen_metadata`
+/// blobs. No schema file exists for them, so fields are addressed by number.
+/// Every read is bounds-checked: these are third-party blobs, and a malformed
+/// one must skip its record rather than abort the sync.
+enum ProtoValue<'a> {
+    Varint(u64),
+    Bytes(&'a [u8]),
+}
+
+fn read_varint(buf: &[u8], pos: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let byte = *buf.get(*pos)?;
+        *pos += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
+        if shift > 63 {
+            return None;
+        }
+    }
+}
+
+fn read_proto_field<'a>(buf: &'a [u8], pos: &mut usize) -> Option<(u32, ProtoValue<'a>)> {
+    let key = read_varint(buf, pos)?;
+    let field_number = u32::try_from(key >> 3).ok()?;
+    let take = |pos: &mut usize, len: usize| -> Option<&'a [u8]> {
+        let end = pos.checked_add(len)?;
+        let slice = buf.get(*pos..end)?;
+        *pos = end;
+        Some(slice)
+    };
+    let value = match key & 0x7 {
+        0 => ProtoValue::Varint(read_varint(buf, pos)?),
+        1 => ProtoValue::Bytes(take(pos, 8)?),
+        2 => {
+            let len = usize::try_from(read_varint(buf, pos)?).ok()?;
+            ProtoValue::Bytes(take(pos, len)?)
+        }
+        5 => ProtoValue::Bytes(take(pos, 4)?),
+        // Deprecated group wire types (3, 4) never appear here; stop rather
+        // than guess at a length.
+        _ => return None,
+    };
+    Some((field_number, value))
+}
+
+/// Visits every well-formed field in `buf`, stopping at the first malformed
+/// one so a truncated tail still yields the fields that preceded it.
+fn for_each_proto_field<'a>(buf: &'a [u8], mut visit: impl FnMut(u32, ProtoValue<'a>)) {
+    let mut pos = 0usize;
+    while pos < buf.len() {
+        let Some((field_number, value)) = read_proto_field(buf, &mut pos) else {
+            return;
+        };
+        visit(field_number, value);
+    }
+}
+
+/// First length-delimited value for `field_number`.
+fn proto_message(buf: &[u8], field_number: u32) -> Option<&[u8]> {
+    let mut found = None;
+    for_each_proto_field(buf, |number, value| {
+        if found.is_none() && number == field_number {
+            if let ProtoValue::Bytes(bytes) = value {
+                found = Some(bytes);
+            }
+        }
+    });
+    found
+}
+
+/// First varint value for `field_number`. proto3 omits zero-valued scalars, so
+/// callers read `None` as 0 rather than as a missing field.
+fn proto_varint(buf: &[u8], field_number: u32) -> Option<u64> {
+    let mut found = None;
+    for_each_proto_field(buf, |number, value| {
+        if found.is_none() && number == field_number {
+            if let ProtoValue::Varint(varint) = value {
+                found = Some(varint);
+            }
+        }
+    });
+    found
+}
+
+fn proto_string(buf: &[u8], field_number: u32) -> Option<String> {
+    let text = std::str::from_utf8(proto_message(buf, field_number)?)
+        .ok()?
+        .trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+fn proto_token_count(buf: &[u8], field_number: u32) -> i64 {
+    proto_varint(buf, field_number)
+        .and_then(|value| i64::try_from(value).ok())
+        .unwrap_or(0)
+        .max(0)
+}
+
+/// One generation recorded in a local conversation's `gen_metadata` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AntigravityLocalUsage {
+    request_uuid: Option<String>,
+    response_id: Option<String>,
+    raw_model_id: Option<String>,
+    tokens: AntigravityTokens,
+}
+
+/// Decodes one `gen_metadata.data` blob.
+///
+/// Field map, validated field by field against the language server's
+/// `GetCascadeTrajectoryGeneratorMetadata` response: outer field 4 is the
+/// request UUID and field 1 the payload. Inside the payload, field 4 is the
+/// usage struct (`.2` `inputTokens`, `.3` `outputTokens`, `.5`
+/// `cacheReadTokens`, `.9` `thinkingOutputTokens`, `.10`
+/// `responseOutputTokens`, `.11` `responseId`), field 19 the plaintext model
+/// name and field 20 repeated `{1: key, 2: value}` metadata pairs.
+///
+/// Returns `None` for non-generation steps (no total output) and for blobs
+/// failing the `thinking + response == total` integrity check, which would
+/// mean the field map has drifted.
+fn parse_gen_metadata_usage(blob: &[u8]) -> Option<AntigravityLocalUsage> {
+    let payload = proto_message(blob, 1)?;
+    let usage = proto_message(payload, 4)?;
+
+    let total_output = proto_token_count(usage, 3);
+    if total_output == 0 {
+        // Non-generation step, not a parse failure.
+        return None;
+    }
+    // Antigravity reports no cache-write tokens in the local blob.
+    let tokens = normalize_antigravity_tokens(
+        proto_token_count(usage, 2),
+        total_output,
+        Some(proto_token_count(usage, 10)),
+        proto_token_count(usage, 5),
+        0,
+        proto_token_count(usage, 9),
+    )?;
+
+    // `.19` carries a resolved plaintext name but is sometimes a placeholder
+    // like `gemini-default`; the `model_enum` pair resolves through the alias
+    // table in that case.
+    let mut raw_model_id = proto_string(payload, 19);
+    if raw_model_id.as_deref().is_none_or(is_pseudo_raw_model) {
+        if let Some(model_enum) = proto_custom_metadata(payload, "model_enum") {
+            raw_model_id = Some(model_enum);
+        }
+    }
+
+    Some(AntigravityLocalUsage {
+        request_uuid: proto_string(blob, 4),
+        response_id: proto_string(usage, 11),
+        raw_model_id,
+        tokens,
+    })
+}
+
+/// Looks `key` up in the payload's repeated field 20 `{1: key, 2: value}` pairs.
+fn proto_custom_metadata(payload: &[u8], key: &str) -> Option<String> {
+    let mut found = None;
+    for_each_proto_field(payload, |number, value| {
+        if found.is_none() && number == 20 {
+            if let ProtoValue::Bytes(pair) = value {
+                if proto_string(pair, 1).as_deref() == Some(key) {
+                    found = proto_string(pair, 2);
+                }
+            }
+        }
+    });
+    found
+}
+
+/// Maps each step's request UUID (`steps.metadata` field 12) to its wall-clock
+/// time (field 1, a protobuf `Timestamp`), so `gen_metadata` records can be
+/// dated through their outer field 4.
+fn local_step_timestamps(local_db: &rusqlite::Connection) -> HashMap<String, i64> {
+    let mut timestamps = HashMap::new();
+    let Ok(mut stmt) = local_db.prepare("SELECT metadata FROM steps") else {
+        return timestamps;
+    };
+    let Ok(mut rows) = stmt.query([]) else {
+        return timestamps;
+    };
+    while let Ok(Some(row)) = rows.next() {
+        let Ok(Some(metadata)) = row.get::<_, Option<Vec<u8>>>(0) else {
+            continue;
+        };
+        let (Some(request_uuid), Some(timestamp)) =
+            (proto_string(&metadata, 12), proto_message(&metadata, 1))
+        else {
+            continue;
+        };
+        let Ok(seconds) = i64::try_from(proto_varint(timestamp, 1).unwrap_or(0)) else {
+            continue;
+        };
+        // A protobuf `Timestamp` keeps nanos in [0, 1e9); anything else is not
+        // one, and would otherwise overflow the millisecond conversion.
+        let nanos = proto_varint(timestamp, 2).unwrap_or(0);
+        if nanos >= 1_000_000_000 {
+            continue;
+        }
+        if let Some(millis) = seconds
+            .checked_mul(1000)
+            .and_then(|ms| ms.checked_add(nanos as i64 / 1_000_000))
+        {
+            timestamps.insert(request_uuid, millis);
+        }
+    }
+    timestamps
+}
+
+/// Reads every generation record out of a local conversation database, paired
+/// with the wall-clock time joined from `steps`.
+fn read_local_conversation_usage(
+    local_db: &rusqlite::Connection,
+) -> Vec<(AntigravityLocalUsage, Option<i64>)> {
+    let timestamps = local_step_timestamps(local_db);
+    let Ok(mut stmt) = local_db.prepare("SELECT data FROM gen_metadata ORDER BY idx") else {
+        return Vec::new();
+    };
+    let Ok(mut rows) = stmt.query([]) else {
+        return Vec::new();
+    };
+    let mut records = Vec::new();
+    while let Ok(Some(row)) = rows.next() {
+        let Ok(Some(blob)) = row.get::<_, Option<Vec<u8>>>(0) else {
+            continue;
+        };
+        let Some(usage) = parse_gen_metadata_usage(&blob) else {
+            continue;
+        };
+        let timestamp = usage
+            .request_uuid
+            .as_deref()
+            .and_then(|uuid| timestamps.get(uuid).copied());
+        records.push((usage, timestamp));
+    }
+    records
+}
+
+/// Conversation directories written by the local Antigravity runtimes, paired
+/// with the runtime that owns them. `antigravity-ide` and `antigravity-backup`
+/// stay out: both hold only encrypted `.pb` files, and `backup` duplicates
+/// `ide` session for session.
+fn antigravity_local_conversation_dirs(home: &Path) -> [(PathBuf, AntigravityRuntimeKind); 2] {
+    let gemini = home.join(".gemini");
+    [
+        (
+            gemini.join("antigravity-cli").join("conversations"),
+            AntigravityRuntimeKind::Cli,
+        ),
+        (
+            gemini.join("antigravity").join("conversations"),
+            AntigravityRuntimeKind::Desktop,
+        ),
+    ]
+}
+
+/// Newest mtime across a conversation file and, for SQLite conversations, its
+/// write-ahead log sidecars — content can land in the WAL without touching the
+/// main file.
+fn local_conversation_modified_ms(path: &Path) -> Option<i64> {
+    let file_modified_ms = |path: &Path| {
+        path.metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(system_time_to_millis)
+    };
+    let mut modified_ms = file_modified_ms(path);
+    if path.extension().and_then(|ext| ext.to_str()) == Some("db") {
+        for extra_ext in ["db-wal", "db-shm"] {
+            if let Some(extra_ms) = file_modified_ms(&path.with_extension(extra_ext)) {
+                modified_ms = Some(match modified_ms {
+                    Some(current) => current.max(extra_ms),
+                    None => extra_ms,
+                });
+            }
+        }
+    }
+    modified_ms
+}
+
+/// Sessions that already hold usage rows written by the current parser version.
+fn sessions_with_current_usage(
+    db_conn: &rusqlite::Connection,
+) -> std::collections::HashSet<(String, String)> {
+    let mut parsed = std::collections::HashSet::new();
+    let Ok(mut stmt) = db_conn
+        .prepare("SELECT DISTINCT client, session_id FROM session_usage WHERE parser_version = ?1")
+    else {
+        return parsed;
+    };
+    let Ok(rows) = stmt.query_map([PARSER_VERSION], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) else {
+        return parsed;
+    };
+    parsed.extend(rows.flatten());
+    parsed
+}
+
+/// Scans the local conversation SQLite databases of every Antigravity runtime
+/// and writes both session metadata and token usage into the cache. Encrypted
+/// `.pb` conversations carry no readable usage and are left to the
+/// language-server RPC path.
+fn sync_local_conversations(
     db_conn: &mut rusqlite::Connection,
     home: &Path,
     cached_sessions: &HashMap<(String, String), (Option<i64>, Option<i64>)>,
     rebuild_all: bool,
+    model_aliases: &HashMap<String, ModelAlias>,
 ) -> Result<()> {
-    let cli_conv_dir = home
-        .join(".gemini")
-        .join("antigravity-cli")
-        .join("conversations");
-    if !cli_conv_dir.exists() {
-        return Ok(());
-    }
-
-    let entries = match std::fs::read_dir(&cli_conv_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
+    // A session already listed in `sessions` but carrying no usage row from the
+    // current parser — an upgrade from a cache built before local parsing
+    // existed, or a `PARSER_VERSION` bump — has to be read even though its file
+    // has not changed since the last sync.
+    let already_parsed = sessions_with_current_usage(db_conn);
 
     let now_ms = Local::now().timestamp_millis();
     let tx = db_conn.transaction()?;
+    let mut synced_sessions = 0usize;
+    let mut inserted_usage_rows = 0usize;
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("db") {
-            if let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) {
-                if session_id.len() < 20 {
-                    continue;
-                }
-                let modified_ms = path
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(system_time_to_millis);
+    for (dir, runtime_kind) in antigravity_local_conversation_dirs(home) {
+        let client_str = client_str_for_runtime_kind(runtime_kind);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
 
-                if !rebuild_all {
-                    if let Some((cached_lm, _)) = cached_sessions
-                        .get(&("antigravity-cli".to_string(), session_id.to_string()))
-                    {
-                        if let (Some(cached), Some(current)) = (cached_lm, modified_ms) {
-                            if *cached >= current {
-                                continue;
-                            }
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("db") {
+                continue;
+            }
+            let Some(session_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if session_id.len() < 20 {
+                continue;
+            }
+
+            let modified_ms = local_conversation_modified_ms(&path);
+            let cache_key = (client_str.to_string(), session_id.to_string());
+            if !rebuild_all && already_parsed.contains(&cache_key) {
+                if let Some((cached_lm, _)) = cached_sessions.get(&cache_key) {
+                    if let (Some(cached), Some(current)) = (cached_lm, modified_ms) {
+                        if *cached >= current {
+                            continue;
                         }
                     }
                 }
-
-                // Read trajectory_meta and steps count from local sqlite db
-                let (trajectory_id, step_count) = if let Ok(local_db) =
-                    rusqlite::Connection::open_with_flags(
-                        &path,
-                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                    ) {
-                    let traj_id: Option<String> = local_db
-                        .query_row(
-                            "SELECT trajectory_id FROM trajectory_meta LIMIT 1",
-                            [],
-                            |row| row.get(0),
-                        )
-                        .ok();
-                    let steps: Option<i64> = local_db
-                        .query_row("SELECT count(*) FROM steps", [], |row| row.get(0))
-                        .ok();
-                    (traj_id, steps)
-                } else {
-                    (None, None)
-                };
-
-                let summary = AntigravitySyncSummary {
-                    last_modified_ms: modified_ms,
-                    connections: Vec::new(),
-                    trajectory_id,
-                    title: None,
-                    status: None,
-                    step_count,
-                    created_time_ms: None,
-                    last_user_input_time_ms: None,
-                    project_id: None,
-                    workspace_path: None,
-                    git_root: None,
-                    repository: None,
-                    git_origin_url: None,
-                    branch_name: None,
-                    parent_conversation_id: None,
-                    mendel_experiment_ids: None,
-                };
-
-                upsert_antigravity_session_row(
-                    &tx,
-                    session_id,
-                    "antigravity-cli",
-                    &summary,
-                    "unknown",
-                    now_ms,
-                )?;
             }
+
+            let (trajectory_id, step_count, usage_records) =
+                match rusqlite::Connection::open_with_flags(
+                    &path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                ) {
+                    Ok(local_db) => {
+                        let trajectory_id: Option<String> = local_db
+                            .query_row(
+                                "SELECT trajectory_id FROM trajectory_meta LIMIT 1",
+                                [],
+                                |row| row.get(0),
+                            )
+                            .ok();
+                        let step_count: Option<i64> = local_db
+                            .query_row("SELECT count(*) FROM steps", [], |row| row.get(0))
+                            .ok();
+                        (
+                            trajectory_id,
+                            step_count,
+                            read_local_conversation_usage(&local_db),
+                        )
+                    }
+                    Err(e) => {
+                        debug!(
+                            "Failed to open local Antigravity conversation {}: {}",
+                            path.display(),
+                            e
+                        );
+                        (None, None, Vec::new())
+                    }
+                };
+
+            let resolved: Vec<(String, i64, &AntigravityLocalUsage)> = usage_records
+                .iter()
+                .map(|(usage, timestamp)| {
+                    let model_id = usage
+                        .raw_model_id
+                        .as_deref()
+                        .map(|raw| resolve_antigravity_model_id_with_aliases(raw, model_aliases))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    (model_id, timestamp.or(modified_ms).unwrap_or(now_ms), usage)
+                })
+                .collect();
+
+            let primary_model_id = resolved
+                .iter()
+                .map(|(model_id, _, _)| model_id.as_str())
+                .find(|model_id| *model_id != "unknown")
+                .unwrap_or("unknown")
+                .to_string();
+
+            let summary = AntigravitySyncSummary {
+                last_modified_ms: modified_ms,
+                connections: Vec::new(),
+                trajectory_id,
+                title: None,
+                status: None,
+                step_count,
+                created_time_ms: None,
+                last_user_input_time_ms: None,
+                project_id: None,
+                workspace_path: None,
+                git_root: None,
+                repository: None,
+                git_origin_url: None,
+                branch_name: None,
+                parent_conversation_id: None,
+                mendel_experiment_ids: None,
+            };
+
+            upsert_antigravity_session_row(
+                &tx,
+                session_id,
+                client_str,
+                &summary,
+                &primary_model_id,
+                now_ms,
+            )?;
+
+            for (step_index, (model_id, timestamp, usage)) in resolved.iter().enumerate() {
+                let raw_message_key = usage
+                    .response_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{}:{}:{}", timestamp, model_id, step_index));
+                let message_key = antigravity_logical_message_key(session_id, &raw_message_key);
+                let storage_message_id = antigravity_storage_message_id(client_str, &message_key);
+
+                tx.execute(
+                    "INSERT OR REPLACE INTO session_usage (
+                        id, session_id, client, model_id, provider_id, timestamp, step_index,
+                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                        response_id, pricing_day, parser_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rusqlite::params![
+                        storage_message_id,
+                        session_id,
+                        client_str,
+                        model_id,
+                        detect_provider_from_model(model_id),
+                        timestamp,
+                        step_index as i64,
+                        usage.tokens.input,
+                        usage.tokens.output,
+                        usage.tokens.cache_read,
+                        usage.tokens.cache_write,
+                        usage.tokens.reasoning,
+                        message_key,
+                        local_date_string_from_timestamp(*timestamp),
+                        PARSER_VERSION,
+                    ],
+                )?;
+                inserted_usage_rows += 1;
+            }
+
+            synced_sessions += 1;
         }
     }
 
     tx.commit()?;
+    if synced_sessions > 0 {
+        info!(
+            "Antigravity local sync: {} conversation databases, {} usage rows",
+            synced_sessions, inserted_usage_rows
+        );
+    }
     Ok(())
 }
 
@@ -2261,20 +2771,11 @@ fn discover_local_conversation_ids_from_home(
     home: &Path,
     active_kinds: &[AntigravityRuntimeKind],
 ) -> Vec<LocalConversationId> {
-    let mut dirs = Vec::new();
-    // Only scan Antigravity CLI conversations directory: ~/.gemini/antigravity-cli/conversations
-    // Do not scan legacy or partial ~/.gemini/antigravity/conversations directory.
-    if active_kinds.contains(&AntigravityRuntimeKind::Cli) || active_kinds.is_empty() {
-        dirs.push((
-            home.join(".gemini")
-                .join("antigravity-cli")
-                .join("conversations"),
-            AntigravityRuntimeKind::Cli,
-        ));
-    }
-
     let mut session_ids = Vec::new();
-    for (dir, runtime_kind) in dirs {
+    for (dir, runtime_kind) in antigravity_local_conversation_dirs(home) {
+        if !active_kinds.is_empty() && !active_kinds.contains(&runtime_kind) {
+            continue;
+        }
         if !dir.exists() {
             continue;
         }
@@ -2286,29 +2787,7 @@ fn discover_local_conversation_ids_from_home(
                         if ext == "pb" || ext == "db" {
                             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                                 if stem.len() >= 20 {
-                                    let mut modified_ms = path
-                                        .metadata()
-                                        .ok()
-                                        .and_then(|metadata| metadata.modified().ok())
-                                        .and_then(system_time_to_millis);
-                                    if ext == "db" {
-                                        for extra_ext in &["db-wal", "db-shm"] {
-                                            let extra_path = path.with_extension(extra_ext);
-                                            if extra_path.exists() {
-                                                if let Some(extra_ms) = extra_path
-                                                    .metadata()
-                                                    .ok()
-                                                    .and_then(|metadata| metadata.modified().ok())
-                                                    .and_then(system_time_to_millis)
-                                                {
-                                                    modified_ms = match modified_ms {
-                                                        Some(m) => Some(m.max(extra_ms)),
-                                                        None => Some(extra_ms),
-                                                    };
-                                                }
-                                            }
-                                        }
-                                    }
+                                    let modified_ms = local_conversation_modified_ms(&path);
                                     session_ids.push(LocalConversationId {
                                         session_id: stem.to_string(),
                                         modified_ms,
@@ -2740,7 +3219,7 @@ mod tests {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 "resp-456", "sess-123", "antigravity-cli", "gemini-3-pro-preview", "google", 1672531201000_i64, 0_i64,
-                150_i64, 50_i64, 20_i64, 0_i64, 10_i64, "resp-456", "2023-01-01", "antigravity-v2"
+                150_i64, 50_i64, 20_i64, 0_i64, 10_i64, "resp-456", "2023-01-01", PARSER_VERSION
             ],
         ).unwrap();
 
@@ -2784,7 +3263,7 @@ mod tests {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 "resp-historical", "sess-historical", "antigravity-desktop", "gemini-3.5-flash", "google", 1672531201000_i64, 0_i64,
-                100_i64, 20_i64, 5_i64, 0_i64, 0_i64, "resp-historical", "2023-01-01", "antigravity-v2"
+                100_i64, 20_i64, 5_i64, 0_i64, 0_i64, "resp-historical", "2023-01-01", PARSER_VERSION
             ],
         ).unwrap();
 
@@ -2817,7 +3296,7 @@ mod tests {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 "resp-456", "sess-123", "antigravity-cli", "gemini-3-pro-preview", "google", 1672531201000_i64, 0_i64,
-                150_i64, 50_i64, 20_i64, 0_i64, 10_i64, "resp-456", "2023-01-01", "antigravity-v2"
+                150_i64, 50_i64, 20_i64, 0_i64, 10_i64, "resp-456", "2023-01-01", PARSER_VERSION
             ],
         ).unwrap();
 
@@ -2826,7 +3305,7 @@ mod tests {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 "resp-456", "sess-123", "antigravity-cli", "gemini-3-pro-preview", "google", 1672531202000_i64, 0_i64,
-                200_i64, 60_i64, 30_i64, 0_i64, 15_i64, "resp-456", "2023-01-01", "antigravity-v2"
+                200_i64, 60_i64, 30_i64, 0_i64, 15_i64, "resp-456", "2023-01-01", PARSER_VERSION
             ],
         ).unwrap();
 
@@ -2866,7 +3345,7 @@ mod tests {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     storage_id, "sess-dup", client, "gemini-3-pro-preview", "google", 1672531201000_i64, 0_i64,
-                    150_i64, 50_i64, 20_i64, 0_i64, 10_i64, &logical_key, "2023-01-01", "antigravity-v2"
+                    150_i64, 50_i64, 20_i64, 0_i64, 10_i64, &logical_key, "2023-01-01", PARSER_VERSION
                 ],
             ).unwrap();
         }
@@ -2911,7 +3390,7 @@ mod tests {
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["msg-1", "sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M26", "anthropic", 1672531201000_i64, 0_i64, 150_i64, 50_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
+            rusqlite::params!["msg-1", "sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M26", "anthropic", 1672531201000_i64, 0_i64, 150_i64, 50_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", PARSER_VERSION],
         ).unwrap();
 
         conn.execute(
@@ -2928,7 +3407,7 @@ mod tests {
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["msg-2", "sess-2", "antigravity-cli", "MODEL_PLACEHOLDER_M20", "google", 1672531202000_i64, 0_i64, 200_i64, 60_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
+            rusqlite::params!["msg-2", "sess-2", "antigravity-cli", "MODEL_PLACEHOLDER_M20", "google", 1672531202000_i64, 0_i64, 200_i64, 60_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", PARSER_VERSION],
         ).unwrap();
 
         conn.execute(
@@ -2945,7 +3424,7 @@ mod tests {
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["msg-3", "sess-3", "antigravity-cli", "claude-opus-4.6-thinking", "anthropic", 1672531203000_i64, 0_i64, 300_i64, 70_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
+            rusqlite::params!["msg-3", "sess-3", "antigravity-cli", "claude-opus-4.6-thinking", "anthropic", 1672531203000_i64, 0_i64, 300_i64, 70_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", PARSER_VERSION],
         ).unwrap();
 
         normalize_cached_antigravity_artifacts(&sessions_dir, &HashMap::new()).unwrap();
@@ -2985,7 +3464,7 @@ mod tests {
         conn.execute(
             "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["msg-1", "sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M20", "google", 1672531201000_i64, 0_i64, 1_i64, 2_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", "antigravity-v2"],
+            rusqlite::params!["msg-1", "sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M20", "google", 1672531201000_i64, 0_i64, 1_i64, 2_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", PARSER_VERSION],
         ).unwrap();
 
         normalize_cached_antigravity_artifacts(&sessions_dir, &HashMap::new()).unwrap();
@@ -3296,10 +3775,21 @@ mod tests {
             &[AntigravityRuntimeKind::Desktop, AntigravityRuntimeKind::Cli],
         );
 
-        assert_eq!(discovered.len(), 1);
-        assert!(!discovered
+        assert_eq!(discovered.len(), 2);
+        let pb_entry = discovered
             .iter()
-            .any(|entry| entry.session_id == "12345678901234567890"));
+            .find(|entry| entry.session_id == "12345678901234567890")
+            .expect("Desktop .pb conversation should be discovered");
+        assert_eq!(pb_entry.runtime_kind, AntigravityRuntimeKind::Desktop);
+        assert!(!discovered.iter().any(|entry| entry.session_id == "short"));
+
+        let discovered_cli_only = discover_local_conversation_ids_from_home(
+            temp_dir.path(),
+            &[AntigravityRuntimeKind::Cli],
+        );
+        assert!(discovered_cli_only
+            .iter()
+            .all(|entry| entry.runtime_kind == AntigravityRuntimeKind::Cli));
 
         let db_entry = discovered
             .iter()
@@ -3340,8 +3830,221 @@ mod tests {
         assert!(!is_pseudo_raw_model("gemini-1.5-pro"));
     }
 
+    fn proto_varint_bytes(value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut value = value;
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return out;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    fn proto_varint_field(field_number: u32, value: u64) -> Vec<u8> {
+        let mut out = proto_varint_bytes(u64::from(field_number) << 3);
+        out.extend(proto_varint_bytes(value));
+        out
+    }
+
+    fn proto_bytes_field(field_number: u32, payload: &[u8]) -> Vec<u8> {
+        let mut out = proto_varint_bytes((u64::from(field_number) << 3) | 2);
+        out.extend(proto_varint_bytes(payload.len() as u64));
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// Builds a `gen_metadata.data` blob in the shape Antigravity writes.
+    struct GenMetadataFixture {
+        request_uuid: String,
+        input_tokens: u64,
+        total_output_tokens: u64,
+        cache_read_tokens: u64,
+        thinking_output_tokens: u64,
+        response_output_tokens: u64,
+        response_id: String,
+        response_model: Option<String>,
+        model_enum: Option<String>,
+    }
+
+    impl Default for GenMetadataFixture {
+        fn default() -> Self {
+            Self {
+                request_uuid: "a04cc152-933d-413f-bf77-e5e046d8005c".to_string(),
+                input_tokens: 5911,
+                total_output_tokens: 669,
+                cache_read_tokens: 8138,
+                thinking_output_tokens: 614,
+                response_output_tokens: 55,
+                response_id: "bGZmapHNJ8XVz7IPxtDuoAo".to_string(),
+                response_model: Some("gemini-3.7-flash".to_string()),
+                model_enum: None,
+            }
+        }
+    }
+
+    impl GenMetadataFixture {
+        fn encode(&self) -> Vec<u8> {
+            let mut usage = Vec::new();
+            usage.extend(proto_varint_field(1, 1196));
+            usage.extend(proto_varint_field(2, self.input_tokens));
+            usage.extend(proto_varint_field(3, self.total_output_tokens));
+            usage.extend(proto_varint_field(5, self.cache_read_tokens));
+            usage.extend(proto_varint_field(6, 24));
+            usage.extend(proto_varint_field(9, self.thinking_output_tokens));
+            usage.extend(proto_varint_field(10, self.response_output_tokens));
+            usage.extend(proto_bytes_field(11, self.response_id.as_bytes()));
+
+            let mut payload = Vec::new();
+            payload.extend(proto_varint_field(3, 1196));
+            payload.extend(proto_bytes_field(4, &usage));
+            if let Some(response_model) = &self.response_model {
+                payload.extend(proto_bytes_field(19, response_model.as_bytes()));
+            }
+            let mut trajectory_pair = Vec::new();
+            trajectory_pair.extend(proto_bytes_field(1, b"trajectory_id"));
+            trajectory_pair.extend(proto_bytes_field(2, b"traj-123"));
+            payload.extend(proto_bytes_field(20, &trajectory_pair));
+            if let Some(model_enum) = &self.model_enum {
+                let mut pair = Vec::new();
+                pair.extend(proto_bytes_field(1, b"model_enum"));
+                pair.extend(proto_bytes_field(2, model_enum.as_bytes()));
+                payload.extend(proto_bytes_field(20, &pair));
+            }
+
+            let mut blob = Vec::new();
+            blob.extend(proto_bytes_field(4, self.request_uuid.as_bytes()));
+            blob.extend(proto_bytes_field(8, b"ignored"));
+            blob.extend(proto_bytes_field(1, &payload));
+            blob
+        }
+    }
+
+    /// Builds a `steps.metadata` blob carrying the wall clock and request UUID.
+    fn encode_step_metadata(request_uuid: &str, seconds: u64, nanos: u64) -> Vec<u8> {
+        let mut timestamp = Vec::new();
+        timestamp.extend(proto_varint_field(1, seconds));
+        timestamp.extend(proto_varint_field(2, nanos));
+        let mut metadata = Vec::new();
+        metadata.extend(proto_bytes_field(1, &timestamp));
+        metadata.extend(proto_varint_field(11, 1196));
+        metadata.extend(proto_bytes_field(12, request_uuid.as_bytes()));
+        metadata
+    }
+
+    fn write_conversation_db(path: &Path, gen_metadata: &[Vec<u8>], steps: &[(String, u64)]) {
+        let local_db = rusqlite::Connection::open(path).unwrap();
+        local_db
+            .execute_batch(
+                "CREATE TABLE trajectory_meta (trajectory_id text, cascade_id text, trajectory_type integer, source integer, PRIMARY KEY (trajectory_id));
+                 CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, status integer, metadata blob);
+                 CREATE TABLE gen_metadata (idx integer PRIMARY KEY, data blob, size integer);
+                 INSERT INTO trajectory_meta VALUES ('traj-123', 'cascade-123', 1, 1);",
+            )
+            .unwrap();
+        for (idx, (request_uuid, seconds)) in steps.iter().enumerate() {
+            local_db
+                .execute(
+                    "INSERT INTO steps VALUES (?, 1, 1, ?)",
+                    rusqlite::params![
+                        idx as i64,
+                        encode_step_metadata(request_uuid, *seconds, 500_000_000)
+                    ],
+                )
+                .unwrap();
+        }
+        for (idx, blob) in gen_metadata.iter().enumerate() {
+            local_db
+                .execute(
+                    "INSERT INTO gen_metadata VALUES (?, ?, ?)",
+                    rusqlite::params![idx as i64, blob, blob.len() as i64],
+                )
+                .unwrap();
+        }
+    }
+
     #[test]
-    fn test_sync_local_cli_conversations() {
+    fn test_parse_gen_metadata_usage_maps_validated_fields() {
+        let fixture = GenMetadataFixture::default();
+        let usage = parse_gen_metadata_usage(&fixture.encode()).expect("blob should parse");
+
+        assert_eq!(usage.tokens.input, 5911);
+        assert_eq!(usage.tokens.cache_read, 8138);
+        assert_eq!(usage.tokens.reasoning, 614);
+        // `responseOutputTokens` (1.4.10), never `outputTokens` (1.4.3 = 669),
+        // which already contains the thinking tokens.
+        assert_eq!(usage.tokens.output, 55);
+        assert_ne!(usage.tokens.output, fixture.total_output_tokens as i64);
+        assert_eq!(
+            usage.response_id.as_deref(),
+            Some("bGZmapHNJ8XVz7IPxtDuoAo")
+        );
+        assert_eq!(usage.raw_model_id.as_deref(), Some("gemini-3.7-flash"));
+        assert_eq!(
+            usage.request_uuid.as_deref(),
+            Some("a04cc152-933d-413f-bf77-e5e046d8005c")
+        );
+    }
+
+    #[test]
+    fn test_parse_gen_metadata_usage_rejects_broken_token_partition() {
+        // `thinkingOutputTokens + responseOutputTokens` must equal
+        // `outputTokens`; a blob that violates it means the field map drifted.
+        let broken = GenMetadataFixture {
+            total_output_tokens: 700,
+            ..GenMetadataFixture::default()
+        };
+        assert_eq!(parse_gen_metadata_usage(&broken.encode()), None);
+
+        // Non-generation steps carry no output at all and are skipped.
+        let non_generation = GenMetadataFixture {
+            total_output_tokens: 0,
+            thinking_output_tokens: 0,
+            response_output_tokens: 0,
+            ..GenMetadataFixture::default()
+        };
+        assert_eq!(parse_gen_metadata_usage(&non_generation.encode()), None);
+    }
+
+    #[test]
+    fn test_parse_gen_metadata_usage_falls_back_to_model_enum() {
+        let placeholder = GenMetadataFixture {
+            response_model: Some("gemini-default".to_string()),
+            model_enum: Some("MODEL_PLACEHOLDER_M20".to_string()),
+            ..GenMetadataFixture::default()
+        };
+        let usage = parse_gen_metadata_usage(&placeholder.encode()).unwrap();
+        assert_eq!(usage.raw_model_id.as_deref(), Some("MODEL_PLACEHOLDER_M20"));
+
+        let missing = GenMetadataFixture {
+            response_model: None,
+            model_enum: Some("MODEL_PLACEHOLDER_M132".to_string()),
+            ..GenMetadataFixture::default()
+        };
+        let usage = parse_gen_metadata_usage(&missing.encode()).unwrap();
+        assert_eq!(
+            usage.raw_model_id.as_deref(),
+            Some("MODEL_PLACEHOLDER_M132")
+        );
+    }
+
+    #[test]
+    fn test_parse_gen_metadata_usage_survives_truncated_blob() {
+        let blob = GenMetadataFixture::default().encode();
+        for len in 0..blob.len() {
+            // Must never panic; a partial blob either parses or is skipped.
+            let _ = parse_gen_metadata_usage(&blob[..len]);
+        }
+    }
+
+    #[test]
+    fn test_sync_local_conversations_reparses_sessions_without_local_usage() {
+        // Upgrade case: the cache already knows the session (older releases
+        // only stored metadata), so the mtime check alone would skip it forever
+        // and its tokens would never arrive.
         let temp_dir = tempfile::tempdir().unwrap();
         let home = temp_dir.path();
         let cli_conv_dir = home
@@ -3350,37 +4053,419 @@ mod tests {
             .join("conversations");
         std::fs::create_dir_all(&cli_conv_dir).unwrap();
 
-        let session_id = "test-session-12345678901234567890";
-        let db_path = cli_conv_dir.join(format!("{}.db", session_id));
-
-        let local_db = rusqlite::Connection::open(&db_path).unwrap();
-        local_db
-            .execute_batch(
-                "CREATE TABLE trajectory_meta (trajectory_id text, cascade_id text, trajectory_type integer, source integer, PRIMARY KEY (trajectory_id));
-                 CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, status integer);
-                 INSERT INTO trajectory_meta VALUES ('traj-123', 'test-session-12345678901234567890', 1, 1);
-                 INSERT INTO steps VALUES (0, 1, 1);
-                 INSERT INTO steps VALUES (1, 2, 1);",
-            )
-            .unwrap();
-        drop(local_db);
+        let session_id = "cli-session-12345678901234567890";
+        let request_uuid = "11111111-1111-4111-8111-111111111111";
+        write_conversation_db(
+            &cli_conv_dir.join(format!("{}.db", session_id)),
+            &[GenMetadataFixture {
+                request_uuid: request_uuid.to_string(),
+                ..GenMetadataFixture::default()
+            }
+            .encode()],
+            &[(request_uuid.to_string(), 1_767_225_600)],
+        );
 
         let cache_dir = temp_dir.path().join("cache");
         let mut db_conn = open_cache_db(&cache_dir).unwrap();
-        let cached_sessions = HashMap::new();
+        let aliases = static_model_aliases();
+        let mut cached_sessions = HashMap::new();
+        cached_sessions.insert(
+            ("antigravity-cli".to_string(), session_id.to_string()),
+            (Some(i64::MAX), Some(1_i64)),
+        );
 
-        sync_local_cli_conversations(&mut db_conn, home, &cached_sessions, false).unwrap();
+        sync_local_conversations(&mut db_conn, home, &cached_sessions, false, &aliases).unwrap();
+        let rows: i64 = db_conn
+            .query_row("SELECT count(*) FROM session_usage", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
 
-        let (count, traj_id, step_cnt): (i64, Option<String>, Option<i64>) = db_conn
+        // Once parsed, the unchanged file is skipped again: a sentinel written
+        // over the row survives the next sync.
+        db_conn
+            .execute("UPDATE session_usage SET input_tokens = -1", [])
+            .unwrap();
+        sync_local_conversations(&mut db_conn, home, &cached_sessions, false, &aliases).unwrap();
+        let (rows_after, input_after): (i64, i64) = db_conn
             .query_row(
-                "SELECT count(*), trajectory_id, step_count FROM sessions WHERE session_id = ?1 AND client = 'antigravity-cli'",
+                "SELECT count(*), min(input_tokens) FROM session_usage",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rows_after, 1);
+        assert_eq!(input_after, -1);
+    }
+
+    #[test]
+    fn test_normalize_antigravity_tokens_never_double_counts_reasoning() {
+        // The shape both sources report: total 669 = thinking 614 + response 55.
+        let tokens = normalize_antigravity_tokens(5911, 669, Some(55), 8138, 0, 614).unwrap();
+        assert_eq!(tokens.output, 55);
+        assert_eq!(tokens.reasoning, 614);
+        // Billing sums output and reasoning, so together they must equal the
+        // reported total exactly once.
+        assert_eq!(tokens.output + tokens.reasoning, 669);
+
+        // A source that reports only the total still yields the disjoint split.
+        let legacy = normalize_antigravity_tokens(5911, 669, None, 8138, 0, 614).unwrap();
+        assert_eq!(legacy.output, 55);
+        assert_eq!(legacy.reasoning, 614);
+
+        // Disagreement means the field map drifted: reject, do not guess.
+        assert_eq!(
+            normalize_antigravity_tokens(1, 700, Some(55), 0, 0, 614),
+            None
+        );
+
+        // Values large enough to overflow an i64 sum must not panic.
+        assert_eq!(
+            normalize_antigravity_tokens(0, 1, Some(i64::MAX), 0, 0, i64::MAX),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rpc_and_local_paths_agree_on_the_same_usage_record() {
+        // Same generation seen through both sources must produce identical
+        // columns; this is the drift guard the two paths previously lacked.
+        let local = parse_gen_metadata_usage(&GenMetadataFixture::default().encode()).unwrap();
+        let rpc_usage = serde_json::json!({
+            "inputTokens": 5911,
+            "outputTokens": 669,
+            "responseOutputTokens": 55,
+            "cacheReadTokens": 8138,
+            "thinkingOutputTokens": 614,
+        });
+        let rpc = normalize_antigravity_tokens(
+            to_safe_i64(rpc_usage.get("inputTokens")),
+            to_safe_i64(rpc_usage.get("outputTokens")),
+            rpc_usage
+                .get("responseOutputTokens")
+                .map(|v| to_safe_i64(Some(v))),
+            to_safe_i64(rpc_usage.get("cacheReadTokens")),
+            to_safe_i64(rpc_usage.get("cacheWriteTokens")),
+            to_safe_i64(rpc_usage.get("thinkingOutputTokens")),
+        )
+        .unwrap();
+        assert_eq!(local.tokens, rpc);
+    }
+
+    #[test]
+    fn test_local_step_timestamps_rejects_out_of_range_nanos() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("conversation.db");
+        let local_db = rusqlite::Connection::open(&path).unwrap();
+        local_db
+            .execute_batch("CREATE TABLE steps (idx integer PRIMARY KEY, metadata blob);")
+            .unwrap();
+
+        // nanos outside [0, 1e9) is not a protobuf Timestamp, and the naive
+        // millisecond conversion would overflow on it.
+        let mut overflowing = Vec::new();
+        overflowing.extend(proto_varint_field(1, (i64::MAX / 1000) as u64));
+        overflowing.extend(proto_varint_field(2, i64::MAX as u64));
+        let mut bad = Vec::new();
+        bad.extend(proto_bytes_field(1, &overflowing));
+        bad.extend(proto_bytes_field(12, b"bad-uuid-0000-0000-000000000000"));
+        local_db
+            .execute("INSERT INTO steps VALUES (0, ?)", rusqlite::params![bad])
+            .unwrap();
+
+        let good = encode_step_metadata(
+            "good-uuid-0000-0000-000000000000",
+            1_767_225_600,
+            500_000_000,
+        );
+        local_db
+            .execute("INSERT INTO steps VALUES (1, ?)", rusqlite::params![good])
+            .unwrap();
+
+        let timestamps = local_step_timestamps(&local_db);
+        assert_eq!(timestamps.len(), 1);
+        assert_eq!(
+            timestamps.get("good-uuid-0000-0000-000000000000"),
+            Some(&1_767_225_600_500)
+        );
+    }
+
+    #[test]
+    fn test_local_sync_preserves_language_server_session_metadata() {
+        // The local scan knows nothing about titles or workspaces; a
+        // `PARSER_VERSION` bump rescans every session, so a plain overwrite
+        // would wipe metadata only a live language server can supply.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let cli_conv_dir = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("conversations");
+        std::fs::create_dir_all(&cli_conv_dir).unwrap();
+
+        let session_id = "cli-session-12345678901234567890";
+        let request_uuid = "11111111-1111-4111-8111-111111111111";
+        write_conversation_db(
+            &cli_conv_dir.join(format!("{}.db", session_id)),
+            &[GenMetadataFixture {
+                request_uuid: request_uuid.to_string(),
+                ..GenMetadataFixture::default()
+            }
+            .encode()],
+            &[(request_uuid.to_string(), 1_767_225_600)],
+        );
+
+        let cache_dir = temp_dir.path().join("cache");
+        let mut db_conn = open_cache_db(&cache_dir).unwrap();
+        db_conn
+            .execute(
+                "INSERT INTO sessions (session_id, client, title, status, workspace_path, git_root,
+                                       branch_name, model_id, step_count, last_modified_ms, synced_at)
+                 VALUES (?, 'antigravity-cli', 'Real title', 'DONE', '/home/me/proj', '/home/me/proj',
+                         'main', 'gemini-3-7-flash', 9, 1, 1)",
                 [session_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
 
-        assert_eq!(count, 1);
+        sync_local_conversations(
+            &mut db_conn,
+            home,
+            &HashMap::new(),
+            false,
+            &static_model_aliases(),
+        )
+        .unwrap();
+
+        let (title, status, workspace, git_root, branch): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = db_conn
+            .query_row(
+                "SELECT title, status, workspace_path, git_root, branch_name
+                 FROM sessions WHERE session_id = ?",
+                [session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(title.as_deref(), Some("Real title"));
+        assert_eq!(status.as_deref(), Some("DONE"));
+        assert_eq!(workspace.as_deref(), Some("/home/me/proj"));
+        assert_eq!(git_root.as_deref(), Some("/home/me/proj"));
+        assert_eq!(branch.as_deref(), Some("main"));
+
+        // The fields the local scan does own are still updated.
+        let (trajectory_id, usage_rows): (Option<String>, i64) = db_conn
+            .query_row(
+                "SELECT (SELECT trajectory_id FROM sessions WHERE session_id = ?1),
+                        (SELECT count(*) FROM session_usage WHERE session_id = ?1)",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(trajectory_id.as_deref(), Some("traj-123"));
+        assert_eq!(usage_rows, 1);
+    }
+
+    #[test]
+    fn test_legacy_v2_usage_rows_are_migrated_on_cache_open() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().join("cache");
+        let conn = open_cache_db(&cache_dir).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, client, model_id, synced_at)
+             VALUES ('sess-legacy', 'antigravity-cli', 'gemini-3-7-flash', 1)",
+            [],
+        )
+        .unwrap();
+        // A v2 row as the RPC wrote it: output_tokens is the total, thinking
+        // included.
+        conn.execute(
+            "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp,
+                                        step_index, input_tokens, output_tokens, cache_read_tokens,
+                                        cache_write_tokens, reasoning_tokens, response_id,
+                                        pricing_day, parser_version)
+             VALUES ('legacy', 'sess-legacy', 'antigravity-cli', 'gemini-3-7-flash', 'google',
+                     1672531201000, 0, 5911, 669, 8138, 0, 614, 'resp', '2023-01-01',
+                     'antigravity-v2')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open_cache_db(&cache_dir).unwrap();
+        let (output, reasoning, version): (i64, i64, String) = conn
+            .query_row(
+                "SELECT output_tokens, reasoning_tokens, parser_version FROM session_usage",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(output, 55);
+        assert_eq!(reasoning, 614);
+        // No row may linger at an old version: one that the local parser can
+        // never re-read would mark the source stale on every launch.
+        assert_eq!(version, PARSER_VERSION);
+
+        // Idempotent — reopening must not subtract twice.
+        drop(conn);
+        let conn = open_cache_db(&cache_dir).unwrap();
+        let output_again: i64 = conn
+            .query_row("SELECT output_tokens FROM session_usage", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(output_again, 55);
+    }
+
+    #[test]
+    fn test_sync_local_conversations_writes_usage_for_both_runtimes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let cli_conv_dir = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("conversations");
+        let desktop_conv_dir = home
+            .join(".gemini")
+            .join("antigravity")
+            .join("conversations");
+        std::fs::create_dir_all(&cli_conv_dir).unwrap();
+        std::fs::create_dir_all(&desktop_conv_dir).unwrap();
+
+        let cli_session_id = "cli-session-12345678901234567890";
+        let desktop_session_id = "desktop-session-12345678901234567890";
+        let cli_uuid = "11111111-1111-4111-8111-111111111111";
+        let desktop_uuid = "22222222-2222-4222-8222-222222222222";
+
+        write_conversation_db(
+            &cli_conv_dir.join(format!("{}.db", cli_session_id)),
+            &[
+                GenMetadataFixture {
+                    request_uuid: cli_uuid.to_string(),
+                    response_id: "resp-cli-1".to_string(),
+                    ..GenMetadataFixture::default()
+                }
+                .encode(),
+                // Non-generation step: skipped, so it must not add a row.
+                GenMetadataFixture {
+                    request_uuid: cli_uuid.to_string(),
+                    response_id: "resp-cli-2".to_string(),
+                    total_output_tokens: 0,
+                    thinking_output_tokens: 0,
+                    response_output_tokens: 0,
+                    ..GenMetadataFixture::default()
+                }
+                .encode(),
+            ],
+            &[(cli_uuid.to_string(), 1_767_225_600)],
+        );
+        write_conversation_db(
+            &desktop_conv_dir.join(format!("{}.db", desktop_session_id)),
+            &[GenMetadataFixture {
+                request_uuid: desktop_uuid.to_string(),
+                response_id: "resp-desktop-1".to_string(),
+                input_tokens: 100,
+                cache_read_tokens: 200,
+                total_output_tokens: 30,
+                thinking_output_tokens: 20,
+                response_output_tokens: 10,
+                ..GenMetadataFixture::default()
+            }
+            .encode()],
+            &[(desktop_uuid.to_string(), 1_767_225_600)],
+        );
+
+        let cache_dir = temp_dir.path().join("cache");
+        let mut db_conn = open_cache_db(&cache_dir).unwrap();
+        let aliases = static_model_aliases();
+
+        sync_local_conversations(&mut db_conn, home, &HashMap::new(), false, &aliases).unwrap();
+
+        let (traj_id, step_cnt): (Option<String>, Option<i64>) = db_conn
+            .query_row(
+                "SELECT trajectory_id, step_count FROM sessions WHERE session_id = ?1 AND client = 'antigravity-cli'",
+                [cli_session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(traj_id, Some("traj-123".to_string()));
-        assert_eq!(step_cnt, Some(2));
+        assert_eq!(step_cnt, Some(1));
+
+        let clients: Vec<(String, i64)> = db_conn
+            .prepare("SELECT client, count(*) FROM session_usage GROUP BY client ORDER BY client")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            clients,
+            vec![
+                ("antigravity-cli".to_string(), 1),
+                ("antigravity-desktop".to_string(), 1),
+            ]
+        );
+
+        let (model_id, input, output, cache_read, cache_write, reasoning, timestamp, parser_version): (
+            String,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            String,
+        ) = db_conn
+            .query_row(
+                "SELECT model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                        reasoning_tokens, timestamp, parser_version
+                 FROM session_usage WHERE client = 'antigravity-desktop'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        // `resolve_antigravity_model_id_with_aliases` normalizes the dotted
+        // version the same way the RPC path does.
+        assert_eq!(model_id, "gemini-3-7-flash");
+        assert_eq!(
+            (input, output, cache_read, cache_write, reasoning),
+            (100, 10, 200, 0, 20)
+        );
+        // Wall clock joined from `steps.metadata`, not the file mtime.
+        assert_eq!(timestamp, 1_767_225_600_500);
+        assert_eq!(parser_version, PARSER_VERSION);
+
+        // A second sync of unchanged files must not duplicate rows: the
+        // `{client}:{session_id}:{responseId}` key replaces in place.
+        let rows_after_first: i64 = db_conn
+            .query_row("SELECT count(*) FROM session_usage", [], |row| row.get(0))
+            .unwrap();
+        sync_local_conversations(&mut db_conn, home, &HashMap::new(), true, &aliases).unwrap();
+        let rows_after_second: i64 = db_conn
+            .query_row("SELECT count(*) FROM session_usage", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows_after_first, 2);
+        assert_eq!(rows_after_first, rows_after_second);
     }
 }
