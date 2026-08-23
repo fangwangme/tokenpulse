@@ -4,13 +4,22 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag whose GitHub Release assets should be rebuilt
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: true
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -25,18 +34,32 @@ jobs:
           # architecture flag, so the x86_64 build needs only the extra target.
           - runner: macos-14
             target: x86_64-apple-darwin
+            asset: tokenpulse-darwin-x64
           - runner: macos-14
             target: aarch64-apple-darwin
+            asset: tokenpulse-darwin-arm64
           # 22.04 rather than latest: the binary then needs only glibc 2.35,
           # so it also runs on distros a couple of releases behind.
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            asset: tokenpulse-linux-x64-gnu
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            asset: tokenpulse-linux-arm64-gnu
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Validate release tag
+        run: |
+          case "${RELEASE_TAG}" in
+            v*) ;;
+            *) echo "Release tag must start with v: ${RELEASE_TAG}" >&2; exit 1 ;;
+          esac
+          test "$(git tag --points-at HEAD --list "${RELEASE_TAG}")" = "${RELEASE_TAG}"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -55,13 +78,14 @@ jobs:
           cp .local/target/${{ matrix.target }}/release/tokenpulse \
             .local/release/tokenpulse-${{ matrix.target }}/tokenpulse
           tar -C .local/release/tokenpulse-${{ matrix.target }} \
-            -czf .local/release/tokenpulse-${{ matrix.target }}.tar.gz tokenpulse
+            -czf .local/release/tokenpulse-${{ matrix.target }}/${{ matrix.asset }}.tar.gz tokenpulse
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
           name: tokenpulse-${{ matrix.target }}
-          path: .local/release/tokenpulse-${{ matrix.target }}.tar.gz
+          path: .local/release/tokenpulse-${{ matrix.target }}/*
+          if-no-files-found: error
 
   publish-release:
     needs: build
@@ -69,35 +93,52 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
 
-      # The curated CHANGELOG entry is the release note. Fall back to generated
-      # notes only when a version has no section, rather than failing the release.
+      # A manual run refreshes the assets of an existing release without moving
+      # its tag or rewriting its notes. Upload the friendly names first, then
+      # remove the legacy Rust-target-triple names only after every upload works.
       - name: Publish GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if .github/scripts/extract-release-notes.sh "${GITHUB_REF_NAME#v}" > release-notes.md; then
-            gh release create "${GITHUB_REF_NAME}" dist/*/*.tar.gz \
-              --title "${GITHUB_REF_NAME}" \
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" dist/*/*.tar.gz --clobber
+
+            for asset in \
+              tokenpulse-aarch64-apple-darwin.tar.gz \
+              tokenpulse-x86_64-apple-darwin.tar.gz \
+              tokenpulse-aarch64-unknown-linux-gnu.tar.gz \
+              tokenpulse-x86_64-unknown-linux-gnu.tar.gz
+            do
+              gh release delete-asset "${RELEASE_TAG}" "${asset}" --yes 2>/dev/null || true
+            done
+          elif .github/scripts/extract-release-notes.sh "${RELEASE_TAG#v}" > release-notes.md; then
+            gh release create "${RELEASE_TAG}" dist/*/*.tar.gz \
+              --title "${RELEASE_TAG}" \
               --notes-file release-notes.md
           else
-            echo "::warning::No CHANGELOG section for ${GITHUB_REF_NAME}; using generated notes."
-            gh release create "${GITHUB_REF_NAME}" dist/*/*.tar.gz \
-              --title "${GITHUB_REF_NAME}" \
+            echo "::warning::No CHANGELOG section for ${RELEASE_TAG}; using generated notes."
+            gh release create "${RELEASE_TAG}" dist/*/*.tar.gz \
+              --title "${RELEASE_TAG}" \
               --generate-notes
           fi
 
   publish-npm:
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -115,7 +156,7 @@ jobs:
       - name: Assemble packages
         run: |
           node npm/scripts/build-packages.mjs \
-            --version "${GITHUB_REF_NAME#v}" \
+            --version "${RELEASE_TAG#v}" \
             --artifacts dist \
             --out .local/npm-dist
 
