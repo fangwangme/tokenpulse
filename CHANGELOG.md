@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Release asset names** now use readable platform and architecture labels
+  (`darwin-x64`, `darwin-arm64`, `linux-x64-gnu`, and `linux-arm64-gnu`)
+  instead of exposing Rust target triples such as `x86_64-unknown-linux-gnu`.
+
 ## [0.5.4] - 2026-08-23
 
 ### Fixed
