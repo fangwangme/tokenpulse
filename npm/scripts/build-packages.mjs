@@ -17,12 +17,32 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const LAUNCHER_SRC = path.join(HERE, "..", "launcher");
 const REPO_ROOT = path.join(HERE, "..", "..");
 
-/** Rust target triple → npm platform package. Keep in sync with release.yml. */
+/** Rust target triple and release archive → npm package. Keep in sync with release.yml. */
 const TARGETS = [
-  { triple: "aarch64-apple-darwin", os: "darwin", cpu: "arm64" },
-  { triple: "x86_64-apple-darwin", os: "darwin", cpu: "x64" },
-  { triple: "aarch64-unknown-linux-gnu", os: "linux", cpu: "arm64" },
-  { triple: "x86_64-unknown-linux-gnu", os: "linux", cpu: "x64" },
+  {
+    triple: "aarch64-apple-darwin",
+    asset: "tokenpulse-darwin-arm64",
+    os: "darwin",
+    cpu: "arm64",
+  },
+  {
+    triple: "x86_64-apple-darwin",
+    asset: "tokenpulse-darwin-x64",
+    os: "darwin",
+    cpu: "x64",
+  },
+  {
+    triple: "aarch64-unknown-linux-gnu",
+    asset: "tokenpulse-linux-arm64-gnu",
+    os: "linux",
+    cpu: "arm64",
+  },
+  {
+    triple: "x86_64-unknown-linux-gnu",
+    asset: "tokenpulse-linux-x64-gnu",
+    os: "linux",
+    cpu: "x64",
+  },
 ];
 
 function parseArgs(argv) {
@@ -62,14 +82,20 @@ function assertVersionMatchesCrate(version) {
  * either the extracted binary or the tarball so the script also works against a
  * locally assembled directory.
  */
-function binaryFor(artifactsDir, triple) {
-  const artifactName = `tokenpulse-${triple}`;
+function binaryFor(artifactsDir, target) {
+  const artifactName = `tokenpulse-${target.triple}`;
   const direct = path.join(artifactsDir, artifactName, "tokenpulse");
   if (fs.existsSync(direct)) return direct;
 
-  const tarball = path.join(artifactsDir, artifactName, `${artifactName}.tar.gz`);
+  const tarball = path.join(
+    artifactsDir,
+    artifactName,
+    `${target.asset}.tar.gz`,
+  );
   if (!fs.existsSync(tarball)) {
-    throw new Error(`No binary or tarball for ${triple} under ${artifactsDir}`);
+    throw new Error(
+      `No binary or ${target.asset}.tar.gz for ${target.triple} under ${artifactsDir}`,
+    );
   }
   const extractDir = path.join(artifactsDir, artifactName);
   execFileSync("tar", ["-xzf", tarball, "-C", extractDir]);
@@ -87,7 +113,7 @@ function writeJson(file, value) {
 function buildPlatformPackage({ target, version, artifactsDir, outDir }) {
   const name = `@fangwangme/tokenpulse-${target.os}-${target.cpu}`;
   const dir = path.join(outDir, name.replace("/", "__"));
-  const binary = binaryFor(artifactsDir, target.triple);
+  const binary = binaryFor(artifactsDir, target);
 
   fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
   const dest = path.join(dir, "bin", "tokenpulse");

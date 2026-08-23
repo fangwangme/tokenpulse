@@ -130,7 +130,7 @@ job stops before publishing anything.
 
 ### Step 6 — CI takes over
 
-`.github/workflows/release.yml` normally fires on the `v*` tag:
+`.github/workflows/release.yml` fires on the `v*` tag:
 
 | Job | Does |
 | --- | --- |
@@ -152,17 +152,6 @@ use user-facing names instead:
 | `aarch64-apple-darwin` | `tokenpulse-darwin-arm64.tar.gz` |
 | `x86_64-unknown-linux-gnu` | `tokenpulse-linux-x64-gnu.tar.gz` |
 | `aarch64-unknown-linux-gnu` | `tokenpulse-linux-arm64-gnu.tar.gz` |
-
-To rebuild the assets for an existing release without moving its tag or
-republishing its npm version, manually run the workflow with that tag:
-
-```bash
-gh workflow run release.yml -f tag=vX.Y.Z
-```
-
-The manual run checks out the requested tag, replaces the release archives,
-and leaves the existing release notes intact. npm publishing runs only for a
-new tag push.
 
 Both macOS targets build on `macos-14`; the x86_64 one is cross-compiled. Do not
 reintroduce the Intel `macos-13` runner — GitHub no longer allocates it, and a
