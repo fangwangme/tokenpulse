@@ -14,6 +14,14 @@ use tracing::{info, warn};
 const CANONICAL_SOURCE_SQL: &str =
     "CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop', 'antigravity-ide') THEN 'antigravity' ELSE source END";
 
+/// Sources where the `client` column carries provenance only, not counting
+/// identity. Antigravity serves one conversation through several runtimes
+/// (Desktop / IDE / CLI), so the same `message_key` can arrive under different
+/// clients across refreshes. The ledger primary key includes `client`, so
+/// without this collapse an upsert-mode refresh silently accumulates a second
+/// row for a message that was already counted.
+const LOGICAL_MESSAGE_IDENTITY_SOURCES: &[&str] = &["antigravity"];
+
 #[derive(Debug, Clone)]
 pub struct DailyUsageRow {
     pub date: String,
@@ -242,6 +250,12 @@ impl UsageStore {
             affected_dates.insert(message.date.clone());
         }
 
+        let touched_sources: BTreeSet<String> = messages
+            .iter()
+            .map(|message| message.client.clone())
+            .collect();
+        collapse_cross_client_duplicates(&tx, &touched_sources, &mut affected_dates)?;
+
         for date in &affected_dates {
             rebuild_daily_for_date(&tx, date, now)?;
         }
@@ -377,6 +391,12 @@ impl UsageStore {
             affected_dates.insert(message.date.clone());
         }
 
+        let touched_sources: BTreeSet<String> = messages
+            .iter()
+            .map(|message| message.client.clone())
+            .collect();
+        collapse_cross_client_duplicates(&tx, &touched_sources, &mut affected_dates)?;
+
         for date in &affected_dates {
             rebuild_daily_for_date(&tx, date, now)?;
         }
@@ -500,6 +520,12 @@ impl UsageStore {
 
             affected_dates.insert(message.date.clone());
         }
+
+        let touched_sources: BTreeSet<String> = messages
+            .iter()
+            .map(|message| message.client.clone())
+            .collect();
+        collapse_cross_client_duplicates(&tx, &touched_sources, &mut affected_dates)?;
 
         for date in &affected_dates {
             rebuild_daily_for_date(&tx, date, now)?;
@@ -1081,6 +1107,64 @@ fn load_pricing_snapshot_keys(
         ))
     })?;
     Ok(rows.flatten().collect())
+}
+
+/// Collapse rows that describe the same logical message but were recorded under
+/// different runtime clients, keeping the largest observation.
+///
+/// A partial runtime snapshot can only under-report a message (a stale copy of a
+/// response holds fewer output tokens than the finished one), so the widest
+/// totals win; `client` then `rowid` only break exact ties so the result is
+/// deterministic. Dates of the dropped rows are folded into `affected_dates` so
+/// the caller rebuilds those daily aggregates.
+fn collapse_cross_client_duplicates(
+    tx: &Transaction<'_>,
+    sources: &BTreeSet<String>,
+    affected_dates: &mut BTreeSet<String>,
+) -> Result<()> {
+    const SURVIVORS: &str = "SELECT rowid FROM (
+             SELECT rowid, ROW_NUMBER() OVER (
+                 PARTITION BY message_key
+                 ORDER BY total_tokens DESC, client ASC, rowid ASC
+             ) AS rn
+             FROM usage_messages WHERE source = ?1
+         ) WHERE rn = 1";
+
+    for source in sources {
+        if !LOGICAL_MESSAGE_IDENTITY_SOURCES.contains(&source.as_str()) {
+            continue;
+        }
+
+        let mut stmt = tx.prepare(&format!(
+            "SELECT DISTINCT date FROM usage_messages
+              WHERE source = ?1 AND rowid NOT IN ({SURVIVORS})"
+        ))?;
+        let dropped_dates = stmt
+            .query_map(params![source], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        if dropped_dates.is_empty() {
+            continue;
+        }
+
+        let removed = tx.execute(
+            &format!(
+                "DELETE FROM usage_messages
+                  WHERE source = ?1 AND rowid NOT IN ({SURVIVORS})"
+            ),
+            params![source],
+        )?;
+        info!(
+            "Collapsed {} duplicate cross-runtime {} message rows across {} day(s)",
+            removed,
+            source,
+            dropped_dates.len()
+        );
+        affected_dates.extend(dropped_dates);
+    }
+
+    Ok(())
 }
 
 fn load_source_dates(tx: &Transaction<'_>, source: &str) -> Result<Vec<String>> {
@@ -1971,7 +2055,8 @@ mod tests {
         assert_eq!(msg_cnt, 3);
         assert_eq!(session_cnt, 3);
 
-        // 4. Verify that duplicate message keys on the same platform and session are deduplicated in aggregation
+        // 4. The same logical message observed through two runtimes is stored
+        //    once: `client` is provenance, not counting identity.
         let mut msg4 = sample_message("2026-05-22", "dup_key");
         msg4.client = "antigravity".to_string();
         msg4.client_detail = Some("antigravity-cli".to_string());
@@ -1993,7 +2078,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(total_db_count, 2);
+        assert_eq!(total_db_count, 1);
 
         let (msg_cnt_dedup, session_cnt_dedup) = store
             .load_summary_counts(None, &["antigravity".to_string()])
@@ -2067,6 +2152,72 @@ mod tests {
             "pseudo-model zero-cost rows must not keep cost repairs pending"
         );
         assert_eq!(store.repair_zero_costs(None, &[]).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_upsert_refresh_cannot_double_count_across_antigravity_runtimes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        // First refresh sees the session through the Desktop language server.
+        let mut desktop = sample_message("2026-03-01", "sess-1:resp-1");
+        desktop.client = "antigravity".to_string();
+        desktop.client_detail = Some("antigravity-desktop".to_string());
+        desktop.session_id = "sess-1".to_string();
+        desktop.tokens.output = 131;
+        store.ingest_messages(&[desktop], false).unwrap();
+
+        // A later incremental refresh only has the IDE language server in its
+        // window, so the same logical message arrives under a different client.
+        // The ledger primary key includes `client`, so without the collapse this
+        // lands as a second row for a message that was already counted.
+        let mut ide = sample_message("2026-03-01", "sess-1:resp-1");
+        ide.client = "antigravity".to_string();
+        ide.client_detail = Some("antigravity-ide".to_string());
+        ide.session_id = "sess-1".to_string();
+        ide.tokens.output = 357;
+        store.ingest_messages(&[ide], false).unwrap();
+
+        let rows = store
+            .load_messages(None, &["antigravity".to_string()])
+            .unwrap();
+        assert_eq!(rows.len(), 1, "one logical message, one ledger row");
+        assert_eq!(
+            rows[0].client_detail.as_deref(),
+            Some("antigravity-ide"),
+            "the widest observation survives"
+        );
+        assert_eq!(rows[0].tokens.output, 357);
+
+        let (message_count, session_count) = store
+            .load_summary_counts(None, &["antigravity".to_string()])
+            .unwrap();
+        assert_eq!(message_count, 1);
+        assert_eq!(session_count, 1);
+    }
+
+    #[test]
+    fn test_cross_client_collapse_leaves_other_sources_untouched() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        // Codex and Claude legitimately key messages per client; only sources in
+        // LOGICAL_MESSAGE_IDENTITY_SOURCES may be collapsed.
+        let mut a = sample_message("2026-03-01", "shared-key");
+        a.client = "codex".to_string();
+        a.client_detail = Some("codex".to_string());
+        let mut b = sample_message("2026-03-01", "shared-key");
+        b.client = "claude".to_string();
+        b.client_detail = Some("claude".to_string());
+        store.ingest_messages(&[a, b], false).unwrap();
+
+        assert_eq!(
+            store
+                .load_messages(None, &["codex".to_string(), "claude".to_string()])
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

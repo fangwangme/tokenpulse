@@ -15,7 +15,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Unified sessions existing across Desktop and IDE into a canonical Desktop work item with prioritized candidate connection routing (`[Desktop, IDE]`), avoiding redundant queries and duplicate counting.
   - Logical message deduplication by `(session_id, message_key)` ensures multi-client artifact overlaps emit single unified messages without token inflation.
   - Preserved cached session metadata and usage when Language Server connections are inactive.
-  - Bumped parser version to `antigravity-v3` for clean migration in the usage ledger.
+  - Bumped parser version to `antigravity-v4` for clean migration in the usage ledger.
+
+### Fixed
+- **Antigravity usage ledger no longer accumulates duplicate rows**: the ledger's
+  primary key includes the runtime client, so an incremental refresh that saw a
+  message through a different Antigravity runtime than the previous refresh
+  stored it a second time. Reported totals were unaffected — the daily rollup
+  already collapsed those rows — but the ledger grew a stale row per message and
+  relied on that safety net. Ingest now enforces one row per logical message for
+  Antigravity and prunes rows left behind by earlier refreshes.
+- **Desktop/IDE overlap now collapses regardless of which app is running**:
+  conversation-root discovery was gated on having a live Language Server for that
+  root, so the 3-root inventory (and therefore the Desktop+IDE merge) silently
+  degraded to whichever apps happened to be open. All three roots are now always
+  scanned, and the merge runs after every connection has been listed instead of
+  depending on process enumeration order.
+- **Kept the widest observation when runtimes disagree**: Desktop and IDE can
+  report different token counts for the same response, and the runtime holding a
+  stale copy always reports fewer. Deduplication now prefers the larger totals
+  and uses runtime priority only to break exact ties, matching what the
+  aggregation layer already reported.
+- **Stale cache rows from a changed canonical runtime**: re-syncing a session
+  only cleared usage rows for its current canonical client, leaving the previous
+  client's rows in the Antigravity cache. Every runtime the work item covers is
+  now cleared before rewriting.
+- **Change detection no longer under-syncs**: the incremental "unchanged" check
+  compared against local file mtime only while storing the merged local/RPC
+  timestamp, so a session could be skipped indefinitely once an RPC listing
+  reported a newer timestamp.
+- Electron renderer/GPU/utility children of the Antigravity app are no longer
+  probed as Language Server candidates, cutting an `lsof` and heartbeat request
+  per helper process on every refresh.
 
 ## [0.5.3] - 2026-08-15
 
