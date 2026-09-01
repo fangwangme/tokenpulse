@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 use tracing::{info, warn};
 
 const CANONICAL_SOURCE_SQL: &str =
-    "CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END";
+    "CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop', 'antigravity-ide') THEN 'antigravity' ELSE source END";
 
 #[derive(Debug, Clone)]
 pub struct DailyUsageRow {
@@ -69,7 +69,7 @@ impl UsageStore {
         let conn = self.open()?;
         let value: Option<String> = if source == "antigravity" {
             conn.query_row(
-                "SELECT MAX(date) FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop')",
+                "SELECT MAX(date) FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop', 'antigravity-ide')",
                 [],
                 |row| row.get(0),
             )
@@ -114,6 +114,7 @@ impl UsageStore {
             let canonical_source = if source == "antigravity"
                 || source == "antigravity-cli"
                 || source == "antigravity-desktop"
+                || source == "antigravity-ide"
             {
                 "antigravity"
             } else {
@@ -988,7 +989,12 @@ fn append_common_filters(
         let mut first = true;
         for source in sources {
             if source == "antigravity" {
-                for s in &["antigravity", "antigravity-cli", "antigravity-desktop"] {
+                for s in &[
+                    "antigravity",
+                    "antigravity-cli",
+                    "antigravity-desktop",
+                    "antigravity-ide",
+                ] {
                     if !first {
                         sql.push_str(", ");
                     }
@@ -1030,7 +1036,12 @@ fn append_range_and_source_filters(
         let mut first = true;
         for source in sources {
             if source == "antigravity" {
-                for s in &["antigravity", "antigravity-cli", "antigravity-desktop"] {
+                for s in &[
+                    "antigravity",
+                    "antigravity-cli",
+                    "antigravity-desktop",
+                    "antigravity-ide",
+                ] {
                     if !first {
                         sql.push_str(", ");
                     }
@@ -1075,7 +1086,7 @@ fn load_pricing_snapshot_keys(
 fn load_source_dates(tx: &Transaction<'_>, source: &str) -> Result<Vec<String>> {
     let mapper = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
     let dates = if source == "antigravity" {
-        let mut stmt = tx.prepare("SELECT DISTINCT date FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop') ORDER BY date ASC")?;
+        let mut stmt = tx.prepare("SELECT DISTINCT date FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop', 'antigravity-ide') ORDER BY date ASC")?;
         let res = stmt
             .query_map([], mapper)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2056,5 +2067,59 @@ mod tests {
             "pseudo-model zero-cost rows must not keep cost repairs pending"
         );
         assert_eq!(store.repair_zero_costs(None, &[]).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_antigravity_ide_source_handling_and_migration() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        // 1. Ingest an older v2 message with client_detail = "antigravity-cli" and another with "antigravity-ide"
+        let mut msg_old_cli = sample_message("2026-03-01", "key-1");
+        msg_old_cli.client = "antigravity".to_string();
+        msg_old_cli.client_detail = Some("antigravity-cli".to_string());
+        msg_old_cli.parser_version = "antigravity-v2".to_string();
+
+        let mut msg_old_ide = sample_message("2026-03-01", "key-2");
+        msg_old_ide.client = "antigravity".to_string();
+        msg_old_ide.client_detail = Some("antigravity-ide".to_string());
+        msg_old_ide.parser_version = "antigravity-v2".to_string();
+
+        store
+            .ingest_messages(&[msg_old_cli, msg_old_ide], false)
+            .unwrap();
+
+        // 2. check_stale_parser_versions should identify "antigravity" as stale when target is "antigravity-v3"
+        let stale_sources = store
+            .check_stale_parser_versions(&[("antigravity", "antigravity-v3")])
+            .unwrap();
+        assert_eq!(stale_sources, HashSet::from(["antigravity".to_string()]));
+
+        // 3. Replace source messages with canonical v3 message
+        let mut msg_v3 = sample_message("2026-03-01", "key-canonical");
+        msg_v3.client = "antigravity".to_string();
+        msg_v3.client_detail = Some("antigravity-desktop".to_string());
+        msg_v3.parser_version = "antigravity-v3".to_string();
+
+        store
+            .replace_source_messages("antigravity", &[msg_v3], false)
+            .unwrap();
+
+        // 4. Verify stale rows under all antigravity client kinds were cleaned up
+        let remaining = store
+            .load_messages(None, &["antigravity".to_string()])
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].message_key, "key-canonical");
+        assert_eq!(
+            remaining[0].client_detail.as_deref(),
+            Some("antigravity-desktop")
+        );
+        assert_eq!(remaining[0].parser_version, "antigravity-v3");
+
+        let stale_after = store
+            .check_stale_parser_versions(&[("antigravity", "antigravity-v3")])
+            .unwrap();
+        assert!(stale_after.is_empty());
     }
 }

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Antigravity IDE Session Sync & Discovery**: Added multi-root discovery across `~/.gemini/antigravity`, `~/.gemini/antigravity-ide`, and `~/.gemini/antigravity-cli`, along with IDE Language Server process candidate detection (`antigravity-ide`).
+
+### Changed
+- **Antigravity Session Deduplication & Incremental Sync**:
+  - Unified sessions existing across Desktop and IDE into a canonical Desktop work item with prioritized candidate connection routing (`[Desktop, IDE]`), avoiding redundant queries and duplicate counting.
+  - Logical message deduplication by `(session_id, message_key)` ensures multi-client artifact overlaps emit single unified messages without token inflation.
+  - Preserved cached session metadata and usage when Language Server connections are inactive.
+  - Bumped parser version to `antigravity-v3` for clean migration in the usage ledger.
+
 ## [0.5.3] - 2026-08-15
 
 ### Changed
