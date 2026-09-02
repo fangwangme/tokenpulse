@@ -22,6 +22,16 @@ const CANONICAL_SOURCE_SQL: &str =
 /// row for a message that was already counted.
 const LOGICAL_MESSAGE_IDENTITY_SOURCES: &[&str] = &["antigravity"];
 
+/// How far back an incremental refresh re-examines session files.
+///
+/// This window only ever moves forward, so anything it skips once is skipped
+/// forever — nothing re-opens an old file until a full rebuild. One day was too
+/// tight to survive a machine migration: restoring a backup writes transcripts
+/// with their original modification times, so files can land on disk already
+/// behind the window. A week of slack costs a few extra file reads per refresh
+/// and gives a restore room to be noticed.
+const INCREMENTAL_LOOKBACK_DAYS: i64 = 7;
+
 #[derive(Debug, Clone)]
 pub struct DailyUsageRow {
     pub date: String,
@@ -146,7 +156,7 @@ impl UsageStore {
     ) -> Result<Option<NaiveDate>> {
         let inferred = self
             .latest_message_date(source)?
-            .map(|date| date - Duration::days(1));
+            .map(|date| date - Duration::days(INCREMENTAL_LOOKBACK_DAYS));
 
         Ok(match (requested, inferred) {
             (Some(requested), Some(inferred)) => Some(requested.max(inferred)),
@@ -305,21 +315,39 @@ impl UsageStore {
             })
             .collect();
 
+        // Only rows written by an *older* parser are dropped and re-derived.
+        //
+        // A session's rows must never be cleared just because this parse did not
+        // reproduce them. Agents delete their own transcripts on a retention
+        // timer, so a session can legitimately live on disk with only part of
+        // its history left — and once that happens the ledger is the only record
+        // of the rest. Recorded usage is a fact that already happened; a refresh
+        // may correct a row (the upsert below does that) but may not erase one it
+        // can no longer see.
+        let parser_versions: HashMap<String, String> = messages
+            .iter()
+            .map(|message| (message.client.clone(), message.parser_version.clone()))
+            .collect();
+
         for (source, client, session_id) in &session_keys {
+            let parser_version = parser_versions.get(source).cloned().unwrap_or_default();
             let mut stmt = tx.prepare(
-                "SELECT DISTINCT date FROM usage_messages WHERE source = ?1 AND client = ?2 AND session_id = ?3",
+                "SELECT DISTINCT date FROM usage_messages
+                  WHERE source = ?1 AND client = ?2 AND session_id = ?3 AND parser_version <> ?4",
             )?;
-            let rows = stmt.query_map(params![source, client, session_id], |row| {
-                row.get::<_, String>(0)
-            })?;
+            let rows = stmt
+                .query_map(params![source, client, session_id, parser_version], |row| {
+                    row.get::<_, String>(0)
+                })?;
             for row in rows.flatten() {
                 affected_dates.insert(row);
             }
             drop(stmt);
 
             tx.execute(
-                "DELETE FROM usage_messages WHERE source = ?1 AND client = ?2 AND session_id = ?3",
-                params![source, client, session_id],
+                "DELETE FROM usage_messages
+                  WHERE source = ?1 AND client = ?2 AND session_id = ?3 AND parser_version <> ?4",
+                params![source, client, session_id, parser_version],
             )?;
         }
 
@@ -1751,7 +1779,11 @@ mod tests {
             .ingest_messages(&[sample_message("2024-03-10", "m1")], false)
             .unwrap();
         let since = store.default_since("claude", None).unwrap().unwrap();
-        assert_eq!(since, NaiveDate::from_ymd_opt(2024, 3, 9).unwrap());
+        assert_eq!(
+            since,
+            NaiveDate::from_ymd_opt(2024, 3, 10).unwrap()
+                - Duration::days(INCREMENTAL_LOOKBACK_DAYS)
+        );
     }
 
     #[test]
@@ -1836,18 +1868,25 @@ mod tests {
     }
 
     #[test]
-    fn replace_sessions_messages_replaces_only_changed_sessions() {
+    fn replace_sessions_messages_reparses_older_parser_rows_only() {
         let tempdir = tempfile::tempdir().unwrap();
         let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
 
-        let mut old_changed = sample_message("2024-03-10", "changed-old");
-        old_changed.session_id = "changed-session".to_string();
+        // Written by an older parser: this one is safe to drop and re-derive.
+        let mut stale = sample_message("2024-03-10", "stale-key");
+        stale.session_id = "changed-session".to_string();
+        stale.parser_version = "claude-v3".to_string();
+
+        // Same session, current parser, but its transcript has since aged out so
+        // no future parse can reproduce it. The ledger is the only record left.
+        let mut aged_out = sample_message("2024-03-10", "aged-out-key");
+        aged_out.session_id = "changed-session".to_string();
 
         let mut untouched = sample_message("2024-03-11", "untouched");
         untouched.session_id = "untouched-session".to_string();
 
         store
-            .ingest_messages(&[old_changed, untouched], false)
+            .ingest_messages(&[stale, aged_out, untouched], false)
             .unwrap();
 
         let mut replacement = sample_message("2024-03-12", "changed-new");
@@ -1863,17 +1902,24 @@ mod tests {
             .map(|message| message.message_key.as_str())
             .collect::<BTreeSet<_>>();
 
-        assert_eq!(remaining.len(), 2);
-        assert!(keys.contains("changed-new"));
-        assert!(keys.contains("untouched"));
-        assert!(!keys.contains("changed-old"));
+        assert!(keys.contains("changed-new"), "new row is ingested");
+        assert!(keys.contains("untouched"), "other sessions are untouched");
+        assert!(
+            !keys.contains("stale-key"),
+            "rows from an older parser are re-derived"
+        );
+        assert!(
+            keys.contains("aged-out-key"),
+            "usage this parse can no longer see must survive the refresh"
+        );
+        assert_eq!(remaining.len(), 3);
 
         let days = store
             .load_dashboard_days(None, &["claude".to_string()])
             .unwrap();
         assert_eq!(
             days.iter().map(|day| day.date.as_str()).collect::<Vec<_>>(),
-            vec!["2024-03-11", "2024-03-12"]
+            vec!["2024-03-10", "2024-03-11", "2024-03-12"]
         );
     }
 

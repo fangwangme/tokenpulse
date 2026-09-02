@@ -47,6 +47,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Electron renderer/GPU/utility children of the Antigravity app are no longer
   probed as Language Server candidates, cutting an `lsof` and heartbeat request
   per helper process on every refresh.
+- **A refresh can no longer erase usage it cannot re-read.** Re-parsing a session
+  cleared all of its ledger rows and re-inserted whatever the current transcript
+  still held. Agents delete their own transcripts on a retention timer, so a
+  session can legitimately survive on disk with only part of its history left —
+  and at that point the ledger is the only record of the rest. Refreshes now only
+  re-derive rows written by an older parser version; recorded usage is a fact
+  that a later refresh may correct but may not silently drop.
+- **Restored and migrated session files are discovered again.** Incremental
+  refresh selected files by modification time, but restoring a backup or moving
+  to another machine rewrites files with their *original* mtime — so transcripts
+  could land on disk already older than the window and never be read. Discovery
+  now uses the later of modification and inode-change time, and the window widened
+  from 1 to 7 days. On the machine this was found on, a system migration had
+  silently dropped 152 messages (23.9M tokens); they are recovered on the next
+  refresh.
 
 ## [0.5.3] - 2026-08-15
 

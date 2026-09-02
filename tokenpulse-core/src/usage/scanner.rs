@@ -28,14 +28,10 @@ pub fn discover_files_with_extensions(
         entries
             .into_par_iter()
             .filter(|e| {
-                if let Ok(metadata) = e.metadata() {
-                    if let Ok(modified) = metadata.modified() {
-                        let modified_date =
-                            chrono::DateTime::<chrono::Local>::from(modified).date_naive();
-                        return modified_date >= since_date;
-                    }
-                }
-                false
+                e.metadata()
+                    .ok()
+                    .and_then(|metadata| file_arrival_date(&metadata))
+                    .is_some_and(|arrival| arrival >= since_date)
             })
             .map(|e| e.path().to_path_buf())
             .collect()
@@ -44,6 +40,41 @@ pub fn discover_files_with_extensions(
             .into_iter()
             .map(|e| e.path().to_path_buf())
             .collect()
+    }
+}
+
+/// The most recent date at which this file could have gained content we have not
+/// read yet.
+///
+/// Modification time alone is not enough. Restoring a backup, migrating to
+/// another machine, or any `rsync -a` / `cp -p` writes the file with its
+/// *original* mtime, so a transcript can land on disk already older than the
+/// incremental window and never be seen. Inode change time cannot be back-dated
+/// that way — on the destination it is the moment the file was written there —
+/// so the later of the two is what "recently arrived" actually means.
+fn file_arrival_date(metadata: &std::fs::Metadata) -> Option<NaiveDate> {
+    let modified = metadata
+        .modified()
+        .ok()
+        .map(|time| chrono::DateTime::<chrono::Local>::from(time).date_naive());
+
+    #[cfg(unix)]
+    let changed = {
+        use std::os::unix::fs::MetadataExt;
+        chrono::DateTime::from_timestamp(metadata.ctime(), 0)
+            .map(|time| time.with_timezone(&chrono::Local).date_naive())
+    };
+    // Windows has no ctime; creation time is the closest equivalent and is also
+    // set to the copy time when a file is restored.
+    #[cfg(not(unix))]
+    let changed = metadata
+        .created()
+        .ok()
+        .map(|time| chrono::DateTime::<chrono::Local>::from(time).date_naive());
+
+    match (modified, changed) {
+        (Some(modified), Some(changed)) => Some(modified.max(changed)),
+        (modified, changed) => modified.or(changed),
     }
 }
 
@@ -64,6 +95,36 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path().to_path_buf();
         (temp_dir, root)
+    }
+
+    #[test]
+    fn test_discover_files_sees_a_restored_backup_with_an_old_mtime() {
+        // Restoring a backup (Time Machine, `rsync -a`, a machine migration)
+        // rewrites the file with its ORIGINAL modification time, so it can land
+        // on disk already older than the incremental window. Inode change time
+        // is the moment it was written here and cannot be back-dated, so the
+        // file must still be discovered.
+        let (_temp_dir, root) = create_temp_dir();
+        let restored = root.join("restored-session.jsonl");
+        fs::write(&restored, "{}").unwrap();
+
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 86_400);
+        fs::File::options()
+            .write(true)
+            .open(&restored)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        let modified = chrono::DateTime::<chrono::Local>::from(
+            fs::metadata(&restored).unwrap().modified().unwrap(),
+        )
+        .date_naive();
+        let since = chrono::Local::now().date_naive() - chrono::Duration::days(7);
+        assert!(modified < since, "mtime must be outside the window");
+
+        let files = discover_files(&root, "jsonl", Some(since));
+        assert_eq!(files.len(), 1, "restored file must still be discovered");
     }
 
     #[test]
