@@ -12,11 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-/// Bumped from `antigravity-v2` when local `gen_metadata` parsing landed. Both
-/// the local and the RPC path stamp rows with it, so the ledger's staleness
-/// check sees one version per source, and a bump re-reads every cached
-/// conversation instead of only the ones whose files changed.
-const PARSER_VERSION: &str = "antigravity-v3";
+/// Bumped from `antigravity-v3` when Antigravity IDE and cross-runtime
+/// deduplication landed.
+const PARSER_VERSION: &str = "antigravity-v4";
 const MODEL_ALIAS_HISTORY_VERSION: u32 = 1;
 const MODEL_ALIAS_HISTORY_FILE_NAME: &str = "model-aliases.json";
 const ANTIGRAVITY_LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
@@ -78,7 +76,7 @@ impl SessionParser for AntigravitySessionParser {
     }
 
     fn parse_sessions(&self, _since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
-        let mut all_messages = Vec::new();
+        let mut unique_messages: HashMap<(String, String), UnifiedMessage> = HashMap::new();
 
         for root in self.session_paths() {
             // Sync first!
@@ -110,7 +108,7 @@ impl SessionParser for AntigravitySessionParser {
             let mut query = String::from(
                 "SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
                         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                        pricing_day, parser_version
+                        pricing_day
                  FROM session_usage"
             );
 
@@ -148,7 +146,6 @@ impl SessionParser for AntigravitySessionParser {
                     row.get::<_, i64>(9)?,
                     row.get::<_, i64>(10)?,
                     row.get::<_, String>(11)?,
-                    row.get::<_, String>(12)?,
                 ))
             };
 
@@ -168,7 +165,6 @@ impl SessionParser for AntigravitySessionParser {
                     cache_write,
                     reasoning,
                     pricing_day,
-                    parser_version,
                 ) = row?;
 
                 let tokens = TokenBreakdown {
@@ -183,26 +179,77 @@ impl SessionParser for AntigravitySessionParser {
                     "antigravity",
                     model_id,
                     provider_id,
-                    session_id,
-                    message_key,
+                    session_id.clone(),
+                    message_key.clone(),
                     timestamp,
                     tokens,
                 )
                 .with_client_detail(client)
                 .with_pricing_day(pricing_day)
-                .with_parser_version(parser_version);
+                // Stamp the parser that produced this ledger row, like every
+                // other provider. Forwarding the cache row's own version instead
+                // left sessions that predate a bump permanently "stale", so the
+                // ledger was fully reparsed and replaced on every refresh.
+                .with_parser_version(PARSER_VERSION);
 
-                all_messages.push(msg);
+                let logical_key = (session_id, message_key);
+                if let Some(existing) = unique_messages.get_mut(&logical_key) {
+                    if should_replace_antigravity_message(existing, &msg) {
+                        *existing = msg;
+                    }
+                } else {
+                    unique_messages.insert(logical_key, msg);
+                }
             }
         }
 
-        all_messages.sort_by_key(|m| m.timestamp);
+        let mut all_messages: Vec<UnifiedMessage> = unique_messages.into_values().collect();
+        all_messages.sort_by(|a, b| {
+            a.timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a.session_id.cmp(&b.session_id))
+                .then_with(|| a.message_key.cmp(&b.message_key))
+        });
         Ok(all_messages)
     }
 
     fn parser_version(&self) -> &str {
         PARSER_VERSION
     }
+}
+
+fn antigravity_client_priority(client_detail: Option<&str>) -> u8 {
+    match client_detail {
+        Some("antigravity-desktop") => 1,
+        Some("antigravity-ide") => 2,
+        Some("antigravity-cli") => 3,
+        _ => 4,
+    }
+}
+
+/// Pick between two runtime observations of the same logical message.
+///
+/// Desktop and IDE share migrated conversations, and a runtime that holds a
+/// stale copy of a response reports fewer tokens than the runtime that saw it
+/// finish — never more. So the widest totals win, and the runtime priority only
+/// breaks exact ties to keep `client_detail` stable across refreshes.
+fn should_replace_antigravity_message(
+    existing: &UnifiedMessage,
+    candidate: &UnifiedMessage,
+) -> bool {
+    let existing_total = existing.tokens.total();
+    let candidate_total = candidate.tokens.total();
+    if candidate_total != existing_total {
+        return candidate_total > existing_total;
+    }
+
+    let existing_priority = antigravity_client_priority(existing.client_detail.as_deref());
+    let candidate_priority = antigravity_client_priority(candidate.client_detail.as_deref());
+    if candidate_priority != existing_priority {
+        return candidate_priority < existing_priority;
+    }
+
+    candidate.timestamp > existing.timestamp
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +265,7 @@ pub struct AntigravityConnection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AntigravityRuntimeKind {
     Desktop,
+    Ide,
     Cli,
     Unknown,
 }
@@ -226,6 +274,7 @@ impl AntigravityRuntimeKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
+            Self::Ide => "ide",
             Self::Cli => "cli",
             Self::Unknown => "unknown",
         }
@@ -236,6 +285,7 @@ impl std::fmt::Display for AntigravityRuntimeKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Desktop => write!(f, "Desktop"),
+            Self::Ide => write!(f, "IDE"),
             Self::Cli => write!(f, "CLI"),
             Self::Unknown => write!(f, "Unknown"),
         }
@@ -530,18 +580,33 @@ async fn sync_antigravity_with_options_async(
         }
     }
 
-    let active_kinds: Vec<AntigravityRuntimeKind> =
-        connections.iter().map(|c| c.runtime_kind).collect();
-    let local_conversation_ids = discover_local_conversation_ids(&active_kinds);
+    let local_conversation_ids = discover_local_conversation_ids();
     debug!(
         "Discovered {} local conversation files",
         local_conversation_ids.len()
     );
 
-    let mut unique_summaries: HashMap<AntigravitySessionCacheKey, AntigravitySyncSummary> =
-        HashMap::new();
+    let has_local_desktop = local_conversation_ids
+        .iter()
+        .any(|c| c.runtime_kind == AntigravityRuntimeKind::Desktop);
+    let has_local_ide = local_conversation_ids
+        .iter()
+        .any(|c| c.runtime_kind == AntigravityRuntimeKind::Ide);
+    let has_local_cli = local_conversation_ids
+        .iter()
+        .any(|c| c.runtime_kind == AntigravityRuntimeKind::Cli);
+
+    let mut work_items = build_inventory_work_items(&local_conversation_ids);
+
     for connection in &connections {
-        if !options.rebuild_all_cache && !local_conversation_ids.is_empty() {
+        let has_local_for_runtime = match connection.runtime_kind {
+            AntigravityRuntimeKind::Desktop => has_local_desktop,
+            AntigravityRuntimeKind::Ide => has_local_ide,
+            AntigravityRuntimeKind::Cli => has_local_cli,
+            AntigravityRuntimeKind::Unknown => false,
+        };
+
+        if !options.rebuild_all_cache && has_local_for_runtime {
             continue;
         }
 
@@ -576,68 +641,57 @@ async fn sync_antigravity_with_options_async(
                 continue;
             }
 
-            upsert_sync_summary(
-                &mut unique_summaries,
-                AntigravitySessionCacheKey {
-                    session_id,
-                    runtime_kind: connection.runtime_kind,
-                },
-                summary_from_trajectory_item(&item, connection.clone()),
-            );
-        }
-    }
-    for local in local_conversation_ids {
-        let cache_key = AntigravitySessionCacheKey {
-            session_id: local.session_id.clone(),
-            runtime_kind: local.runtime_kind,
-        };
-        if let Some(summary) = unique_summaries.get_mut(&cache_key) {
-            summary.last_modified_ms = newer_timestamp(summary.last_modified_ms, local.modified_ms);
-            prioritize_connections_for_runtime(
-                &mut summary.connections,
-                &connections,
-                local.runtime_kind,
-            );
-        } else {
-            let mut conns = Vec::new();
-            prioritize_connections_for_runtime(&mut conns, &connections, local.runtime_kind);
-            unique_summaries.insert(
-                cache_key,
-                AntigravitySyncSummary {
-                    last_modified_ms: local.modified_ms,
-                    connections: conns,
-                    trajectory_id: None,
-                    title: None,
-                    status: None,
-                    step_count: None,
-                    created_time_ms: None,
-                    last_user_input_time_ms: None,
-                    project_id: None,
-                    workspace_path: None,
-                    git_root: None,
-                    repository: None,
-                    git_origin_url: None,
-                    branch_name: None,
-                    parent_conversation_id: None,
-                    mendel_experiment_ids: None,
-                },
-            );
+            let summary = summary_from_trajectory_item(&item);
+            let item_key = AntigravitySessionCacheKey {
+                session_id: session_id.clone(),
+                runtime_kind: connection.runtime_kind,
+            };
+
+            if let Some(existing) = work_items.get_mut(&item_key) {
+                enrich_summary(&mut existing.summary, summary);
+            } else {
+                work_items.insert(
+                    item_key,
+                    AntigravityWorkItem {
+                        session_id: session_id.clone(),
+                        canonical_runtime: connection.runtime_kind,
+                        candidate_runtimes: vec![connection.runtime_kind],
+                        summary,
+                    },
+                );
+            }
         }
     }
 
+    // Runs after every connection has been listed, so the Desktop/IDE collapse
+    // no longer depends on the order `connections` happens to be in.
+    collapse_desktop_ide_overlap(&mut work_items);
+
     let mut sessions_to_sync = Vec::new();
-    for (cache_key, summary) in unique_summaries {
-        let session_id = cache_key.session_id.clone();
-        let client_str = client_str_for_runtime_kind(cache_key.runtime_kind).to_string();
-        let last_modified_ms = summary.last_modified_ms;
+    for (_key, work_item) in work_items {
+        let candidate_connections =
+            resolve_candidate_connections(&work_item.candidate_runtimes, &connections);
+
+        // Decision 7: Skip sessions that have no compatible active connection during normal sync,
+        // preserving any existing rich cache rows.
+        if candidate_connections.is_empty() {
+            debug!(
+                "Session {} has no compatible active connections for candidate runtimes {:?}, skipping",
+                work_item.session_id, work_item.candidate_runtimes
+            );
+            continue;
+        }
+
+        let client_str = client_str_for_runtime_kind(work_item.canonical_runtime);
+        let session_id = &work_item.session_id;
 
         if !options.rebuild_all_cache {
             if let Some((cached_lm, cached_step)) =
-                cached_sessions.get(&(client_str.clone(), session_id.clone()))
+                cached_sessions.get(&(client_str.to_string(), session_id.clone()))
             {
-                let unchanged = match (cached_lm, last_modified_ms) {
+                let unchanged = match (cached_lm, work_item.summary.last_modified_ms) {
                     (Some(cached), Some(current)) => cached >= &current,
-                    _ => match (cached_step, summary.step_count) {
+                    _ => match (cached_step, work_item.summary.step_count) {
                         (Some(cached), Some(current)) => cached >= &current,
                         _ => false,
                     },
@@ -648,7 +702,8 @@ async fn sync_antigravity_with_options_async(
                 }
             }
         }
-        sessions_to_sync.push((cache_key, summary));
+
+        sessions_to_sync.push((work_item, candidate_connections));
     }
 
     let total_detected_sessions = sessions_to_sync.len();
@@ -659,11 +714,11 @@ async fn sync_antigravity_with_options_async(
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
     let mut join_set = tokio::task::JoinSet::new();
 
-    for (idx, (cache_key, summary)) in sessions_to_sync.iter().enumerate() {
+    for (idx, (work_item, candidate_conns)) in sessions_to_sync.iter().enumerate() {
         let client_clone = client.clone();
         let sem_clone = semaphore.clone();
-        let session_id = cache_key.session_id.clone();
-        let connections = summary.connections.clone();
+        let session_id = work_item.session_id.clone();
+        let conns = candidate_conns.clone();
         let metadata_timeout = if options.rebuild_all_cache {
             Duration::from_secs(30)
         } else {
@@ -673,7 +728,7 @@ async fn sync_antigravity_with_options_async(
         join_set.spawn(async move {
             let _permit = sem_clone.acquire().await.ok();
             let mut metadata_response = None;
-            for conn in &connections {
+            for conn in &conns {
                 match rpc_request_with_timeout(
                     &client_clone,
                     conn,
@@ -719,23 +774,32 @@ async fn sync_antigravity_with_options_async(
     let now_ms = Local::now().timestamp_millis();
     let mut empty_metadata_count = 0usize;
     let mut zero_usage_sessions_count = 0usize;
-    for (idx, (cache_key, summary)) in sessions_to_sync.into_iter().enumerate() {
+    for (idx, (work_item, _conns)) in sessions_to_sync.into_iter().enumerate() {
+        let AntigravityWorkItem {
+            session_id,
+            canonical_runtime,
+            candidate_runtimes,
+            summary,
+        } = work_item;
+        let client_str = client_str_for_runtime_kind(canonical_runtime);
+
         let Some(metadata_response) = responses[idx].take() else {
-            let tx = db_conn.transaction()?;
-            upsert_antigravity_session_row(
-                &tx,
-                &cache_key.session_id,
-                client_str_for_runtime_kind(cache_key.runtime_kind),
-                &summary,
-                "unknown",
-                now_ms,
-            )?;
-            tx.commit()?;
+            // All candidate connections failed:
+            // If session is already in cache with rich data, do NOT overwrite it!
+            if !cached_sessions.contains_key(&(client_str.to_string(), session_id.clone())) {
+                let tx = db_conn.transaction()?;
+                upsert_antigravity_session_row(
+                    &tx,
+                    &session_id,
+                    client_str,
+                    &summary,
+                    "unknown",
+                    now_ms,
+                )?;
+                tx.commit()?;
+            }
             continue;
         };
-
-        let session_id = cache_key.session_id;
-        let client_str = client_str_for_runtime_kind(cache_key.runtime_kind);
 
         let metadata = metadata_response
             .get("generatorMetadata")
@@ -782,6 +846,15 @@ async fn sync_antigravity_with_options_async(
         // and deleting first would drop rows the local parser produced whenever
         // the RPC returns a subset of them.
         let tx = db_conn.transaction()?;
+        // Clear every runtime this work item speaks for, not just the canonical
+        // one: a session whose canonical runtime changed between refreshes would
+        // otherwise leave its previous client's rows behind and be counted twice.
+        for runtime in &candidate_runtimes {
+            tx.execute(
+                "DELETE FROM session_usage WHERE client = ? AND session_id = ?;",
+                rusqlite::params![client_str_for_runtime_kind(*runtime), &session_id],
+            )?;
+        }
 
         upsert_antigravity_session_row(
             &tx,
@@ -991,8 +1064,124 @@ fn client_str_for_runtime_kind(runtime_kind: AntigravityRuntimeKind) -> &'static
     match runtime_kind {
         AntigravityRuntimeKind::Cli => "antigravity-cli",
         AntigravityRuntimeKind::Desktop => "antigravity-desktop",
+        AntigravityRuntimeKind::Ide => "antigravity-ide",
         AntigravityRuntimeKind::Unknown => "antigravity",
     }
+}
+
+#[derive(Debug, Clone)]
+struct AntigravityWorkItem {
+    session_id: String,
+    canonical_runtime: AntigravityRuntimeKind,
+    candidate_runtimes: Vec<AntigravityRuntimeKind>,
+    summary: AntigravitySyncSummary,
+}
+
+/// One work item per (session, data root) discovered on disk. Overlapping roots
+/// are merged afterwards by [`collapse_desktop_ide_overlap`], so this stays a
+/// straight projection of the local inventory.
+fn build_inventory_work_items(
+    local_conversation_ids: &[LocalConversationId],
+) -> HashMap<AntigravitySessionCacheKey, AntigravityWorkItem> {
+    let mut work_items: HashMap<AntigravitySessionCacheKey, AntigravityWorkItem> = HashMap::new();
+    for local in local_conversation_ids {
+        let key = AntigravitySessionCacheKey {
+            session_id: local.session_id.clone(),
+            runtime_kind: local.runtime_kind,
+        };
+        let item = work_items
+            .entry(key)
+            .or_insert_with(|| AntigravityWorkItem {
+                session_id: local.session_id.clone(),
+                canonical_runtime: local.runtime_kind,
+                candidate_runtimes: vec![local.runtime_kind],
+                summary: AntigravitySyncSummary::empty_with_mtime(None),
+            });
+        item.summary.last_modified_ms =
+            newer_timestamp(item.summary.last_modified_ms, local.modified_ms);
+    }
+    work_items
+}
+
+/// Fold a session that exists in both the Desktop and IDE roots into a single
+/// canonical Desktop work item.
+///
+/// Desktop and IDE Language Servers are not interchangeable for arbitrary
+/// sessions, but a session present in *both* roots can be answered by either —
+/// so the IDE endpoint stays available as a fallback, ordered after Desktop.
+fn collapse_desktop_ide_overlap(
+    work_items: &mut HashMap<AntigravitySessionCacheKey, AntigravityWorkItem>,
+) {
+    let overlapping: Vec<String> = work_items
+        .keys()
+        .filter(|key| key.runtime_kind == AntigravityRuntimeKind::Ide)
+        .filter(|key| {
+            work_items.contains_key(&AntigravitySessionCacheKey {
+                session_id: key.session_id.clone(),
+                runtime_kind: AntigravityRuntimeKind::Desktop,
+            })
+        })
+        .map(|key| key.session_id.clone())
+        .collect();
+
+    for session_id in overlapping {
+        let Some(ide_item) = work_items.remove(&AntigravitySessionCacheKey {
+            session_id: session_id.clone(),
+            runtime_kind: AntigravityRuntimeKind::Ide,
+        }) else {
+            continue;
+        };
+        let Some(desktop_item) = work_items.get_mut(&AntigravitySessionCacheKey {
+            session_id,
+            runtime_kind: AntigravityRuntimeKind::Desktop,
+        }) else {
+            continue;
+        };
+
+        enrich_summary(&mut desktop_item.summary, ide_item.summary);
+        for runtime in ide_item.candidate_runtimes {
+            if !desktop_item.candidate_runtimes.contains(&runtime) {
+                desktop_item.candidate_runtimes.push(runtime);
+            }
+        }
+    }
+}
+
+fn resolve_candidate_connections(
+    candidate_runtimes: &[AntigravityRuntimeKind],
+    all_connections: &[AntigravityConnection],
+) -> Vec<AntigravityConnection> {
+    let mut conns = Vec::new();
+    for runtime in candidate_runtimes {
+        for conn in all_connections
+            .iter()
+            .filter(|c| c.runtime_kind == *runtime)
+        {
+            push_unique_connection(&mut conns, conn.clone());
+        }
+    }
+    conns
+}
+
+fn enrich_summary(dest: &mut AntigravitySyncSummary, src: AntigravitySyncSummary) {
+    dest.last_modified_ms = newer_timestamp(dest.last_modified_ms, src.last_modified_ms);
+    update_opt(&mut dest.trajectory_id, src.trajectory_id);
+    update_opt(&mut dest.title, src.title);
+    update_opt(&mut dest.status, src.status);
+    update_opt(&mut dest.step_count, src.step_count);
+    update_opt(&mut dest.created_time_ms, src.created_time_ms);
+    update_opt(
+        &mut dest.last_user_input_time_ms,
+        src.last_user_input_time_ms,
+    );
+    update_opt(&mut dest.project_id, src.project_id);
+    update_opt(&mut dest.workspace_path, src.workspace_path);
+    update_opt(&mut dest.git_root, src.git_root);
+    update_opt(&mut dest.repository, src.repository);
+    update_opt(&mut dest.git_origin_url, src.git_origin_url);
+    update_opt(&mut dest.branch_name, src.branch_name);
+    update_opt(&mut dest.parent_conversation_id, src.parent_conversation_id);
+    update_opt(&mut dest.mendel_experiment_ids, src.mendel_experiment_ids);
 }
 
 fn upsert_antigravity_session_row(
@@ -1478,7 +1667,6 @@ fn sync_local_conversations(
 
             let summary = AntigravitySyncSummary {
                 last_modified_ms: modified_ms,
-                connections: Vec::new(),
                 trajectory_id,
                 title: None,
                 status: None,
@@ -1567,10 +1755,7 @@ fn update_opt<T>(dest: &mut Option<T>, src: Option<T>) {
     }
 }
 
-fn summary_from_trajectory_item(
-    item: &Value,
-    connection: AntigravityConnection,
-) -> AntigravitySyncSummary {
+fn summary_from_trajectory_item(item: &Value) -> AntigravitySyncSummary {
     let last_modified_ms = item
         .get("lastModifiedTime")
         .or_else(|| item.get("lastModified"))
@@ -1591,7 +1776,6 @@ fn summary_from_trajectory_item(
 
     AntigravitySyncSummary {
         last_modified_ms,
-        connections: vec![connection],
         trajectory_id: item
             .get("trajectoryId")
             .and_then(Value::as_str)
@@ -1638,47 +1822,9 @@ fn summary_from_trajectory_item(
     }
 }
 
-fn upsert_sync_summary(
-    summaries: &mut HashMap<AntigravitySessionCacheKey, AntigravitySyncSummary>,
-    cache_key: AntigravitySessionCacheKey,
-    data: AntigravitySyncSummary,
-) {
-    if let Some(summary) = summaries.get_mut(&cache_key) {
-        summary.last_modified_ms = newer_timestamp(summary.last_modified_ms, data.last_modified_ms);
-        for conn in data.connections {
-            push_unique_connection(&mut summary.connections, conn);
-        }
-        update_opt(&mut summary.trajectory_id, data.trajectory_id);
-        update_opt(&mut summary.title, data.title);
-        update_opt(&mut summary.status, data.status);
-        update_opt(&mut summary.step_count, data.step_count);
-        update_opt(&mut summary.created_time_ms, data.created_time_ms);
-        update_opt(
-            &mut summary.last_user_input_time_ms,
-            data.last_user_input_time_ms,
-        );
-        update_opt(&mut summary.project_id, data.project_id);
-        update_opt(&mut summary.workspace_path, data.workspace_path);
-        update_opt(&mut summary.git_root, data.git_root);
-        update_opt(&mut summary.repository, data.repository);
-        update_opt(&mut summary.git_origin_url, data.git_origin_url);
-        update_opt(&mut summary.branch_name, data.branch_name);
-        update_opt(
-            &mut summary.parent_conversation_id,
-            data.parent_conversation_id,
-        );
-        update_opt(
-            &mut summary.mendel_experiment_ids,
-            data.mendel_experiment_ids,
-        );
-    } else {
-        summaries.insert(cache_key, data);
-    }
-}
-
+#[derive(Debug, Clone)]
 struct AntigravitySyncSummary {
     last_modified_ms: Option<i64>,
-    connections: Vec<AntigravityConnection>,
     trajectory_id: Option<String>,
     title: Option<String>,
     status: Option<String>,
@@ -1695,6 +1841,28 @@ struct AntigravitySyncSummary {
     mendel_experiment_ids: Option<String>,
 }
 
+impl AntigravitySyncSummary {
+    fn empty_with_mtime(mtime: Option<i64>) -> Self {
+        Self {
+            last_modified_ms: mtime,
+            trajectory_id: None,
+            title: None,
+            status: None,
+            step_count: None,
+            created_time_ms: None,
+            last_user_input_time_ms: None,
+            project_id: None,
+            workspace_path: None,
+            git_root: None,
+            repository: None,
+            git_origin_url: None,
+            branch_name: None,
+            parent_conversation_id: None,
+            mendel_experiment_ids: None,
+        }
+    }
+}
+
 fn push_unique_connection(
     connections: &mut Vec<AntigravityConnection>,
     conn: AntigravityConnection,
@@ -1705,26 +1873,6 @@ fn push_unique_connection(
     {
         connections.push(conn);
     }
-}
-
-fn prioritize_connections_for_runtime(
-    connections: &mut Vec<AntigravityConnection>,
-    all_connections: &[AntigravityConnection],
-    runtime_kind: AntigravityRuntimeKind,
-) {
-    let mut ordered = Vec::new();
-    for conn in all_connections
-        .iter()
-        .filter(|conn| conn.runtime_kind == runtime_kind)
-    {
-        push_unique_connection(&mut ordered, conn.clone());
-    }
-    for conn in connections.drain(..) {
-        if conn.runtime_kind == runtime_kind {
-            push_unique_connection(&mut ordered, conn);
-        }
-    }
-    *connections = ordered;
 }
 
 fn newer_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
@@ -2668,7 +2816,7 @@ fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
             continue;
         };
         let command = parts[2..].join(" ");
-        if !is_antigravity_process(&command) {
+        if !is_antigravity_process(&command) || is_electron_helper_process(&command) {
             continue;
         }
 
@@ -2711,6 +2859,23 @@ fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
     Ok(candidates)
 }
 
+/// Electron renderer/GPU/utility children inherit the app bundle path, so the
+/// bundle-name match below picks up a dozen of them per running app. None of
+/// them serves the Language Server, and every candidate costs an `lsof` plus a
+/// heartbeat probe on each listening port.
+fn is_electron_helper_process(command: &str) -> bool {
+    command.split_whitespace().any(|token| {
+        matches!(
+            token,
+            "--type=renderer"
+                | "--type=gpu-process"
+                | "--type=utility"
+                | "--type=zygote"
+                | "--type=broker"
+        )
+    })
+}
+
 fn is_antigravity_process(command: &str) -> bool {
     let lower = command.to_lowercase();
     let first_token = command.split_whitespace().next().unwrap_or("");
@@ -2721,6 +2886,10 @@ fn is_antigravity_process(command: &str) -> bool {
         || lower.contains("\\antigravity\\")
         || lower.contains("/antigravity-cli/")
         || lower.contains("\\antigravity-cli\\")
+        || lower.contains("/antigravity-ide/")
+        || lower.contains("\\antigravity-ide\\")
+        || lower.contains("antigravity.app")
+        || lower.contains("antigravity ide.app")
         || path_basename_is(Path::new(first_token), "agy")
 }
 
@@ -2728,6 +2897,18 @@ fn infer_antigravity_runtime_kind(
     command: &str,
     exe_path: Option<&Path>,
 ) -> AntigravityRuntimeKind {
+    // 1. Inspect exact --app_data_dir value before broad executable/path heuristics
+    if let Some(app_data_dir) = extract_flag_value(command, "--app_data_dir") {
+        let trimmed = app_data_dir.trim().to_lowercase();
+        if trimmed == "antigravity-cli" {
+            return AntigravityRuntimeKind::Cli;
+        } else if trimmed == "antigravity-ide" {
+            return AntigravityRuntimeKind::Ide;
+        } else if trimmed == "antigravity" {
+            return AntigravityRuntimeKind::Desktop;
+        }
+    }
+
     let lower = command.to_lowercase();
     let exe_lower = exe_path
         .map(|path| path.to_string_lossy().to_lowercase())
@@ -2738,14 +2919,18 @@ fn infer_antigravity_runtime_kind(
         || exe_lower.contains("antigravity-cli")
         || path_basename_is(Path::new(first_token), "agy")
         || exe_path.map_or(false, |path| path_basename_is(path, "agy"))
-        || extract_flag_value(command, "--app_data_dir").as_deref() == Some("antigravity-cli")
     {
         AntigravityRuntimeKind::Cli
+    } else if lower.contains("antigravity-ide")
+        || exe_lower.contains("antigravity-ide")
+        || lower.contains("antigravity ide.app")
+        || exe_lower.contains("antigravity ide.app")
+    {
+        AntigravityRuntimeKind::Ide
     } else if lower.contains("/antigravity/")
         || lower.contains("\\antigravity\\")
         || lower.contains("antigravity.app")
         || exe_lower.contains("antigravity.app")
-        || extract_flag_value(command, "--app_data_dir").as_deref() == Some("antigravity")
     {
         AntigravityRuntimeKind::Desktop
     } else {
@@ -2760,22 +2945,42 @@ fn path_basename_is(path: &Path, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn discover_local_conversation_ids(
-    active_kinds: &[AntigravityRuntimeKind],
-) -> Vec<LocalConversationId> {
+fn discover_local_conversation_ids() -> Vec<LocalConversationId> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    discover_local_conversation_ids_from_home(&home, active_kinds)
+    discover_local_conversation_ids_from_home(&home)
 }
 
-fn discover_local_conversation_ids_from_home(
-    home: &Path,
-    active_kinds: &[AntigravityRuntimeKind],
-) -> Vec<LocalConversationId> {
+/// Build the local session inventory from all three conversation roots.
+///
+/// Discovery deliberately ignores which Language Servers happen to be running:
+/// the Desktop/IDE overlap can only be collapsed into one work item when both
+/// roots are known, and gating a root on a live server made that collapse
+/// depend on which app the user had open. Sessions with no reachable runtime
+/// are dropped later, once candidate connections are resolved.
+fn discover_local_conversation_ids_from_home(home: &Path) -> Vec<LocalConversationId> {
+    let dirs = [
+        (
+            home.join(".gemini")
+                .join("antigravity")
+                .join("conversations"),
+            AntigravityRuntimeKind::Desktop,
+        ),
+        (
+            home.join(".gemini")
+                .join("antigravity-ide")
+                .join("conversations"),
+            AntigravityRuntimeKind::Ide,
+        ),
+        (
+            home.join(".gemini")
+                .join("antigravity-cli")
+                .join("conversations"),
+            AntigravityRuntimeKind::Cli,
+        ),
+    ];
+
     let mut session_ids = Vec::new();
-    for (dir, runtime_kind) in antigravity_local_conversation_dirs(home) {
-        if !active_kinds.is_empty() && !active_kinds.contains(&runtime_kind) {
-            continue;
-        }
+    for (dir, runtime_kind) in dirs {
         if !dir.exists() {
             continue;
         }
@@ -2783,15 +2988,15 @@ fn discover_local_conversation_ids_from_home(
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() {
-                    if let Some(ext) = path.extension() {
+                    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                         if ext == "pb" || ext == "db" {
                             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                                 if stem.len() >= 20 {
                                     let modified_ms = local_conversation_modified_ms(&path);
                                     session_ids.push(LocalConversationId {
                                         session_id: stem.to_string(),
-                                        modified_ms,
                                         runtime_kind,
+                                        modified_ms,
                                     });
                                 }
                             }
@@ -2801,15 +3006,24 @@ fn discover_local_conversation_ids_from_home(
             }
         }
     }
+
     session_ids.sort_by(|left, right| {
         left.session_id
             .cmp(&right.session_id)
+            .then_with(|| left.runtime_kind.as_str().cmp(right.runtime_kind.as_str()))
             .then_with(|| left.modified_ms.cmp(&right.modified_ms))
     });
-    session_ids.dedup_by(|left, right| {
-        left.session_id == right.session_id && left.runtime_kind == right.runtime_kind
-    });
-    session_ids
+    let mut deduped: Vec<LocalConversationId> = Vec::new();
+    for item in session_ids {
+        if let Some(last) = deduped.last_mut() {
+            if last.session_id == item.session_id && last.runtime_kind == item.runtime_kind {
+                last.modified_ms = newer_timestamp(last.modified_ms, item.modified_ms);
+                continue;
+            }
+        }
+        deduped.push(item);
+    }
+    deduped
 }
 
 fn system_time_to_millis(time: std::time::SystemTime) -> Option<i64> {
@@ -3323,7 +3537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_file_keeps_cli_and_desktop_copies_for_logical_dedup() {
+    fn test_parse_file_deduplicates_same_logical_message_across_clients() {
         let temp_dir = tempfile::tempdir().unwrap();
         let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -3351,21 +3565,37 @@ mod tests {
         }
 
         let parser = AntigravitySessionParser::new()
-            .with_custom_paths(vec![sessions_dir])
+            .with_custom_paths(vec![sessions_dir.clone()])
             .with_skip_sync(true);
         let messages = parser.parse_sessions(None).unwrap();
 
-        assert_eq!(messages.len(), 2);
-        assert!(messages.iter().all(|msg| msg.client == "antigravity"));
-        assert!(messages
-            .iter()
-            .all(|msg| msg.session_id == "sess-dup" && msg.message_key == logical_key));
-        let details = messages
-            .iter()
-            .filter_map(|msg| msg.client_detail.as_deref())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert!(details.contains("antigravity-cli"));
-        assert!(details.contains("antigravity-desktop"));
+        // One logical message across multiple clients emits exactly ONE message.
+        // Desktop is preferred over CLI per canonical runtime priority.
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.client, "antigravity");
+        assert_eq!(msg.client_detail.as_deref(), Some("antigravity-desktop"));
+        assert_eq!(msg.session_id, "sess-dup");
+        assert_eq!(msg.message_key, logical_key);
+        assert_eq!(msg.tokens.input, 150);
+        assert_eq!(msg.tokens.output, 50);
+
+        // Now add a distinct response ID for the same session; it should emit two messages.
+        let logical_key_2 = antigravity_logical_message_key("sess-dup", "resp-dup-2");
+        let storage_id_2 = antigravity_storage_message_id("antigravity-desktop", &logical_key_2);
+        conn.execute(
+            "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, response_id, pricing_day, parser_version)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                storage_id_2, "sess-dup", "antigravity-desktop", "gemini-3-pro-preview", "google", 1672531202000_i64, 1_i64,
+                200_i64, 60_i64, 10_i64, 0_i64, 5_i64, &logical_key_2, "2023-01-01", "antigravity-v3"
+            ],
+        ).unwrap();
+
+        let messages_after = parser.parse_sessions(None).unwrap();
+        assert_eq!(messages_after.len(), 2);
+        assert_eq!(messages_after[0].message_key, logical_key);
+        assert_eq!(messages_after[1].message_key, logical_key_2);
     }
 
     #[test]
@@ -3716,20 +3946,71 @@ mod tests {
     }
 
     #[test]
-    fn test_detects_antigravity_cli_process_shape() {
+    fn test_detects_antigravity_process_and_runtime_kinds() {
         assert!(is_antigravity_process("agy"));
         assert!(is_antigravity_process("/Users/test/.local/bin/agy"));
+        assert!(is_antigravity_process(
+            "language_server --app_data_dir antigravity-cli"
+        ));
+        assert!(is_antigravity_process(
+            "language_server --app_data_dir antigravity-ide"
+        ));
+        assert!(is_antigravity_process(
+            "language_server --app_data_dir antigravity"
+        ));
+        assert!(is_antigravity_process(
+            "/Applications/Antigravity.app/Contents/MacOS/Electron"
+        ));
+        assert!(is_antigravity_process(
+            "/Applications/Antigravity IDE.app/Contents/MacOS/Electron"
+        ));
+
+        // CLI inference
         assert_eq!(
             infer_antigravity_runtime_kind("agy", None),
+            AntigravityRuntimeKind::Cli
+        );
+        assert_eq!(
+            infer_antigravity_runtime_kind("/Users/test/.local/bin/agy", None),
             AntigravityRuntimeKind::Cli
         );
         assert_eq!(
             infer_antigravity_runtime_kind("language_server --app_data_dir antigravity-cli", None),
             AntigravityRuntimeKind::Cli
         );
+
+        // Desktop inference
         assert_eq!(
             infer_antigravity_runtime_kind("language_server --app_data_dir antigravity", None),
             AntigravityRuntimeKind::Desktop
+        );
+        assert_eq!(
+            infer_antigravity_runtime_kind(
+                "/Applications/Antigravity.app/Contents/MacOS/Electron",
+                None
+            ),
+            AntigravityRuntimeKind::Desktop
+        );
+
+        // IDE inference
+        assert_eq!(
+            infer_antigravity_runtime_kind("language_server --app_data_dir antigravity-ide", None),
+            AntigravityRuntimeKind::Ide
+        );
+        assert_eq!(
+            infer_antigravity_runtime_kind(
+                "/Applications/Antigravity IDE.app/Contents/MacOS/Electron",
+                None
+            ),
+            AntigravityRuntimeKind::Ide
+        );
+        // Ensure --app_data_dir takes precedence even if extension path contains /antigravity/
+        assert_eq!(
+            infer_antigravity_runtime_kind(
+                "language_server --app_data_dir antigravity-ide --extension_dir /Users/test/.vscode/extensions/antigravity/bin",
+                None
+            ),
+            AntigravityRuntimeKind::Ide
         );
     }
 
@@ -3742,64 +4023,247 @@ mod tests {
     }
 
     #[test]
-    fn test_discover_local_conversation_ids() {
+    fn test_discover_local_conversation_ids_across_three_roots() {
         let temp_dir = tempfile::tempdir().unwrap();
         let gemini_dir = temp_dir.path().join(".gemini");
-        let anti_dir = gemini_dir.join("antigravity").join("conversations");
+        let desktop_dir = gemini_dir.join("antigravity").join("conversations");
+        let ide_dir = gemini_dir.join("antigravity-ide").join("conversations");
         let cli_dir = gemini_dir.join("antigravity-cli").join("conversations");
 
-        std::fs::create_dir_all(&anti_dir).unwrap();
+        std::fs::create_dir_all(&desktop_dir).unwrap();
+        std::fs::create_dir_all(&ide_dir).unwrap();
         std::fs::create_dir_all(&cli_dir).unwrap();
 
-        let uuid_1 = "12345678901234567890.pb";
-        let uuid_2 = "abcdefabcdefabcdefabcdef.db";
-        let non_uuid = "short.pb";
-        let txt_file = "12345678901234567890.txt";
+        let desktop_sess = "desktop12345678901234567890.pb";
+        let ide_sess = "ide123456789012345678901234.db";
+        let cli_sess = "cli123456789012345678901234.db";
+        let short_file = "short.pb";
+        let non_target_file = "desktop12345678901234567890.txt";
 
-        std::fs::write(anti_dir.join(uuid_1), "mock").unwrap();
+        std::fs::write(desktop_dir.join(desktop_sess), "mock").unwrap();
+        std::fs::write(desktop_dir.join(short_file), "mock").unwrap();
+        std::fs::write(desktop_dir.join(non_target_file), "mock").unwrap();
 
-        let db_file_path = cli_dir.join(uuid_2);
-        std::fs::write(&db_file_path, "mock").unwrap();
-
-        // Wait briefly to ensure file modification times are different
+        let ide_db_path = ide_dir.join(ide_sess);
+        std::fs::write(&ide_db_path, "mock").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
-
-        let wal_file_path = cli_dir.join("abcdefabcdefabcdefabcdef.db-wal");
+        let wal_file_path = ide_dir.join("ide123456789012345678901234.db-wal");
         std::fs::write(&wal_file_path, "mock").unwrap();
 
-        std::fs::write(anti_dir.join(non_uuid), "mock").unwrap();
-        std::fs::write(cli_dir.join(txt_file), "mock").unwrap();
+        std::fs::write(cli_dir.join(cli_sess), "mock").unwrap();
 
-        let discovered = discover_local_conversation_ids_from_home(
-            temp_dir.path(),
-            &[AntigravityRuntimeKind::Desktop, AntigravityRuntimeKind::Cli],
-        );
+        let discovered = discover_local_conversation_ids_from_home(temp_dir.path());
 
-        assert_eq!(discovered.len(), 2);
-        let pb_entry = discovered
+        assert_eq!(discovered.len(), 3);
+        assert!(discovered
             .iter()
-            .find(|entry| entry.session_id == "12345678901234567890")
-            .expect("Desktop .pb conversation should be discovered");
-        assert_eq!(pb_entry.runtime_kind, AntigravityRuntimeKind::Desktop);
-        assert!(!discovered.iter().any(|entry| entry.session_id == "short"));
-
-        let discovered_cli_only = discover_local_conversation_ids_from_home(
-            temp_dir.path(),
-            &[AntigravityRuntimeKind::Cli],
-        );
-        assert!(discovered_cli_only
+            .any(|e| e.session_id == "desktop12345678901234567890"
+                && e.runtime_kind == AntigravityRuntimeKind::Desktop));
+        assert!(discovered
             .iter()
-            .all(|entry| entry.runtime_kind == AntigravityRuntimeKind::Cli));
+            .any(|e| e.session_id == "cli123456789012345678901234"
+                && e.runtime_kind == AntigravityRuntimeKind::Cli));
 
-        let db_entry = discovered
+        let ide_entry = discovered
             .iter()
-            .find(|entry| entry.session_id == "abcdefabcdefabcdefabcdef")
+            .find(|e| e.session_id == "ide123456789012345678901234")
             .unwrap();
-        assert_eq!(db_entry.runtime_kind, AntigravityRuntimeKind::Cli);
-        let db_entry_mtime_ms = db_entry.modified_ms.unwrap();
+        assert_eq!(ide_entry.runtime_kind, AntigravityRuntimeKind::Ide);
         let wal_mtime = wal_file_path.metadata().unwrap().modified().unwrap();
         let wal_mtime_ms = system_time_to_millis(wal_mtime).unwrap();
-        assert_eq!(db_entry_mtime_ms, wal_mtime_ms);
+        assert_eq!(ide_entry.modified_ms.unwrap(), wal_mtime_ms);
+    }
+
+    #[test]
+    fn test_desktop_ide_duplicate_collapses_to_canonical_desktop_work_item() {
+        let local_items = vec![
+            LocalConversationId {
+                session_id: "shared-session-1234567890".to_string(),
+                modified_ms: Some(2000),
+                runtime_kind: AntigravityRuntimeKind::Desktop,
+            },
+            LocalConversationId {
+                session_id: "shared-session-1234567890".to_string(),
+                modified_ms: Some(1000),
+                runtime_kind: AntigravityRuntimeKind::Ide,
+            },
+            LocalConversationId {
+                session_id: "ide-only-session-12345678".to_string(),
+                modified_ms: Some(1500),
+                runtime_kind: AntigravityRuntimeKind::Ide,
+            },
+        ];
+
+        let mut work_items = build_inventory_work_items(&local_items);
+        assert_eq!(work_items.len(), 3, "one item per (session, data root)");
+        collapse_desktop_ide_overlap(&mut work_items);
+        assert_eq!(work_items.len(), 2, "Desktop+IDE overlap becomes one item");
+
+        let shared_key = AntigravitySessionCacheKey {
+            session_id: "shared-session-1234567890".to_string(),
+            runtime_kind: AntigravityRuntimeKind::Desktop,
+        };
+        let shared_item = work_items.get(&shared_key).expect("shared work item");
+        assert_eq!(
+            shared_item.canonical_runtime,
+            AntigravityRuntimeKind::Desktop
+        );
+        assert_eq!(shared_item.summary.last_modified_ms, Some(2000));
+        assert_eq!(
+            shared_item.candidate_runtimes,
+            vec![AntigravityRuntimeKind::Desktop, AntigravityRuntimeKind::Ide]
+        );
+
+        let ide_key = AntigravitySessionCacheKey {
+            session_id: "ide-only-session-12345678".to_string(),
+            runtime_kind: AntigravityRuntimeKind::Ide,
+        };
+        let ide_item = work_items.get(&ide_key).expect("ide-only work item");
+        assert_eq!(ide_item.canonical_runtime, AntigravityRuntimeKind::Ide);
+        assert_eq!(ide_item.summary.last_modified_ms, Some(1500));
+        assert_eq!(
+            ide_item.candidate_runtimes,
+            vec![AntigravityRuntimeKind::Ide]
+        );
+    }
+
+    #[test]
+    fn test_dedup_keeps_the_widest_runtime_observation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let conn = open_cache_db(&sessions_dir).unwrap();
+        for client in ["antigravity-desktop", "antigravity-ide"] {
+            conn.execute(
+                "INSERT INTO sessions (session_id, trajectory_id, client, title, model_id, status, step_count, created_time_ms, last_modified_ms, last_user_input_time_ms, synced_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params!["sess-partial", "traj-partial", client, "title", "gemini-3-pro-preview", "status", 1_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64],
+            ).unwrap();
+        }
+
+        let logical_key = antigravity_logical_message_key("sess-partial", "resp-partial");
+        // Desktop holds a stale, truncated copy of the same response; the IDE
+        // saw it finish. Runtime priority must not win over the wider totals.
+        for (client, output) in [
+            ("antigravity-desktop", 131_i64),
+            ("antigravity-ide", 357_i64),
+        ] {
+            conn.execute(
+                "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, response_id, pricing_day, parser_version)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    antigravity_storage_message_id(client, &logical_key), "sess-partial", client,
+                    "gemini-3-pro-preview", "google", 1672531201000_i64, 0_i64,
+                    4008_i64, output, 0_i64, 0_i64, 0_i64, &logical_key, "2023-01-01", PARSER_VERSION
+                ],
+            ).unwrap();
+        }
+
+        let messages = AntigravitySessionParser::new()
+            .with_custom_paths(vec![sessions_dir])
+            .with_skip_sync(true)
+            .parse_sessions(None)
+            .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].client_detail.as_deref(),
+            Some("antigravity-ide")
+        );
+        assert_eq!(messages[0].tokens.output, 357);
+    }
+
+    #[test]
+    fn test_desktop_ide_collapse_is_independent_of_discovery_order() {
+        let shared = "shared-session-1234567890";
+        let desktop = LocalConversationId {
+            session_id: shared.to_string(),
+            modified_ms: Some(2000),
+            runtime_kind: AntigravityRuntimeKind::Desktop,
+        };
+        let ide = LocalConversationId {
+            session_id: shared.to_string(),
+            modified_ms: Some(1000),
+            runtime_kind: AntigravityRuntimeKind::Ide,
+        };
+
+        for order in [
+            vec![desktop.clone(), ide.clone()],
+            vec![ide.clone(), desktop.clone()],
+        ] {
+            let mut work_items = build_inventory_work_items(&order);
+            collapse_desktop_ide_overlap(&mut work_items);
+
+            assert_eq!(work_items.len(), 1);
+            let item = work_items.values().next().unwrap();
+            assert_eq!(item.canonical_runtime, AntigravityRuntimeKind::Desktop);
+            assert_eq!(
+                item.candidate_runtimes,
+                vec![AntigravityRuntimeKind::Desktop, AntigravityRuntimeKind::Ide]
+            );
+        }
+    }
+
+    #[test]
+    fn test_electron_helper_processes_are_not_language_server_candidates() {
+        let helper =
+            "/Applications/Antigravity IDE.app/Contents/Frameworks/Helper.app/Contents/MacOS/Helper --type=renderer";
+        assert!(is_antigravity_process(helper));
+        assert!(is_electron_helper_process(helper));
+
+        let language_server = "/Applications/Antigravity IDE.app/Contents/Resources/language_server --app_data_dir antigravity-ide";
+        assert!(is_antigravity_process(language_server));
+        assert!(!is_electron_helper_process(language_server));
+    }
+
+    #[test]
+    fn test_resolve_candidate_connections_order() {
+        let desktop_conn = AntigravityConnection {
+            pid: 100,
+            port: 8000,
+            csrf_token: None,
+            scheme: "http".to_string(),
+            fingerprint: "desk".to_string(),
+            runtime_kind: AntigravityRuntimeKind::Desktop,
+        };
+        let ide_conn = AntigravityConnection {
+            pid: 200,
+            port: 9000,
+            csrf_token: None,
+            scheme: "http".to_string(),
+            fingerprint: "ide".to_string(),
+            runtime_kind: AntigravityRuntimeKind::Ide,
+        };
+        let cli_conn = AntigravityConnection {
+            pid: 300,
+            port: 7000,
+            csrf_token: None,
+            scheme: "http".to_string(),
+            fingerprint: "cli".to_string(),
+            runtime_kind: AntigravityRuntimeKind::Cli,
+        };
+        let all_conns = vec![desktop_conn.clone(), ide_conn.clone(), cli_conn.clone()];
+
+        // Overlap candidates: [Desktop, IDE]
+        let conns = resolve_candidate_connections(
+            &[AntigravityRuntimeKind::Desktop, AntigravityRuntimeKind::Ide],
+            &all_conns,
+        );
+        assert_eq!(conns.len(), 2);
+        assert_eq!(conns[0].runtime_kind, AntigravityRuntimeKind::Desktop);
+        assert_eq!(conns[1].runtime_kind, AntigravityRuntimeKind::Ide);
+
+        // IDE-only candidate: [IDE]
+        let ide_conns = resolve_candidate_connections(&[AntigravityRuntimeKind::Ide], &all_conns);
+        assert_eq!(ide_conns.len(), 1);
+        assert_eq!(ide_conns[0].runtime_kind, AntigravityRuntimeKind::Ide);
+
+        // Desktop-only when only IDE LS is active: returns empty
+        let only_ide_running = vec![ide_conn.clone()];
+        let desk_conns =
+            resolve_candidate_connections(&[AntigravityRuntimeKind::Desktop], &only_ide_running);
+        assert!(desk_conns.is_empty());
     }
 
     #[test]

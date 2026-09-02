@@ -12,7 +12,25 @@ use std::sync::{Mutex, OnceLock};
 use tracing::{info, warn};
 
 const CANONICAL_SOURCE_SQL: &str =
-    "CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop') THEN 'antigravity' ELSE source END";
+    "CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop', 'antigravity-ide') THEN 'antigravity' ELSE source END";
+
+/// Sources where the `client` column carries provenance only, not counting
+/// identity. Antigravity serves one conversation through several runtimes
+/// (Desktop / IDE / CLI), so the same `message_key` can arrive under different
+/// clients across refreshes. The ledger primary key includes `client`, so
+/// without this collapse an upsert-mode refresh silently accumulates a second
+/// row for a message that was already counted.
+const LOGICAL_MESSAGE_IDENTITY_SOURCES: &[&str] = &["antigravity"];
+
+/// How far back an incremental refresh re-examines session files.
+///
+/// This window only ever moves forward, so anything it skips once is skipped
+/// forever — nothing re-opens an old file until a full rebuild. One day was too
+/// tight to survive a machine migration: restoring a backup writes transcripts
+/// with their original modification times, so files can land on disk already
+/// behind the window. A week of slack costs a few extra file reads per refresh
+/// and gives a restore room to be noticed.
+const INCREMENTAL_LOOKBACK_DAYS: i64 = 7;
 
 #[derive(Debug, Clone)]
 pub struct DailyUsageRow {
@@ -69,7 +87,7 @@ impl UsageStore {
         let conn = self.open()?;
         let value: Option<String> = if source == "antigravity" {
             conn.query_row(
-                "SELECT MAX(date) FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop')",
+                "SELECT MAX(date) FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop', 'antigravity-ide')",
                 [],
                 |row| row.get(0),
             )
@@ -114,6 +132,7 @@ impl UsageStore {
             let canonical_source = if source == "antigravity"
                 || source == "antigravity-cli"
                 || source == "antigravity-desktop"
+                || source == "antigravity-ide"
             {
                 "antigravity"
             } else {
@@ -137,7 +156,7 @@ impl UsageStore {
     ) -> Result<Option<NaiveDate>> {
         let inferred = self
             .latest_message_date(source)?
-            .map(|date| date - Duration::days(1));
+            .map(|date| date - Duration::days(INCREMENTAL_LOOKBACK_DAYS));
 
         Ok(match (requested, inferred) {
             (Some(requested), Some(inferred)) => Some(requested.max(inferred)),
@@ -241,6 +260,12 @@ impl UsageStore {
             affected_dates.insert(message.date.clone());
         }
 
+        let touched_sources: BTreeSet<String> = messages
+            .iter()
+            .map(|message| message.client.clone())
+            .collect();
+        collapse_cross_client_duplicates(&tx, &touched_sources, &mut affected_dates)?;
+
         for date in &affected_dates {
             rebuild_daily_for_date(&tx, date, now)?;
         }
@@ -290,21 +315,39 @@ impl UsageStore {
             })
             .collect();
 
+        // Only rows written by an *older* parser are dropped and re-derived.
+        //
+        // A session's rows must never be cleared just because this parse did not
+        // reproduce them. Agents delete their own transcripts on a retention
+        // timer, so a session can legitimately live on disk with only part of
+        // its history left — and once that happens the ledger is the only record
+        // of the rest. Recorded usage is a fact that already happened; a refresh
+        // may correct a row (the upsert below does that) but may not erase one it
+        // can no longer see.
+        let parser_versions: HashMap<String, String> = messages
+            .iter()
+            .map(|message| (message.client.clone(), message.parser_version.clone()))
+            .collect();
+
         for (source, client, session_id) in &session_keys {
+            let parser_version = parser_versions.get(source).cloned().unwrap_or_default();
             let mut stmt = tx.prepare(
-                "SELECT DISTINCT date FROM usage_messages WHERE source = ?1 AND client = ?2 AND session_id = ?3",
+                "SELECT DISTINCT date FROM usage_messages
+                  WHERE source = ?1 AND client = ?2 AND session_id = ?3 AND parser_version <> ?4",
             )?;
-            let rows = stmt.query_map(params![source, client, session_id], |row| {
-                row.get::<_, String>(0)
-            })?;
+            let rows = stmt
+                .query_map(params![source, client, session_id, parser_version], |row| {
+                    row.get::<_, String>(0)
+                })?;
             for row in rows.flatten() {
                 affected_dates.insert(row);
             }
             drop(stmt);
 
             tx.execute(
-                "DELETE FROM usage_messages WHERE source = ?1 AND client = ?2 AND session_id = ?3",
-                params![source, client, session_id],
+                "DELETE FROM usage_messages
+                  WHERE source = ?1 AND client = ?2 AND session_id = ?3 AND parser_version <> ?4",
+                params![source, client, session_id, parser_version],
             )?;
         }
 
@@ -375,6 +418,12 @@ impl UsageStore {
 
             affected_dates.insert(message.date.clone());
         }
+
+        let touched_sources: BTreeSet<String> = messages
+            .iter()
+            .map(|message| message.client.clone())
+            .collect();
+        collapse_cross_client_duplicates(&tx, &touched_sources, &mut affected_dates)?;
 
         for date in &affected_dates {
             rebuild_daily_for_date(&tx, date, now)?;
@@ -499,6 +548,12 @@ impl UsageStore {
 
             affected_dates.insert(message.date.clone());
         }
+
+        let touched_sources: BTreeSet<String> = messages
+            .iter()
+            .map(|message| message.client.clone())
+            .collect();
+        collapse_cross_client_duplicates(&tx, &touched_sources, &mut affected_dates)?;
 
         for date in &affected_dates {
             rebuild_daily_for_date(&tx, date, now)?;
@@ -988,7 +1043,12 @@ fn append_common_filters(
         let mut first = true;
         for source in sources {
             if source == "antigravity" {
-                for s in &["antigravity", "antigravity-cli", "antigravity-desktop"] {
+                for s in &[
+                    "antigravity",
+                    "antigravity-cli",
+                    "antigravity-desktop",
+                    "antigravity-ide",
+                ] {
                     if !first {
                         sql.push_str(", ");
                     }
@@ -1030,7 +1090,12 @@ fn append_range_and_source_filters(
         let mut first = true;
         for source in sources {
             if source == "antigravity" {
-                for s in &["antigravity", "antigravity-cli", "antigravity-desktop"] {
+                for s in &[
+                    "antigravity",
+                    "antigravity-cli",
+                    "antigravity-desktop",
+                    "antigravity-ide",
+                ] {
                     if !first {
                         sql.push_str(", ");
                     }
@@ -1072,10 +1137,68 @@ fn load_pricing_snapshot_keys(
     Ok(rows.flatten().collect())
 }
 
+/// Collapse rows that describe the same logical message but were recorded under
+/// different runtime clients, keeping the largest observation.
+///
+/// A partial runtime snapshot can only under-report a message (a stale copy of a
+/// response holds fewer output tokens than the finished one), so the widest
+/// totals win; `client` then `rowid` only break exact ties so the result is
+/// deterministic. Dates of the dropped rows are folded into `affected_dates` so
+/// the caller rebuilds those daily aggregates.
+fn collapse_cross_client_duplicates(
+    tx: &Transaction<'_>,
+    sources: &BTreeSet<String>,
+    affected_dates: &mut BTreeSet<String>,
+) -> Result<()> {
+    const SURVIVORS: &str = "SELECT rowid FROM (
+             SELECT rowid, ROW_NUMBER() OVER (
+                 PARTITION BY message_key
+                 ORDER BY total_tokens DESC, client ASC, rowid ASC
+             ) AS rn
+             FROM usage_messages WHERE source = ?1
+         ) WHERE rn = 1";
+
+    for source in sources {
+        if !LOGICAL_MESSAGE_IDENTITY_SOURCES.contains(&source.as_str()) {
+            continue;
+        }
+
+        let mut stmt = tx.prepare(&format!(
+            "SELECT DISTINCT date FROM usage_messages
+              WHERE source = ?1 AND rowid NOT IN ({SURVIVORS})"
+        ))?;
+        let dropped_dates = stmt
+            .query_map(params![source], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        if dropped_dates.is_empty() {
+            continue;
+        }
+
+        let removed = tx.execute(
+            &format!(
+                "DELETE FROM usage_messages
+                  WHERE source = ?1 AND rowid NOT IN ({SURVIVORS})"
+            ),
+            params![source],
+        )?;
+        info!(
+            "Collapsed {} duplicate cross-runtime {} message rows across {} day(s)",
+            removed,
+            source,
+            dropped_dates.len()
+        );
+        affected_dates.extend(dropped_dates);
+    }
+
+    Ok(())
+}
+
 fn load_source_dates(tx: &Transaction<'_>, source: &str) -> Result<Vec<String>> {
     let mapper = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
     let dates = if source == "antigravity" {
-        let mut stmt = tx.prepare("SELECT DISTINCT date FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop') ORDER BY date ASC")?;
+        let mut stmt = tx.prepare("SELECT DISTINCT date FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop', 'antigravity-ide') ORDER BY date ASC")?;
         let res = stmt
             .query_map([], mapper)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1656,7 +1779,11 @@ mod tests {
             .ingest_messages(&[sample_message("2024-03-10", "m1")], false)
             .unwrap();
         let since = store.default_since("claude", None).unwrap().unwrap();
-        assert_eq!(since, NaiveDate::from_ymd_opt(2024, 3, 9).unwrap());
+        assert_eq!(
+            since,
+            NaiveDate::from_ymd_opt(2024, 3, 10).unwrap()
+                - Duration::days(INCREMENTAL_LOOKBACK_DAYS)
+        );
     }
 
     #[test]
@@ -1741,18 +1868,25 @@ mod tests {
     }
 
     #[test]
-    fn replace_sessions_messages_replaces_only_changed_sessions() {
+    fn replace_sessions_messages_reparses_older_parser_rows_only() {
         let tempdir = tempfile::tempdir().unwrap();
         let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
 
-        let mut old_changed = sample_message("2024-03-10", "changed-old");
-        old_changed.session_id = "changed-session".to_string();
+        // Written by an older parser: this one is safe to drop and re-derive.
+        let mut stale = sample_message("2024-03-10", "stale-key");
+        stale.session_id = "changed-session".to_string();
+        stale.parser_version = "claude-v3".to_string();
+
+        // Same session, current parser, but its transcript has since aged out so
+        // no future parse can reproduce it. The ledger is the only record left.
+        let mut aged_out = sample_message("2024-03-10", "aged-out-key");
+        aged_out.session_id = "changed-session".to_string();
 
         let mut untouched = sample_message("2024-03-11", "untouched");
         untouched.session_id = "untouched-session".to_string();
 
         store
-            .ingest_messages(&[old_changed, untouched], false)
+            .ingest_messages(&[stale, aged_out, untouched], false)
             .unwrap();
 
         let mut replacement = sample_message("2024-03-12", "changed-new");
@@ -1768,17 +1902,24 @@ mod tests {
             .map(|message| message.message_key.as_str())
             .collect::<BTreeSet<_>>();
 
-        assert_eq!(remaining.len(), 2);
-        assert!(keys.contains("changed-new"));
-        assert!(keys.contains("untouched"));
-        assert!(!keys.contains("changed-old"));
+        assert!(keys.contains("changed-new"), "new row is ingested");
+        assert!(keys.contains("untouched"), "other sessions are untouched");
+        assert!(
+            !keys.contains("stale-key"),
+            "rows from an older parser are re-derived"
+        );
+        assert!(
+            keys.contains("aged-out-key"),
+            "usage this parse can no longer see must survive the refresh"
+        );
+        assert_eq!(remaining.len(), 3);
 
         let days = store
             .load_dashboard_days(None, &["claude".to_string()])
             .unwrap();
         assert_eq!(
             days.iter().map(|day| day.date.as_str()).collect::<Vec<_>>(),
-            vec!["2024-03-11", "2024-03-12"]
+            vec!["2024-03-10", "2024-03-11", "2024-03-12"]
         );
     }
 
@@ -1960,7 +2101,8 @@ mod tests {
         assert_eq!(msg_cnt, 3);
         assert_eq!(session_cnt, 3);
 
-        // 4. Verify that duplicate message keys on the same platform and session are deduplicated in aggregation
+        // 4. The same logical message observed through two runtimes is stored
+        //    once: `client` is provenance, not counting identity.
         let mut msg4 = sample_message("2026-05-22", "dup_key");
         msg4.client = "antigravity".to_string();
         msg4.client_detail = Some("antigravity-cli".to_string());
@@ -1982,7 +2124,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(total_db_count, 2);
+        assert_eq!(total_db_count, 1);
 
         let (msg_cnt_dedup, session_cnt_dedup) = store
             .load_summary_counts(None, &["antigravity".to_string()])
@@ -2056,5 +2198,125 @@ mod tests {
             "pseudo-model zero-cost rows must not keep cost repairs pending"
         );
         assert_eq!(store.repair_zero_costs(None, &[]).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_upsert_refresh_cannot_double_count_across_antigravity_runtimes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        // First refresh sees the session through the Desktop language server.
+        let mut desktop = sample_message("2026-03-01", "sess-1:resp-1");
+        desktop.client = "antigravity".to_string();
+        desktop.client_detail = Some("antigravity-desktop".to_string());
+        desktop.session_id = "sess-1".to_string();
+        desktop.tokens.output = 131;
+        store.ingest_messages(&[desktop], false).unwrap();
+
+        // A later incremental refresh only has the IDE language server in its
+        // window, so the same logical message arrives under a different client.
+        // The ledger primary key includes `client`, so without the collapse this
+        // lands as a second row for a message that was already counted.
+        let mut ide = sample_message("2026-03-01", "sess-1:resp-1");
+        ide.client = "antigravity".to_string();
+        ide.client_detail = Some("antigravity-ide".to_string());
+        ide.session_id = "sess-1".to_string();
+        ide.tokens.output = 357;
+        store.ingest_messages(&[ide], false).unwrap();
+
+        let rows = store
+            .load_messages(None, &["antigravity".to_string()])
+            .unwrap();
+        assert_eq!(rows.len(), 1, "one logical message, one ledger row");
+        assert_eq!(
+            rows[0].client_detail.as_deref(),
+            Some("antigravity-ide"),
+            "the widest observation survives"
+        );
+        assert_eq!(rows[0].tokens.output, 357);
+
+        let (message_count, session_count) = store
+            .load_summary_counts(None, &["antigravity".to_string()])
+            .unwrap();
+        assert_eq!(message_count, 1);
+        assert_eq!(session_count, 1);
+    }
+
+    #[test]
+    fn test_cross_client_collapse_leaves_other_sources_untouched() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        // Codex and Claude legitimately key messages per client; only sources in
+        // LOGICAL_MESSAGE_IDENTITY_SOURCES may be collapsed.
+        let mut a = sample_message("2026-03-01", "shared-key");
+        a.client = "codex".to_string();
+        a.client_detail = Some("codex".to_string());
+        let mut b = sample_message("2026-03-01", "shared-key");
+        b.client = "claude".to_string();
+        b.client_detail = Some("claude".to_string());
+        store.ingest_messages(&[a, b], false).unwrap();
+
+        assert_eq!(
+            store
+                .load_messages(None, &["codex".to_string(), "claude".to_string()])
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_antigravity_ide_source_handling_and_migration() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        // 1. Ingest an older v2 message with client_detail = "antigravity-cli" and another with "antigravity-ide"
+        let mut msg_old_cli = sample_message("2026-03-01", "key-1");
+        msg_old_cli.client = "antigravity".to_string();
+        msg_old_cli.client_detail = Some("antigravity-cli".to_string());
+        msg_old_cli.parser_version = "antigravity-v2".to_string();
+
+        let mut msg_old_ide = sample_message("2026-03-01", "key-2");
+        msg_old_ide.client = "antigravity".to_string();
+        msg_old_ide.client_detail = Some("antigravity-ide".to_string());
+        msg_old_ide.parser_version = "antigravity-v2".to_string();
+
+        store
+            .ingest_messages(&[msg_old_cli, msg_old_ide], false)
+            .unwrap();
+
+        // 2. check_stale_parser_versions should identify "antigravity" as stale when target is "antigravity-v3"
+        let stale_sources = store
+            .check_stale_parser_versions(&[("antigravity", "antigravity-v3")])
+            .unwrap();
+        assert_eq!(stale_sources, HashSet::from(["antigravity".to_string()]));
+
+        // 3. Replace source messages with canonical v3 message
+        let mut msg_v3 = sample_message("2026-03-01", "key-canonical");
+        msg_v3.client = "antigravity".to_string();
+        msg_v3.client_detail = Some("antigravity-desktop".to_string());
+        msg_v3.parser_version = "antigravity-v3".to_string();
+
+        store
+            .replace_source_messages("antigravity", &[msg_v3], false)
+            .unwrap();
+
+        // 4. Verify stale rows under all antigravity client kinds were cleaned up
+        let remaining = store
+            .load_messages(None, &["antigravity".to_string()])
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].message_key, "key-canonical");
+        assert_eq!(
+            remaining[0].client_detail.as_deref(),
+            Some("antigravity-desktop")
+        );
+        assert_eq!(remaining[0].parser_version, "antigravity-v3");
+
+        let stale_after = store
+            .check_stale_parser_versions(&[("antigravity", "antigravity-v3")])
+            .unwrap();
+        assert!(stale_after.is_empty());
     }
 }

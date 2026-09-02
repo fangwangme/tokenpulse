@@ -12,10 +12,9 @@
 - Keep code clean and minimal
 - Follow existing patterns
 - Ask before making big changes
-- User-visible changes add their `CHANGELOG.md` lines under `## [Unreleased]`
-  in the same PR. That section becomes the GitHub Release body verbatim, so
-  writing it at release time means reconstructing it from commits
-  (see `docs/RELEASING.md`)
+- User-visible changes directly bump the version in `Cargo.toml` and record their
+  `CHANGELOG.md` section under `## [X.Y.Z] - YYYY-MM-DD` in the same PR, so that
+  merging the PR allows immediate tagging and releasing without extra steps.
 
 ## Review Focus
 - CI format failures must be checked at the workflow/toolchain level, not just
