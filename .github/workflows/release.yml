@@ -25,14 +25,18 @@ jobs:
           # architecture flag, so the x86_64 build needs only the extra target.
           - runner: macos-14
             target: x86_64-apple-darwin
+            asset: tokenpulse-darwin-x64
           - runner: macos-14
             target: aarch64-apple-darwin
+            asset: tokenpulse-darwin-arm64
           # 22.04 rather than latest: the binary then needs only glibc 2.35,
           # so it also runs on distros a couple of releases behind.
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            asset: tokenpulse-linux-x64-gnu
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            asset: tokenpulse-linux-arm64-gnu
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -55,13 +59,13 @@ jobs:
           cp .local/target/${{ matrix.target }}/release/tokenpulse \
             .local/release/tokenpulse-${{ matrix.target }}/tokenpulse
           tar -C .local/release/tokenpulse-${{ matrix.target }} \
-            -czf .local/release/tokenpulse-${{ matrix.target }}.tar.gz tokenpulse
+            -czf .local/release/tokenpulse-${{ matrix.target }}/${{ matrix.asset }}.tar.gz tokenpulse
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
           name: tokenpulse-${{ matrix.target }}
-          path: .local/release/tokenpulse-${{ matrix.target }}.tar.gz
+          path: .local/release/tokenpulse-${{ matrix.target }}/${{ matrix.asset }}.tar.gz
 
   publish-release:
     needs: build

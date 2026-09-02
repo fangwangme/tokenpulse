@@ -58,8 +58,10 @@ git log --oneline "$(git describe --tags --abbrev=0)"..main
 the GitHub Release body. Nothing else needs writing.
 
 Ideally each feature PR already added its lines under `## [Unreleased]` as it
-merged, and this step is just renaming that heading to `## [X.Y.Z] - YYYY-MM-DD`
-and tidying it. When entries are missing, write them now from the commit log.
+merged — creating that heading if it was not there — and this step is just
+renaming it to `## [X.Y.Z] - YYYY-MM-DD` and tidying it. When entries are
+missing, write them now from the commit log. A release leaves no empty
+`## [Unreleased]` behind.
 
 ```markdown
 ## [X.Y.Z] - YYYY-MM-DD
@@ -140,6 +142,16 @@ Targets: `x86_64-apple-darwin`, `aarch64-apple-darwin`,
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`. Linux builds run on
 `ubuntu-22.04`, so the binaries need only glibc 2.35 and still run on distros a
 couple of releases behind.
+
+The Rust target triples are internal build identifiers. GitHub Release assets
+use user-facing names instead:
+
+| Rust target | Release asset |
+| --- | --- |
+| `x86_64-apple-darwin` | `tokenpulse-darwin-x64.tar.gz` |
+| `aarch64-apple-darwin` | `tokenpulse-darwin-arm64.tar.gz` |
+| `x86_64-unknown-linux-gnu` | `tokenpulse-linux-x64-gnu.tar.gz` |
+| `aarch64-unknown-linux-gnu` | `tokenpulse-linux-arm64-gnu.tar.gz` |
 
 Both macOS targets build on `macos-14`; the x86_64 one is cross-compiled. Do not
 reintroduce the Intel `macos-13` runner — GitHub no longer allocates it, and a
@@ -251,6 +263,6 @@ so the scripts pass `--access public`.
 
 ## 4. After release
 
-Verification is Step 7 above. The only thing left is to open a fresh
-`## [Unreleased]` section at the top of `CHANGELOG.md`, so the next change has
-somewhere to go.
+Verification is Step 7 above. Nothing else is left — do **not** open a PR just
+to add an empty `## [Unreleased]` heading. The next change to land writes that
+heading itself, in the same PR that adds the entry under it.

@@ -47,7 +47,7 @@ The usage pipeline is:
 4. rebuild `daily_model_usage` for affected dates
 5. derive `DashboardDay`, weekly rollups, monthly rollups, agent summaries, and normalized model summaries from the ledger
 
-For file-backed agents, incremental runs treat a modified session file as the authoritative copy for that session: changed files are parsed in parallel, then the ledger rows for those changed sessions are replaced before daily aggregates are rebuilt. This keeps rewritten or compacted session files from leaving stale messages behind. OpenCode remains row-incremental through its own SQLite timestamp filter, and Antigravity continues to use its Language Server-backed cache database.
+For file-backed agents, incremental runs treat a modified session file as the authoritative copy for that session: changed files are parsed in parallel, then the ledger rows for those changed sessions are replaced before daily aggregates are rebuilt. This keeps rewritten or compacted session files from leaving stale messages behind. OpenCode remains row-incremental through its own SQLite timestamp filter, and Antigravity keeps its own cache database, now filled from the conversation SQLite files themselves rather than only from the language server.
 
 ## Core Data Model
 
@@ -215,6 +215,23 @@ tokenpulse --log
 
 Antigravity usage sync maintains a local cache database in `~/.local/share/tokenpulse/antigravity-cache/cache.db`. Regular runs rebuild sessions whose Antigravity or Antigravity CLI conversation files were modified in the last two days. Running with `--rebuild-all` clears the database of parsed messages and fully rebuilds the local SQLite cache database by querying all discoverable sessions from a running Antigravity language server.
 
+Token usage comes from the conversation databases themselves, so it no longer depends on a running language server. Both `~/.gemini/antigravity-cli/conversations/` (CLI) and `~/.gemini/antigravity/conversations/` (Desktop) are scanned; `antigravity-ide/` and `antigravity-backup/` are not, because they hold only encrypted `.pb` files and `backup` duplicates `ide`. For each `.db` conversation the parser decodes the protobuf blobs in the `gen_metadata` table and writes one `session_usage` row per generation, tagged with the current `parser_version` (`antigravity-v3`):
+
+| `gen_metadata` field | language-server field | column |
+|---|---|---|
+| `1.4.2` | `inputTokens` | `input_tokens` |
+| `1.4.5` | `cacheReadTokens` | `cache_read_tokens` |
+| `1.4.9` | `thinkingOutputTokens` | `reasoning_tokens` |
+| `1.4.10` | `responseOutputTokens` | `output_tokens` |
+| `1.4.11` | `responseId` | `response_id` |
+| `1.19`, else the `model_enum` pair in `1.20` | `responseModel` | `model_id` |
+
+`output_tokens` deliberately comes from `1.4.10` rather than `1.4.3` (`outputTokens`): `1.4.3` already contains the thinking tokens, and cost calculation adds reasoning on top of output, so `1.4.3` would double-count. Both the local parser and the language-server path funnel through one `normalize_antigravity_tokens` function that applies this rule and verifies `thinking + response == total`, so the two sources cannot drift apart; a record failing that check is logged and skipped rather than stored. When a source reports only the total, the disjoint output is recovered as `total - thinking`. Antigravity reports no cache-write tokens on either path, so `cache_write_tokens` is always 0. Wall-clock times are joined from `steps.metadata` through the request UUID the two tables share; a `Timestamp` whose nanoseconds fall outside `[0, 1e9)` is not one and is skipped.
+
+Opening the cache migrates any `antigravity-v2` usage row in place, splitting its total output into `output_tokens` and `reasoning_tokens`. That both corrects the old double-count and guarantees no row lingers at an outdated `parser_version`: because `parse_sessions` reports each row's stored version to the ledger, one row the local parser can never re-read — an encrypted `.pb` session — would otherwise mark the source stale on every launch.
+
+Encrypted `.pb` conversations carry no readable usage and remain the language server's job. Both paths write the same `client:session_id:responseId` key with `INSERT OR REPLACE`, so a session read locally and over RPC overwrites in place instead of duplicating. A conversation is re-read when its file (or its `-wal`/`-shm` sidecar) is newer than the cached copy, or when the cache holds no usage row for it at the current `parser_version` — which is what backfills a cache built by an earlier release, and what makes a future `parser_version` bump re-read every conversation. Because that rescan touches every session at once, the local upsert only fills the columns a conversation database actually holds and leaves language-server-supplied metadata (title, workspace path, git root, branch) untouched.
+
 Antigravity CLI and Desktop are treated as sub-clients of the same `antigravity` source. The parser stores the concrete runtime in `client_detail` (`antigravity-cli` or `antigravity-desktop`) and uses a storage key shaped like `client:session_id:message_id`, while usage aggregates deduplicate on the logical `antigravity + session_id + message_id` key. This allows the same message to exist in both CLI and Desktop cache paths without counting its tokens twice.
 
 Claude Code, Codex, Copilot, Gemini CLI, and PI do not maintain separate raw cache databases. Their normal incremental path discovers session files by mtime, parses matching files concurrently, and replaces only the sessions represented by those files. Range refreshes and full rebuilds still use the broader source/date clearing paths.
@@ -337,7 +354,7 @@ Current limits worth keeping in mind:
 - durable append-only scan-state is not complete yet
 - weekly/monthly `session_count` should not be treated as audit-grade unique-session counts yet
 - Gemini historical accuracy needs more fixtures
-- Antigravity sync requires the active language server process to be running for real-time updates
+- Antigravity `.pb` conversations (encrypted) still require the active language server process; `.db` conversations are parsed directly
 - cost accuracy depends on model pricing matching or source-provided cost
 
 ## Working Rules

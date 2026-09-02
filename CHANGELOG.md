@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.4] - 2026-09-02
+## [0.5.5] - 2026-09-02
 
 ### Added
 - **Antigravity IDE Session Sync & Discovery**: Added multi-root discovery across `~/.gemini/antigravity`, `~/.gemini/antigravity-ide`, and `~/.gemini/antigravity-cli`, along with IDE Language Server process candidate detection (`antigravity-ide`).
@@ -62,6 +62,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from 1 to 7 days. On the machine this was found on, a system migration had
   silently dropped 152 messages (23.9M tokens); they are recovered on the next
   refresh.
+
+### Changed
+- **Release asset names** now use readable platform and architecture labels
+  (`darwin-x64`, `darwin-arm64`, `linux-x64-gnu`, and `linux-arm64-gnu`)
+  instead of exposing Rust target triples such as `x86_64-unknown-linux-gnu`.
+
+## [0.5.4] - 2026-08-23
+
+### Fixed
+- **Antigravity token usage is recorded at all**: the usage ledger held zero
+  `antigravity` rows. Tokens were only ever fetched over a language-server RPC
+  that never connects on Linux, while the token counts sitting in every local
+  conversation database went unread. They are now parsed directly, so usage
+  arrives whether or not Antigravity is running. On the development machine the
+  first run recovered ~21,000 generations going back to 2026-05-20. This happens
+  automatically on upgrade — no `--rebuild-all`, no flag.
+- **Antigravity costs no longer double-count reasoning tokens**: Antigravity
+  reports total output with the thinking tokens already inside it, and TokenPulse
+  then billed reasoning again on top. Anyone whose Antigravity data came from a
+  running language server (in practice, macOS) has been overcharged for every
+  thinking model. Existing rows are corrected in place on first launch, so
+  reported Antigravity cost will drop.
+- **Antigravity Desktop and CLI are told apart**: conversations under
+  `~/.gemini/antigravity/` were skipped entirely, and the ones that were read got
+  labelled as CLI regardless of origin. Both runtimes are now scanned and
+  labelled correctly, which is also what stops a session that exists in both
+  places from being counted twice.
+- **Antigravity session titles and workspace paths survive a resync**: a local
+  rescan overwrote the details only a running language server can supply,
+  and nothing could restore them afterwards.
+- **A corrupt Antigravity conversation file can no longer abort the sync**: a
+  malformed record is skipped, as was always intended, instead of overflowing on
+  an oversized value.
 
 ## [0.5.3] - 2026-08-15
 
