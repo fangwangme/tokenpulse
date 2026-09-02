@@ -5,6 +5,61 @@ quota across multiple AI coding agents. It parses local session data into a
 SQLite ledger and presents an interactive dashboard — or plain-text/JSON/CSV
 output for scripting.
 
+## Install
+
+TokenPulse reads agent session data from the local filesystem, so install it on
+the same machine the agents run on.
+
+### Prebuilt binary (no Rust toolchain needed)
+
+Install globally via npm:
+
+```bash
+npm install -g @fangwangme/tokenpulse
+```
+
+Or via bun:
+
+```bash
+bun add -g @fangwangme/tokenpulse
+```
+
+Or run directly without installing:
+
+```bash
+npx @fangwangme/tokenpulse
+```
+
+```bash
+bunx @fangwangme/tokenpulse
+```
+
+Once installed, launch the dashboard:
+
+```bash
+tokenpulse
+```
+
+Prebuilt binaries are published for macOS (Intel and Apple Silicon) and Linux
+(x64 and arm64). npm/bun resolves the one matching your machine; on any other
+platform, build from source instead.
+
+### From source
+
+Requires a Rust toolchain (1.75+):
+
+```bash
+cargo install --git https://github.com/fangwangme/tokenpulse tokenpulse-cli
+```
+
+Or clone and build:
+
+```bash
+git clone https://github.com/fangwangme/tokenpulse
+cd tokenpulse
+cargo install --path tokenpulse-cli
+```
+
 ## Screenshots
 
 | Overview | Quota |
@@ -88,44 +143,6 @@ output for scripting.
 - **Observation history** — every quota poll (per provider, rate window, and
   model family) and every Keeper run is appended to a local SQLite database for
   your own trend analysis
-
-## Install
-
-TokenPulse reads agent session data from the local filesystem, so install it on
-the same machine the agents run on.
-
-### npm (prebuilt binary, no Rust toolchain needed)
-
-```bash
-npm install -g @fangwangme/tokenpulse
-tokenpulse
-```
-
-Or run it without installing:
-
-```bash
-npx @fangwangme/tokenpulse
-```
-
-Prebuilt binaries are published for macOS (Intel and Apple Silicon) and Linux
-(x64 and arm64). npm resolves the one matching your machine; on any other
-platform, build from source instead.
-
-### From source
-
-Requires a Rust toolchain (1.75+):
-
-```bash
-cargo install --git https://github.com/fangwangme/tokenpulse tokenpulse-cli
-```
-
-Or clone and build:
-
-```bash
-git clone https://github.com/fangwangme/tokenpulse
-cd tokenpulse
-cargo install --path tokenpulse-cli
-```
 
 ## Quick Start
 
