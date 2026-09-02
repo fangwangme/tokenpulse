@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-09-02
+
+### Fixed
+- **Antigravity usage is no longer re-dated onto the day it was synced**: two
+  passes write the same rows, and the language-server pass ran second. Its
+  timestamp chain ended in "now", so every generation the server reported
+  without a `createdAt` was stamped with the instant the sync ran — overwriting
+  the exact time the local pass had already recovered from the conversation
+  database. One refresh moved eight days of history onto a single afternoon
+  (4,919 rows and 530M tokens on one millisecond, across 60 sessions), inflating
+  that day's reported usage roughly fourfold while the days it drained read
+  zero. The language-server pass now joins the same conversation database by
+  `responseId` and carries the generation's real time; the session's start time
+  ranks below that join, and a generation nothing can date is dropped rather
+  than filed under today.
+- **The local pass no longer dates a generation by its file's mtime**: a
+  conversation file's last-write time is not the time of any generation inside
+  it, and it fell back to "now" when the file had no mtime at all. A generation
+  whose time cannot be joined from `steps` is now skipped and counted in the
+  sync log.
+- **A parser-version bump now clears what it replaces**: usage rows a session
+  left behind at an older parser version are removed once it is re-parsed, so a
+  mis-dated row cannot survive the bump meant to correct it. Bumped the parser
+  version to `antigravity-v5`, which is what re-derives the already mis-dated
+  rows from the local conversation databases on the next sync.
+
 ## [0.5.5] - 2026-09-02
 
 ### Added
