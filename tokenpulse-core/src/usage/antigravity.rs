@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-/// Bumped from `antigravity-v3` when Antigravity IDE and cross-runtime
-/// deduplication landed.
-const PARSER_VERSION: &str = "antigravity-v4";
+/// Bumped from `antigravity-v4` when generation timestamps stopped falling back
+/// to the sync instant; the bump is what makes the next sync re-derive the
+/// already mis-dated rows from the local conversation databases.
+const PARSER_VERSION: &str = "antigravity-v5";
 const MODEL_ALIAS_HISTORY_VERSION: u32 = 1;
 const MODEL_ALIAS_HISTORY_FILE_NAME: &str = "model-aliases.json";
 const ANTIGRAVITY_LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
@@ -774,6 +775,7 @@ async fn sync_antigravity_with_options_async(
     let now_ms = Local::now().timestamp_millis();
     let mut empty_metadata_count = 0usize;
     let mut zero_usage_sessions_count = 0usize;
+    let mut undated_usage_rows = 0usize;
     for (idx, (work_item, _conns)) in sessions_to_sync.into_iter().enumerate() {
         let AntigravityWorkItem {
             session_id,
@@ -841,21 +843,7 @@ async fn sync_antigravity_with_options_async(
             }
         }
 
-        // No DELETE before re-inserting: `INSERT OR REPLACE` on the shared
-        // `{client}:{session_id}:{responseId}` key already overwrites in place,
-        // and deleting first would drop rows the local parser produced whenever
-        // the RPC returns a subset of them.
         let tx = db_conn.transaction()?;
-        // Clear every runtime this work item speaks for, not just the canonical
-        // one: a session whose canonical runtime changed between refreshes would
-        // otherwise leave its previous client's rows behind and be counted twice.
-        for runtime in &candidate_runtimes {
-            tx.execute(
-                "DELETE FROM session_usage WHERE client = ? AND session_id = ?;",
-                rusqlite::params![client_str_for_runtime_kind(*runtime), &session_id],
-            )?;
-        }
-
         upsert_antigravity_session_row(
             &tx,
             &session_id,
@@ -865,111 +853,19 @@ async fn sync_antigravity_with_options_async(
             now_ms,
         )?;
 
-        let mut inserted_usage_rows = 0usize;
-        for (step_idx, meta) in metadata.iter().enumerate() {
-            let chat_model = meta.get("chatModel").unwrap_or(meta);
-            let raw_model_id = chat_model
-                .get("responseModel")
-                .or_else(|| chat_model.get("model"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let mut model_id =
-                resolve_antigravity_model_id_with_aliases(raw_model_id, &model_aliases);
-            if is_pseudo_raw_model(&model_id) {
-                if let Some(display_name) =
-                    chat_model.get("modelDisplayName").and_then(Value::as_str)
-                {
-                    if let Some(normalized) = normalize_display_name_to_id(display_name) {
-                        model_id = normalized;
-                    }
-                }
-            }
-
-            let created_at = chat_model
-                .get("chatStartMetadata")
-                .and_then(|v| v.get("createdAt"))
-                .and_then(parse_timestamp_value);
-
-            if let Some(retry_infos) = chat_model.get("retryInfos").and_then(Value::as_array) {
-                for retry in retry_infos {
-                    let usage = retry.get("usage").unwrap_or(retry);
-                    let Some(tokens) = normalize_antigravity_tokens(
-                        to_safe_i64(usage.get("inputTokens")),
-                        to_safe_i64(usage.get("outputTokens")),
-                        usage
-                            .get("responseOutputTokens")
-                            .map(|v| to_safe_i64(Some(v))),
-                        to_safe_i64(usage.get("cacheReadTokens")),
-                        to_safe_i64(usage.get("cacheWriteTokens")),
-                        to_safe_i64(usage.get("thinkingOutputTokens")),
-                    ) else {
-                        continue;
-                    };
-                    let AntigravityTokens {
-                        input,
-                        output,
-                        cache_read,
-                        cache_write,
-                        reasoning,
-                    } = tokens;
-                    let timestamp = usage
-                        .get("createdAt")
-                        .or_else(|| usage.get("timestamp"))
-                        .and_then(parse_timestamp_value)
-                        .or(created_at)
-                        .unwrap_or(now_ms);
-
-                    if input == 0
-                        && output == 0
-                        && cache_read == 0
-                        && reasoning == 0
-                        && cache_write == 0
-                    {
-                        continue;
-                    }
-
-                    let raw_message_key = usage
-                        .get("responseId")
-                        .and_then(Value::as_str)
-                        .map(String::from)
-                        .unwrap_or_else(|| format!("{}:{}:{}", timestamp, model_id, step_idx));
-                    let message_key =
-                        antigravity_logical_message_key(&session_id, &raw_message_key);
-                    let storage_message_id =
-                        antigravity_storage_message_id(client_str, &message_key);
-
-                    let provider_id = detect_provider_from_model(&model_id);
-                    let date_str = local_date_string_from_timestamp(timestamp);
-
-                    tx.execute(
-                        "INSERT OR REPLACE INTO session_usage (
-                            id, session_id, client, model_id, provider_id, timestamp, step_index,
-                            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                            response_id, pricing_day, parser_version
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        rusqlite::params![
-                            storage_message_id,
-                            &session_id,
-                            client_str,
-                            model_id,
-                            provider_id,
-                            timestamp,
-                            step_idx as i64,
-                            input,
-                            output,
-                            cache_read,
-                            cache_write,
-                            reasoning,
-                            message_key,
-                            date_str,
-                            PARSER_VERSION,
-                        ],
-                    )?;
-                    inserted_usage_rows += 1;
-                }
-            }
-        }
-
+        let RpcUsageWrite {
+            inserted: inserted_usage_rows,
+            undated,
+        } = write_rpc_session_usage(
+            &tx,
+            &home,
+            &session_id,
+            client_str,
+            &candidate_runtimes,
+            &metadata,
+            &model_aliases,
+        )?;
+        undated_usage_rows += undated;
         tx.commit()?;
         if metadata_was_empty {
             continue;
@@ -988,6 +884,13 @@ async fn sync_antigravity_with_options_async(
 
     let cached_rows_after = count_antigravity_session_cache_rows(&db_conn);
 
+    if undated_usage_rows > 0 {
+        warn!(
+            "Antigravity sync: dropped {} language-server usage rows with no resolvable generation time",
+            undated_usage_rows
+        );
+    }
+
     info!(
         "Antigravity sync: Synced local Antigravity cache in {} ms. Connections: {}, sessions: (total: {}, synced: {}, metadata_failed: {}, metadata_empty: {}, zero_usage: {}), cache rows: {} -> {}",
         sync_start.elapsed().as_millis(),
@@ -1002,6 +905,207 @@ async fn sync_antigravity_with_options_async(
     );
 
     Ok(())
+}
+
+/// Outcome of writing one session's language-server usage rows.
+struct RpcUsageWrite {
+    inserted: usize,
+    /// Generations dropped because no source could date them. They are never
+    /// stamped with the sync instant: doing so re-dated weeks of history onto
+    /// one afternoon.
+    undated: usize,
+}
+
+/// Writes one session's `generatorMetadata` usage into the cache, replacing
+/// whatever a previous refresh stored for every runtime this work item speaks
+/// for.
+///
+/// The rows share their `{client}:{session_id}:{responseId}` key with the ones
+/// `sync_local_conversations` writes, so this pass overwrites them. It
+/// therefore has to be able to date a generation at least as precisely as the
+/// local pass did, which is why it joins the same conversation database when
+/// the language server reports no time of its own.
+fn write_rpc_session_usage(
+    tx: &rusqlite::Transaction<'_>,
+    home: &Path,
+    session_id: &str,
+    client_str: &str,
+    candidate_runtimes: &[AntigravityRuntimeKind],
+    metadata: &[Value],
+    model_aliases: &HashMap<String, ModelAlias>,
+) -> Result<RpcUsageWrite> {
+    // Clear every runtime this work item speaks for, not just the canonical
+    // one: a session whose canonical runtime changed between refreshes would
+    // otherwise leave its previous client's rows behind and be counted twice.
+    for runtime in candidate_runtimes {
+        tx.execute(
+            "DELETE FROM session_usage WHERE client = ? AND session_id = ?;",
+            rusqlite::params![client_str_for_runtime_kind(*runtime), session_id],
+        )?;
+    }
+
+    // Built on the first generation that needs it and reused for the rest of
+    // the session; a language server that reports `createdAt` never pays for
+    // reading the conversation database at all.
+    let mut local_timestamps: Option<HashMap<String, i64>> = None;
+    let mut write = RpcUsageWrite {
+        inserted: 0,
+        undated: 0,
+    };
+
+    for (step_idx, meta) in metadata.iter().enumerate() {
+        let chat_model = meta.get("chatModel").unwrap_or(meta);
+        let raw_model_id = chat_model
+            .get("responseModel")
+            .or_else(|| chat_model.get("model"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let mut model_id = resolve_antigravity_model_id_with_aliases(raw_model_id, model_aliases);
+        if is_pseudo_raw_model(&model_id) {
+            if let Some(display_name) = chat_model.get("modelDisplayName").and_then(Value::as_str) {
+                if let Some(normalized) = normalize_display_name_to_id(display_name) {
+                    model_id = normalized;
+                }
+            }
+        }
+
+        let created_at = chat_model
+            .get("chatStartMetadata")
+            .and_then(|v| v.get("createdAt"))
+            .and_then(parse_timestamp_value);
+
+        let Some(retry_infos) = chat_model.get("retryInfos").and_then(Value::as_array) else {
+            continue;
+        };
+
+        for retry in retry_infos {
+            let usage = retry.get("usage").unwrap_or(retry);
+            let Some(tokens) = normalize_antigravity_tokens(
+                to_safe_i64(usage.get("inputTokens")),
+                to_safe_i64(usage.get("outputTokens")),
+                usage
+                    .get("responseOutputTokens")
+                    .map(|v| to_safe_i64(Some(v))),
+                to_safe_i64(usage.get("cacheReadTokens")),
+                to_safe_i64(usage.get("cacheWriteTokens")),
+                to_safe_i64(usage.get("thinkingOutputTokens")),
+            ) else {
+                continue;
+            };
+            let AntigravityTokens {
+                input,
+                output,
+                cache_read,
+                cache_write,
+                reasoning,
+            } = tokens;
+
+            if input == 0 && output == 0 && cache_read == 0 && reasoning == 0 && cache_write == 0 {
+                continue;
+            }
+
+            let response_id = usage.get("responseId").and_then(Value::as_str);
+            let timestamp = usage
+                .get("createdAt")
+                .or_else(|| usage.get("timestamp"))
+                .and_then(parse_timestamp_value)
+                // Ground truth: the generation's own time, joined out of the
+                // session's conversation database through the same response id.
+                .or_else(|| {
+                    let response_id = response_id?;
+                    local_timestamps
+                        .get_or_insert_with(|| local_generation_timestamps(home, session_id))
+                        .get(response_id)
+                        .copied()
+                })
+                // `chatStartMetadata.createdAt` dates every generation at the
+                // session's start, which mis-files anything spanning midnight.
+                // It ranks last, and below it a row is dropped rather than
+                // invented.
+                .or(created_at);
+
+            let Some(timestamp) = timestamp else {
+                write.undated += 1;
+                debug!(
+                    "Antigravity session {} ({}): dropping generation {} with no resolvable time",
+                    session_id,
+                    client_str,
+                    response_id.unwrap_or("<no response id>")
+                );
+                continue;
+            };
+
+            let raw_message_key = response_id
+                .map(String::from)
+                .unwrap_or_else(|| format!("{}:{}:{}", timestamp, model_id, step_idx));
+            let message_key = antigravity_logical_message_key(session_id, &raw_message_key);
+            let storage_message_id = antigravity_storage_message_id(client_str, &message_key);
+
+            let provider_id = detect_provider_from_model(&model_id);
+            let date_str = local_date_string_from_timestamp(timestamp);
+
+            tx.execute(
+                "INSERT OR REPLACE INTO session_usage (
+                    id, session_id, client, model_id, provider_id, timestamp, step_index,
+                    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                    response_id, pricing_day, parser_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    storage_message_id,
+                    session_id,
+                    client_str,
+                    model_id,
+                    provider_id,
+                    timestamp,
+                    step_idx as i64,
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                    reasoning,
+                    message_key,
+                    date_str,
+                    PARSER_VERSION,
+                ],
+            )?;
+            write.inserted += 1;
+        }
+    }
+
+    Ok(write)
+}
+
+/// Generation times read from one session's own conversation database, keyed by
+/// the `responseId` the language server reports for the same generation.
+///
+/// Empty when the conversation is encrypted, absent, or unreadable — the caller
+/// treats a miss as "not datable from here", never as time zero.
+fn local_generation_timestamps(home: &Path, session_id: &str) -> HashMap<String, i64> {
+    let mut timestamps = HashMap::new();
+    // A session id reaches this from the language server; it names a file, so
+    // anything path-shaped is refused rather than resolved.
+    if session_id.is_empty() || Path::new(session_id).components().count() != 1 {
+        return timestamps;
+    }
+
+    for (dir, _) in antigravity_local_conversation_dirs(home) {
+        let path = dir.join(format!("{session_id}.db"));
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(local_db) = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) else {
+            continue;
+        };
+        for (usage, timestamp) in read_local_conversation_usage(&local_db) {
+            if let (Some(response_id), Some(timestamp)) = (usage.response_id, timestamp) {
+                timestamps.insert(response_id, timestamp);
+            }
+        }
+    }
+    timestamps
 }
 
 /// Disjoint token columns for one Antigravity generation.
@@ -1583,6 +1687,7 @@ fn sync_local_conversations(
     let tx = db_conn.transaction()?;
     let mut synced_sessions = 0usize;
     let mut inserted_usage_rows = 0usize;
+    let mut undated_usage_rows = 0usize;
 
     for (dir, runtime_kind) in antigravity_local_conversation_dirs(home) {
         let client_str = client_str_for_runtime_kind(runtime_kind);
@@ -1646,17 +1751,37 @@ fn sync_local_conversations(
                     }
                 };
 
+            let mut undatable_ids: Vec<String> = Vec::new();
             let resolved: Vec<(String, i64, &AntigravityLocalUsage)> = usage_records
                 .iter()
-                .map(|(usage, timestamp)| {
+                .filter_map(|(usage, timestamp)| {
+                    // Only the time joined out of `steps.metadata` is this
+                    // generation's own. The file mtime dates the conversation's
+                    // last write and "now" dates the sync, so either one files
+                    // months of history under whichever day the sync ran.
+                    let Some(timestamp) = *timestamp else {
+                        // Refusing to date it now also retracts whatever an
+                        // earlier parser invented for it. Only this generation
+                        // is withdrawn — a row this parse merely cannot see is
+                        // left alone, because it is still a record of usage
+                        // that happened.
+                        if let Some(response_id) = usage.response_id.as_deref() {
+                            undatable_ids.push(antigravity_storage_message_id(
+                                client_str,
+                                &antigravity_logical_message_key(session_id, response_id),
+                            ));
+                        }
+                        return None;
+                    };
                     let model_id = usage
                         .raw_model_id
                         .as_deref()
                         .map(|raw| resolve_antigravity_model_id_with_aliases(raw, model_aliases))
                         .unwrap_or_else(|| "unknown".to_string());
-                    (model_id, timestamp.or(modified_ms).unwrap_or(now_ms), usage)
+                    Some((model_id, timestamp, usage))
                 })
                 .collect();
+            undated_usage_rows += usage_records.len() - resolved.len();
 
             let primary_model_id = resolved
                 .iter()
@@ -1727,11 +1852,25 @@ fn sync_local_conversations(
                 inserted_usage_rows += 1;
             }
 
+            // `parse_sessions` stamps every cache row with the current parser
+            // version on its way to the ledger, so a row left behind here would
+            // reach it looking freshly parsed — with the date an earlier
+            // fallback invented.
+            for id in &undatable_ids {
+                tx.execute("DELETE FROM session_usage WHERE id = ?1;", [id])?;
+            }
+
             synced_sessions += 1;
         }
     }
 
     tx.commit()?;
+    if undated_usage_rows > 0 {
+        warn!(
+            "Antigravity local sync: dropped {} generations whose time could not be joined from `steps`",
+            undated_usage_rows
+        );
+    }
     if synced_sessions > 0 {
         info!(
             "Antigravity local sync: {} conversation databases, {} usage rows",
@@ -4931,5 +5070,311 @@ mod tests {
             .unwrap();
         assert_eq!(rows_after_first, 2);
         assert_eq!(rows_after_first, rows_after_second);
+    }
+    /// One `generatorMetadata` entry with no time of its own, in the shape the
+    /// language server returns it.
+    fn undated_rpc_metadata(response_id: &str) -> Vec<Value> {
+        vec![json!({
+            "chatModel": {
+                "responseModel": "gemini-3.7-flash",
+                "retryInfos": [{
+                    "usage": {
+                        "responseId": response_id,
+                        "inputTokens": 5911,
+                        "outputTokens": 669,
+                        "responseOutputTokens": 55,
+                        "thinkingOutputTokens": 614,
+                        "cacheReadTokens": 8138,
+                        "cacheWriteTokens": 0,
+                    }
+                }]
+            }
+        })]
+    }
+
+    #[test]
+    fn test_rpc_write_keeps_timestamp_recovered_from_local_steps() {
+        // The RPC pass overwrites the local pass's row wholesale. Its own
+        // `createdAt` chain is empty here, so without the conversation-database
+        // join it would fall back to the sync instant and re-date the
+        // generation onto today.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let cli_conv_dir = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("conversations");
+        std::fs::create_dir_all(&cli_conv_dir).unwrap();
+
+        let session_id = "cli-session-12345678901234567890";
+        let request_uuid = "11111111-1111-4111-8111-111111111111";
+        let response_id = "resp-from-local-steps";
+        // 2025-12-31T22:40:00Z + 500ms.
+        let generation_seconds = 1_767_225_600_u64;
+        let generation_ms = 1_767_225_600_500_i64;
+        write_conversation_db(
+            &cli_conv_dir.join(format!("{}.db", session_id)),
+            &[GenMetadataFixture {
+                request_uuid: request_uuid.to_string(),
+                response_id: response_id.to_string(),
+                ..GenMetadataFixture::default()
+            }
+            .encode()],
+            &[(request_uuid.to_string(), generation_seconds)],
+        );
+
+        let cache_dir = temp_dir.path().join("cache");
+        let mut db_conn = open_cache_db(&cache_dir).unwrap();
+        let aliases = static_model_aliases();
+        sync_local_conversations(&mut db_conn, home, &HashMap::new(), false, &aliases).unwrap();
+
+        let stored_by_local: i64 = db_conn
+            .query_row("SELECT timestamp FROM session_usage", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored_by_local, generation_ms);
+
+        let tx = db_conn.transaction().unwrap();
+        let write = write_rpc_session_usage(
+            &tx,
+            home,
+            session_id,
+            "antigravity-cli",
+            &[AntigravityRuntimeKind::Cli],
+            &undated_rpc_metadata(response_id),
+            &aliases,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!((write.inserted, write.undated), (1, 0));
+        let (rows, timestamp, pricing_day): (i64, i64, String) = db_conn
+            .query_row(
+                "SELECT count(*), min(timestamp), min(pricing_day) FROM session_usage",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(timestamp, generation_ms);
+        assert_eq!(
+            pricing_day,
+            local_date_string_from_timestamp(generation_ms),
+            "the RPC pass must not re-date a generation the local pass dated precisely"
+        );
+    }
+
+    #[test]
+    fn test_rpc_write_drops_generation_it_cannot_date() {
+        // No `createdAt`, no `chatStartMetadata`, and no local conversation
+        // database to join: the generation has no knowable time, so it is
+        // dropped rather than stamped with the sync instant.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let cache_dir = temp_dir.path().join("cache");
+        let mut db_conn = open_cache_db(&cache_dir).unwrap();
+        let session_id = "cli-session-98765432109876543210";
+        db_conn
+            .execute(
+                "INSERT INTO sessions (session_id, client, model_id, synced_at)
+                 VALUES (?, 'antigravity-cli', 'gemini-3-7-flash', 1)",
+                [session_id],
+            )
+            .unwrap();
+
+        let tx = db_conn.transaction().unwrap();
+        let write = write_rpc_session_usage(
+            &tx,
+            home,
+            session_id,
+            "antigravity-cli",
+            &[AntigravityRuntimeKind::Cli],
+            &undated_rpc_metadata("resp-undatable"),
+            &static_model_aliases(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!((write.inserted, write.undated), (0, 1));
+        let today = local_date_string_from_timestamp(Local::now().timestamp_millis());
+        let (rows, rows_today): (i64, i64) = db_conn
+            .query_row(
+                "SELECT count(*), count(*) FILTER (WHERE pricing_day = ?1) FROM session_usage",
+                [&today],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert_eq!(
+            rows_today, 0,
+            "an undatable generation must never land on today"
+        );
+    }
+
+    #[test]
+    fn test_local_sync_drops_generations_without_a_joined_timestamp() {
+        // The conversation database holds a generation whose request UUID has
+        // no matching step, so no wall clock can be joined. The file mtime is
+        // today's; using it would file the generation under today.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let cli_conv_dir = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("conversations");
+        std::fs::create_dir_all(&cli_conv_dir).unwrap();
+
+        let session_id = "cli-session-12345678901234567890";
+        let dated_uuid = "11111111-1111-4111-8111-111111111111";
+        let orphan_uuid = "22222222-2222-4222-8222-222222222222";
+        let generation_ms = 1_767_225_600_500_i64;
+        write_conversation_db(
+            &cli_conv_dir.join(format!("{}.db", session_id)),
+            &[
+                GenMetadataFixture {
+                    request_uuid: dated_uuid.to_string(),
+                    response_id: "resp-dated".to_string(),
+                    ..GenMetadataFixture::default()
+                }
+                .encode(),
+                GenMetadataFixture {
+                    request_uuid: orphan_uuid.to_string(),
+                    response_id: "resp-orphan".to_string(),
+                    ..GenMetadataFixture::default()
+                }
+                .encode(),
+            ],
+            &[(dated_uuid.to_string(), 1_767_225_600)],
+        );
+
+        let cache_dir = temp_dir.path().join("cache");
+        let mut db_conn = open_cache_db(&cache_dir).unwrap();
+        sync_local_conversations(
+            &mut db_conn,
+            home,
+            &HashMap::new(),
+            false,
+            &static_model_aliases(),
+        )
+        .unwrap();
+
+        let stored: Vec<(String, i64)> = db_conn
+            .prepare("SELECT response_id, timestamp FROM session_usage")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(
+            stored,
+            vec![(format!("{session_id}:resp-dated"), generation_ms)]
+        );
+    }
+
+    #[test]
+    fn test_local_sync_withdraws_only_the_generations_it_can_no_longer_date() {
+        // Two rows a previous parser left behind. One belongs to a generation
+        // this parse refuses to date, so its invented date has to go with it —
+        // `parse_sessions` stamps every cache row with the current version, and
+        // it would otherwise reach the ledger looking freshly parsed. The other
+        // is a row only the language server ever saw; not reproducing it is not
+        // evidence the usage never happened, so it stays.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let cli_conv_dir = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("conversations");
+        std::fs::create_dir_all(&cli_conv_dir).unwrap();
+
+        let session_id = "cli-session-12345678901234567890";
+        let dated_uuid = "11111111-1111-4111-8111-111111111111";
+        let orphan_uuid = "22222222-2222-4222-8222-222222222222";
+        write_conversation_db(
+            &cli_conv_dir.join(format!("{}.db", session_id)),
+            &[
+                GenMetadataFixture {
+                    request_uuid: dated_uuid.to_string(),
+                    response_id: "resp-dated".to_string(),
+                    ..GenMetadataFixture::default()
+                }
+                .encode(),
+                GenMetadataFixture {
+                    request_uuid: orphan_uuid.to_string(),
+                    response_id: "resp-undatable".to_string(),
+                    ..GenMetadataFixture::default()
+                }
+                .encode(),
+            ],
+            &[(dated_uuid.to_string(), 1_767_225_600)],
+        );
+
+        let cache_dir = temp_dir.path().join("cache");
+        let mut db_conn = open_cache_db(&cache_dir).unwrap();
+        db_conn
+            .execute(
+                "INSERT INTO sessions (session_id, client, model_id, synced_at)
+                 VALUES (?, 'antigravity-cli', 'gemini-3-7-flash', 1)",
+                [session_id],
+            )
+            .unwrap();
+        for (id, response_id) in [
+            (
+                "antigravity-cli:cli-session-12345678901234567890:resp-undatable",
+                "resp-undatable",
+            ),
+            (
+                "antigravity-cli:cli-session-12345678901234567890:resp-server-only",
+                "resp-server-only",
+            ),
+        ] {
+            db_conn
+                .execute(
+                    "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp,
+                                                step_index, input_tokens, output_tokens, cache_read_tokens,
+                                                cache_write_tokens, reasoning_tokens, response_id,
+                                                pricing_day, parser_version)
+                     VALUES (?1, ?2, 'antigravity-cli', 'gemini-3-7-flash', 'google', 1788338064876,
+                             0, 1, 1, 0, 0, 0, ?3, '2026-09-02', 'antigravity-v4')",
+                    rusqlite::params![
+                        id,
+                        session_id,
+                        format!("{session_id}:{response_id}")
+                    ],
+                )
+                .unwrap();
+        }
+
+        sync_local_conversations(
+            &mut db_conn,
+            home,
+            &HashMap::new(),
+            false,
+            &static_model_aliases(),
+        )
+        .unwrap();
+
+        let mut stored: Vec<(String, i64, String)> = db_conn
+            .prepare("SELECT response_id, timestamp, parser_version FROM session_usage")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        stored.sort();
+        assert_eq!(
+            stored,
+            vec![
+                (
+                    format!("{session_id}:resp-dated"),
+                    1_767_225_600_500,
+                    PARSER_VERSION.to_string()
+                ),
+                (
+                    format!("{session_id}:resp-server-only"),
+                    1_788_338_064_876,
+                    "antigravity-v4".to_string()
+                ),
+            ]
+        );
     }
 }
