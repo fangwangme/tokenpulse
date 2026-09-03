@@ -78,6 +78,21 @@ pub fn quota_provider_info_list() -> Vec<QuotaProviderInfo> {
         .collect()
 }
 
+/// Ids of every registered quota provider, in registry order.
+///
+/// This is the single source of truth for "which providers are configurable as
+/// quota providers": the Settings rows are generated from it, and config keys
+/// are intersected with it, so a provider without a fetcher never has to be
+/// listed a second time — and can never be configured by accident.
+pub fn quota_provider_ids() -> Vec<&'static str> {
+    QUOTA_PROVIDERS.iter().map(|e| e.id).collect()
+}
+
+/// Whether `provider_id` has a registered quota fetcher.
+pub fn is_quota_provider(provider_id: &str) -> bool {
+    QUOTA_PROVIDERS.iter().any(|e| e.id == provider_id)
+}
+
 /// Build QuotaFetcher instances for the requested providers.
 ///
 /// When `provider` is Some, only that single provider is built (if known).

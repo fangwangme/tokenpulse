@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-09-03
+
+### Fixed
+- **Antigravity conversations no longer invalidate their own cache on every
+  refresh**: the change detector took the newest mtime across `.db`, `.db-wal`
+  and `.db-shm`, but `-shm` is SQLite's WAL shared-memory index and *readers*
+  write it — opening a conversation read-only moves its mtime. Parsing a
+  conversation therefore guaranteed it looked changed on the next refresh, a
+  closed loop. Measured against the real cache (564 cached sessions), 263
+  sessions re-synced every cycle and all 263 were stale solely because of
+  `-shm`: for every one of them the stored timestamp was already at or past
+  `max(.db, .db-wal)`. The same poisoned timestamp fed the language-server skip
+  check, so those sessions were re-fetched over RPC as well. On a steady-state
+  refresh this dominated the 77 s total, with the Antigravity parse phase alone
+  taking 43.7 s. `-shm` is now excluded; `-wal` still catches writes that land
+  only in the write-ahead log, which is what it was added for.
+
+### Changed
+- **Settings now configures quota providers only**: the provider rows were a
+  hardcoded list that was neither a quota list nor a usage list — it offered
+  `gemini`, which has had no quota fetcher since the fetcher was removed, and
+  omitted `opencode` and `pi`. Worse, one keypress mutated two different
+  things: the persisted quota config *and* the session-only usage source
+  filter, so toggling a row silently hid usage rows too. The rows are now
+  generated from the quota registry (claude, codex, copilot, antigravity), the
+  toggle writes only the quota config, and the block is labelled as such. The
+  usage view's own source filter (`s`) is unaffected, and usage is still
+  scanned for every supported agent.
+- **A stale provider key in `config.toml` no longer costs a lookup**: quota
+  provider resolution is intersected with the registry, so a leftover
+  `[providers.gemini]` from an older install no longer opens the quota cache
+  every refresh. Existing config files are left untouched — the key is ignored,
+  not removed. `gemini` is also gone from the default config. Gemini CLI
+  **usage** parsing and its historical data are unchanged; usage never read
+  this map.
+
 ## [0.5.6] - 2026-09-02
 
 ### Fixed

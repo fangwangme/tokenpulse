@@ -1,4 +1,5 @@
 use super::UsageState;
+use crate::commands::quota::quota_provider_ids;
 use crate::tui::theme::{theme_status_label, Theme};
 use ratatui::{
     layout::Rect,
@@ -7,8 +8,6 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use tokenpulse_core::config::{Config, ConfigManager, QuotaDisplayMode};
-
-const ALL_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "antigravity", "copilot"];
 
 /// The settings rows above the per-provider toggles, in display order. Both the
 /// row count and the keyboard dispatch read from this, and
@@ -142,10 +141,11 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
         },
     ];
 
-    // Add provider checkboxes!
-    let providers = ALL_PROVIDERS.to_vec();
-
-    for provider in providers {
+    // Quota provider checkboxes. The rows come from the quota registry so they
+    // are exactly the providers that have a fetcher; usage parsing is not
+    // configured here — every supported agent is always scanned, and the usage
+    // view has its own source filter.
+    for provider in quota_provider_ids() {
         let enabled = config
             .providers
             .get(provider)
@@ -186,7 +186,7 @@ fn next_refresh_interval(curr: u32) -> u32 {
 }
 
 pub fn settings_row_count(_state: &UsageState) -> usize {
-    FIXED_SETTING_KEYS.len() + ALL_PROVIDERS.len()
+    FIXED_SETTING_KEYS.len() + quota_provider_ids().len()
 }
 
 pub fn handle_settings_action(
@@ -234,16 +234,13 @@ pub fn handle_settings_action(
         }
         Some("keeper_engine") => config.keeper.enabled = !config.keeper.enabled,
         _ => {
+            // Quota configuration only. The usage view's source filter is
+            // session state with its own key (`s`), so one keypress here must
+            // not silently hide usage rows as well.
             let provider_idx = idx - FIXED_SETTING_KEYS.len();
-            if let Some(&provider) = ALL_PROVIDERS.get(provider_idx) {
+            if let Some(&provider) = quota_provider_ids().get(provider_idx) {
                 let p_config = config.providers.entry(provider.to_string()).or_default();
                 p_config.enabled = !p_config.enabled;
-
-                if p_config.enabled {
-                    state.enabled_sources.insert(provider.to_string());
-                } else if state.enabled_sources.len() > 1 {
-                    state.enabled_sources.remove(provider);
-                }
             }
         }
     }
@@ -286,7 +283,22 @@ pub fn render_settings_tab(
 
     let items = get_settings_items(state, config, theme);
 
+    let first_provider_row = items.iter().position(|i| i.key == "provider_enable");
+
     for (idx, item) in items.iter().enumerate() {
+        // Name the block: these rows configure quota polling, not which agents
+        // are scanned for usage.
+        if Some(idx) == first_provider_row {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled("Quota providers", Style::default().fg(theme.dim).bold()),
+                Span::styled(
+                    "  (usage is always scanned for every agent)",
+                    Style::default().fg(theme.dim),
+                ),
+            ]));
+        }
+
         let is_selected = idx == state.selected_row;
         let marker = if is_selected { ">" } else { " " };
 
@@ -364,6 +376,116 @@ mod tests {
         assert!(keys[FIXED_SETTING_KEYS.len()..]
             .iter()
             .all(|k| *k == "provider_enable"));
+    }
+
+    /// The Settings rows are the quota registry, nothing else. `gemini` has no
+    /// quota fetcher, so it must not be configurable here even though Gemini
+    /// CLI usage is still parsed and shown.
+    #[test]
+    fn settings_provider_rows_are_exactly_the_quota_registry() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let state = UsageState::new(&dashboard, vec![]);
+        let config = Config::default();
+        let theme = Theme::new(crate::tui::theme::ThemeMode::Dark);
+
+        let items = get_settings_items(&state, &config, &theme);
+        let provider_labels: Vec<String> = items
+            .iter()
+            .filter(|i| i.key == "provider_enable")
+            .map(|i| i.label.clone())
+            .collect();
+
+        assert_eq!(
+            provider_labels,
+            vec![
+                "claude (enabled)",
+                "codex (enabled)",
+                "copilot (enabled)",
+                "antigravity (enabled)",
+            ]
+        );
+        assert!(!provider_labels.iter().any(|l| l.starts_with("gemini")));
+        assert_eq!(settings_row_count(&state), FIXED_SETTING_KEYS.len() + 4);
+    }
+
+    /// One keypress used to mutate two different semantics: the persisted quota
+    /// config and the session-only usage source filter. The usage view has its
+    /// own filter (`s`), so this row must move the config alone.
+    #[test]
+    fn provider_toggle_changes_quota_config_only() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+        // Two sources, so the old `len() > 1` removal branch would fire on the
+        // disable half of the toggle and the insert branch on the enable half.
+        state.enabled_sources = ["claude", "gemini"].into_iter().map(String::from).collect();
+        let mut config = Config::default();
+        let mut theme = Theme::new(crate::tui::theme::ThemeMode::Dark);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_manager = ConfigManager::with_path(temp_dir.path().join("config.toml"));
+
+        // The first provider row.
+        state.selected_row = FIXED_SETTING_KEYS.len();
+        let provider = quota_provider_ids()[0];
+        let sources_before = state.enabled_sources.clone();
+        assert!(config.providers.get(provider).unwrap().enabled);
+
+        handle_settings_action(&mut state, &mut config, &config_manager, &mut theme).unwrap();
+
+        assert!(
+            !config.providers.get(provider).unwrap().enabled,
+            "the quota config entry is what the row toggles"
+        );
+        assert_eq!(
+            state.enabled_sources, sources_before,
+            "the usage source filter must be untouched"
+        );
+
+        handle_settings_action(&mut state, &mut config, &config_manager, &mut theme).unwrap();
+        assert!(config.providers.get(provider).unwrap().enabled);
+        assert_eq!(state.enabled_sources, sources_before);
+    }
+
+    /// The rendered tab must name the block, so a reader cannot mistake these
+    /// rows for "which agents are scanned for usage".
+    #[test]
+    fn settings_tab_labels_the_provider_block_as_quota_providers() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dashboard = UsageDashboard { daily: vec![] };
+        let state = UsageState::new(&dashboard, vec![]);
+        let config = Config::default();
+        let theme = Theme::new(crate::tui::theme::ThemeMode::Dark);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_manager = ConfigManager::with_path(temp_dir.path().join("config.toml"));
+
+        terminal
+            .draw(|f| render_settings_tab(f, f.area(), &state, &config, &config_manager, &theme))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Quota providers"));
+        for provider in quota_provider_ids() {
+            assert!(
+                rendered.contains(&format!("[x] {provider}")),
+                "missing row for {provider}"
+            );
+        }
+        assert!(
+            !rendered.contains("] gemini"),
+            "gemini has no quota fetcher and must not be a Settings row"
+        );
     }
 
     #[test]
