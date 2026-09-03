@@ -146,11 +146,7 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
     // `SUPPORTED_USAGE_PROVIDERS`, not by this map, and the usage view has its
     // own source filter — so nothing here decides what usage is scanned.
     for provider in quota_provider_ids() {
-        let enabled = config
-            .providers
-            .get(provider)
-            .map(|p| p.enabled)
-            .unwrap_or(false);
+        let enabled = provider_enabled(config, provider);
         items.push(SettingItem {
             key: "provider_enable",
             label: format!(
@@ -183,6 +179,19 @@ fn next_refresh_interval(curr: u32) -> u32 {
         .position(|&v| v == curr)
         .unwrap_or(0);
     REFRESH_INTERVALS[(pos + 1) % REFRESH_INTERVALS.len()]
+}
+
+/// Whether a quota provider counts as enabled.
+///
+/// Absent means off: quota resolution walks `config.providers`, so a key that
+/// is not there is never fetched. Rendering and toggling both read this so the
+/// checkbox and the keypress cannot disagree.
+fn provider_enabled(config: &Config, provider: &str) -> bool {
+    config
+        .providers
+        .get(provider)
+        .map(|p| p.enabled)
+        .unwrap_or(false)
 }
 
 pub fn settings_row_count(_state: &UsageState) -> usize {
@@ -239,8 +248,17 @@ pub fn handle_settings_action(
             // not silently hide usage rows as well.
             let provider_idx = idx - FIXED_SETTING_KEYS.len();
             if let Some(&provider) = quota_provider_ids().get(provider_idx) {
-                let p_config = config.providers.entry(provider.to_string()).or_default();
-                p_config.enabled = !p_config.enabled;
+                // Negate what the row displays, not what `or_default()` seeds.
+                // A provider absent from the map renders `[ ]` (quota
+                // resolution only sees keys that are present), while the
+                // default entry is `enabled: true` — inserting then negating
+                // wrote `false` and the first keypress did nothing visible.
+                let enabled = provider_enabled(config, provider);
+                config
+                    .providers
+                    .entry(provider.to_string())
+                    .or_default()
+                    .enabled = !enabled;
             }
         }
     }
@@ -314,11 +332,7 @@ pub fn render_settings_tab(
         if item.key == "provider_enable" {
             // For providers, display as "[x] provider_id"
             let provider_name = item.label.split(' ').next().unwrap_or("");
-            let enabled = config
-                .providers
-                .get(provider_name)
-                .map(|p| p.enabled)
-                .unwrap_or(false);
+            let enabled = provider_enabled(config, provider_name);
             let checkbox = if enabled { "[x]" } else { "[ ]" };
             let checkbox_style = if enabled {
                 Style::default().fg(theme.gauge_low)
@@ -587,6 +601,40 @@ mod tests {
         // Never past the end, and never divide-by-zero on a collapsed area.
         assert_eq!(scroll_offset_for(29, 30, 10), 20);
         assert_eq!(scroll_offset_for(5, 30, 0), 0);
+    }
+
+    /// A quota provider absent from `config.providers` renders as `[ ]`, because
+    /// quota resolution only ever sees keys that are in the map. The toggle has
+    /// to agree with that: seeding the entry from `ProviderConfig::default()`
+    /// (`enabled: true`) and *then* negating writes `false` — the row was
+    /// already showing `[ ]`, so the first keypress did nothing visible.
+    #[test]
+    fn toggling_a_provider_missing_from_config_enables_it_on_the_first_press() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+        let mut config = Config::default();
+        let mut theme = Theme::new(crate::tui::theme::ThemeMode::Dark);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_manager = ConfigManager::with_path(temp_dir.path().join("config.toml"));
+
+        let provider = quota_provider_ids()[0];
+        config.providers.remove(provider);
+
+        let theme_ro = Theme::new(crate::tui::theme::ThemeMode::Dark);
+        let shown_before = get_settings_items(&state, &config, &theme_ro)
+            .into_iter()
+            .find(|i| i.label.starts_with(provider))
+            .unwrap()
+            .label;
+        assert_eq!(shown_before, format!("{provider} (disabled)"));
+
+        state.selected_row = FIXED_SETTING_KEYS.len();
+        handle_settings_action(&mut state, &mut config, &config_manager, &mut theme).unwrap();
+
+        assert!(
+            config.providers.get(provider).unwrap().enabled,
+            "one press on a `[ ]` row must turn it on"
+        );
     }
 
     #[test]

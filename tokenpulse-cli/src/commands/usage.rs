@@ -403,8 +403,12 @@ pub async fn run(
         let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
         let mut quota_snapshots = Vec::new();
         let now = chrono::Utc::now();
-        for info in crate::commands::quota::quota_provider_info_list() {
-            if let Ok(Some(cached)) = cache_store.load_valid(info.id, now) {
+        // Only providers the config enables, matching the non-TUI path and
+        // every later refresh. Seeding the screen from the whole registry
+        // showed a stale card for a provider the user had switched off, until
+        // the first refresh silently dropped it again.
+        for provider in enabled_quota_providers(&config) {
+            if let Ok(Some(cached)) = cache_store.load_valid(&provider, now) {
                 quota_snapshots.push(cached.snapshot);
             }
         }
@@ -484,7 +488,7 @@ fn quota_providers_to_fetch(config: &Config) -> Vec<String> {
 /// with the registry keeps those from reaching the quota cache and the fetch
 /// list. Existing configs are left as they are — the stale key is ignored, not
 /// removed.
-fn enabled_quota_providers(config: &Config) -> Vec<String> {
+pub(crate) fn enabled_quota_providers(config: &Config) -> Vec<String> {
     config
         .providers
         .iter()

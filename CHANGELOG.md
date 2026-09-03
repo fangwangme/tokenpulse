@@ -39,6 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   visible area while the keyboard could still select and toggle them. The list
   now scrolls to keep the cursor on screen, which also stops the next added
   setting from silently pushing a row off the edge.
+- **Toggling a quota provider that was missing from `config.toml` now works on
+  the first press**: the row rendered `[ ]` (quota resolution only sees keys
+  that are present), but the toggle seeded the entry from the default
+  `enabled: true` and then negated it, writing `false` — the same state the row
+  already showed. Rendering and toggling now read the same helper.
+- **A disabled quota provider no longer shows a stale card at startup**: the TUI
+  seeded its cached snapshots from the whole provider registry instead of the
+  enabled set, so a provider the user had switched off reappeared from cache
+  until the first refresh quietly dropped it. It now matches the non-TUI path
+  and every later refresh.
 - **`config enable` / `config disable` now reject ids with no quota fetcher**:
   they used to write the key and print success for anything, including a typo
   or `gemini`, while quota resolution ignored it — configured-looking and inert
