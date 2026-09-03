@@ -302,7 +302,7 @@ fn matches_keeper_agent(provider: &str, agent_id: &str) -> bool {
         return true;
     }
     match a.as_str() {
-        "antigravity" => p == "google" || p == "gemini" || p == "antigravity",
+        "antigravity" => p == "google" || p == "antigravity",
         "claude" => p == "anthropic" || p == "claude",
         "codex" => p == "openai" || p == "codex",
         _ => false,
@@ -352,8 +352,8 @@ pub fn extract_weekly_reset_time(
 }
 
 /// Finds the quota snapshot backing a Keeper agent, preferring an exact
-/// provider match over an alias so a future `gemini` provider cannot be picked
-/// up by the `antigravity` agent just because it appears earlier in the list.
+/// provider match over an alias so a `google` snapshot cannot be picked up by
+/// the `antigravity` agent just because it appears earlier in the list.
 pub fn find_snapshot_for_agent<'a>(
     snapshots: &'a [crate::provider::QuotaSnapshot],
     agent_id: &str,
@@ -648,9 +648,9 @@ mod tests {
             fetched_at: Utc::now(),
         };
 
-        // `gemini` aliases to the antigravity agent, but an exact match wins even
+        // `google` aliases to the antigravity agent, but an exact match wins even
         // when the alias appears first.
-        let snapshots = vec![make("gemini"), make("antigravity")];
+        let snapshots = vec![make("google"), make("antigravity")];
         assert_eq!(
             find_snapshot_for_agent(&snapshots, "antigravity")
                 .unwrap()

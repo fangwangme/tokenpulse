@@ -1294,12 +1294,7 @@ where
     }
 
     if config.display.refresh_quota {
-        let enabled_providers: Vec<String> = config
-            .providers
-            .iter()
-            .filter(|(_, p)| p.enabled)
-            .map(|(k, _)| k.clone())
-            .collect();
+        let enabled_providers = crate::commands::usage::enabled_quota_providers(&config);
         spawn_quota_reload(msg_tx.clone(), enabled_providers);
     }
 
@@ -1512,12 +1507,7 @@ where
             });
 
             if config.display.refresh_quota {
-                let enabled_providers: Vec<String> = config
-                    .providers
-                    .iter()
-                    .filter(|(_, p)| p.enabled)
-                    .map(|(k, _)| k.clone())
-                    .collect();
+                let enabled_providers = crate::commands::usage::enabled_quota_providers(&config);
                 spawn_quota_reload(msg_tx.clone(), enabled_providers);
             }
         }
@@ -1713,12 +1703,8 @@ where
                         });
 
                         if config.display.refresh_quota {
-                            let enabled_providers: Vec<String> = config
-                                .providers
-                                .iter()
-                                .filter(|(_, p)| p.enabled)
-                                .map(|(k, _)| k.clone())
-                                .collect();
+                            let enabled_providers =
+                                crate::commands::usage::enabled_quota_providers(&config);
                             spawn_quota_reload(msg_tx.clone(), enabled_providers);
                         }
 

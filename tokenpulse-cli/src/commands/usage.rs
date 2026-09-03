@@ -403,8 +403,12 @@ pub async fn run(
         let cache_store = tokenpulse_core::quota::QuotaCacheStore::new();
         let mut quota_snapshots = Vec::new();
         let now = chrono::Utc::now();
-        for info in crate::commands::quota::quota_provider_info_list() {
-            if let Ok(Some(cached)) = cache_store.load_valid(info.id, now) {
+        // Only providers the config enables, matching the non-TUI path and
+        // every later refresh. Seeding the screen from the whole registry
+        // showed a stale card for a provider the user had switched off, until
+        // the first refresh silently dropped it again.
+        for provider in enabled_quota_providers(&config) {
+            if let Ok(Some(cached)) = cache_store.load_valid(&provider, now) {
                 quota_snapshots.push(cached.snapshot);
             }
         }
@@ -477,11 +481,18 @@ fn quota_providers_to_fetch(config: &Config) -> Vec<String> {
     enabled_quota_providers(config)
 }
 
-fn enabled_quota_providers(config: &Config) -> Vec<String> {
+/// Enabled config entries that are actually quota providers.
+///
+/// `config.providers` is a free-form map: an older config (or a hand edit) can
+/// carry a key with no quota fetcher behind it, such as `gemini`. Intersecting
+/// with the registry keeps those from reaching the quota cache and the fetch
+/// list. Existing configs are left as they are — the stale key is ignored, not
+/// removed.
+pub(crate) fn enabled_quota_providers(config: &Config) -> Vec<String> {
     config
         .providers
         .iter()
-        .filter(|(_, provider)| provider.enabled)
+        .filter(|(id, provider)| provider.enabled && crate::commands::quota::is_quota_provider(id))
         .map(|(id, _)| id.clone())
         .collect()
 }
@@ -1259,5 +1270,40 @@ mod tests {
         let mut cached = enabled_quota_providers(&config_with_providers(false, &providers));
         cached.sort();
         assert_eq!(cached, enabled);
+    }
+
+    /// `config.providers` is a free-form map and older configs carry keys with
+    /// no quota fetcher. Those must not reach the quota cache or the fetch
+    /// list, or every refresh opens a SQLite database for a provider that
+    /// cannot produce a snapshot.
+    #[test]
+    fn enabled_quota_providers_drops_config_keys_without_a_fetcher() {
+        let providers = [
+            ("claude", true),
+            ("antigravity", true),
+            ("gemini", true),
+            ("opencode", true),
+            ("pi", true),
+        ];
+        let config = config_with_providers(true, &providers);
+
+        let mut enabled = enabled_quota_providers(&config);
+        enabled.sort();
+        assert_eq!(
+            enabled,
+            vec!["antigravity".to_string(), "claude".to_string()],
+            "only registered quota providers survive"
+        );
+
+        let mut to_fetch = quota_providers_to_fetch(&config);
+        to_fetch.sort();
+        assert_eq!(to_fetch, enabled);
+
+        for id in enabled_quota_providers(&config) {
+            assert!(
+                crate::commands::quota::is_quota_provider(&id),
+                "{id} has no quota fetcher"
+            );
+        }
     }
 }

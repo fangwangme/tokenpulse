@@ -185,10 +185,11 @@ impl Default for QuotaDisplayMode {
 
 impl Default for Config {
     fn default() -> Self {
+        // Quota providers only — these are the ids with a quota fetcher. Usage
+        // parsing never reads this map; it iterates its own supported list.
         let mut providers = HashMap::new();
         providers.insert("claude".to_string(), ProviderConfig::default());
         providers.insert("codex".to_string(), ProviderConfig::default());
-        providers.insert("gemini".to_string(), ProviderConfig::default());
         providers.insert("antigravity".to_string(), ProviderConfig::default());
         providers.insert("copilot".to_string(), ProviderConfig::default());
 
@@ -386,6 +387,13 @@ impl ConfigManager {
         }
     }
 
+    /// A manager bound to an explicit config file, bypassing the home-directory
+    /// and `TOKENPULSE_CONFIG_PATH` lookup. Lets a caller (or a test) save to a
+    /// path of its own without mutating process-wide environment.
+    pub fn with_path(config_path: PathBuf) -> Self {
+        Self { config_path }
+    }
+
     pub fn config_path(&self) -> &PathBuf {
         &self.config_path
     }
@@ -530,9 +538,11 @@ mod tests {
         let config = Config::default();
         assert!(config.providers.contains_key("claude"));
         assert!(config.providers.contains_key("codex"));
-        assert!(config.providers.contains_key("gemini"));
         assert!(config.providers.contains_key("antigravity"));
         assert!(config.providers.contains_key("copilot"));
+        // `gemini` has no quota fetcher; Gemini CLI usage is parsed regardless
+        // of this map.
+        assert!(!config.providers.contains_key("gemini"));
     }
 
     #[test]
@@ -543,9 +553,9 @@ mod tests {
     }
 
     #[test]
-    fn test_default_has_five_providers() {
+    fn test_default_has_four_quota_providers() {
         let config = Config::default();
-        assert_eq!(config.providers.len(), 5);
+        assert_eq!(config.providers.len(), 4);
         for (_, provider) in &config.providers {
             assert!(provider.enabled);
         }
@@ -562,7 +572,7 @@ mod tests {
             .map(|(k, _)| k.clone())
             .collect();
         assert!(!enabled.contains(&"claude".to_string()));
-        assert_eq!(enabled.len(), 4);
+        assert_eq!(enabled.len(), 3);
     }
 
     #[test]

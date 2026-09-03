@@ -216,12 +216,12 @@ mod tests {
         let observed_at = Utc::now();
 
         store
-            .save("gemini", observed_at, &sample_snapshot("gemini"))
+            .save("codex", observed_at, &sample_snapshot("codex"))
             .unwrap();
 
-        let cached = store.load_valid("gemini", observed_at).unwrap();
+        let cached = store.load_valid("codex", observed_at).unwrap();
         assert!(cached.is_some());
-        assert_eq!(cached.unwrap().provider, "gemini");
+        assert_eq!(cached.unwrap().provider, "codex");
     }
 
     #[test]
@@ -247,18 +247,18 @@ mod tests {
             db_path: temp_dir.path().join("quota.db"),
         };
         let observed_at = Utc::now();
-        let mut first = sample_snapshot("gemini");
+        let mut first = sample_snapshot("codex");
         first.plan = Some("Free".to_string());
-        let mut second = sample_snapshot("gemini");
+        let mut second = sample_snapshot("codex");
         second.plan = Some("Paid".to_string());
 
-        store.save("gemini", observed_at, &first).unwrap();
+        store.save("codex", observed_at, &first).unwrap();
         store
-            .save("gemini", observed_at + Duration::minutes(1), &second)
+            .save("codex", observed_at + Duration::minutes(1), &second)
             .unwrap();
 
         let cached = store
-            .load_valid("gemini", observed_at + Duration::minutes(1))
+            .load_valid("codex", observed_at + Duration::minutes(1))
             .unwrap()
             .unwrap();
         assert_eq!(cached.snapshot.plan.as_deref(), Some("Paid"));

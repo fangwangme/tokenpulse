@@ -1626,6 +1626,12 @@ fn antigravity_local_conversation_dirs(home: &Path) -> [(PathBuf, AntigravityRun
 /// Newest mtime across a conversation file and, for SQLite conversations, its
 /// write-ahead log sidecars — content can land in the WAL without touching the
 /// main file.
+///
+/// `-shm` is deliberately excluded. It is the WAL shared-memory index: it holds
+/// no durable content, is rebuilt from `-wal` on demand, and is written by
+/// *readers* — opening a conversation read-only moves its mtime. Including it
+/// made every parse invalidate its own cache entry, so each refresh re-parsed
+/// every conversation the previous refresh had read.
 fn local_conversation_modified_ms(path: &Path) -> Option<i64> {
     let file_modified_ms = |path: &Path| {
         path.metadata()
@@ -1635,7 +1641,7 @@ fn local_conversation_modified_ms(path: &Path) -> Option<i64> {
     };
     let mut modified_ms = file_modified_ms(path);
     if path.extension().and_then(|ext| ext.to_str()) == Some("db") {
-        for extra_ext in ["db-wal", "db-shm"] {
+        for extra_ext in ["db-wal"] {
             if let Some(extra_ms) = file_modified_ms(&path.with_extension(extra_ext)) {
                 modified_ms = Some(match modified_ms {
                     Some(current) => current.max(extra_ms),
@@ -4211,6 +4217,49 @@ mod tests {
         let wal_mtime = wal_file_path.metadata().unwrap().modified().unwrap();
         let wal_mtime_ms = system_time_to_millis(wal_mtime).unwrap();
         assert_eq!(ide_entry.modified_ms.unwrap(), wal_mtime_ms);
+    }
+
+    /// `-shm` is written by readers, so a parse bumps it and the conversation
+    /// would look changed on the next refresh — a cache that invalidates
+    /// itself. The change detector must ignore it and report `max(.db, -wal)`.
+    #[test]
+    fn test_local_conversation_modified_ms_ignores_shm_sidecar() {
+        use std::time::{Duration, SystemTime};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("conv12345678901234567890.db");
+        let wal_path = temp_dir.path().join("conv12345678901234567890.db-wal");
+        let shm_path = temp_dir.path().join("conv12345678901234567890.db-shm");
+
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let set_mtime = |path: &Path, time: SystemTime| {
+            std::fs::write(path, "mock").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(time)
+                .unwrap();
+        };
+
+        // `-wal` is newer than `.db`, and `-shm` is newer than both.
+        set_mtime(&db_path, base);
+        set_mtime(&wal_path, base + Duration::from_secs(60));
+        set_mtime(&shm_path, base + Duration::from_secs(120));
+
+        let wal_ms = system_time_to_millis(base + Duration::from_secs(60)).unwrap();
+        let shm_ms = system_time_to_millis(base + Duration::from_secs(120)).unwrap();
+
+        let detected = local_conversation_modified_ms(&db_path).unwrap();
+        assert_eq!(
+            detected, wal_ms,
+            "expected max(.db, -wal); -shm must not contribute"
+        );
+        assert_ne!(detected, shm_ms, "-shm mtime leaked into change detection");
+
+        // A `-wal` newer than `.db` is still what wins once `-shm` is out.
+        std::fs::remove_file(&shm_path).unwrap();
+        assert_eq!(local_conversation_modified_ms(&db_path).unwrap(), wal_ms);
     }
 
     #[test]
