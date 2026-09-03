@@ -23,6 +23,24 @@ fn validate_notification_sound(value: &str) -> Result<()> {
     )
 }
 
+/// Rejects provider ids that `config enable`/`disable` cannot actually affect.
+///
+/// `providers` in the config is the quota map, and quota resolution ignores any
+/// id without a fetcher. Writing such a key used to print "enabled" and then do
+/// nothing at all — a typo, or `gemini`, looked accepted forever. Usage parsing
+/// is not configured here, so there is nothing else the key could have meant.
+fn validate_quota_provider(provider: &str) -> Result<()> {
+    if crate::commands::quota::is_quota_provider(provider) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Unknown quota provider '{}'. Configurable quota providers: {}. \
+         (Usage parsing is not configured here.)",
+        provider,
+        crate::commands::quota::quota_provider_ids().join(", ")
+    )
+}
+
 pub fn run(action: ConfigAction) -> Result<()> {
     let manager = ConfigManager::new();
 
@@ -82,12 +100,14 @@ pub fn run(action: ConfigAction) -> Result<()> {
             }
         }
         ConfigAction::Enable { provider } => {
+            validate_quota_provider(&provider)?;
             manager.enable_provider(&provider)?;
-            println!("Provider '{provider}' enabled");
+            println!("Quota provider '{provider}' enabled");
         }
         ConfigAction::Disable { provider } => {
+            validate_quota_provider(&provider)?;
             manager.disable_provider(&provider)?;
-            println!("Provider '{provider}' disabled");
+            println!("Quota provider '{provider}' disabled");
         }
         ConfigAction::Set { setting } => {
             let (key, value) = setting.split_once('=').ok_or_else(|| {
@@ -288,4 +308,32 @@ pub fn run(action: ConfigAction) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `config enable <id>` used to accept anything, write the key, and print
+    /// success — while quota resolution ignored it. A typo, or `gemini` (whose
+    /// fetcher was removed), looked configured forever and did nothing.
+    #[test]
+    fn enable_disable_rejects_ids_without_a_quota_fetcher() {
+        for id in crate::commands::quota::quota_provider_ids() {
+            assert!(
+                validate_quota_provider(id).is_ok(),
+                "{id} is in the registry and must be configurable"
+            );
+        }
+
+        for id in ["gemini", "opencode", "pi", "clade", ""] {
+            let err = validate_quota_provider(id)
+                .expect_err(&format!("{id} has no quota fetcher and must be rejected"))
+                .to_string();
+            // The message has to name the alternatives, or the user is stuck.
+            for known in crate::commands::quota::quota_provider_ids() {
+                assert!(err.contains(known), "error should list {known}: {err}");
+            }
+        }
+    }
 }

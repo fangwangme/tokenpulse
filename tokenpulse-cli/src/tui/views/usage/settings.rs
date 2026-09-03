@@ -142,9 +142,9 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
     ];
 
     // Quota provider checkboxes. The rows come from the quota registry so they
-    // are exactly the providers that have a fetcher; usage parsing is not
-    // configured here — every supported agent is always scanned, and the usage
-    // view has its own source filter.
+    // are exactly the providers that have a fetcher. Usage parsing is driven by
+    // `SUPPORTED_USAGE_PROVIDERS`, not by this map, and the usage view has its
+    // own source filter — so nothing here decides what usage is scanned.
     for provider in quota_provider_ids() {
         let enabled = config
             .providers
@@ -284,22 +284,26 @@ pub fn render_settings_tab(
     let items = get_settings_items(state, config, theme);
 
     let first_provider_row = items.iter().position(|i| i.key == "provider_enable");
+    // Which rendered line the cursor sits on, so the view can scroll to it.
+    let mut selected_line = 0usize;
 
     for (idx, item) in items.iter().enumerate() {
-        // Name the block: these rows configure quota polling, not which agents
-        // are scanned for usage.
+        // Name the block: these rows configure quota polling. They are not the
+        // usage source filter, which lives in the usage view under `s`.
         if Some(idx) == first_provider_row {
-            lines.push(Line::raw(""));
             lines.push(Line::from(vec![
                 Span::styled("Quota providers", Style::default().fg(theme.dim).bold()),
                 Span::styled(
-                    "  (usage is always scanned for every agent)",
+                    "  (usage sources are filtered separately)",
                     Style::default().fg(theme.dim),
                 ),
             ]));
         }
 
         let is_selected = idx == state.selected_row;
+        if is_selected {
+            selected_line = lines.len();
+        }
         let marker = if is_selected { ">" } else { " " };
 
         let mut spans = vec![
@@ -349,8 +353,29 @@ pub fn render_settings_tab(
         Span::raw(" cycle / toggle selected setting"),
     ]));
 
-    let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true });
+    let settings_scroll_offset =
+        scroll_offset_for(selected_line, lines.len(), inner.height as usize);
+
+    // The dashboard body is `Min(10)` between 10 rows of chrome, so on a
+    // half-screen terminal the list is taller than the space it gets. Without
+    // this the cursor walks off the bottom edge and toggles a row nobody can
+    // see. Deliberately unwrapped: scrolling counts rendered rows, so one line
+    // has to stay one row — a long config path is clipped rather than reflowed.
+    let paragraph = Paragraph::new(lines).scroll((settings_scroll_offset as u16, 0));
     f.render_widget(paragraph, inner);
+}
+
+/// First line to render so `selected_line` stays on screen.
+///
+/// Stateless: it scrolls the minimum needed to bring the cursor into view at
+/// the bottom edge, and never past the end of the list.
+fn scroll_offset_for(selected_line: usize, total_lines: usize, visible: usize) -> usize {
+    if visible == 0 || total_lines <= visible {
+        return 0;
+    }
+    selected_line
+        .saturating_sub(visible - 1)
+        .min(total_lines - visible)
 }
 
 #[cfg(test)]
@@ -446,34 +471,50 @@ mod tests {
         assert_eq!(state.enabled_sources, sources_before);
     }
 
-    /// The rendered tab must name the block, so a reader cannot mistake these
-    /// rows for "which agents are scanned for usage".
-    #[test]
-    fn settings_tab_labels_the_provider_block_as_quota_providers() {
+    /// Renders the Settings tab into the rect the real dashboard gives it, not
+    /// a full-screen area. The body sits between 10 rows of chrome, so a
+    /// full-screen render flatters the layout by ~10 rows and hides exactly the
+    /// overflow this tab has to survive.
+    fn render_at_terminal_size(
+        state: &UsageState,
+        config: &Config,
+        width: u16,
+        height: u16,
+    ) -> String {
         use ratatui::{backend::TestBackend, Terminal};
 
-        let backend = TestBackend::new(80, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let dashboard = UsageDashboard { daily: vec![] };
-        let state = UsageState::new(&dashboard, vec![]);
-        let config = Config::default();
         let theme = Theme::new(crate::tui::theme::ThemeMode::Dark);
         let temp_dir = tempfile::tempdir().unwrap();
         let config_manager = ConfigManager::with_path(temp_dir.path().join("config.toml"));
 
+        // Ask the real layout where the body goes rather than hardcoding it, so
+        // this test cannot drift if the chrome changes.
+        let body = super::super::dashboard_root_sections(Rect::new(0, 0, width, height))[2];
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|f| render_settings_tab(f, f.area(), &state, &config, &config_manager, &theme))
+            .draw(|f| render_settings_tab(f, body, state, config, &config_manager, &theme))
             .unwrap();
 
         let buf = terminal.backend().buffer();
-        let rendered: String = (0..buf.area.height)
+        (0..buf.area.height)
             .map(|y| {
                 (0..buf.area.width)
                     .map(|x| buf[(x, y)].symbol())
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+    }
+
+    /// The rendered tab must name the block, so a reader cannot mistake these
+    /// rows for "which agents are scanned for usage".
+    #[test]
+    fn settings_tab_labels_the_provider_block_as_quota_providers() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let state = UsageState::new(&dashboard, vec![]);
+        let config = Config::default();
+
+        let rendered = render_at_terminal_size(&state, &config, 80, 40);
 
         assert!(rendered.contains("Quota providers"));
         for provider in quota_provider_ids() {
@@ -486,6 +527,66 @@ mod tests {
             !rendered.contains("] gemini"),
             "gemini has no quota fetcher and must not be a Settings row"
         );
+        // The label must not claim usage is always scanned: `scan_antigravity`
+        // is rendered a few rows above and can switch Antigravity usage off.
+        assert!(!rendered.contains("always scanned"));
+    }
+
+    /// The dashboard body is `Min(10)` between 10 rows of chrome, so an 80x30
+    /// terminal leaves the Settings list 18 rows for more lines than that. Every
+    /// selectable row must still be reachable *and* visible — a cursor on a row
+    /// rendered past the bottom edge toggles a setting nobody can see.
+    #[test]
+    fn every_settings_row_stays_visible_when_selected() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let config = Config::default();
+        let mut state = UsageState::new(&dashboard, vec![]);
+
+        for terminal_height in [24, 30, 40] {
+            for row in 0..settings_row_count(&state) {
+                state.selected_row = row;
+                let rendered = render_at_terminal_size(&state, &config, 80, terminal_height);
+                // Match the cursor at the start of a row, just inside the left
+                // border. A bare `contains("> ")` would pass on the theme row's
+                // `auto -> dark` no matter where the cursor actually went.
+                assert!(
+                    rendered.lines().any(|line| line.starts_with("│> ")),
+                    "row {row} at height {terminal_height}: cursor scrolled off screen\n{rendered}"
+                );
+            }
+        }
+    }
+
+    /// The specific regression: at 80x30 the last quota provider used to render
+    /// past the bottom edge while remaining selectable.
+    #[test]
+    fn last_quota_provider_is_visible_on_a_half_screen_terminal() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let config = Config::default();
+        let mut state = UsageState::new(&dashboard, vec![]);
+
+        let last_provider = *quota_provider_ids().last().unwrap();
+        state.selected_row = settings_row_count(&state) - 1;
+
+        let rendered = render_at_terminal_size(&state, &config, 80, 30);
+        assert!(
+            rendered.contains(&format!("> [x] {last_provider}")),
+            "the selected last provider row must be on screen:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn scroll_offset_keeps_the_cursor_in_view_without_overscrolling() {
+        // Everything fits: never scroll.
+        assert_eq!(scroll_offset_for(0, 10, 20), 0);
+        assert_eq!(scroll_offset_for(9, 10, 20), 0);
+        // Taller than the window: scroll only once the cursor passes the edge.
+        assert_eq!(scroll_offset_for(0, 30, 10), 0);
+        assert_eq!(scroll_offset_for(9, 30, 10), 0);
+        assert_eq!(scroll_offset_for(10, 30, 10), 1);
+        // Never past the end, and never divide-by-zero on a collapsed area.
+        assert_eq!(scroll_offset_for(29, 30, 10), 20);
+        assert_eq!(scroll_offset_for(5, 30, 0), 0);
     }
 
     #[test]

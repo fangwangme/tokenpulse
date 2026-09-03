@@ -31,8 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filter, so toggling a row silently hid usage rows too. The rows are now
   generated from the quota registry (claude, codex, copilot, antigravity), the
   toggle writes only the quota config, and the block is labelled as such. The
-  usage view's own source filter (`s`) is unaffected, and usage is still
-  scanned for every supported agent.
+  usage view's own source filter (`s`) is unaffected, and nothing here
+  decides what usage is parsed.
+- **The Settings list now scrolls to the selected row**: the tab rendered its
+  lines into a body of `Min(10)` rows between 10 rows of dashboard chrome and
+  never scrolled, so on an 80x30 terminal the bottom rows fell outside the
+  visible area while the keyboard could still select and toggle them. The list
+  now scrolls to keep the cursor on screen, which also stops the next added
+  setting from silently pushing a row off the edge.
+- **`config enable` / `config disable` now reject ids with no quota fetcher**:
+  they used to write the key and print success for anything, including a typo
+  or `gemini`, while quota resolution ignored it — configured-looking and inert
+  forever. They now fail with the list of configurable quota providers.
 - **A stale provider key in `config.toml` no longer costs a lookup**: quota
   provider resolution is intersected with the registry, so a leftover
   `[providers.gemini]` from an older install no longer opens the quota cache

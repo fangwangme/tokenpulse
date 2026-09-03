@@ -186,7 +186,7 @@ impl Default for QuotaDisplayMode {
 impl Default for Config {
     fn default() -> Self {
         // Quota providers only — these are the ids with a quota fetcher. Usage
-        // parsing never reads this map; every supported agent is scanned.
+        // parsing never reads this map; it iterates its own supported list.
         let mut providers = HashMap::new();
         providers.insert("claude".to_string(), ProviderConfig::default());
         providers.insert("codex".to_string(), ProviderConfig::default());
