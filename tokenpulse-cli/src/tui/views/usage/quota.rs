@@ -1,5 +1,5 @@
 use super::UsageState;
-use crate::commands::quota::quota_display_name;
+use crate::commands::quota::{display_plan, quota_display_name};
 use crate::tui::theme::Theme;
 use crate::tui::widgets::GradientGauge;
 use ratatui::{
@@ -10,10 +10,13 @@ use ratatui::{
 };
 use std::cmp::Ordering;
 use tokenpulse_core::{
-    config::{Config, QuotaDisplayMode},
+    config::{AccountDisplay, Config, QuotaDisplayMode},
     provider::RateWindow,
     QuotaSnapshot,
 };
+
+const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1000;
+const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 pub fn render_quota_tab(
     f: &mut ratatui::Frame,
@@ -40,7 +43,7 @@ pub fn render_quota_tab(
         &filtered_snapshots,
         &config.display.quota_display_mode,
         theme,
-        config.display.show_account,
+        config.display.account_display,
     );
 }
 
@@ -50,7 +53,7 @@ fn render_overview(
     snapshots: &[&QuotaSnapshot],
     display_mode: &QuotaDisplayMode,
     theme: &Theme,
-    show_account: bool,
+    account_display: AccountDisplay,
 ) {
     if snapshots.is_empty() {
         let msg = Paragraph::new("No quota data available for enabled providers")
@@ -75,7 +78,7 @@ fn render_overview(
             theme,
             false,
             true,
-            show_account,
+            account_display,
         );
         return;
     }
@@ -115,7 +118,7 @@ fn render_overview(
                     theme,
                     false,
                     true,
-                    show_account,
+                    account_display,
                 );
             }
         }
@@ -130,7 +133,7 @@ fn render_snapshot_card(
     theme: &Theme,
     compact: bool,
     overview: bool,
-    show_account: bool,
+    account_display: AccountDisplay,
 ) {
     let provider_color = theme.provider_color(&snapshot.provider);
     let block = Block::default()
@@ -143,8 +146,8 @@ fn render_snapshot_card(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let has_account_display = snapshot.account.is_some() && show_account;
-    let has_plan_display = snapshot.plan.is_some() && show_account;
+    let has_account_display = snapshot.account.is_some() && account_display.shows_account();
+    let has_plan_display = snapshot.plan.is_some() && account_display.shows_plan();
     let show_account_row = has_account_display || has_plan_display;
 
     let base_windows: Vec<&RateWindow> = if overview && snapshot.windows.len() > 4 {
@@ -176,12 +179,8 @@ fn render_snapshot_card(
         base_windows
     };
 
-    let max_label_len = windows
-        .iter()
-        .map(|w| w.label.chars().count())
-        .max()
-        .unwrap_or(10);
-    let fixed_label_width = max_label_len.min(inner.width.saturating_sub(30) as usize);
+    let tags: Vec<String> = windows.iter().map(|w| window_tag(w)).collect();
+    let tag_width = tags.iter().map(|t| t.chars().count()).max().unwrap_or(0);
 
     // Build vertical constraints with balanced spacing between sections and windows
     let add_spacing = !compact && inner.height >= (windows.len() * 3 + fixed_rows) as u16;
@@ -227,29 +226,28 @@ fn render_snapshot_card(
         .split(inner);
 
     let mut cursor = 0usize;
+    // `PLAN: Plus · user@example.com`, cut down to what `account_display` allows.
     if show_account_row {
         let mut spans = Vec::new();
-        if has_account_display {
-            if let Some(account) = &snapshot.account {
-                let max_acc_len = (inner.width as usize).saturating_sub(25).max(15);
-                let truncated_acc = super::truncate(account, max_acc_len);
+        if has_plan_display {
+            if let Some(plan) = &snapshot.plan {
+                spans.push(Span::styled("PLAN: ", tag_style(theme)));
+                let max_plan_len = (inner.width as usize).saturating_sub(30).max(10);
                 spans.push(Span::styled(
-                    truncated_acc,
+                    super::truncate(&display_plan(plan), max_plan_len),
                     Style::default().fg(theme.fg).bold(),
                 ));
             }
         }
-        if has_plan_display {
-            if let Some(plan) = &snapshot.plan {
-                if has_account_display {
-                    spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
+        if has_account_display {
+            if let Some(account) = &snapshot.account {
+                if !spans.is_empty() {
+                    spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
                 }
-                spans.push(Span::styled("Plan: ", Style::default().fg(theme.dim)));
-                let max_plan_len = (inner.width as usize).saturating_sub(30).max(10);
-                let truncated_plan = super::truncate(plan, max_plan_len);
+                let max_acc_len = (inner.width as usize).saturating_sub(25).max(15);
                 spans.push(Span::styled(
-                    truncated_plan,
-                    Style::default().fg(theme.fg).bold(),
+                    super::truncate(account, max_acc_len),
+                    Style::default().fg(theme.fg),
                 ));
             }
         }
@@ -265,7 +263,7 @@ fn render_snapshot_card(
         }
     }
 
-    for (idx, window) in windows.iter().enumerate() {
+    for (idx, (window, tag)) in windows.iter().zip(&tags).enumerate() {
         if cursor < sections.len() {
             let gauge_area = sections[cursor];
             cursor += 1;
@@ -273,10 +271,11 @@ fn render_snapshot_card(
                 f,
                 gauge_area,
                 window,
+                tag,
+                tag_width,
                 display_mode,
                 theme,
                 compact,
-                fixed_label_width,
             );
         }
         if add_spacing
@@ -316,21 +315,69 @@ fn render_snapshot_card(
     }
 }
 
+/// The tag a quota card shows for a window: `5H`, `WEEKLY`, `WEEKLY · SONNET`.
+///
+/// Derived from the period and model family, so every provider's windows read
+/// the same whatever its own `label` says (`Session (5h)`, `Gemini (5h)`, ...).
+/// That label is only the fallback when the period is unknown, and stays as-is
+/// for the plain-text and JSON outputs.
+fn window_tag(window: &RateWindow) -> String {
+    let period = match window.period_duration_ms {
+        Some(FIVE_HOURS_MS) => "5H".to_string(),
+        Some(SEVEN_DAYS_MS) => "WEEKLY".to_string(),
+        Some(ms) if ms > 0 => compact_duration(ms),
+        _ => label_without_parenthetical(&window.label).to_uppercase(),
+    };
+    match window.model_family.as_deref().map(str::to_uppercase) {
+        // An unknown-period label is often the family itself (`Gemini (monthly)`).
+        Some(family) if family != period => format!("{period} · {family}"),
+        _ => period,
+    }
+}
+
+/// `3D`, `1H`, `30M`: the largest unit that divides the period evenly.
+fn compact_duration(ms: i64) -> String {
+    const UNITS: [(i64, &str); 4] = [
+        (24 * 60 * 60 * 1000, "D"),
+        (60 * 60 * 1000, "H"),
+        (60 * 1000, "M"),
+        (1000, "S"),
+    ];
+    UNITS
+        .iter()
+        .find(|(unit, _)| ms % unit == 0)
+        .map(|(unit, suffix)| format!("{}{suffix}", ms / unit))
+        .unwrap_or_else(|| format!("{ms}MS"))
+}
+
+/// `Premium Requests (300)` → `Premium Requests`.
+fn label_without_parenthetical(label: &str) -> &str {
+    let trimmed = label.trim();
+    match trimmed.rfind(" (") {
+        Some(start) if trimmed.ends_with(')') => trimmed[..start].trim_end(),
+        _ => trimmed,
+    }
+}
+
+fn tag_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.fg).bold()
+}
+
 fn render_window_block(
     f: &mut ratatui::Frame,
     area: Rect,
     window: &RateWindow,
+    tag: &str,
+    tag_width: usize,
     display_mode: &QuotaDisplayMode,
     theme: &Theme,
     compact: bool,
-    fixed_label_width: usize,
 ) {
     if area.height == 0 {
         return;
     }
 
     let shown_percent = quota_percent(display_mode, window.used_percent);
-    let label = super::truncate(&window.label, area.width.saturating_sub(18) as usize);
     let reset_str = window
         .resets_at
         .as_ref()
@@ -348,15 +395,15 @@ fn render_window_block(
         QuotaDisplayMode::Remaining => (100.0 - *ep).clamp(0.0, 100.0),
     });
 
-    let base_gauge = GradientGauge::new(&label, shown_percent)
-        .color(gauge_color)
-        .expected_percent(expected_pct)
-        .label_width(fixed_label_width);
-
-    // Compact cards render a single line with no detail row, so keep the
-    // percentage and reset countdown on the bar itself.
+    // Compact cards render a single line with no detail row, so the tag stays
+    // in front of the bar to tell windows apart, and the percentage and reset
+    // countdown stay on the bar itself.
     if compact {
-        let gauge = base_gauge
+        let label = super::truncate(tag, area.width.saturating_sub(18) as usize);
+        let gauge = GradientGauge::new(&label, shown_percent)
+            .color(gauge_color)
+            .expected_percent(expected_pct)
+            .label_width(tag_width.min(area.width.saturating_sub(30) as usize))
             .width(area.width.saturating_sub(22) as usize)
             .time(&reset_str);
         f.render_widget(gauge, area);
@@ -368,10 +415,12 @@ fn render_window_block(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
 
-    // Top line: pure progress bar (no trailing number); every figure lives on
-    // the detail line below so nothing is duplicated.
-    let gauge = base_gauge
-        .width(split[0].width as usize)
+    // Top line: the bar alone across the full width (no label, no trailing
+    // number); the tag and every figure live on the detail line below.
+    let gauge = GradientGauge::new("", shown_percent)
+        .color(gauge_color)
+        .expected_percent(expected_pct)
+        .label_width(0)
         .show_percent(false);
     f.render_widget(gauge, split[0]);
 
@@ -390,7 +439,13 @@ fn render_window_block(
     let balance_color = theme.gauge_color(window.used_percent);
     let remaining_percent = (100.0 - window.used_percent).max(0.0);
 
+    // The tag is padded to the card's longest so every window's figures start
+    // in the same column.
     let mut detail_spans = vec![
+        Span::styled(
+            format!("{:<width$} ", format!("{tag}:"), width = tag_width + 1),
+            tag_style(theme),
+        ),
         Span::styled(
             format!("reset {reset_str}"),
             Style::default().fg(balance_color),
@@ -683,5 +738,232 @@ mod tests {
                 render_quota_tab(f, f.area(), &state, &config, &theme);
             })
             .unwrap();
+    }
+    fn window(label: &str, period_ms: Option<i64>, family: Option<&str>, used: f64) -> RateWindow {
+        RateWindow {
+            label: label.to_string(),
+            model_family: family.map(str::to_string),
+            used_percent: used,
+            resets_at: Some(chrono::Utc::now() + chrono::Duration::hours(3)),
+            period_duration_ms: period_ms,
+        }
+    }
+
+    fn claude_snapshot() -> QuotaSnapshot {
+        QuotaSnapshot {
+            provider: "claude".to_string(),
+            account: Some("user@example.com".to_string()),
+            plan: Some("plus".to_string()),
+            windows: vec![
+                window("Session (5h)", Some(FIVE_HOURS_MS), None, 30.0),
+                window("Weekly (7d)", Some(SEVEN_DAYS_MS), None, 20.0),
+                window("Sonnet (7d)", Some(SEVEN_DAYS_MS), Some("Sonnet"), 10.0),
+            ],
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: chrono::Utc::now(),
+        }
+    }
+
+    fn antigravity_snapshot() -> QuotaSnapshot {
+        QuotaSnapshot {
+            provider: "antigravity".to_string(),
+            account: None,
+            plan: None,
+            windows: vec![
+                window("Gemini (5h)", Some(FIVE_HOURS_MS), Some("Gemini"), 30.0),
+                window("Gemini (7d)", Some(SEVEN_DAYS_MS), Some("Gemini"), 20.0),
+                window("Claude (5h)", Some(FIVE_HOURS_MS), Some("Claude"), 10.0),
+                window("Claude (7d)", Some(SEVEN_DAYS_MS), Some("Claude"), 5.0),
+            ],
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: chrono::Utc::now(),
+        }
+    }
+
+    /// The card's rows, without the left and right border columns.
+    fn render_card(
+        snapshot: &QuotaSnapshot,
+        account_display: AccountDisplay,
+        compact: bool,
+    ) -> Vec<String> {
+        let (width, height) = (80, 14);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|f| {
+                render_snapshot_card(
+                    f,
+                    f.area(),
+                    snapshot,
+                    &QuotaDisplayMode::Remaining,
+                    &theme,
+                    compact,
+                    true,
+                    account_display,
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (1..height - 1)
+            .map(|y| (1..width - 1).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn is_bar_glyph(ch: char) -> bool {
+        matches!(ch, '█' | '░' | '▏')
+    }
+
+    /// Each window's bar row and the detail row under it.
+    fn bar_and_detail_rows(rows: &[String]) -> Vec<(&String, &String)> {
+        rows.iter()
+            .enumerate()
+            .filter(|(_, row)| row.chars().any(is_bar_glyph))
+            .map(|(i, row)| (row, &rows[i + 1]))
+            .collect()
+    }
+
+    /// Column where the figures start: the first non-space after the colon.
+    fn text_column_after_colon(detail: &str) -> usize {
+        let chars: Vec<char> = detail.chars().collect();
+        let colon = chars.iter().position(|&c| c == ':').unwrap();
+        colon + 1 + chars[colon + 1..].iter().take_while(|&&c| c == ' ').count()
+    }
+
+    #[test]
+    fn bar_rows_carry_no_label_and_span_the_card() {
+        let rows = render_card(&claude_snapshot(), AccountDisplay::Full, false);
+        let windows = bar_and_detail_rows(&rows);
+
+        assert_eq!(windows.len(), 3, "{rows:#?}");
+        for (bar, _) in windows {
+            assert!(
+                bar.chars().all(is_bar_glyph),
+                "the bar row must be the bar alone, full width: {bar:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_rows_start_with_uniform_tags_aligned_per_card() {
+        let rows = render_card(&claude_snapshot(), AccountDisplay::Full, false);
+        let details: Vec<&String> = bar_and_detail_rows(&rows)
+            .into_iter()
+            .map(|(_, detail)| detail)
+            .collect();
+
+        assert!(details[0].starts_with("5H:"), "{:?}", details[0]);
+        assert!(details[1].starts_with("WEEKLY:"), "{:?}", details[1]);
+        assert!(
+            details[2].starts_with("WEEKLY · SONNET:"),
+            "{:?}",
+            details[2]
+        );
+        let columns: Vec<usize> = details.iter().map(|d| text_column_after_colon(d)).collect();
+        assert!(
+            columns.iter().all(|&c| c == columns[0]),
+            "figures must start in one column: {columns:?}\n{details:#?}"
+        );
+        assert!(details[0][..].contains("reset "), "{:?}", details[0]);
+    }
+
+    #[test]
+    fn antigravity_windows_are_tagged_period_first_with_their_family() {
+        let rows = render_card(&antigravity_snapshot(), AccountDisplay::Full, false);
+        let details: Vec<&String> = bar_and_detail_rows(&rows)
+            .into_iter()
+            .map(|(_, detail)| detail)
+            .collect();
+
+        let expected = [
+            "5H · GEMINI:",
+            "WEEKLY · GEMINI:",
+            "5H · CLAUDE:",
+            "WEEKLY · CLAUDE:",
+        ];
+        assert_eq!(details.len(), expected.len(), "{rows:#?}");
+        for (detail, tag) in details.iter().zip(expected) {
+            assert!(
+                detail.starts_with(tag),
+                "{detail:?} should start with {tag}"
+            );
+        }
+        let columns: Vec<usize> = details.iter().map(|d| text_column_after_colon(d)).collect();
+        assert!(columns.iter().all(|&c| c == columns[0]), "{columns:?}");
+    }
+
+    #[test]
+    fn compact_mode_keeps_the_tag_in_front_of_the_bar() {
+        let rows = render_card(&claude_snapshot(), AccountDisplay::None, true);
+        let bars: Vec<&String> = rows
+            .iter()
+            .filter(|row| row.chars().any(is_bar_glyph))
+            .collect();
+
+        assert_eq!(bars.len(), 3, "{rows:#?}");
+        for (bar, tag) in bars.iter().zip(["5H", "WEEKLY", "WEEKLY · SONNET"]) {
+            assert!(bar.starts_with(tag), "{bar:?} should start with {tag}");
+            let after_label: String = bar
+                .chars()
+                .skip("WEEKLY · SONNET ".chars().count())
+                .collect();
+            assert!(
+                after_label.starts_with(is_bar_glyph),
+                "the bar follows the padded tag column: {bar:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn account_row_follows_account_display() {
+        let snapshot = claude_snapshot();
+
+        let none = render_card(&snapshot, AccountDisplay::None, false).join("\n");
+        assert!(!none.contains("PLAN"), "{none}");
+        assert!(!none.contains("user@example.com"), "{none}");
+
+        let plan = render_card(&snapshot, AccountDisplay::Plan, false).join("\n");
+        assert!(
+            plan.contains("PLAN: Plus"),
+            "plan is capitalized for display: {plan}"
+        );
+        assert!(!plan.contains("user@example.com"), "{plan}");
+
+        let full = render_card(&snapshot, AccountDisplay::Full, false).join("\n");
+        assert!(full.contains("PLAN: Plus · user@example.com"), "{full}");
+    }
+
+    #[test]
+    fn window_tags_derive_from_period_and_family() {
+        let tag = |label, period, family| window_tag(&window(label, period, family, 0.0));
+
+        assert_eq!(tag("Session (5h)", Some(FIVE_HOURS_MS), None), "5H");
+        assert_eq!(tag("Weekly (7d)", Some(SEVEN_DAYS_MS), None), "WEEKLY");
+        assert_eq!(tag("Window (3d)", Some(3 * 24 * 3600 * 1000), None), "3D");
+        assert_eq!(tag("Window (1h)", Some(3600 * 1000), None), "1H");
+        assert_eq!(
+            tag("Sonnet (7d)", Some(SEVEN_DAYS_MS), Some("Sonnet")),
+            "WEEKLY · SONNET"
+        );
+        assert_eq!(
+            tag("Opus (7d)", Some(SEVEN_DAYS_MS), Some("Opus")),
+            "WEEKLY · OPUS"
+        );
+        assert_eq!(
+            tag("Gemini (5h)", Some(FIVE_HOURS_MS), Some("Gemini")),
+            "5H · GEMINI"
+        );
+        assert_eq!(
+            tag("Claude (7d)", Some(SEVEN_DAYS_MS), Some("Claude")),
+            "WEEKLY · CLAUDE"
+        );
+        // Unknown period: the provider label, minus its trailing parenthetical.
+        assert_eq!(
+            tag("Premium Requests (300)", None, None),
+            "PREMIUM REQUESTS"
+        );
+        assert_eq!(tag("Primary window", None, None), "PRIMARY WINDOW");
+        assert_eq!(tag("Gemini (monthly)", None, Some("Gemini")), "GEMINI");
     }
 }

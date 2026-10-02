@@ -1,10 +1,8 @@
 pub mod claude;
 pub mod codex;
-pub mod copilot;
 
 pub use claude::ClaudeAuth;
 pub use codex::CodexAuth;
-pub use copilot::CopilotAuth;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CredentialStatus {
@@ -63,12 +61,6 @@ pub fn detect_providers() -> Vec<DetectedProvider> {
                     "not detected".to_string()
                 }
             },
-        },
-        DetectedProvider {
-            name: "copilot".to_string(),
-            display_name: "GitHub Copilot".to_string(),
-            detected: CopilotAuth::detect(),
-            credential_hint: CopilotAuth::credential_hint(),
         },
     ]
 }

@@ -1,5 +1,6 @@
 use tokenpulse_core::{
-    quota::{AntigravityQuotaFetcher, ClaudeQuotaFetcher, CodexQuotaFetcher, CopilotQuotaFetcher},
+    config::AccountDisplay,
+    quota::{AntigravityQuotaFetcher, ClaudeQuotaFetcher, CodexQuotaFetcher},
     QuotaFetcher,
 };
 
@@ -20,30 +21,28 @@ struct QuotaProviderEntry {
     id: &'static str,
     /// Human-readable name shown in UI headers and error messages.
     display_name: &'static str,
-    /// Factory function to create the fetcher.
-    make_fetcher: fn() -> Box<dyn QuotaFetcher>,
+    /// Factory function to create the fetcher. A fetcher that has to do extra
+    /// work to find the account email skips it unless the setting shows it.
+    make_fetcher: fn(AccountDisplay) -> Box<dyn QuotaFetcher>,
 }
 
 const QUOTA_PROVIDERS: &[QuotaProviderEntry] = &[
     QuotaProviderEntry {
         id: "claude",
         display_name: "CLAUDE CODE",
-        make_fetcher: || Box::new(ClaudeQuotaFetcher::new()),
+        make_fetcher: |account_display| {
+            Box::new(ClaudeQuotaFetcher::new().with_account_email(account_display.shows_account()))
+        },
     },
     QuotaProviderEntry {
         id: "codex",
         display_name: "CODEX",
-        make_fetcher: || Box::new(CodexQuotaFetcher::new()),
-    },
-    QuotaProviderEntry {
-        id: "copilot",
-        display_name: "GITHUB COPILOT",
-        make_fetcher: || Box::new(CopilotQuotaFetcher::new()),
+        make_fetcher: |_| Box::new(CodexQuotaFetcher::new()),
     },
     QuotaProviderEntry {
         id: "antigravity",
         display_name: "ANTIGRAVITY",
-        make_fetcher: || Box::new(AntigravityQuotaFetcher::new()),
+        make_fetcher: |_| Box::new(AntigravityQuotaFetcher::new()),
     },
 ];
 
@@ -75,12 +74,25 @@ pub fn is_quota_provider(provider_id: &str) -> bool {
 ///
 /// When `provider` is Some, only that single provider is built (if known).
 /// When `provider` is None, all enabled providers are built.
-pub fn build_quota_fetchers(enabled_providers: &[String]) -> Vec<Box<dyn QuotaFetcher>> {
+pub fn build_quota_fetchers(
+    enabled_providers: &[String],
+    account_display: AccountDisplay,
+) -> Vec<Box<dyn QuotaFetcher>> {
     QUOTA_PROVIDERS
         .iter()
         .filter(|e| enabled_providers.contains(&e.id.to_string()))
-        .map(|e| (e.make_fetcher)())
+        .map(|e| (e.make_fetcher)(account_display))
         .collect()
+}
+
+/// A plan name as the quota views show it: `plus` → `Plus`, `max` → `Max`.
+/// Providers report it in whatever case their API uses.
+pub fn display_plan(plan: &str) -> String {
+    let mut chars = plan.trim().chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// Provider ids in the same order `build_quota_fetchers` returns fetchers.

@@ -7,7 +7,7 @@ A Rust CLI tool with two core features:
 2. **Usage** - Ledger-backed historical usage dashboard with cost estimation
 
 **Current Usage Scope:** Claude Code, Codex, OpenCode, Gemini CLI (historical only), PI, Copilot CLI, Antigravity
-**Current Quota Scope:** Claude Code, Codex, GitHub Copilot, Antigravity
+**Current Quota Scope:** Claude Code, Codex, Antigravity
 **Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI has been deprecated and is retained for historical data analytics only.
 
 **Language:** Rust
@@ -70,7 +70,6 @@ tokenpulse/
 │       │   ├── mod.rs
 │       │   ├── claude.rs
 │       │   ├── codex.rs
-│       │   ├── copilot.rs
 │       │   ├── antigravity.rs
 │       │   └── cache.rs
 │       └── pricing/              # model pricing and cost calculation
@@ -158,18 +157,18 @@ back to a single line in compact cards:
   (`▏`) showing where theoretical usage should be at this point in time. The
   fill respects the active display mode (used vs remaining); no number or time
   is printed on the bar itself.
-- **Detail line** — `<reset countdown>   used X%   remaining Y%   <pace>`.
+- **Detail line** — `<TAG>: reset <countdown>   used X%   remaining Y%   <pace>`.
   The reset countdown and used/remaining percentages are colored by the
   balance amount (green/yellow/red); the pace text keeps its own pace color and
   carries the at-current-rate ETA when behind pace ("on track" / "N% under pace"
   / "+N% pace | eta …"), and is omitted entirely once the window is exhausted.
-- Fixed-width label columns keep multiple windows aligned (especially Antigravity's
-  per-group 5h/weekly pairs).
-- Compact cards collapse to one line: bar + percentage + reset countdown.
+- The bar spans the full card width; the detail line starts with a uniform tag
+  derived from the window's period and model family (`5H:`, `WEEKLY:`,
+  `WEEKLY · SONNET:`, `5H · GEMINI:`), padded per card so the figures align.
+- Compact cards collapse to one line: tag + bar + percentage + reset countdown.
 - Codex can show each available manual rate-limit reset credit with its expiry
   as separate quota card rows, ordered by earliest expiry and collapsing only
   when height is constrained.
-- GitHub Copilot uses dynamic calendar-month billing period calculation.
 
 ```
 ╭─────────────────────────────────────────────────────────────────────╮
@@ -320,7 +319,7 @@ Quota windows:
 |---|---|---|
 | Claude Code | `~/.claude/projects/**/*.jsonl` | JSONL with type=assistant, message.usage |
 | Codex | `~/.codex/sessions/*.jsonl` | JSONL with model, token deltas |
-| OpenCode | `~/.local/share/opencode/opencode.db` | SQLite, messages table |
+| OpenCode | `${XDG_DATA_HOME:-~/.local/share}/opencode/opencode*.db` | SQLite, 2.x `session_message` + 1.x `message` |
 | PI | `~/.pi/agent/sessions/**/*.jsonl` | JSONL with header + entries |
 | GitHub Copilot | `~/.local/share/github-copilot/events.jsonl` | OTEL JSONL events |
 | Gemini CLI | `~/.gemini/tmp/**/session-*.json{,l}` | JSON + streamed JSONL session files |
@@ -353,7 +352,7 @@ Cache: ~/.local/share/tokenpulse/pricing.json (24h TTL)
 - [x] OpenCode: SQLite session parser
 - [x] PI: session JSONL parser
 - [x] Gemini CLI: historical session parser with JSONL dedup + cache-overlap normalization
-- [x] GitHub Copilot: quota + usage parser
+- [x] GitHub Copilot: usage parser (quota fetcher removed in 0.6.0)
 - [x] Antigravity: quota probe
 - [x] Antigravity: historical usage parser
 

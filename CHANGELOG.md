@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-03
+
+### Added
+- **OpenCode 2.x usage is tracked**: OpenCode 2.x moved its messages to a new
+  `session_message` table inside the same `opencode.db`, and the parser only
+  read the 1.x `message` table, so a machine on OpenCode 2.x recorded no
+  OpenCode usage at all. Both layouts are now read from each database: 2.x
+  assistant rows and token-bearing compactions first, then 1.x assistant rows
+  whose id 2.x does not have. That fallback is per message, not per session,
+  because the v1 → v2 migration keeps ids but drops some assistant messages
+  (the one that produced a compaction summary, subtask parents) whose usage
+  then exists only in 1.x. Rows a fork copied from its parent (new ids, same
+  `seq` and tokens) are skipped so forked history is not billed twice.
+  Every OpenCode database is scanned — `opencode.db` plus `opencode-<channel>.db`
+  siblings, or `OPENCODE_DB` when set, under `$XDG_DATA_HOME` when set — each
+  message id counted once across them, and all are opened read-only. Ledger
+  keys stay the message id, so migrated sessions keep their rows. The parser
+  version moves to `opencode-v3`, which re-ingests OpenCode usage once.
+- **`display.account_display = none | plan | full`** replaces the
+  all-or-nothing `show_account`: `none` hides the account row, `plan` shows
+  only the plan, `full` (the default) shows plan and email. It applies to the
+  TUI quota cards and the plain-text quota output; `--json` keeps the raw
+  fields. Settings cycles it, and `tokenpulse config set account_display=...`
+  validates it. The config moves to version 4: `show_account = true` migrates
+  to `full`, `false` to `none`.
+
+### Changed
+- **Quota cards use one tag style for every provider**: window labels came
+  from each provider in mixed styles (`Session (5h)`, `Sonnet (7d)`,
+  `Gemini (5h)`, `Window (3d)`) and their column ate bar width. The bar now
+  spans the full card width on its own line, and the detail line starts with a
+  tag derived from the window's period and model family — `5H:`, `WEEKLY:`,
+  `WEEKLY · SONNET:`, `5H · GEMINI:` — padded per card so the figures line up.
+  Compact cards keep the tag in front of the bar. Provider labels and the
+  plain-text / JSON outputs are unchanged.
+- **Claude Code shows its real plan and account**: the plan was hardcoded to
+  `Pro` and the account was never set. The plan now comes from the OAuth
+  credential's `subscriptionType`, and the email from `oauthAccount` in
+  `~/.claude.json`, read only when `account_display = full`. Plan names are
+  capitalized for display (`max` → `Max`).
+- **Antigravity's Cloud Code fallback no longer claims a `Pro` plan**: that
+  response carries no plan or account, so both are now left empty.
+
+### Removed
+- **GitHub Copilot quota**: quota covers Claude Code, Codex and Antigravity.
+  The Copilot quota fetcher and its credential lookup are gone, along with its
+  default config entry and Settings row. An existing `[providers.copilot]`
+  entry still loads and is ignored, and `config enable copilot` is rejected.
+  Copilot CLI and Gemini CLI usage parsing are unchanged.
+
 ## [0.5.7] - 2026-09-03
 
 ### Fixed

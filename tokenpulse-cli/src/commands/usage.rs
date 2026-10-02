@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokenpulse_core::{
-    config::{Config, ConfigManager, QuotaDisplayMode},
+    config::{AccountDisplay, Config, ConfigManager, QuotaDisplayMode},
     usage::{
         build_usage_summary_from_daily, AntigravitySessionParser, ClaudeSessionParser,
         CodexSessionParser, CopilotSessionParser, DateRange, GeminiSessionParser,
@@ -435,7 +435,11 @@ pub async fn run(
         let config = config_manager.load().unwrap_or_default();
         let quota_snapshots = collect_quota_snapshots(&config).await;
 
-        print_quota_summary(&quota_snapshots, &config.display.quota_display_mode);
+        print_quota_summary(
+            &quota_snapshots,
+            &config.display.quota_display_mode,
+            config.display.account_display,
+        );
     }
 
     Ok(())
@@ -451,7 +455,10 @@ async fn collect_quota_snapshots(config: &Config) -> Vec<QuotaSnapshot> {
     let observed_at = Utc::now();
     let mut snapshots = Vec::new();
 
-    let fetchers = crate::commands::quota::build_quota_fetchers(&quota_providers_to_fetch(config));
+    let fetchers = crate::commands::quota::build_quota_fetchers(
+        &quota_providers_to_fetch(config),
+        config.display.account_display,
+    );
     for snapshot in tokenpulse_core::quota::fetch_all(fetchers)
         .await
         .into_iter()
@@ -694,7 +701,14 @@ fn parse_provider_names(provider: Option<&str>) -> Vec<String> {
 fn build_parsers(provider_names: &[String], rebuild_all: bool) -> Vec<Box<dyn SessionParser>> {
     let config_manager = ConfigManager::new();
     let config = config_manager.load().unwrap_or_default();
+    parsers_for(provider_names, rebuild_all, config.display.scan_antigravity)
+}
 
+fn parsers_for(
+    provider_names: &[String],
+    rebuild_all: bool,
+    scan_antigravity: bool,
+) -> Vec<Box<dyn SessionParser>> {
     provider_names
         .iter()
         .filter_map(|provider| match provider.as_str() {
@@ -705,7 +719,7 @@ fn build_parsers(provider_names: &[String], rebuild_all: bool) -> Vec<Box<dyn Se
             "gemini" => Some(Box::new(GeminiSessionParser::new()) as Box<dyn SessionParser>),
             "pi" => Some(Box::new(PiSessionParser::new()) as Box<dyn SessionParser>),
             "antigravity" => {
-                if config.display.scan_antigravity {
+                if scan_antigravity {
                     Some(
                         Box::new(AntigravitySessionParser::new().with_rebuild_cache(rebuild_all))
                             as Box<dyn SessionParser>,
@@ -947,17 +961,17 @@ fn print_json_unified(
 fn print_quota_summary(
     snapshots: &[tokenpulse_core::QuotaSnapshot],
     display_mode: &QuotaDisplayMode,
+    account_display: AccountDisplay,
 ) {
     if snapshots.is_empty() {
         return;
     }
     println!("\n=== Quota Status ===");
     for snapshot in snapshots {
-        let plan_str = snapshot.plan.as_deref().unwrap_or("None");
-        let account_str = snapshot.account.as_deref().unwrap_or("None");
         println!("\nProvider: {}", snapshot.provider.to_uppercase());
-        println!("  Plan: {}", plan_str);
-        println!("  Account: {}", account_str);
+        for line in account_lines(snapshot, account_display) {
+            println!("  {line}");
+        }
 
         for window in &snapshot.windows {
             let used = window.used_percent;
@@ -992,6 +1006,27 @@ fn print_quota_summary(
         }
         print_rate_limit_reset_credits(snapshot);
     }
+}
+
+/// The `Plan:` / `Account:` lines `account_display` allows for one snapshot.
+fn account_lines(
+    snapshot: &tokenpulse_core::QuotaSnapshot,
+    account_display: AccountDisplay,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if account_display.shows_plan() {
+        let plan = snapshot
+            .plan
+            .as_deref()
+            .map(crate::commands::quota::display_plan)
+            .unwrap_or_else(|| "None".to_string());
+        lines.push(format!("Plan: {plan}"));
+    }
+    if account_display.shows_account() {
+        let account = snapshot.account.as_deref().unwrap_or("None");
+        lines.push(format!("Account: {account}"));
+    }
+    lines
 }
 
 fn print_rate_limit_reset_credits(snapshot: &tokenpulse_core::QuotaSnapshot) {
@@ -1090,14 +1125,17 @@ fn print_models_csv(summary: &tokenpulse_core::usage::UsageSummary) {
 
 #[cfg(test)]
 mod tests {
-    use super::{enabled_quota_providers, parse_provider_names, quota_providers_to_fetch};
+    use super::{
+        account_lines, enabled_quota_providers, parse_provider_names, parsers_for,
+        quota_providers_to_fetch,
+    };
     use chrono::NaiveDate;
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
     use tokenpulse_core::{
-        config::{Config, DisplayConfig, ProviderConfig},
+        config::{AccountDisplay, Config, DisplayConfig, ProviderConfig},
         provider::{SessionParser, TokenBreakdown, UnifiedMessage},
         usage::UsageStore,
     };
@@ -1252,7 +1290,7 @@ mod tests {
 
     #[test]
     fn non_tui_quota_fetch_respects_refresh_quota_setting() {
-        let providers = [("claude", true), ("codex", true), ("copilot", false)];
+        let providers = [("claude", true), ("codex", true), ("antigravity", false)];
 
         let mut enabled = enabled_quota_providers(&config_with_providers(true, &providers));
         enabled.sort();
@@ -1305,5 +1343,62 @@ mod tests {
                 "{id} has no quota fetcher"
             );
         }
+    }
+    #[test]
+    fn plain_text_account_lines_follow_account_display() {
+        let snapshot = tokenpulse_core::QuotaSnapshot {
+            provider: "codex".to_string(),
+            plan: Some("plus".to_string()),
+            account: Some("user@example.com".to_string()),
+            windows: vec![],
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: chrono::Utc::now(),
+        };
+
+        assert!(account_lines(&snapshot, AccountDisplay::None).is_empty());
+        assert_eq!(
+            account_lines(&snapshot, AccountDisplay::Plan),
+            ["Plan: Plus"]
+        );
+        assert_eq!(
+            account_lines(&snapshot, AccountDisplay::Full),
+            ["Plan: Plus", "Account: user@example.com"]
+        );
+    }
+    /// Copilot quota was removed; Copilot CLI and Gemini CLI usage parsing were
+    /// not.
+    #[test]
+    fn usage_parsers_still_include_copilot_and_gemini() {
+        let names = parse_provider_names(None);
+        let built: Vec<String> = parsers_for(&names, false, false)
+            .iter()
+            .map(|parser| parser.provider_name().to_string())
+            .collect();
+
+        assert!(built.contains(&"copilot".to_string()), "{built:?}");
+        assert!(built.contains(&"gemini".to_string()), "{built:?}");
+        assert!(built.contains(&"opencode".to_string()), "{built:?}");
+    }
+    /// A config written while Copilot quota existed still loads, and its
+    /// `[providers.copilot]` entry no longer makes Copilot a quota provider.
+    #[test]
+    fn legacy_copilot_config_key_is_not_a_quota_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "version = 3\n[providers.claude]\nenabled = true\n[providers.copilot]\nenabled = true\n",
+        )
+        .unwrap();
+
+        let config = tokenpulse_core::config::ConfigManager::with_path(path)
+            .load()
+            .unwrap();
+
+        assert!(config.providers.get("copilot").unwrap().enabled);
+        assert_eq!(enabled_quota_providers(&config), ["claude"]);
+        assert!(!crate::commands::quota::is_quota_provider("copilot"));
+        assert!(!crate::commands::quota::quota_provider_ids().contains(&"copilot"));
     }
 }

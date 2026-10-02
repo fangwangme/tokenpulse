@@ -47,7 +47,7 @@ The usage pipeline is:
 4. rebuild `daily_model_usage` for affected dates
 5. derive `DashboardDay`, weekly rollups, monthly rollups, agent summaries, and normalized model summaries from the ledger
 
-For file-backed agents, incremental runs treat a modified session file as the authoritative copy for that session: changed files are parsed in parallel, then the ledger rows for those changed sessions are replaced before daily aggregates are rebuilt. This keeps rewritten or compacted session files from leaving stale messages behind. OpenCode remains row-incremental through its own SQLite timestamp filter, and Antigravity keeps its own cache database, now filled from the conversation SQLite files themselves rather than only from the language server.
+For file-backed agents, incremental runs treat a modified session file as the authoritative copy for that session: changed files are parsed in parallel, then the ledger rows for those changed sessions are replaced before daily aggregates are rebuilt. This keeps rewritten or compacted session files from leaving stale messages behind. OpenCode remains row-incremental through its own SQLite timestamp filter (see below), and Antigravity keeps its own cache database, now filled from the conversation SQLite files themselves rather than only from the language server.
 
 ## Core Data Model
 
@@ -147,10 +147,37 @@ Important rule:
 
 ### OpenCode
 
-- source path:
-  - `~/.local/share/opencode/opencode.db`
-- reads assistant messages from SQLite
-- uses stored tokens and pricing-based cost estimation when available
+- source paths (all opened read-only):
+  - `OPENCODE_DB` when set (a relative value resolves against the data dir)
+  - otherwise `opencode.db` plus every `opencode-<channel>.db` sibling in the
+    data dir, `${XDG_DATA_HOME:-~/.local/share}/opencode`; SQLite `-wal`,
+    `-shm` and `-journal` files are not databases and are skipped
+- one database can hold two layouts, and both are read:
+  - OpenCode 2.x: `session_message`, `type` column, model at `data.model.{id, providerID}`
+  - OpenCode 1.x: `message`, `data.role`, model at `data.modelID` / `data.providerID`
+- counted rows: 2.x `assistant` rows with `tokens`, and 2.x `compaction` rows
+  with `tokens` (completed or failed; a running compaction has none). A failed
+  compaction carries no model, so the session's `session_v2.model` stands in,
+  else `unknown`. 1.x: `assistant` rows with `tokens`
+- precedence is per message, not per session: a 1.x row is used only when its
+  id is absent from `session_message`. The v1 → v2 migration keeps message ids
+  but drops some assistant messages (the one that produced a compaction
+  summary, subtask parents, rows failing validation) and never deletes v1
+  rows, so a migrated session can still have usage that exists only in 1.x.
+  The 1.x table is therefore read even when `migration.v1-v2` is `completed`
+- forks: forking copies the parent's rows into the new session under new ids
+  but the same `seq` and identical `data`. For each `session_v2` row with
+  `fork_session_id` and `fork_boundary`, the cutoff is the boundary message's
+  `seq` (`through`) or the parent's largest `seq` below it (`before`); the
+  fork's rows at or below the cutoff are skipped. An unresolvable boundary
+  keeps all rows
+- the ledger key is the message id, so a message keeps its key when its
+  session migrates, and each id is counted once across all scanned databases
+- incremental runs filter by `time_created` in SQL (2.x through
+  `session_message_time_created_idx`, 1.x through the covering index
+  `(session_id, time_created, id)`) and read only the needed JSON fields with
+  `json_extract`, not the full `data` column
+- source cost is ignored; cost comes from centralized pricing
 
 ### Gemini CLI (Historical Only)
 

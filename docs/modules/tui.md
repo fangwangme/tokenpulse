@@ -72,25 +72,46 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 
 ## Quota View Layout
 
-Each window uses a progress bar on top and a detail line
-`<countdown> … used … remaining … <pace>` directly below it, with a blank row
-between consecutive windows. Compact cards collapse to a single bar + percentage
-+ reset countdown.
+Each window is two lines: the progress bar alone across the full card width,
+then a detail line `<TAG>: reset … used … remaining … <pace>` directly below
+it, with a blank row between consecutive windows.
+
+The tag is derived in the TUI from the window's period and model family, so
+every provider reads the same: `5H`, `WEEKLY`, any other known period as a
+compact duration (`3D`, `1H`), and an unknown period as the provider label
+uppercased without its trailing parenthetical. A model family is appended
+period-first: `WEEKLY · SONNET`, `5H · GEMINI`, `WEEKLY · CLAUDE`. Within a card
+each `<TAG>:` is padded to the card's longest, so the figures after the colon
+start in one column. The provider's own `RateWindow.label` is unchanged and is
+still what `tokenpulse quota`, the plain-text summary and `--json` print.
+
+Compact cards (too short for two lines per window) collapse each window to a
+single row — tag, bar, percentage and reset countdown — keeping the tag in
+front of the bar so the windows stay distinguishable.
+
+The row above the windows follows `display.account_display`: nothing (`none`),
+`PLAN: Plus` (`plan`) or `PLAN: Plus · user@example.com` (`full`), with the
+plan capitalized for display.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  Header: "TokenPulse - Quota" + timestamp                        │
 ├──────────────────────────────────────────────────────────────────┤
-│  ┌─ Antigravity ────────────────────────────────────────────┐    │
-│  │  Gemini (5h)  ████████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │    │
-│  │    3h 12m   used 42.00%  remaining 58.00%  On track      │    │
+│  ┌─ CLAUDE CODE ────────────────────────────────────────────┐    │
+│  │ PLAN: Max · user@example.com                             │    │
 │  │                                                          │    │
-│  │  Gemini (7d)  ███▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │    │
-│  │    4d 6h    used 18.00%  remaining 82.00%  12% under pace │    │
+│  │ ███████████████████████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │    │
+│  │ 5H:              reset 3h 12m   used 42%   remaining 58% │    │
+│  │                                                          │    │
+│  │ ███████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │    │
+│  │ WEEKLY · SONNET: reset 4d 6h    used 18%   remaining 82% │    │
 │  └──────────────────────────────────────────────────────────┘    │
-│  ┌─ Copilot ────────────────────────────────────────────────┐    │
-│  │  Completions  ███████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │    │
-│  │    29d      used 25.00%  remaining 75.00%  On track      │    │
+│  ┌─ ANTIGRAVITY ────────────────────────────────────────────┐    │
+│  │ ████████▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │    │
+│  │ 5H · GEMINI:     reset 1h 5m    used 25%   remaining 75% │    │
+│  │                                                          │    │
+│  │ ███▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │    │
+│  │ WEEKLY · CLAUDE: reset 5d 2h    used 8%    remaining 92% │    │
 │  └──────────────────────────────────────────────────────────┘    │
 ├──────────────────────────────────────────────────────────────────┤
 │  Footer: q quit │ r refresh │ j/k scroll                         │
@@ -156,7 +177,7 @@ between consecutive windows. Compact cards collapse to a single bar + percentage
 - Configurable settings include:
   - `quota_display_mode` (toggle between `used` and `remaining` credit balance)
   - `show_empty_providers` (true / false)
-  - `show_account` (true / false)
+  - `account_display` (cycle `none` / `plan` / `full`: no account row, plan only, or plan + email; default `full`)
   - `auto_refresh_interval` (unified auto-refresh interval for quota + usage: 0, 1, 2, 5, 10, 15 min; 0 = disabled)
   - `theme` (cycle through auto / dark / light)
   - `scan_antigravity` (toggle active Antigravity session scanning and alias synchronization: true / false)
@@ -164,7 +185,7 @@ between consecutive windows. Compact cards collapse to a single bar + percentage
   - `notification_level` (how far a quota recovery alert reaches: `off` / `in_app` / `terminal` / `system`, default `system`)
   - `notification_sound` (cycle `chime` / `Hero` / `Glass` / `Submarine` / `none`; the selected sound plays immediately so it can be judged by ear)
   - `keeper_engine` (master switch for the Keeper tab's scheduled pings: true / false, default false)
-  - Individual provider enabled/disabled switches
+  - Individual quota provider enabled/disabled switches (`claude`, `codex`, `antigravity`)
 - Controls: use Up/Down (`j`/`k`) to navigate settings, and Space or Enter to cycle/toggle the selected setting.
 - The same values are readable and writable outside the TUI with `tokenpulse config show` and `tokenpulse config set KEY=VALUE`.
 
