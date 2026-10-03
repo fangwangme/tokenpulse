@@ -173,6 +173,15 @@ Important rule:
   keeps all rows
 - the ledger key is the message id, so a message keeps its key when its
   session migrates, and each id is counted once across all scanned databases
+- each database is read inside one read transaction, so table detection, fork
+  cutoffs and both message reads see the same snapshot; a message OpenCode
+  migrates mid-scan cannot fall between the 2.x and 1.x reads
+- a database that cannot be read fails the whole OpenCode scan for that run
+  (the error names the file) instead of being skipped: a partial result would
+  pass for a complete one, and a parser-version rebuild would replace the
+  ledger with it. A row whose values have an unexpected type is skipped
+- 1.x rows that name the model `model` / `provider` instead of `modelID` /
+  `providerID` are still read
 - incremental runs filter by `time_created` in SQL (2.x through
   `session_message_time_created_idx`, 1.x through the covering index
   `(session_id, time_created, id)`) and read only the needed JSON fields with

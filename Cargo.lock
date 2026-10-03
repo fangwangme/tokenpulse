@@ -1965,6 +1965,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dirs",
+ "libc",
  "rayon",
  "reqwest",
  "rusqlite",

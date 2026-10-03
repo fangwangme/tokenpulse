@@ -20,9 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `seq` and tokens) are skipped so forked history is not billed twice.
   Every OpenCode database is scanned — `opencode.db` plus `opencode-<channel>.db`
   siblings, or `OPENCODE_DB` when set, under `$XDG_DATA_HOME` when set — each
-  message id counted once across them, and all are opened read-only. Ledger
-  keys stay the message id, so migrated sessions keep their rows. The parser
-  version moves to `opencode-v3`, which re-ingests OpenCode usage once.
+  message id counted once across them, and all are opened read-only. Each
+  database is read from a single snapshot, so a message OpenCode migrates
+  mid-scan is not lost between the two reads, and a database that cannot be
+  read fails the OpenCode scan instead of yielding a partial result that a
+  rebuild would replace the ledger with. Ledger keys stay the message id, so
+  migrated sessions keep their rows. The parser version moves to
+  `opencode-v3`, which re-ingests OpenCode usage once.
 - **`display.account_display = none | plan | full`** replaces the
   all-or-nothing `show_account`: `none` hides the account row, `plan` shows
   only the plan, `full` (the default) shows plan and email. It applies to the
@@ -47,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capitalized for display (`max` → `Max`).
 - **Antigravity's Cloud Code fallback no longer claims a `Pro` plan**: that
   response carries no plan or account, so both are now left empty.
+
+### Fixed
+- **A timed-out Keeper ping now stops everything it started**: the ping runs
+  through `sh -c`, and the timeout killed only that shell, so any process the
+  agent CLI had started kept running — and spending quota — after the ping
+  was reported as timed out. The ping now runs in its own process group,
+  which on timeout gets SIGTERM, five seconds to exit, then SIGKILL. The
+  timeout itself goes from 45 s to 120 s so a slow agent start is not cut
+  short.
 
 ### Removed
 - **GitHub Copilot quota**: quota covers Claude Code, Codex and Antigravity.

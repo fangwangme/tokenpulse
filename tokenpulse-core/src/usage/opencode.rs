@@ -1,13 +1,14 @@
 use crate::provider::{SessionParser, TokenBreakdown, UnifiedMessage};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{Local, LocalResult, NaiveDate, TimeZone};
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
+use std::time::Duration;
+use tracing::debug;
 
 const PARSER_VERSION: &str = "opencode-v3";
 
@@ -40,7 +41,7 @@ impl SessionParser for OpenCodeSessionParser {
     }
 
     fn parse_sessions(&self, since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
-        Ok(parse_databases(&self.session_paths(), since))
+        parse_databases(&self.session_paths(), since)
     }
 
     fn parser_version(&self) -> &str {
@@ -105,22 +106,28 @@ fn discover_databases(data_dir: &Path, db_override: Option<OsString>) -> Vec<Pat
 }
 
 /// Parse every database, counting each message id once across all of them.
-fn parse_databases(paths: &[PathBuf], since: Option<NaiveDate>) -> Vec<UnifiedMessage> {
+///
+/// Any database that cannot be read fails the whole scan rather than being
+/// skipped. A partial result looks complete to the caller, and a parser
+/// version bump replaces the source's entire ledger with whatever was parsed —
+/// rows from the skipped database would be deleted, and being older than the
+/// next incremental window, never read back.
+fn parse_databases(paths: &[PathBuf], since: Option<NaiveDate>) -> Result<Vec<UnifiedMessage>> {
     let since_timestamp_ms = since.and_then(start_of_day_timestamp_ms);
     let mut seen = HashSet::new();
     let mut messages = Vec::new();
 
     for path in paths {
         debug!("Parsing OpenCode database: {:?}", path);
-        let conn = match open_read_only(path) {
-            Ok(connection) => connection,
-            Err(error) => {
-                warn!("Failed to open database {:?}: {}", path, error);
-                continue;
-            }
-        };
-
-        for row in load_rows(&conn, since_timestamp_ms) {
+        let rows = open_read_only(path)
+            .and_then(|conn| load_rows(&conn, since_timestamp_ms))
+            .map_err(|error| {
+                anyhow!(
+                    "failed to read OpenCode database {}: {error}",
+                    path.display()
+                )
+            })?;
+        for row in rows {
             if seen.insert(row.id.clone()) {
                 messages.push(row.into_message());
             }
@@ -131,15 +138,19 @@ fn parse_databases(paths: &[PathBuf], since: Option<NaiveDate>) -> Vec<UnifiedMe
         messages.retain(|message| message_on_or_after(message, since));
     }
     messages.sort_by_key(|message| message.timestamp);
-    messages
+    Ok(messages)
 }
 
 /// OpenCode owns these databases, and may be writing to them while we read.
+/// The busy timeout rides out a write OpenCode is committing at that moment,
+/// which would otherwise fail the scan.
 fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(
+    let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
+    )?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    Ok(conn)
 }
 
 /// Token-bearing rows of one database: OpenCode 2.x `session_message` first,
@@ -151,31 +162,65 @@ fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
 /// so their usage exists only in v1 — and a user who downgrades to 1.x writes
 /// to v1 again. Migrated messages keep their id, which is what makes the
 /// message-level fallback exact.
-fn load_rows(conn: &Connection, since_timestamp_ms: Option<i64>) -> Vec<OpenCodeRow> {
-    let has_v2 = table_exists(conn, "session_message");
+fn load_rows(
+    conn: &Connection,
+    since_timestamp_ms: Option<i64>,
+) -> rusqlite::Result<Vec<OpenCodeRow>> {
+    load_rows_between(conn, since_timestamp_ms, || {})
+}
+
+/// `load_rows`, running `between_layouts` after the v2 read and before the v1
+/// read — the moment a concurrent v1 → v2 migration would have to hit to make
+/// a message vanish. Tests use it to stage that migration.
+fn load_rows_between(
+    conn: &Connection,
+    since_timestamp_ms: Option<i64>,
+    between_layouts: impl FnOnce(),
+) -> rusqlite::Result<Vec<OpenCodeRow>> {
+    // One read transaction, so table detection, fork cutoffs and both message
+    // reads see a single snapshot. OpenCode migrates in the background while it
+    // runs: a message it moves between two separate reads would be in neither,
+    // not yet in the v2 read and excluded from the v1 read by `NOT EXISTS`.
+    // Dropping the transaction ends it; nothing was written.
+    let snapshot = conn.unchecked_transaction()?;
+    let has_v2 = table_exists(&snapshot, "session_message")?;
     let mut rows = Vec::new();
 
     if has_v2 {
-        match load_v2_rows(conn, since_timestamp_ms) {
-            Ok(v2_rows) => rows.extend(v2_rows),
-            Err(error) => warn!("Failed to read OpenCode session_message: {}", error),
-        }
+        rows.extend(load_v2_rows(&snapshot, since_timestamp_ms)?);
     }
-    if table_exists(conn, "message") {
-        match load_v1_rows(conn, since_timestamp_ms, has_v2) {
-            Ok(v1_rows) => rows.extend(v1_rows),
-            Err(error) => warn!("Failed to read OpenCode message: {}", error),
-        }
+    between_layouts();
+    if table_exists(&snapshot, "message")? {
+        rows.extend(load_v1_rows(&snapshot, since_timestamp_ms, has_v2)?);
     }
 
-    rows
+    Ok(rows)
+}
+
+/// Collect a query's rows, skipping one whose values have an unexpected type
+/// but failing on any other error: a read error midway would otherwise end the
+/// scan early and pass for a complete result.
+fn collect_rows<T>(rows: impl Iterator<Item = rusqlite::Result<T>>) -> rusqlite::Result<Vec<T>> {
+    let mut collected = Vec::new();
+    for row in rows {
+        match row {
+            Ok(row) => collected.push(row),
+            Err(
+                rusqlite::Error::InvalidColumnType(..)
+                | rusqlite::Error::FromSqlConversionFailure(..)
+                | rusqlite::Error::IntegralValueOutOfRange(..),
+            ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(collected)
 }
 
 fn load_v2_rows(
     conn: &Connection,
     since_timestamp_ms: Option<i64>,
 ) -> rusqlite::Result<Vec<OpenCodeRow>> {
-    let has_sessions = table_exists(conn, "session_v2");
+    let has_sessions = table_exists(conn, "session_v2")?;
     let cutoffs = if has_sessions {
         fork_copy_cutoffs(conn)?
     } else {
@@ -183,19 +228,18 @@ fn load_v2_rows(
     };
 
     let mut stmt = conn.prepare(&v2_query(since_timestamp_ms.is_some(), has_sessions))?;
-    let rows = stmt
-        .query_map(params_from_iter(since_timestamp_ms), |row| {
-            Ok((OpenCodeRow::from_sql(row)?, row.get::<_, i64>(11)?))
-        })?
-        .flatten()
+    let rows = collect_rows(stmt.query_map(params_from_iter(since_timestamp_ms), |row| {
+        Ok((OpenCodeRow::from_sql(row)?, row.get::<_, i64>(11)?))
+    })?)?;
+    Ok(rows
+        .into_iter()
         .filter(|(row, seq)| {
             cutoffs
                 .get(&row.session_id)
                 .is_none_or(|cutoff| seq > cutoff)
         })
         .map(|(row, _)| row)
-        .collect();
-    Ok(rows)
+        .collect())
 }
 
 /// Assistant messages, plus completed or failed compactions, that carry
@@ -204,17 +248,23 @@ fn load_v2_rows(
 fn v2_query(windowed: bool, has_sessions: bool) -> String {
     let (session_model, session_provider, join) = if has_sessions {
         (
-            "json_extract(s.model, '$.id')",
-            "json_extract(s.model, '$.providerID')",
+            format!(
+                "CASE WHEN json_valid(s.model) THEN {} END",
+                text_at("s.model", &["$.id"])
+            ),
+            format!(
+                "CASE WHEN json_valid(s.model) THEN {} END",
+                text_at("s.model", &["$.providerID"])
+            ),
             "\nLEFT JOIN session_v2 s ON s.id = sm.session_id",
         )
     } else {
-        ("NULL", "NULL", "")
+        ("NULL".to_string(), "NULL".to_string(), "")
     };
     format!(
         "SELECT sm.id, sm.session_id, sm.time_created,
-       COALESCE(json_extract(sm.data, '$.model.id'), {session_model}),
-       COALESCE(json_extract(sm.data, '$.model.providerID'), {session_provider}),
+       COALESCE({model}, {session_model}),
+       COALESCE({provider}, {session_provider}),
        {tokens},
        {data_time},
        sm.seq
@@ -222,6 +272,8 @@ FROM session_message sm{join}
 WHERE sm.type IN ('assistant', 'compaction')
   AND json_valid(sm.data)
   AND json_type(sm.data, '$.tokens') = 'object'{window}",
+        model = text_at("sm.data", &["$.model.id"]),
+        provider = text_at("sm.data", &["$.model.providerID"]),
         tokens = token_columns("sm.data"),
         data_time = data_time_column("sm.data"),
         window = if windowed {
@@ -239,14 +291,11 @@ fn load_v1_rows(
 ) -> rusqlite::Result<Vec<OpenCodeRow>> {
     // Early 1.x schemas had no `time_created` column; their rows are dated from
     // `data.time` and filtered by `since` after parsing.
-    let has_time = column_exists(conn, "message", "time_created");
+    let has_time = column_exists(conn, "message", "time_created")?;
     let window = since_timestamp_ms.filter(|_| has_time);
 
     let mut stmt = conn.prepare(&v1_query(window.is_some(), has_time, has_v2))?;
-    let rows = stmt
-        .query_map(params_from_iter(window), OpenCodeRow::from_sql)?
-        .flatten()
-        .collect();
+    let rows = collect_rows(stmt.query_map(params_from_iter(window), OpenCodeRow::from_sql)?)?;
     Ok(rows)
 }
 
@@ -254,12 +303,13 @@ fn load_v1_rows(
 ///
 /// The time window goes through `rowid IN (...)` so SQLite answers it from the
 /// covering index `(session_id, time_created, id)` instead of scanning every
-/// row's `data`.
+/// row's `data`. Rows that name the model `model` / `provider` instead of
+/// `modelID` / `providerID` are still read, as the parser always accepted.
 fn v1_query(windowed: bool, has_time: bool, has_v2: bool) -> String {
     format!(
         "SELECT m.id, m.session_id, {time_created},
-       json_extract(m.data, '$.modelID'),
-       json_extract(m.data, '$.providerID'),
+       {model},
+       {provider},
        {tokens},
        {data_time}
 FROM message m
@@ -267,6 +317,8 @@ WHERE {window}json_valid(m.data)
   AND json_extract(m.data, '$.role') = 'assistant'
   AND json_type(m.data, '$.tokens') = 'object'{dedup}",
         time_created = if has_time { "m.time_created" } else { "NULL" },
+        model = text_at("m.data", &["$.modelID", "$.model"]),
+        provider = text_at("m.data", &["$.providerID", "$.provider"]),
         tokens = token_columns("m.data"),
         data_time = data_time_column("m.data"),
         window = if windowed {
@@ -280,6 +332,21 @@ WHERE {window}json_valid(m.data)
             ""
         },
     )
+}
+
+/// The first of `paths` in `data` that holds a string, else NULL. A value of
+/// another type (a `model` object, a numeric id) is not a name.
+fn text_at(data: &str, paths: &[&str]) -> String {
+    let candidates: Vec<String> = paths
+        .iter()
+        .map(|path| {
+            format!("CASE json_type({data}, '{path}') WHEN 'text' THEN json_extract({data}, '{path}') END")
+        })
+        .collect();
+    match candidates.as_slice() {
+        [only] => only.clone(),
+        _ => format!("COALESCE({})", candidates.join(", ")),
+    }
 }
 
 fn token_columns(data: &str) -> String {
@@ -305,20 +372,18 @@ fn data_time_column(data: &str) -> String {
 /// parent or boundary message missing, unparsable JSON — leaves the fork with
 /// no cutoff, so all of its rows are kept.
 fn fork_copy_cutoffs(conn: &Connection) -> rusqlite::Result<HashMap<String, i64>> {
-    if !column_exists(conn, "session_v2", "fork_session_id")
-        || !column_exists(conn, "session_v2", "fork_boundary")
+    if !column_exists(conn, "session_v2", "fork_session_id")?
+        || !column_exists(conn, "session_v2", "fork_boundary")?
     {
         return Ok(HashMap::new());
     }
 
-    let forks: Vec<(String, String, String)> = conn
-        .prepare(
-            "SELECT id, fork_session_id, fork_boundary FROM session_v2
-             WHERE fork_session_id IS NOT NULL AND fork_boundary IS NOT NULL",
-        )?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .flatten()
-        .collect();
+    let mut forks_stmt = conn.prepare(
+        "SELECT id, fork_session_id, fork_boundary FROM session_v2
+         WHERE fork_session_id IS NOT NULL AND fork_boundary IS NOT NULL",
+    )?;
+    let forks: Vec<(String, String, String)> =
+        collect_rows(forks_stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?)?;
 
     let mut boundary_seq =
         conn.prepare("SELECT seq FROM session_message WHERE id = ?1 AND session_id = ?2")?;
@@ -357,22 +422,26 @@ struct ForkBoundary {
     message_id: String,
 }
 
-fn table_exists(conn: &Connection, table: &str) -> bool {
+/// Errors propagate: a file that is not a database fails here, and reading
+/// that as "no such table" would silently skip it.
+fn table_exists(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
         [table],
         |_| Ok(()),
     )
-    .is_ok()
+    .optional()
+    .map(|found| found.is_some())
 }
 
-fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
         [table, column],
         |_| Ok(()),
     )
-    .is_ok()
+    .optional()
+    .map(|found| found.is_some())
 }
 
 fn start_of_day_timestamp_ms(date: NaiveDate) -> Option<i64> {
@@ -611,7 +680,7 @@ mod tests {
 
     fn parse(paths: &[&Db]) -> Vec<UnifiedMessage> {
         let paths: Vec<PathBuf> = paths.iter().map(|db| db.path.clone()).collect();
-        parse_databases(&paths, None)
+        parse_databases(&paths, None).unwrap()
     }
 
     fn keys(messages: &[UnifiedMessage]) -> Vec<&str> {
@@ -822,7 +891,8 @@ mod tests {
             )
             .unwrap();
 
-        let messages = parse_databases(&[db.path.clone()], NaiveDate::from_ymd_opt(2020, 1, 1));
+        let messages =
+            parse_databases(&[db.path.clone()], NaiveDate::from_ymd_opt(2020, 1, 1)).unwrap();
 
         assert_eq!(keys(&messages), ["msg_old"]);
         assert_eq!(messages[0].timestamp, T0);
@@ -1140,7 +1210,7 @@ mod tests {
         beta.v1("msg_main", "ses_1", T0, v1_assistant("m", 20));
 
         let paths = discover_databases(dir.path(), None);
-        let messages = parse_databases(&paths, None);
+        let messages = parse_databases(&paths, None).unwrap();
 
         assert_eq!(keys(&messages), ["msg_main", "msg_next", "msg_shared"]);
         let total_input: i64 = messages.iter().map(|m| m.tokens.input).sum();
@@ -1167,7 +1237,7 @@ mod tests {
         );
         db.v2_at("v2_new", "ses_v2", "assistant", 2, on, v2_assistant("m", 1));
 
-        let messages = parse_databases(&[db.path.clone()], Some(since));
+        let messages = parse_databases(&[db.path.clone()], Some(since)).unwrap();
 
         assert_eq!(keys(&messages), ["v1_new", "v2_new"]);
         assert_eq!(parse(&[&db]).len(), 4);
@@ -1260,5 +1330,137 @@ mod tests {
             v2_plan.contains("session_message_time_created_idx"),
             "{v2_plan}"
         );
+    }
+    /// A partial scan looks complete to the caller, and on a parser-version
+    /// bump it replaces the whole OpenCode ledger — so one unreadable database
+    /// must fail the scan, not be skipped.
+    #[test]
+    fn an_unreadable_database_fails_the_whole_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = Db::create(dir.path(), "opencode.db", &[V2_SCHEMA]);
+        main.session("ses_1", None, None);
+        main.v2("msg_a", "ses_1", "assistant", 1, v2_assistant("m", 1));
+        std::fs::write(dir.path().join("opencode-dev.db"), vec![b'x'; 4096]).unwrap();
+
+        let paths = discover_databases(dir.path(), None);
+        assert_eq!(paths.len(), 2);
+        let error = parse_databases(&paths, None).expect_err("a partial result must not pass");
+
+        let message = error.to_string();
+        assert!(message.contains("opencode-dev.db"), "{message}");
+        assert!(
+            message.contains("not a database"),
+            "the cause is reported: {message}"
+        );
+    }
+
+    /// A readable database with neither layout is not an error; it just holds
+    /// no OpenCode usage.
+    #[test]
+    fn a_database_without_opencode_tables_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = Db::create(dir.path(), "opencode.db", &[V1_SCHEMA]);
+        main.v1("msg_a", "ses_1", T0, v1_assistant("m", 1));
+        Db::create(
+            dir.path(),
+            "opencode-dev.db",
+            &["CREATE TABLE kv (key text, value text);"],
+        );
+        std::fs::write(dir.path().join("opencode-beta.db"), b"").unwrap();
+
+        let paths = discover_databases(dir.path(), None);
+        let messages = parse_databases(&paths, None).unwrap();
+
+        assert_eq!(paths.len(), 3);
+        assert_eq!(keys(&messages), ["msg_a"]);
+    }
+
+    /// OpenCode migrates 1.x rows into 2.x in the background while it runs. A
+    /// message it moves between the v2 read and the v1 read must still be
+    /// counted: both reads have to see the same snapshot.
+    #[test]
+    fn message_migrated_between_the_two_reads_is_still_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::create(dir.path(), "opencode.db", &[V1_SCHEMA, V2_SCHEMA]);
+        let mode: String = db
+            .conn
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal", "OpenCode's databases are in WAL mode");
+        db.v1("msg_a", "ses_1", T0, v1_assistant("m", 1));
+        db.v1("msg_b", "ses_1", T0, v1_assistant("m", 2));
+        let reader = open_read_only(&db.path).unwrap();
+
+        let rows = load_rows_between(&reader, None, || {
+            db.session("ses_1", None, None);
+            db.v2("msg_b", "ses_1", "assistant", 1, v2_assistant("m", 2));
+        })
+        .unwrap();
+
+        let mut ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["msg_a", "msg_b"]);
+    }
+
+    /// The parser has always accepted `model` / `provider` in place of
+    /// `modelID` / `providerID` on 1.x rows.
+    #[test]
+    fn v1_legacy_model_and_provider_keys_are_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::create(dir.path(), "opencode.db", &[V1_SCHEMA]);
+        db.v1(
+            "msg_legacy",
+            "ses_1",
+            T0,
+            json!({
+                "role": "assistant",
+                "model": "claude-sonnet-4",
+                "provider": "anthropic",
+                "tokens": tokens(10),
+                "time": { "created": T0 }
+            }),
+        );
+        // A non-string `model` is not a name, and does not shadow `modelID`.
+        db.v1(
+            "msg_object_model",
+            "ses_1",
+            T0,
+            json!({
+                "role": "assistant",
+                "modelID": "claude-opus-4",
+                "providerID": "anthropic",
+                "model": { "providerID": "x", "modelID": "y" },
+                "tokens": tokens(10),
+                "time": { "created": T0 }
+            }),
+        );
+
+        let messages = parse(&[&db]);
+
+        let legacy = by_key(&messages, "msg_legacy");
+        assert_eq!(legacy.model_id, "claude-sonnet-4");
+        assert_eq!(legacy.provider_id, "anthropic");
+        assert_eq!(
+            by_key(&messages, "msg_object_model").model_id,
+            "claude-opus-4"
+        );
+    }
+
+    /// A value of the wrong type spoils its own row, not the scan.
+    #[test]
+    fn a_row_with_a_wrongly_typed_value_is_skipped_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::create(dir.path(), "opencode.db", &[V2_SCHEMA]);
+        db.session("ses_1", None, None);
+        db.v2("msg_a", "ses_1", "assistant", 1, v2_assistant("m", 1));
+        db.conn
+            .execute(
+                "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+                 VALUES ('msg_bad_time', 'ses_1', 'assistant', 2, 'not-a-time', 0, ?1)",
+                [v2_assistant("m", 1).to_string()],
+            )
+            .unwrap();
+
+        assert_eq!(keys(&parse(&[&db])), ["msg_a"]);
     }
 }

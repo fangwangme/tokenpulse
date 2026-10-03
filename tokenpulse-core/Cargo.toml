@@ -20,6 +20,7 @@ rusqlite.workspace = true
 tracing.workspace = true
 toml = "0.8"
 base64 = "0.22"
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
