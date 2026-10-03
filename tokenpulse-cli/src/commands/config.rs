@@ -120,7 +120,9 @@ pub fn run(action: ConfigAction) -> Result<()> {
             let key = key.trim();
             let value = value.trim();
 
-            let mut config = manager.load().unwrap_or_default();
+            // A config that fails to load must not be replaced by defaults with
+            // one setting changed.
+            let mut config = manager.load()?;
 
             match key {
                 "quota_display_mode" => {

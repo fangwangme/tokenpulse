@@ -674,6 +674,27 @@ mod tests {
         }
     }
 
+    /// The TUI falls back to defaults when the config fails to load. A Settings
+    /// keypress must not then write those defaults over the user's file.
+    #[test]
+    fn settings_never_overwrite_a_config_file_that_does_not_parse() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+        let mut theme = Theme::new(crate::tui::theme::ThemeMode::Dark);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("config.toml");
+        let original = "[display]\nrefresh_quota = false\ntheme = \"purple\"\n";
+        std::fs::write(&path, original).unwrap();
+        let config_manager = ConfigManager::with_path(path.clone());
+        let mut config = config_manager.load().unwrap_or_default();
+
+        let result = handle_settings_action(&mut state, &mut config, &config_manager, &mut theme);
+
+        let error = result.expect_err("the save must be refused");
+        assert!(error.to_string().contains("left unchanged"), "{error:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
     #[test]
     fn notification_sound_cycles_through_every_option_and_wraps() {
         let mut sound = SOUND_CYCLE[0].to_string();

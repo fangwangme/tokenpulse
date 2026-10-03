@@ -60,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which on timeout gets SIGTERM, five seconds to exit, then SIGKILL. The
   timeout itself goes from 45 s to 120 s so a slow agent start is not cut
   short.
+- **Changing a setting no longer wipes a config file that has an error**:
+  `config enable` / `disable` / `set`, the Settings tab and the Keeper toggles
+  loaded the config with a fallback to defaults and then saved, so one bad
+  value (`theme = "purple"`) silently replaced the whole file — custom Keeper
+  prompts were lost and `refresh_quota = false` came back as `true`. Load
+  errors now stop those commands, and saving refuses to replace a file that
+  does not parse; the error names the file and the problem, and the file is
+  left as it was.
 
 ### Removed
 - **GitHub Copilot quota**: quota covers Claude Code, Codex and Antigravity.

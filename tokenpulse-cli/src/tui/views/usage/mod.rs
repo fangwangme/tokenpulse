@@ -1897,38 +1897,48 @@ where
                             }
                             KeyCode::Char('1') | KeyCode::Char('d') => {
                                 let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
-                                if let Ok(new_state) =
-                                    config_manager.toggle_agent_session_keeper(agent)
-                                {
-                                    if let Some(agent_cfg) = config.keeper.agents.get_mut(agent) {
-                                        agent_cfg.session_keeper_enabled = new_state;
+                                match config_manager.toggle_agent_session_keeper(agent) {
+                                    Ok(new_state) => {
+                                        if let Some(agent_cfg) = config.keeper.agents.get_mut(agent)
+                                        {
+                                            agent_cfg.session_keeper_enabled = new_state;
+                                        }
+                                        state.set_refresh_status(
+                                            format!(
+                                                "{} 5h keeper {}",
+                                                keeper::keeper_agent_name(agent),
+                                                if new_state { "enabled" } else { "disabled" }
+                                            ),
+                                            RefreshStatusLevel::Success,
+                                        );
                                     }
-                                    state.set_refresh_status(
-                                        format!(
-                                            "{} 5h keeper {}",
-                                            keeper::keeper_agent_name(agent),
-                                            if new_state { "enabled" } else { "disabled" }
-                                        ),
-                                        RefreshStatusLevel::Success,
-                                    );
+                                    Err(e) => state.set_refresh_status(
+                                        format!("Save error: {e}"),
+                                        RefreshStatusLevel::Error,
+                                    ),
                                 }
                             }
                             KeyCode::Char('2') | KeyCode::Char('w') => {
                                 let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
-                                if let Ok(new_state) =
-                                    config_manager.toggle_agent_weekly_keeper(agent)
-                                {
-                                    if let Some(agent_cfg) = config.keeper.agents.get_mut(agent) {
-                                        agent_cfg.weekly_keeper_enabled = new_state;
+                                match config_manager.toggle_agent_weekly_keeper(agent) {
+                                    Ok(new_state) => {
+                                        if let Some(agent_cfg) = config.keeper.agents.get_mut(agent)
+                                        {
+                                            agent_cfg.weekly_keeper_enabled = new_state;
+                                        }
+                                        state.set_refresh_status(
+                                            format!(
+                                                "{} Weekly keeper {}",
+                                                keeper::keeper_agent_name(agent),
+                                                if new_state { "enabled" } else { "disabled" }
+                                            ),
+                                            RefreshStatusLevel::Success,
+                                        );
                                     }
-                                    state.set_refresh_status(
-                                        format!(
-                                            "{} Weekly keeper {}",
-                                            keeper::keeper_agent_name(agent),
-                                            if new_state { "enabled" } else { "disabled" }
-                                        ),
-                                        RefreshStatusLevel::Success,
-                                    );
+                                    Err(e) => state.set_refresh_status(
+                                        format!("Save error: {e}"),
+                                        RefreshStatusLevel::Error,
+                                    ),
                                 }
                             }
                             KeyCode::Char('p') => {

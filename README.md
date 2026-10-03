@@ -204,9 +204,9 @@ tokenpulse --log
 # Show current config
 tokenpulse config show
 
-# Enable / disable providers
+# Enable / disable quota providers (claude, codex, antigravity)
 tokenpulse config enable claude
-tokenpulse config disable gemini
+tokenpulse config disable antigravity
 
 # Quota display mode: "remaining" (default) or "used"
 tokenpulse config set quota_display_mode=used
@@ -250,6 +250,10 @@ tokenpulse config test-notification
 > hard to miss over headphones. If `notification_level=system` shows no banner,
 > allow your terminal to post notifications in System Settings > Notifications;
 > the sound plays regardless.
+
+If `config.toml` has an error, the commands and Settings rows that change it
+leave it untouched and report the error instead of rewriting it from defaults;
+fix or remove the file, then retry.
 
 ### Session Keeper (Heartbeats & Wakeup)
 

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -479,9 +479,8 @@ impl ConfigManager {
         }
 
         let content = fs::read_to_string(&self.config_path)?;
-        let raw: toml::Table = toml::from_str(&content)?;
-        let legacy_show_account = legacy_show_account(&raw);
-        let mut config: Config = raw.try_into()?;
+        let (mut config, legacy_show_account) = parse_config(&content)
+            .with_context(|| format!("invalid config file {}", self.config_path.display()))?;
 
         let default_agents = default_keeper_agents();
         let mut modified = false;
@@ -531,7 +530,26 @@ impl ConfigManager {
         Ok(config)
     }
 
+    /// Writes `config` to the file — but never over a file that does not parse.
+    ///
+    /// Whatever produced `config` then did not come from that file: most likely
+    /// a caller fell back to defaults after loading it failed, as the TUI does
+    /// at startup. Writing would silently discard everything the user had set
+    /// over what may be a single typo.
     pub fn save(&self, config: &Config) -> Result<()> {
+        match fs::read_to_string(&self.config_path) {
+            Ok(existing) => {
+                if let Err(error) = parse_config(&existing) {
+                    return Err(error.context(format!(
+                        "{} has an error and was left unchanged; fix or remove it, then retry",
+                        self.config_path.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
         if let Some(parent) = self.config_path.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent)?;
@@ -544,7 +562,7 @@ impl ConfigManager {
     }
 
     pub fn enable_provider(&self, provider: &str) -> Result<()> {
-        let mut config = self.load().unwrap_or_default();
+        let mut config = self.load()?;
         config
             .providers
             .entry(provider.to_string())
@@ -554,7 +572,7 @@ impl ConfigManager {
     }
 
     pub fn disable_provider(&self, provider: &str) -> Result<()> {
-        let mut config = self.load().unwrap_or_default();
+        let mut config = self.load()?;
         if let Some(p) = config.providers.get_mut(provider) {
             p.enabled = false;
         }
@@ -569,7 +587,7 @@ impl ConfigManager {
         agent: &str,
         switch: fn(&mut AgentKeeperConfig) -> &mut bool,
     ) -> Result<bool> {
-        let mut config = self.load().unwrap_or_default();
+        let mut config = self.load()?;
         let entry = config
             .keeper
             .agents
@@ -591,6 +609,13 @@ impl ConfigManager {
     pub fn toggle_agent_weekly_keeper(&self, agent: &str) -> Result<bool> {
         self.toggle_agent_keeper(agent, |c| &mut c.weekly_keeper_enabled)
     }
+}
+
+/// Parses a config file, with the pre-v4 `show_account` switch if it has one.
+fn parse_config(content: &str) -> Result<(Config, Option<bool>)> {
+    let raw: toml::Table = toml::from_str(content)?;
+    let legacy_show_account = legacy_show_account(&raw);
+    Ok((raw.try_into()?, legacy_show_account))
 }
 
 /// The pre-v4 `display.show_account` switch, when the file still has it and has
@@ -1062,5 +1087,63 @@ model = "gpt-5.6-luna-low"
             "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
         );
         assert_eq!(codex.model, "gpt-5.6-luna");
+    }
+    /// One bad value plus settings worth keeping: what `config enable` and the
+    /// Keeper toggles used to replace with defaults.
+    const BROKEN_CONFIG: &str = r#"
+version = 4
+
+[display]
+refresh_quota = false
+theme = "purple"
+
+[keeper.agents.claude]
+prompt = "my custom prompt"
+"#;
+
+    #[test]
+    fn changing_a_setting_never_overwrites_a_config_that_does_not_parse() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        fs::write(&config_path, BROKEN_CONFIG).unwrap();
+        let manager = ConfigManager { config_path };
+
+        let load_error = format!("{:#}", manager.load().unwrap_err());
+        assert!(load_error.contains("invalid config file"), "{load_error}");
+        assert!(
+            load_error.contains("purple"),
+            "the cause is reported: {load_error}"
+        );
+
+        assert!(manager.enable_provider("claude").is_err());
+        assert!(manager.disable_provider("codex").is_err());
+        assert!(manager.toggle_agent_session_keeper("claude").is_err());
+        assert!(manager.toggle_agent_weekly_keeper("claude").is_err());
+        // What a caller that fell back to defaults would write.
+        let save_error = manager.save(&Config::default()).unwrap_err();
+        assert!(
+            save_error.to_string().contains("left unchanged"),
+            "{save_error:#}"
+        );
+
+        assert_eq!(
+            fs::read_to_string(&manager.config_path).unwrap(),
+            BROKEN_CONFIG
+        );
+    }
+
+    #[test]
+    fn save_writes_over_a_valid_config_and_creates_a_missing_one() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = ConfigManager {
+            config_path: temp_dir.path().join("nested").join("config.toml"),
+        };
+
+        manager.save(&Config::default()).unwrap();
+        let mut config = manager.load().unwrap();
+        config.display.refresh_quota = false;
+        manager.save(&config).unwrap();
+
+        assert!(!manager.load().unwrap().display.refresh_quota);
     }
 }
