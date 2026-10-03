@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -16,8 +16,12 @@ pub struct Config {
     pub keeper: KeeperConfig,
 }
 
+/// Current config schema version. `ConfigManager::load` migrates anything older
+/// and rewrites the file.
+pub const CONFIG_VERSION: u32 = 4;
+
 fn default_version() -> u32 {
-    3
+    CONFIG_VERSION
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,8 +49,10 @@ pub struct DisplayConfig {
         alias = "quota_auto_refresh_secs"
     )]
     pub auto_refresh_secs: u32,
-    #[serde(default = "default_true")]
-    pub show_account: bool,
+    /// How much of the signed-in account the quota views show. Replaces the
+    /// pre-v4 `show_account` switch, which `ConfigManager::load` migrates.
+    #[serde(default)]
+    pub account_display: AccountDisplay,
     #[serde(default = "default_true")]
     pub scan_antigravity: bool,
     /// Whether quota refreshes are allowed. When false, the TUI skips
@@ -130,6 +136,59 @@ impl Default for NotificationLevel {
     }
 }
 
+/// How much of the signed-in account the quota card shows.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AccountDisplay {
+    /// No account row.
+    None,
+    /// The plan only.
+    Plan,
+    /// The plan and the account email.
+    Full,
+}
+
+impl AccountDisplay {
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::Plan,
+            Self::Plan => Self::Full,
+            Self::Full => Self::None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Plan => "plan",
+            Self::Full => "full",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "plan" => Some(Self::Plan),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    pub fn shows_plan(self) -> bool {
+        self != Self::None
+    }
+
+    pub fn shows_account(self) -> bool {
+        self == Self::Full
+    }
+}
+
+impl Default for AccountDisplay {
+    fn default() -> Self {
+        Self::Full
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemePreference {
@@ -191,10 +250,9 @@ impl Default for Config {
         providers.insert("claude".to_string(), ProviderConfig::default());
         providers.insert("codex".to_string(), ProviderConfig::default());
         providers.insert("antigravity".to_string(), ProviderConfig::default());
-        providers.insert("copilot".to_string(), ProviderConfig::default());
 
         Self {
-            version: 3,
+            version: CONFIG_VERSION,
             providers,
             display: DisplayConfig::default(),
             keeper: KeeperConfig::default(),
@@ -218,7 +276,7 @@ impl Default for DisplayConfig {
             theme: ThemePreference::default(),
             quota_display_mode: QuotaDisplayMode::default(),
             auto_refresh_secs: default_auto_refresh_secs(),
-            show_account: true,
+            account_display: AccountDisplay::default(),
             scan_antigravity: true,
             refresh_quota: true,
             notification_level: NotificationLevel::default(),
@@ -421,10 +479,21 @@ impl ConfigManager {
         }
 
         let content = fs::read_to_string(&self.config_path)?;
-        let mut config: Config = toml::from_str(&content)?;
+        let (mut config, legacy_show_account) = parse_config(&content)
+            .with_context(|| format!("invalid config file {}", self.config_path.display()))?;
 
         let default_agents = default_keeper_agents();
         let mut modified = false;
+
+        // v4 replaced `show_account = true | false` with `account_display`.
+        if let Some(show_account) = legacy_show_account {
+            config.display.account_display = if show_account {
+                AccountDisplay::Full
+            } else {
+                AccountDisplay::None
+            };
+            modified = true;
+        }
 
         for (name, default_cfg) in &default_agents {
             if let Some(agent_cfg) = config.keeper.agents.get_mut(name) {
@@ -451,8 +520,8 @@ impl ConfigManager {
             }
         }
 
-        if config.version < 3 || modified {
-            config.version = 3;
+        if config.version < CONFIG_VERSION || modified {
+            config.version = CONFIG_VERSION;
             if let Err(e) = self.save(&config) {
                 tracing::warn!("Failed to save migrated config: {}", e);
             }
@@ -461,7 +530,26 @@ impl ConfigManager {
         Ok(config)
     }
 
+    /// Writes `config` to the file — but never over a file that does not parse.
+    ///
+    /// Whatever produced `config` then did not come from that file: most likely
+    /// a caller fell back to defaults after loading it failed, as the TUI does
+    /// at startup. Writing would silently discard everything the user had set
+    /// over what may be a single typo.
     pub fn save(&self, config: &Config) -> Result<()> {
+        match fs::read_to_string(&self.config_path) {
+            Ok(existing) => {
+                if let Err(error) = parse_config(&existing) {
+                    return Err(error.context(format!(
+                        "{} has an error and was left unchanged; fix or remove it, then retry",
+                        self.config_path.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
         if let Some(parent) = self.config_path.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent)?;
@@ -474,7 +562,7 @@ impl ConfigManager {
     }
 
     pub fn enable_provider(&self, provider: &str) -> Result<()> {
-        let mut config = self.load().unwrap_or_default();
+        let mut config = self.load()?;
         config
             .providers
             .entry(provider.to_string())
@@ -484,7 +572,7 @@ impl ConfigManager {
     }
 
     pub fn disable_provider(&self, provider: &str) -> Result<()> {
-        let mut config = self.load().unwrap_or_default();
+        let mut config = self.load()?;
         if let Some(p) = config.providers.get_mut(provider) {
             p.enabled = false;
         }
@@ -499,7 +587,7 @@ impl ConfigManager {
         agent: &str,
         switch: fn(&mut AgentKeeperConfig) -> &mut bool,
     ) -> Result<bool> {
-        let mut config = self.load().unwrap_or_default();
+        let mut config = self.load()?;
         let entry = config
             .keeper
             .agents
@@ -523,6 +611,23 @@ impl ConfigManager {
     }
 }
 
+/// Parses a config file, with the pre-v4 `show_account` switch if it has one.
+fn parse_config(content: &str) -> Result<(Config, Option<bool>)> {
+    let raw: toml::Table = toml::from_str(content)?;
+    let legacy_show_account = legacy_show_account(&raw);
+    Ok((raw.try_into()?, legacy_show_account))
+}
+
+/// The pre-v4 `display.show_account` switch, when the file still has it and has
+/// not also been given an `account_display` by hand.
+fn legacy_show_account(raw: &toml::Table) -> Option<bool> {
+    let display = raw.get("display")?.as_table()?;
+    if display.contains_key("account_display") {
+        return None;
+    }
+    display.get("show_account")?.as_bool()
+}
+
 impl Default for ConfigManager {
     fn default() -> Self {
         Self::new()
@@ -539,10 +644,10 @@ mod tests {
         assert!(config.providers.contains_key("claude"));
         assert!(config.providers.contains_key("codex"));
         assert!(config.providers.contains_key("antigravity"));
-        assert!(config.providers.contains_key("copilot"));
-        // `gemini` has no quota fetcher; Gemini CLI usage is parsed regardless
-        // of this map.
+        // `gemini` and `copilot` have no quota fetcher; Gemini CLI and Copilot
+        // CLI usage is parsed regardless of this map.
         assert!(!config.providers.contains_key("gemini"));
+        assert!(!config.providers.contains_key("copilot"));
     }
 
     #[test]
@@ -553,9 +658,11 @@ mod tests {
     }
 
     #[test]
-    fn test_default_has_four_quota_providers() {
+    fn test_default_has_three_quota_providers() {
         let config = Config::default();
-        assert_eq!(config.providers.len(), 4);
+        let mut ids: Vec<&str> = config.providers.keys().map(String::as_str).collect();
+        ids.sort();
+        assert_eq!(ids, ["antigravity", "claude", "codex"]);
         for (_, provider) in &config.providers {
             assert!(provider.enabled);
         }
@@ -572,7 +679,7 @@ mod tests {
             .map(|(k, _)| k.clone())
             .collect();
         assert!(!enabled.contains(&"claude".to_string()));
-        assert_eq!(enabled.len(), 3);
+        assert_eq!(enabled.len(), 2);
     }
 
     #[test]
@@ -609,7 +716,7 @@ enabled = true
             QuotaDisplayMode::Remaining
         );
         assert_eq!(config.display.auto_refresh_secs, 300);
-        assert!(config.display.show_account);
+        assert_eq!(config.display.account_display, AccountDisplay::Full);
         assert!(config.display.scan_antigravity);
         assert!(config.display.refresh_quota);
         assert_eq!(config.display.notification_level, NotificationLevel::System);
@@ -748,16 +855,111 @@ usage_auto_refresh_secs = 900
         let manager = ConfigManager { config_path };
         let loaded = manager.load().unwrap();
 
-        // Migrated to v3 with a single interval carried from the quota value.
-        assert_eq!(loaded.version, 3);
+        // Migrated to the current version with a single interval carried
+        // from the quota value.
+        assert_eq!(loaded.version, CONFIG_VERSION);
         assert_eq!(loaded.display.auto_refresh_secs, 120);
 
         // The rewritten file drops the legacy keys in favor of the unified one.
         let written_content = fs::read_to_string(&manager.config_path).unwrap();
-        assert!(written_content.contains("version = 3"));
+        assert!(written_content.contains("version = 4"));
         assert!(written_content.contains("auto_refresh_secs = 120"));
         assert!(!written_content.contains("quota_auto_refresh_secs"));
         assert!(!written_content.contains("usage_auto_refresh_secs"));
+    }
+
+    fn load_written(toml_str: &str) -> (Config, String) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        fs::write(&config_path, toml_str).unwrap();
+        let manager = ConfigManager { config_path };
+        let loaded = manager.load().unwrap();
+        let written = fs::read_to_string(&manager.config_path).unwrap();
+        (loaded, written)
+    }
+
+    #[test]
+    fn legacy_show_account_true_migrates_to_full() {
+        let (loaded, written) = load_written(
+            r#"
+version = 3
+[display]
+show_account = true
+"#,
+        );
+
+        assert_eq!(loaded.display.account_display, AccountDisplay::Full);
+        assert_eq!(loaded.version, 4);
+        assert!(written.contains("version = 4"));
+        assert!(written.contains(r#"account_display = "full""#));
+        assert!(!written.contains("show_account"));
+    }
+
+    #[test]
+    fn legacy_show_account_false_migrates_to_none() {
+        let (loaded, written) = load_written(
+            r#"
+version = 3
+[display]
+show_account = false
+"#,
+        );
+
+        assert_eq!(loaded.display.account_display, AccountDisplay::None);
+        assert_eq!(loaded.version, 4);
+        assert!(written.contains("version = 4"));
+        assert!(written.contains(r#"account_display = "none""#));
+        assert!(!written.contains("show_account"));
+    }
+
+    #[test]
+    fn account_display_round_trips_and_wins_over_a_stale_show_account() {
+        let (loaded, written) = load_written(
+            r#"
+version = 4
+[display]
+account_display = "plan"
+show_account = false
+"#,
+        );
+
+        assert_eq!(loaded.display.account_display, AccountDisplay::Plan);
+        assert!(written.contains(r#"account_display = "plan""#));
+        let parsed: Config = toml::from_str(&written).unwrap();
+        assert_eq!(parsed.display.account_display, AccountDisplay::Plan);
+    }
+
+    #[test]
+    fn account_display_cycles_none_plan_full() {
+        assert_eq!(AccountDisplay::None.next(), AccountDisplay::Plan);
+        assert_eq!(AccountDisplay::Plan.next(), AccountDisplay::Full);
+        assert_eq!(AccountDisplay::Full.next(), AccountDisplay::None);
+        for value in [
+            AccountDisplay::None,
+            AccountDisplay::Plan,
+            AccountDisplay::Full,
+        ] {
+            assert_eq!(AccountDisplay::parse(value.label()), Some(value));
+        }
+        assert_eq!(AccountDisplay::parse("true"), None);
+    }
+
+    /// Copilot quota was removed; a config written while it existed must still
+    /// load, with the stale key left in the map for the registry to ignore.
+    #[test]
+    fn config_with_legacy_copilot_provider_still_loads() {
+        let (loaded, _) = load_written(
+            r#"
+version = 3
+[providers.claude]
+enabled = true
+[providers.copilot]
+enabled = true
+"#,
+        );
+
+        assert!(loaded.providers.get("claude").unwrap().enabled);
+        assert_eq!(loaded.version, 4);
     }
 
     #[test]
@@ -885,5 +1087,63 @@ model = "gpt-5.6-luna-low"
             "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
         );
         assert_eq!(codex.model, "gpt-5.6-luna");
+    }
+    /// One bad value plus settings worth keeping: what `config enable` and the
+    /// Keeper toggles used to replace with defaults.
+    const BROKEN_CONFIG: &str = r#"
+version = 4
+
+[display]
+refresh_quota = false
+theme = "purple"
+
+[keeper.agents.claude]
+prompt = "my custom prompt"
+"#;
+
+    #[test]
+    fn changing_a_setting_never_overwrites_a_config_that_does_not_parse() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        fs::write(&config_path, BROKEN_CONFIG).unwrap();
+        let manager = ConfigManager { config_path };
+
+        let load_error = format!("{:#}", manager.load().unwrap_err());
+        assert!(load_error.contains("invalid config file"), "{load_error}");
+        assert!(
+            load_error.contains("purple"),
+            "the cause is reported: {load_error}"
+        );
+
+        assert!(manager.enable_provider("claude").is_err());
+        assert!(manager.disable_provider("codex").is_err());
+        assert!(manager.toggle_agent_session_keeper("claude").is_err());
+        assert!(manager.toggle_agent_weekly_keeper("claude").is_err());
+        // What a caller that fell back to defaults would write.
+        let save_error = manager.save(&Config::default()).unwrap_err();
+        assert!(
+            save_error.to_string().contains("left unchanged"),
+            "{save_error:#}"
+        );
+
+        assert_eq!(
+            fs::read_to_string(&manager.config_path).unwrap(),
+            BROKEN_CONFIG
+        );
+    }
+
+    #[test]
+    fn save_writes_over_a_valid_config_and_creates_a_missing_one() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = ConfigManager {
+            config_path: temp_dir.path().join("nested").join("config.toml"),
+        };
+
+        manager.save(&Config::default()).unwrap();
+        let mut config = manager.load().unwrap();
+        config.display.refresh_quota = false;
+        manager.save(&config).unwrap();
+
+        assert!(!manager.load().unwrap().display.refresh_quota);
     }
 }

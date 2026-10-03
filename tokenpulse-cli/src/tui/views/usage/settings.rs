@@ -7,7 +7,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
-use tokenpulse_core::config::{Config, ConfigManager, QuotaDisplayMode};
+use tokenpulse_core::config::{AccountDisplay, Config, ConfigManager, QuotaDisplayMode};
 
 /// The settings rows above the per-provider toggles, in display order. Both the
 /// row count and the keyboard dispatch read from this, and
@@ -15,7 +15,7 @@ use tokenpulse_core::config::{Config, ConfigManager, QuotaDisplayMode};
 const FIXED_SETTING_KEYS: &[&str] = &[
     "quota_display_mode",
     "show_empty_providers",
-    "show_account",
+    "account_display",
     "auto_refresh_interval",
     "theme",
     "scan_antigravity",
@@ -76,9 +76,13 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
             value_color: theme.gemini,
         },
         SettingItem {
-            key: "show_account",
-            label: config.display.show_account.to_string(),
-            value_color: theme.claude,
+            key: "account_display",
+            label: config.display.account_display.label().to_string(),
+            value_color: if config.display.account_display == AccountDisplay::None {
+                theme.dim
+            } else {
+                theme.claude
+            },
         },
         SettingItem {
             key: "auto_refresh_interval",
@@ -219,7 +223,9 @@ pub fn handle_settings_action(
         Some("show_empty_providers") => {
             config.display.show_empty_providers = !config.display.show_empty_providers;
         }
-        Some("show_account") => config.display.show_account = !config.display.show_account,
+        Some("account_display") => {
+            config.display.account_display = config.display.account_display.next();
+        }
         Some("auto_refresh_interval") => {
             config.display.auto_refresh_secs =
                 next_refresh_interval(config.display.auto_refresh_secs);
@@ -439,12 +445,12 @@ mod tests {
             vec![
                 "claude (enabled)",
                 "codex (enabled)",
-                "copilot (enabled)",
                 "antigravity (enabled)",
             ]
         );
         assert!(!provider_labels.iter().any(|l| l.starts_with("gemini")));
-        assert_eq!(settings_row_count(&state), FIXED_SETTING_KEYS.len() + 4);
+        assert!(!provider_labels.iter().any(|l| l.starts_with("copilot")));
+        assert_eq!(settings_row_count(&state), FIXED_SETTING_KEYS.len() + 3);
     }
 
     /// One keypress used to mutate two different semantics: the persisted quota
@@ -635,6 +641,58 @@ mod tests {
             config.providers.get(provider).unwrap().enabled,
             "one press on a `[ ]` row must turn it on"
         );
+    }
+
+    #[test]
+    fn account_display_row_cycles_none_plan_full_and_saves() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+        let mut config = Config::default();
+        let mut theme = Theme::new(crate::tui::theme::ThemeMode::Dark);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_manager = ConfigManager::with_path(temp_dir.path().join("config.toml"));
+        let row = FIXED_SETTING_KEYS
+            .iter()
+            .position(|key| *key == "account_display")
+            .unwrap();
+        state.selected_row = row;
+        assert_eq!(config.display.account_display, AccountDisplay::Full);
+
+        for expected in [
+            AccountDisplay::None,
+            AccountDisplay::Plan,
+            AccountDisplay::Full,
+        ] {
+            handle_settings_action(&mut state, &mut config, &config_manager, &mut theme).unwrap();
+            assert_eq!(config.display.account_display, expected);
+            let label = &get_settings_items(&state, &config, &theme)[row].label;
+            assert_eq!(label, expected.label());
+            assert_eq!(
+                config_manager.load().unwrap().display.account_display,
+                expected
+            );
+        }
+    }
+
+    /// The TUI falls back to defaults when the config fails to load. A Settings
+    /// keypress must not then write those defaults over the user's file.
+    #[test]
+    fn settings_never_overwrite_a_config_file_that_does_not_parse() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+        let mut theme = Theme::new(crate::tui::theme::ThemeMode::Dark);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("config.toml");
+        let original = "[display]\nrefresh_quota = false\ntheme = \"purple\"\n";
+        std::fs::write(&path, original).unwrap();
+        let config_manager = ConfigManager::with_path(path.clone());
+        let mut config = config_manager.load().unwrap_or_default();
+
+        let result = handle_settings_action(&mut state, &mut config, &config_manager, &mut theme);
+
+        let error = result.expect_err("the save must be refused");
+        assert!(error.to_string().contains("left unchanged"), "{error:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 
     #[test]

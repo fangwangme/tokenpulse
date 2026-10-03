@@ -1,7 +1,7 @@
 use crate::config::AgentKeeperConfig;
 use chrono::{DateTime, Local, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::info;
 
 #[derive(Debug, Clone, Copy)]
@@ -57,8 +57,13 @@ pub struct KeeperExecutionRecord {
 /// Maximum number of characters kept from a ping's combined output.
 const OUTPUT_SNIPPET_MAX_CHARS: usize = 300;
 
-/// How long a single ping may run before it is abandoned and its child killed.
-const PING_TIMEOUT_SECS: u64 = 45;
+/// How long a single ping may run before it is stopped. Generous, because a
+/// slow agent start is not a failure; what matters is that a stuck one is
+/// stopped completely.
+const PING_TIMEOUT_SECS: u64 = 120;
+
+/// How long a timed-out ping gets to exit after SIGTERM before SIGKILL.
+const PING_KILL_GRACE: Duration = Duration::from_secs(5);
 
 /// How long after the configured wakeup time a missed daily ping may still fire.
 ///
@@ -386,28 +391,17 @@ pub async fn execute_agent_ping(
         command_str
     );
 
-    #[cfg(target_os = "windows")]
-    let (program, arg) = ("cmd", "/C");
-    #[cfg(not(target_os = "windows"))]
-    let (program, arg) = ("sh", "-c");
-
-    // `kill_on_drop` matters here: on timeout the `output()` future is dropped,
-    // and without it the spawned CLI keeps running detached forever.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(PING_TIMEOUT_SECS),
-        tokio::process::Command::new(program)
-            .arg(arg)
-            .arg(&command_str)
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
+    let result = run_command_with_timeout(
+        &command_str,
+        Duration::from_secs(PING_TIMEOUT_SECS),
+        PING_KILL_GRACE,
     )
     .await;
 
     let duration_ms = start_instant.elapsed().as_millis() as u64;
 
     let (success, exit_code, output_snippet) = match result {
-        Ok(Ok(output)) => {
+        Some(Ok(output)) => {
             let code = output.status.code();
             let is_success = output.status.success();
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -423,12 +417,12 @@ pub async fn execute_agent_ping(
             };
             (is_success, code, snippet)
         }
-        Ok(Err(e)) => (
+        Some(Err(e)) => (
             false,
             None,
             sanitize_output_snippet(&format!("Execution failed: {e}")),
         ),
-        Err(_) => (
+        None => (
             false,
             None,
             format!("Execution timed out after {PING_TIMEOUT_SECS}s"),
@@ -447,6 +441,86 @@ pub async fn execute_agent_ping(
         exit_code,
         output_snippet,
     }
+}
+
+/// Runs `command_str` through the shell and returns its output, or `None` if it
+/// was still running after `timeout`.
+///
+/// On Unix the command runs in a process group of its own, and a timeout stops
+/// the whole group: SIGTERM, up to `grace` to exit, then SIGKILL for whatever
+/// is left. An agent CLI starts processes of its own, and killing only the
+/// shell — all `kill_on_drop` does — left those running, and spending quota,
+/// after the ping had been reported as timed out.
+async fn run_command_with_timeout(
+    command_str: &str,
+    timeout: Duration,
+    grace: Duration,
+) -> Option<std::io::Result<std::process::Output>> {
+    #[cfg(target_os = "windows")]
+    let (program, arg) = ("cmd", "/C");
+    #[cfg(not(target_os = "windows"))]
+    let (program, arg) = ("sh", "-c");
+
+    let mut command = tokio::process::Command::new(program);
+    command
+        .arg(arg)
+        .arg(command_str)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // Still covers the ping itself being dropped mid-run, e.g. when the
+        // TUI exits.
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return Some(Err(error)),
+    };
+    #[cfg(unix)]
+    let group = child.id();
+    let output = child.wait_with_output();
+    tokio::pin!(output);
+
+    if let Ok(result) = tokio::time::timeout(timeout, &mut output).await {
+        return Some(result);
+    }
+
+    #[cfg(unix)]
+    if let Some(group) = group {
+        signal_process_group(group, libc::SIGTERM);
+        let deadline = tokio::time::Instant::now() + grace;
+        // Keep draining the pipes while the shell exits, so a command writing
+        // on its way out is not blocked on a full pipe.
+        let _ = tokio::time::timeout_at(deadline, &mut output).await;
+        // Its children may outlive it; they get the rest of the grace period.
+        while process_group_exists(group) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if process_group_exists(group) {
+            signal_process_group(group, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = grace;
+
+    None
+}
+
+#[cfg(unix)]
+fn signal_process_group(group: u32, signal: libc::c_int) {
+    // SAFETY: `killpg` takes plain integers and has no memory-safety
+    // preconditions; a group that is already gone just returns ESRCH.
+    unsafe {
+        libc::killpg(group as libc::pid_t, signal);
+    }
+}
+
+#[cfg(unix)]
+fn process_group_exists(group: u32) -> bool {
+    // SAFETY: as above; signal 0 only checks whether the group has members.
+    unsafe { libc::killpg(group as libc::pid_t, 0) == 0 }
 }
 
 /// Builds a failure record for a ping that never produced one of its own.
@@ -869,5 +943,65 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         assert!(!marker.exists(), "child outlived the timeout");
         let _ = std::fs::remove_file(&marker);
+    }
+    /// A timed-out ping has to stop everything it started, not just the shell:
+    /// an agent CLI starts processes of its own, and those used to keep running
+    /// (and spending quota) after the ping was reported as timed out.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_ping_stops_its_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("grandchild-survived");
+        // The subshell is the ping's grandchild: killing the shell alone
+        // leaves it running.
+        let command = format!("(sleep 1; touch '{}') & wait", marker.display());
+
+        let outcome = run_command_with_timeout(
+            &command,
+            Duration::from_millis(200),
+            Duration::from_millis(500),
+        )
+        .await;
+
+        assert!(outcome.is_none(), "the command should have timed out");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!marker.exists(), "a grandchild outlived the timeout");
+    }
+
+    /// The group is asked to stop before it is killed, so an agent gets a
+    /// chance to exit cleanly.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_ping_gets_sigterm_before_sigkill() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("got-sigterm");
+        let command = format!(
+            "trap \"touch '{}'; exit 0\" TERM; sleep 30 & wait",
+            marker.display()
+        );
+
+        let outcome =
+            run_command_with_timeout(&command, Duration::from_millis(200), Duration::from_secs(2))
+                .await;
+
+        assert!(outcome.is_none(), "the command should have timed out");
+        assert!(
+            marker.exists(),
+            "the command was killed without a SIGTERM first"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_finishing_in_time_returns_its_output() {
+        let outcome = run_command_with_timeout(
+            "echo hello",
+            Duration::from_secs(10),
+            Duration::from_secs(1),
+        )
+        .await;
+
+        let output = outcome.expect("finished in time").expect("ran");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
     }
 }

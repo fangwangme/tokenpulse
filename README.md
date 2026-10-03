@@ -87,7 +87,7 @@ cargo install --path tokenpulse-cli
 | Claude Code | `~/.claude/projects/` / `~/.claude/transcripts/` |
 | Codex | `~/.codex/sessions/` |
 | GitHub Copilot | `~/.local/share/github-copilot/events.jsonl` |
-| OpenCode | `~/.local/share/opencode/` |
+| OpenCode | `${XDG_DATA_HOME:-~/.local/share}/opencode/` (1.x and 2.x storage, or `OPENCODE_DB`) |
 | Gemini CLI | `~/.gemini/tmp/` |
 | PI | `~/.pi/agent/sessions/` |
 | Antigravity | Language Server (GUI/CLI) |
@@ -98,7 +98,6 @@ cargo install --path tokenpulse-cli
 |---|---|
 | Claude Code | ✅ |
 | Codex | ✅ |
-| GitHub Copilot | ✅ |
 | Antigravity | ✅ |
 
 > Notes:
@@ -120,8 +119,9 @@ cargo install --path tokenpulse-cli
   prompts, replies, durations, status codes, and smooth mouse-wheel scrolling
 - **Ledger-backed** — local SQLite with per-day pricing snapshots so historical
   cost does not silently drift
-- **Quota overview** — up to the top 4 windows per provider; each is a progress
-  bar with an expected-progress marker plus a detail line showing the reset
+- **Quota overview** — up to the top 4 windows per provider; each is a
+  full-width progress bar with an expected-progress marker plus a detail line
+  led by a uniform window tag (`5H:`, `WEEKLY · SONNET:`) and showing the reset
   countdown, used/remaining percentages, and an at-current-rate pace indicator
 - **Auto-refresh in TUI** — one interval for both quota and usage
   (0/1/2/5/10/15 min, default 5 min); cycle or toggle in the Settings tab, with
@@ -204,9 +204,9 @@ tokenpulse --log
 # Show current config
 tokenpulse config show
 
-# Enable / disable providers
+# Enable / disable quota providers (claude, codex, antigravity)
 tokenpulse config enable claude
-tokenpulse config disable gemini
+tokenpulse config disable antigravity
 
 # Quota display mode: "remaining" (default) or "used"
 tokenpulse config set quota_display_mode=used
@@ -222,8 +222,8 @@ tokenpulse config set auto_refresh_interval=5
 # Show empty providers in the dashboard
 tokenpulse config set show_empty_providers=true
 
-# Show / hide account name in quota cards
-tokenpulse config set show_account=true
+# Account row in quota cards: none, plan, or full (plan + email; default)
+tokenpulse config set account_display=plan
 
 # Enable / disable quota refresh (default: true)
 tokenpulse config set refresh_quota=false
@@ -250,6 +250,10 @@ tokenpulse config test-notification
 > hard to miss over headphones. If `notification_level=system` shows no banner,
 > allow your terminal to post notifications in System Settings > Notifications;
 > the sound plays regardless.
+
+If `config.toml` has an error, the commands and Settings rows that change it
+leave it untouched and report the error instead of rewriting it from defaults;
+fix or remove the file, then retry.
 
 ### Session Keeper (Heartbeats & Wakeup)
 

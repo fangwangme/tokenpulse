@@ -4,6 +4,13 @@
 
 On-demand fetching of remaining usage quota from coding agent APIs. No polling.
 
+Quota providers: Claude Code, Codex and Antigravity. They are registered in one
+list, `QUOTA_PROVIDERS` in `tokenpulse-cli/src/commands/quota.rs`; the Settings
+rows, the ids `config enable` accepts and the providers quota resolution honours
+are all derived from it. A `[providers.<id>]` entry for anything else — such as
+`copilot` or `gemini` from an older config — still loads but is ignored. Copilot
+CLI and Gemini CLI *usage* parsing is separate and unaffected.
+
 ## Architecture
 
 ```
@@ -11,7 +18,6 @@ quota/
 ├── mod.rs          # QuotaFetcher trait, QuotaSnapshot struct, fetch_all()
 ├── claude.rs       # Claude Code quota fetcher
 ├── codex.rs        # Codex quota fetcher
-├── copilot.rs      # GitHub Copilot quota fetcher
 ├── antigravity.rs  # Antigravity quota fetcher
 └── cache.rs        # Quota response caching (one overwritten row per provider)
 ```
@@ -68,6 +74,13 @@ The Session and Weekly windows meter the pooled quota, so they leave
 
 Extra-credit usage (`extra_usage`) is intentionally not surfaced for Claude Code.
 
+### Plan and Account
+- `plan` is the `subscriptionType` (`pro`, `max`, ...) of the credential that
+  served the request, stored as-is; nothing is hardcoded.
+- `account` is `oauthAccount.emailAddress` from `~/.claude.json`, Claude Code's
+  global config. The file is read only when `display.account_display = "full"`,
+  since that is the only setting that shows the email.
+
 ## Codex
 
 ### Credential Flow
@@ -106,53 +119,6 @@ Authorization: Bearer <access_token>
 
 No missing 5-hour or 7-day window is synthesized. Reset-credit fetching and display are independent and unchanged.
 
-## GitHub Copilot
-
-### Credential Flow
-1. Check `GITHUB_TOKEN` environment variable
-2. Fallback: `gh auth token` CLI command
-3. Fallback: `~/.config/github-copilot/hosts.json` or `apps.json` → `oauth_token` field
-
-### Quota API
-```
-GET https://api.github.com/copilot_internal/user
-Authorization: token <token>
-Editor-Version: vscode/1.100.0
-Editor-Plugin-Version: copilot/1.300.0
-User-Agent: GitHubCopilotChat/1.300.0
-X-Github-Api-Version: 2025-04-01
-```
-
-Note: Uses `token` auth scheme, NOT `Bearer`.
-
-### Paid Tier Response
-```json
-{
-  "copilot_plan": "business",
-  "quota_reset_date": "2025-08-01T00:00:00Z",
-  "quota_snapshots": {
-    "completions": { "percent_remaining": 75.0, "entitlement": 1000 },
-    "premium_requests": { "percent_remaining": 50.0, "entitlement": 500 }
-  }
-}
-```
-
-### Free Tier Response
-```json
-{
-  "copilot_plan": "free",
-  "limited_user_quotas": { "chat_completions": 40.0 },
-  "monthly_quotas": { "chat_completions": 100.0 },
-  "limited_user_reset_date": "2025-08-01"
-}
-```
-
-### Response Mapping
-| Tier | Calculation                                                        |
-| ---- | ------------------------------------------------------------------ |
-| Paid | `used_percent = (100 - percent_remaining).clamp(0, 100)`           |
-| Free | `used_percent = ((total - remaining) / total * 100).clamp(0, 100)` |
-
 ## Antigravity
 
 ### Credential Flow
@@ -162,7 +128,7 @@ No external auth lookup. Antigravity quota is read from a running local Antigrav
 1. Discover running Antigravity CLI/Desktop language server processes
 2. Prefer CLI LS, then Desktop LS, then unknown Antigravity LS processes
 3. Send a Connect-RPC `RetrieveUserQuotaSummary` request to the local language server; on success, make a best-effort `GetUserStatus` call for account email + plan name
-4. Do not use OAuth files, keyring lookups, or direct Cloud Code HTTP for Antigravity quota
+4. If no language server responds, fall back to the Cloud Code quota API. That response has no plan or account, so the snapshot leaves both empty rather than guessing one
 
 ### Response Mapping
 `RetrieveUserQuotaSummary` returns one group per model family, each with a `5h` and a `weekly` bucket. Each bucket maps to a `RateWindow`:
@@ -188,6 +154,23 @@ pub async fn fetch_all(providers: &[Box<dyn QuotaFetcher>]) -> Vec<Result<QuotaS
     futures::future::join_all(futures).await
 }
 ```
+
+## Account Display
+
+`display.account_display` decides how much of the account the quota views show:
+
+| Value  | Quota card row                 | Plain-text output        |
+| ------ | ------------------------------ | ------------------------ |
+| `none` | no account row                 | no `Plan:` / `Account:`  |
+| `plan` | `PLAN: Plus`                   | `Plan:`                  |
+| `full` | `PLAN: Plus · user@example.com` | `Plan:` and `Account:`  |
+
+The default is `full`. Plan names are capitalized at display time (`plus` →
+`Plus`, `max` → `Max`); snapshots, the quota cache, history and `--json` keep the
+provider's raw value. Config v4 replaced the earlier `show_account = true |
+false` with this setting: `true` migrates to `full`, `false` to `none`, and the
+rewritten file no longer contains `show_account`. Set it from Settings (cycles
+`none → plan → full`) or with `tokenpulse config set account_display=<value>`.
 
 ## Observation history
 

@@ -445,7 +445,9 @@ impl AntigravityQuotaFetcher {
 
         Ok(QuotaSnapshot {
             provider: "antigravity".to_string(),
-            plan: Some("Pro".to_string()),
+            // The Cloud Code quota API reports no plan or account; the
+            // language-server path is the one that knows them.
+            plan: None,
             account: None,
             windows,
             credits: None,

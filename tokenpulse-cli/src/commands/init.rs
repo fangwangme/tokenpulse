@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use tokenpulse_core::auth::detect_providers;
 use tokenpulse_core::config::{
     Config, ConfigManager, DisplayConfig, KeeperConfig, ProviderConfig, QuotaDisplayMode,
+    CONFIG_VERSION,
 };
 
 /// Supported providers — init selection is based on this list,
@@ -115,7 +116,7 @@ pub fn run(use_defaults: bool) -> Result<()> {
     }
 
     let config = Config {
-        version: 3,
+        version: CONFIG_VERSION,
         providers,
         display: DisplayConfig {
             show_empty_providers: false,

@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::debug;
 
@@ -61,10 +62,25 @@ struct UsageLimitModel {
     display_name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ClaudeGlobalConfig {
+    #[serde(rename = "oauthAccount", default)]
+    oauth_account: Option<ClaudeOAuthAccount>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeOAuthAccount {
+    #[serde(rename = "emailAddress", default)]
+    email_address: Option<String>,
+}
+
 pub struct ClaudeQuotaFetcher {
     client: Client,
     auth: ClaudeAuth,
     quota_api_url: String,
+    /// Claude Code's global config, read for the account email. `None` unless
+    /// the email is going to be shown.
+    account_config_path: Option<PathBuf>,
 }
 
 impl ClaudeQuotaFetcher {
@@ -77,7 +93,19 @@ impl ClaudeQuotaFetcher {
             client,
             auth: ClaudeAuth::new(),
             quota_api_url: QUOTA_API_URL.to_string(),
+            account_config_path: None,
         }
+    }
+
+    /// Also report the signed-in email, from `oauthAccount.emailAddress` in
+    /// `~/.claude.json`. Off by default so the file is only read when the
+    /// email will actually be displayed.
+    pub fn with_account_email(mut self, enabled: bool) -> Self {
+        self.account_config_path = enabled
+            .then(dirs::home_dir)
+            .flatten()
+            .map(|home| home.join(".claude.json"));
+        self
     }
 
     #[cfg(test)]
@@ -89,6 +117,7 @@ impl ClaudeQuotaFetcher {
                 .unwrap(),
             auth,
             quota_api_url,
+            account_config_path: None,
         }
     }
 
@@ -217,7 +246,18 @@ impl ClaudeQuotaFetcher {
             return Err(CandidateFailure::CredentialsChanged);
         }
 
-        quota_snapshot_from_body(&body).map_err(CandidateFailure::Other)
+        let plan = candidate
+            .credentials
+            .claude_ai_oauth
+            .subscription_type
+            .clone();
+        let mut snapshot =
+            quota_snapshot_from_body(&body, plan).map_err(CandidateFailure::Other)?;
+        snapshot.account = self
+            .account_config_path
+            .as_deref()
+            .and_then(read_account_email);
+        Ok(snapshot)
     }
 }
 
@@ -302,7 +342,18 @@ impl QuotaFetcher for ClaudeQuotaFetcher {
     }
 }
 
-fn quota_snapshot_from_body(body: &str) -> Result<QuotaSnapshot> {
+fn read_account_email(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<ClaudeGlobalConfig>(&content)
+        .ok()?
+        .oauth_account?
+        .email_address
+        .filter(|email| !email.trim().is_empty())
+}
+
+/// `plan` is the credential's `subscriptionType` (`pro`, `max`, ...), passed
+/// through as-is; the views capitalize it for display.
+fn quota_snapshot_from_body(body: &str, plan: Option<String>) -> Result<QuotaSnapshot> {
     let quota: ClaudeQuotaResponse = serde_json::from_str(body)
         .map_err(|error| anyhow!("Failed to parse Claude quota response: {error}"))?;
     let mut windows = Vec::new();
@@ -389,7 +440,7 @@ fn quota_snapshot_from_body(body: &str) -> Result<QuotaSnapshot> {
 
     Ok(QuotaSnapshot {
         provider: "claude".to_string(),
-        plan: Some("Pro".to_string()),
+        plan: plan.filter(|plan| !plan.trim().is_empty()),
         account: None,
         windows,
         // Claude Code credit usage is intentionally not surfaced.
@@ -699,5 +750,77 @@ mod tests {
             refresher.attempted.lock().unwrap().as_slice(),
             ["shared-refresh"]
         );
+    }
+    fn single_candidate_fetcher(
+        subscription_type: Option<&str>,
+        account_config_path: Option<PathBuf>,
+    ) -> ClaudeQuotaFetcher {
+        let mut credentials = credentials("plan-access", "plan-refresh", 0.0);
+        credentials.claude_ai_oauth.subscription_type = subscription_type.map(str::to_string);
+        let store = Arc::new(CandidateStore {
+            candidates: vec![ClaudeCredentialCandidate {
+                source: ClaudeCredentialSource::File,
+                credentials,
+            }],
+        });
+        let auth = ClaudeAuth::with_components(store, Arc::new(UnexpectedRefresher));
+        let mut fetcher =
+            ClaudeQuotaFetcher::with_auth_and_url(auth, spawn_quota_server("plan-access"));
+        fetcher.account_config_path = account_config_path;
+        fetcher
+    }
+
+    #[tokio::test]
+    async fn snapshot_plan_comes_from_subscription_type() {
+        let fetcher = single_candidate_fetcher(Some("max"), None);
+
+        let snapshot = fetcher.fetch_quota().await.unwrap();
+
+        assert_eq!(snapshot.plan.as_deref(), Some("max"));
+        assert_eq!(
+            snapshot.account, None,
+            "the email is only read when asked for"
+        );
+    }
+
+    #[test]
+    fn snapshot_without_subscription_type_has_no_plan() {
+        let body = r#"{"five_hour":{"utilization":1.0,"resets_at":null}}"#;
+
+        assert_eq!(quota_snapshot_from_body(body, None).unwrap().plan, None);
+        assert_eq!(
+            quota_snapshot_from_body(body, Some(" ".to_string()))
+                .unwrap()
+                .plan,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_account_comes_from_claude_json_when_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        std::fs::write(
+            &path,
+            r#"{"numStartups":3,"oauthAccount":{"emailAddress":"user@example.com","organizationRole":"admin"},"projects":{}}"#,
+        )
+        .unwrap();
+        let fetcher = single_candidate_fetcher(Some("pro"), Some(path));
+
+        let snapshot = fetcher.fetch_quota().await.unwrap();
+
+        assert_eq!(snapshot.plan.as_deref(), Some("pro"));
+        assert_eq!(snapshot.account.as_deref(), Some("user@example.com"));
+    }
+
+    #[test]
+    fn account_email_is_absent_without_an_oauth_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        assert_eq!(read_account_email(&path), None, "missing file");
+        std::fs::write(&path, r#"{"numStartups":3}"#).unwrap();
+        assert_eq!(read_account_email(&path), None, "no oauthAccount");
+        std::fs::write(&path, r#"{"oauthAccount":{"emailAddress":""}}"#).unwrap();
+        assert_eq!(read_account_email(&path), None, "empty email");
     }
 }

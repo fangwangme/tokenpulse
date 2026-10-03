@@ -58,7 +58,8 @@ impl<'a> GradientGauge<'a> {
         self
     }
 
-    /// Set fixed label column width for alignment across multiple gauges
+    /// Set fixed label column width for alignment across multiple gauges.
+    /// `0` drops the label column entirely, so the bar takes the full width.
     pub fn label_width(mut self, w: usize) -> Self {
         self.label_width = Some(w);
         self
@@ -98,7 +99,12 @@ impl<'a> Widget for GradientGauge<'a> {
         // Use fixed label width if specified, otherwise auto-calculate
         let (label_width, bar_width) = if let Some(fixed_lw) = self.label_width {
             let lw = fixed_lw.min(available.saturating_sub(2));
-            let bw = available.saturating_sub(lw + 1);
+            // No label, no separator column either.
+            let bw = if lw == 0 {
+                available
+            } else {
+                available.saturating_sub(lw + 1)
+            };
             (lw, bw)
         } else {
             let mut bw = self.width.min(available.saturating_sub(1));
@@ -152,7 +158,9 @@ impl<'a> Widget for GradientGauge<'a> {
 
         // Render with color. If there's an expected marker, render it char by char
         // for different styling
-        let label_chars = label.len();
+        // Counted in chars, as the loop below indexes them: a tag such as
+        // `5H · GEMINI` is longer in bytes than in chars.
+        let label_chars = label.chars().count();
         let style = Style::default().fg(self.color);
         let marker_style = Style::default()
             .fg(Color::White)
@@ -201,4 +209,51 @@ fn truncate_display_width(text: &str, width: usize) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(gauge: GradientGauge<'_>, width: u16) -> Buffer {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        gauge.render(area, &mut buf);
+        buf
+    }
+
+    fn row(buf: &Buffer) -> String {
+        (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    #[test]
+    fn zero_label_width_gives_the_bar_the_full_width() {
+        let buf = render(
+            GradientGauge::new("", 50.0)
+                .label_width(0)
+                .show_percent(false),
+            20,
+        );
+
+        let text = row(&buf);
+        assert_eq!(text, format!("{}{}", "█".repeat(10), "░".repeat(10)));
+    }
+
+    #[test]
+    fn expected_marker_lands_on_the_bar_after_a_multibyte_label() {
+        let buf = render(
+            GradientGauge::new("5H · GEMINI", 0.0)
+                .label_width(11)
+                .show_percent(false)
+                .expected_percent(Some(50.0)),
+            32,
+        );
+
+        let text = row(&buf);
+        assert!(text.starts_with("5H · GEMINI "), "{text}");
+        // 32 columns - 11 label - 1 separator = a 20-column bar; 50% is index 10.
+        let marker_x = 12 + 10;
+        assert_eq!(buf[(marker_x, 0)].symbol(), "▏", "{text}");
+        assert!(buf[(marker_x, 0)].modifier.contains(Modifier::BOLD));
+    }
 }

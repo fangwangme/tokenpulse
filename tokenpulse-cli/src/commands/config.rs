@@ -1,7 +1,7 @@
 use crate::ConfigAction;
 use anyhow::Result;
 use tokenpulse_core::config::{
-    ConfigManager, NotificationLevel, QuotaDisplayMode, ThemePreference,
+    AccountDisplay, ConfigManager, NotificationLevel, QuotaDisplayMode, ThemePreference,
 };
 use tokenpulse_core::notification::{self, QuotaRecovery, SOUND_CHIME, SOUND_NONE};
 
@@ -49,13 +49,13 @@ pub fn run(action: ConfigAction) -> Result<()> {
             let config = manager.load()?;
             println!("Config file: {}", manager.config_path().display());
             println!();
+            // Registry order, and only ids with a quota fetcher: a stale key
+            // such as `copilot` from an older config is ignored by quota
+            // resolution, so listing it would claim a provider that is not one.
             println!("Providers:");
-            for (name, provider) in &config.providers {
-                let status = if provider.enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
+            for name in crate::commands::quota::quota_provider_ids() {
+                let enabled = config.providers.get(name).is_some_and(|p| p.enabled);
+                let status = if enabled { "enabled" } else { "disabled" };
                 println!("  {name}: {status}");
             }
             println!();
@@ -64,7 +64,10 @@ pub fn run(action: ConfigAction) -> Result<()> {
                 "  show_empty_providers: {}",
                 config.display.show_empty_providers
             );
-            println!("  show_account: {}", config.display.show_account);
+            println!(
+                "  account_display: {}",
+                config.display.account_display.label()
+            );
             println!("  theme: {}", config.display.theme.label());
             let mode_str = match config.display.quota_display_mode {
                 QuotaDisplayMode::Used => "used",
@@ -117,7 +120,9 @@ pub fn run(action: ConfigAction) -> Result<()> {
             let key = key.trim();
             let value = value.trim();
 
-            let mut config = manager.load().unwrap_or_default();
+            // A config that fails to load must not be replaced by defaults with
+            // one setting changed.
+            let mut config = manager.load()?;
 
             match key {
                 "quota_display_mode" => {
@@ -148,19 +153,16 @@ pub fn run(action: ConfigAction) -> Result<()> {
                     manager.save(&config)?;
                     println!("show_empty_providers = {value}");
                 }
-                "show_account" => {
-                    config.display.show_account = match value {
-                        "true" | "1" | "yes" => true,
-                        "false" | "0" | "no" => false,
-                        _ => {
-                            anyhow::bail!(
-                                "Invalid value '{}' for show_account. Expected: true, false",
+                "account_display" => {
+                    config.display.account_display =
+                        AccountDisplay::parse(value).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Invalid value '{}' for account_display. Expected: none, plan, full",
                                 value
-                            );
-                        }
-                    };
+                            )
+                        })?;
                     manager.save(&config)?;
-                    println!("show_account = {value}");
+                    println!("account_display = {value}");
                 }
                 "theme" => {
                     config.display.theme = match value {
@@ -262,7 +264,7 @@ pub fn run(action: ConfigAction) -> Result<()> {
                 }
                 _ => {
                     anyhow::bail!(
-                        "Unknown setting '{}'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  show_account           (true | false)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)\n  notification_level     (off | in_app | terminal | system)\n  notification_sound     (chime | none | a name under /System/Library/Sounds, e.g. Hero)\n  keeper_engine          (true | false)",
+                        "Unknown setting '{}'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  account_display        (none | plan | full)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)\n  notification_level     (off | in_app | terminal | system)\n  notification_sound     (chime | none | a name under /System/Library/Sounds, e.g. Hero)\n  keeper_engine          (true | false)",
                         key
                     );
                 }
@@ -315,8 +317,9 @@ mod tests {
     use super::*;
 
     /// `config enable <id>` used to accept anything, write the key, and print
-    /// success — while quota resolution ignored it. A typo, or `gemini` (whose
-    /// fetcher was removed), looked configured forever and did nothing.
+    /// success — while quota resolution ignored it. A typo, or `gemini` or
+    /// `copilot` (whose fetchers were removed), looked configured forever and
+    /// did nothing.
     #[test]
     fn enable_disable_rejects_ids_without_a_quota_fetcher() {
         for id in crate::commands::quota::quota_provider_ids() {
@@ -326,7 +329,7 @@ mod tests {
             );
         }
 
-        for id in ["gemini", "opencode", "pi", "clade", ""] {
+        for id in ["gemini", "copilot", "opencode", "pi", "clade", ""] {
             let err = validate_quota_provider(id)
                 .expect_err(&format!("{id} has no quota fetcher and must be rejected"))
                 .to_string();
