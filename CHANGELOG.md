@@ -31,6 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a model missing under its own name is retried as `<model>-preview`, and
   `vertex_ai/` is tried last, only when nothing else matches.
 
+- **Codex forked and sub-agent sessions no longer re-count their parent's
+  usage**: such a session's rollout opens with history inherited from the
+  parent thread — the parent's replayed token counts, and a running total
+  that already includes everything the parent used. The first of those has no
+  per-call usage, so the whole inherited total was counted as one message,
+  and none of them carried a model, so all of it surfaced as tens of millions
+  of `unknown` tokens. Token counts before the session's first turn now only
+  seed the running total. The parser version moves to `codex-v4`, which
+  re-ingests Codex usage once.
+- **Models listed only under provider prefixes are priced**: when no lookup
+  rule matches, the same model under any provider prefix is used, preferring
+  the highest-priority source and the price most of its listings agree on.
+  This prices models such as `muse-spark-1.3-contributor-free` (OpenCode's
+  free tier, catalogued only as `meta/…` and by resellers) at the paid rate.
+
 ### Changed
 - **One model name per model, without `-preview`**: model grouping and display
   drop the `preview` segment for every source, since vendors attach it

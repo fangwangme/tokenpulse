@@ -138,7 +138,74 @@ impl PricingCatalog {
             });
         }
 
-        None
+        self.lookup_under_any_provider(&key_id)
+            .or_else(|| self.lookup_under_any_provider(&format!("{key_id}-preview")))
+    }
+
+    /// Last resort: the same model listed only under provider prefixes no
+    /// candidate rule produces — `meta/muse-spark-1-3-contributor` plus a dozen
+    /// resellers, with no unprefixed key. The highest-priority source wins,
+    /// then the price most of its listings agree on, so one reseller's markup
+    /// cannot set the price.
+    fn lookup_under_any_provider(&self, key_id: &str) -> Option<ResolvedPricing<'_>> {
+        if key_id.is_empty() || crate::model_id::is_pseudo(key_id) {
+            return None;
+        }
+
+        let listings: Vec<(&String, &PricingRecord)> = self
+            .entries
+            .iter()
+            .filter(|(key, record)| {
+                key.split_once('/')
+                    .is_some_and(|(_, model)| model == key_id)
+                    && pricing_record_is_usable(record)
+            })
+            .collect();
+        let best_rank = listings
+            .iter()
+            .map(|(_, record)| source_rank(&record.source))
+            .min()?;
+
+        let mut by_price: HashMap<(u64, u64), Vec<(&String, &PricingRecord)>> = HashMap::new();
+        for (key, record) in listings {
+            if source_rank(&record.source) == best_rank {
+                let price = (
+                    record.pricing.input_cost_per_token.to_bits(),
+                    record.pricing.output_cost_per_token.to_bits(),
+                );
+                by_price.entry(price).or_default().push((key, record));
+            }
+        }
+        let (key, record) = by_price
+            .into_values()
+            .map(|mut group| {
+                group.sort_by_key(|(key, _)| *key);
+                group
+            })
+            .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| b[0].0.cmp(a[0].0)))?
+            .into_iter()
+            .next()?;
+
+        Some(ResolvedPricing {
+            matched_key: key.as_str(),
+            pricing: &record.pricing,
+            source: &record.source,
+            version: &record.version,
+        })
+    }
+}
+
+/// Source priority, matching the merge order: LiteLLM, then models.dev, then
+/// OpenRouter.
+fn source_rank(source: &str) -> u8 {
+    if source == "litellm" {
+        0
+    } else if source.starts_with("models.dev") {
+        1
+    } else if source == "openrouter" {
+        2
+    } else {
+        3
     }
 }
 
@@ -1254,6 +1321,51 @@ mod tests {
             calculate_cost(&tokens, resolved.pricing) > 0.0,
             "tiered Antigravity rows must not stay at zero cost"
         );
+    }
+
+    #[test]
+    fn test_catalog_falls_back_to_the_same_model_under_any_provider() {
+        let record = |input: f64, output: f64, source: &str| {
+            PricingRecord::new(make_pricing(input, output), source, "v1")
+        };
+        let catalog = PricingCatalog::new(HashMap::from([
+            // Free on OpenCode: unusable, so the paid price is wanted.
+            (
+                "opencode/muse-spark-1.3-contributor".to_string(),
+                record(0.0, 0.0, "models.dev:opencode"),
+            ),
+            (
+                "meta/muse-spark-1.3-contributor".to_string(),
+                record(0.0000001, 0.0000002, "litellm"),
+            ),
+            (
+                "openrouter/muse-spark-1.3-contributor".to_string(),
+                record(0.0000001, 0.0000002, "litellm"),
+            ),
+            // A marked-up reseller in the same source loses to the majority.
+            (
+                "aihubmix/muse-spark-1.3-contributor".to_string(),
+                record(0.00000011, 0.00000022, "litellm"),
+            ),
+            // A lower-priority source never wins over LiteLLM.
+            (
+                "kilo/muse-spark-1.3-contributor".to_string(),
+                record(0.000005, 0.000005, "models.dev:kilo"),
+            ),
+            // A different model that merely shares a prefix is not matched.
+            (
+                "meta/muse-spark-1.3".to_string(),
+                record(0.00000125, 0.00000425, "litellm"),
+            ),
+        ]));
+
+        let resolved = catalog
+            .lookup("muse-spark-1.3-contributor-free", Some("opencode"))
+            .unwrap();
+        assert_eq!(resolved.matched_key, "meta/muse-spark-1-3-contributor");
+        assert_eq!(resolved.pricing.input_cost_per_token, 0.0000001);
+
+        assert!(catalog.lookup("unknown", Some("opencode")).is_none());
     }
 
     #[test]

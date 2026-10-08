@@ -29,7 +29,10 @@ The current candidate order is:
 7. Date-suffix stripped candidates and their normalized forms.
 8. Slash-to-dot variants for providers that publish keys with dot separators.
 9. Steps 1–8 again for `<model>-preview`, when the id does not already end in it. Some models are only ever published as previews, and sources that name models from UI labels (Antigravity) never carry the suffix.
-10. `vertex_ai/<model>` and `vertex_ai/<model>-preview` for Gemini, last of all. Vertex keeps listing models the first-party and router catalogs have retired, but it must never outrank them.
+10. `vertex_ai/<model>` and `vertex_ai/<model>-preview` for Gemini. Vertex keeps listing models the first-party and router catalogs have retired, but it must never outrank them.
+11. The same model under any provider prefix (`*/<model>`, then `*/<model>-preview`), for models no rule reaches — e.g. `muse-spark-1-3-contributor`, listed only as `meta/…` and by resellers. The highest-priority source wins (LiteLLM, then models.dev, then OpenRouter), then the price most of its listings agree on, so a single reseller's markup cannot set the price.
+
+A provider-specific zero price (a `-free` tier such as `opencode/…`) is never usable, so the lookup continues to the paid price of the same model.
 
 This keeps exact pricing preferred, while still recovering from common provider spelling differences.
 

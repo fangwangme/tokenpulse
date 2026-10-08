@@ -144,6 +144,12 @@ Important rule:
 - primary token source is `last_token_usage`
 - supports fallback delta computation from `total_token_usage`
 - includes cumulative-regression guards
+- forked and sub-agent sessions (`session_meta` with `forked_from_id`,
+  `parent_thread_id`, or a `source.subagent`) open with history inherited from
+  the parent thread: replayed token counts and a running total that already
+  includes the parent's usage. Token counts before the session's first
+  `turn_context` only seed the running total and are never counted; root
+  sessions are unaffected
 
 ### OpenCode
 
