@@ -433,6 +433,16 @@ fn parse_osc_color_component(value: &str) -> Option<u8> {
     Some(((raw * 255 + max / 2) / max) as u8)
 }
 
+fn normalize_company_key(provider: &str) -> &'static str {
+    let provider = provider.trim().to_ascii_lowercase();
+    match provider.as_str() {
+        value if value.contains("openai") => "openai",
+        value if value.contains("google") => "google",
+        value if value.contains("anthropic") => "anthropic",
+        _ => "other",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,15 +692,5 @@ mod tests {
         assert_eq!(parse_osc_color_component("0"), Some(0));
         assert_eq!(parse_osc_color_component("f"), Some(255));
         assert_eq!(parse_osc_color_component("80"), Some(128));
-    }
-}
-
-fn normalize_company_key(provider: &str) -> &'static str {
-    let provider = provider.trim().to_ascii_lowercase();
-    match provider.as_str() {
-        value if value.contains("openai") => "openai",
-        value if value.contains("google") => "google",
-        value if value.contains("anthropic") => "anthropic",
-        _ => "other",
     }
 }

@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-/// Bumped from `antigravity-v4` when generation timestamps stopped falling back
-/// to the sync instant; the bump is what makes the next sync re-derive the
-/// already mis-dated rows from the local conversation databases.
-const PARSER_VERSION: &str = "antigravity-v5";
+/// Bumped from `antigravity-v5` when model ids started resolving enum-first
+/// with the raw identity stored alongside; the bump re-derives every row the
+/// local conversation databases still hold.
+const PARSER_VERSION: &str = "antigravity-v6";
 const MODEL_ALIAS_HISTORY_VERSION: u32 = 1;
 const MODEL_ALIAS_HISTORY_FILE_NAME: &str = "model-aliases.json";
 const ANTIGRAVITY_LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
@@ -41,11 +41,13 @@ impl AntigravitySessionParser {
         self
     }
 
+    #[cfg(test)]
     pub fn with_custom_paths(mut self, paths: Vec<PathBuf>) -> Self {
         self.custom_paths = Some(paths);
         self
     }
 
+    #[cfg(test)]
     pub fn with_skip_sync(mut self, skip_sync: bool) -> Self {
         self.skip_sync = skip_sync;
         self
@@ -81,7 +83,6 @@ impl SessionParser for AntigravitySessionParser {
 
         for root in self.session_paths() {
             // Sync first!
-            let sync_started_ms = Local::now().timestamp_millis();
             if !self.skip_sync {
                 if let Err(e) = sync_antigravity_with_options(
                     &root,
@@ -97,7 +98,7 @@ impl SessionParser for AntigravitySessionParser {
                 Ok(aliases) => aliases,
                 Err(e) => {
                     debug!("Failed to load Antigravity model alias history: {}", e);
-                    HashMap::new()
+                    static_model_aliases()
                 }
             };
             if let Err(e) = normalize_cached_antigravity_artifacts(&root, &alias_history) {
@@ -120,14 +121,17 @@ impl SessionParser for AntigravitySessionParser {
                     .unwrap()
                     .and_utc()
                     .timestamp_millis();
+                // Sessions synced or re-resolved since the window opened are
+                // read whatever their age, until a refresh succeeds and moves
+                // the window: a run whose ledger ingest failed would otherwise
+                // lose the correction for good.
                 query.push_str(
                     " WHERE timestamp >= ?1
                        OR (client || ':' || session_id) IN (
-                           SELECT client || ':' || session_id FROM sessions WHERE synced_at >= ?2
+                           SELECT client || ':' || session_id FROM sessions WHERE synced_at >= ?1
                        )",
                 );
                 params.push(since_ms);
-                params.push(sync_started_ms);
             }
             query.push_str(" ORDER BY timestamp ASC");
 
@@ -383,10 +387,28 @@ fn open_cache_db(sessions_dir: &Path) -> Result<rusqlite::Connection> {
             response_id TEXT,
             pricing_day TEXT NOT NULL,
             parser_version TEXT NOT NULL,
+            model_enum TEXT,
+            served_model TEXT,
             FOREIGN KEY(session_id, client) REFERENCES sessions(session_id, client) ON DELETE CASCADE
         );",
         [],
     )?;
+
+    // The raw model identity arrived with `antigravity-v6`; caches built
+    // earlier gain the columns empty and re-resolve from the stored id.
+    for column in ["model_enum", "served_model"] {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_usage') WHERE name = ?1",
+            [column],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            conn.execute(
+                &format!("ALTER TABLE session_usage ADD COLUMN {column} TEXT;"),
+                [],
+            )?;
+        }
+    }
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_session_usage_session_id ON session_usage(session_id);",
@@ -432,10 +454,6 @@ fn migrate_legacy_usage_rows(conn: &rusqlite::Connection) -> Result<()> {
 fn count_antigravity_session_cache_rows(conn: &rusqlite::Connection) -> usize {
     conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
         .unwrap_or(0)
-}
-
-pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
-    sync_antigravity_with_options(sessions_dir, AntigravitySyncOptions::default())
 }
 
 fn block_on_async<F: std::future::Future>(future: F) -> F::Output {
@@ -821,22 +839,7 @@ async fn sync_antigravity_with_options_async(
         let mut primary_model_id = "unknown".to_string();
         for meta in &metadata {
             let chat_model = meta.get("chatModel").unwrap_or(meta);
-            let raw_model_id = chat_model
-                .get("responseModel")
-                .or_else(|| chat_model.get("model"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let mut model_id =
-                resolve_antigravity_model_id_with_aliases(raw_model_id, &model_aliases);
-            if is_pseudo_raw_model(&model_id) {
-                if let Some(display_name) =
-                    chat_model.get("modelDisplayName").and_then(Value::as_str)
-                {
-                    if let Some(normalized) = normalize_display_name_to_id(display_name) {
-                        model_id = normalized;
-                    }
-                }
-            }
+            let model_id = resolve_rpc_chat_model(chat_model, &model_aliases).model_id;
             if model_id != "unknown" {
                 primary_model_id = model_id;
                 break;
@@ -907,6 +910,50 @@ async fn sync_antigravity_with_options_async(
     Ok(())
 }
 
+/// One `generatorMetadata` entry's model, resolved, plus the raw identity it
+/// was resolved from (kept in the cache for later re-resolution).
+struct RpcChatModel {
+    model_id: String,
+    model_enum: Option<String>,
+    served_model: Option<String>,
+}
+
+/// `chatModel.model` carries the enum and `responseModel` the served name; see
+/// [`resolve_antigravity_model`] for why the enum wins.
+fn resolve_rpc_chat_model(
+    chat_model: &Value,
+    model_aliases: &HashMap<String, ModelAlias>,
+) -> RpcChatModel {
+    let text = |key: &str| {
+        chat_model
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let model_enum = text("model");
+    let served_model = text("responseModel");
+    let mut model_id = resolve_antigravity_model(
+        model_enum.as_deref(),
+        served_model.as_deref(),
+        model_aliases,
+    );
+    if crate::model_id::is_pseudo(&model_id) {
+        if let Some(label_id) = text("modelDisplayName")
+            .as_deref()
+            .and_then(antigravity_label_to_model_id)
+        {
+            model_id = label_id;
+        }
+    }
+    RpcChatModel {
+        model_id,
+        model_enum,
+        served_model,
+    }
+}
+
 /// Outcome of writing one session's language-server usage rows.
 struct RpcUsageWrite {
     inserted: usize,
@@ -955,19 +1002,11 @@ fn write_rpc_session_usage(
 
     for (step_idx, meta) in metadata.iter().enumerate() {
         let chat_model = meta.get("chatModel").unwrap_or(meta);
-        let raw_model_id = chat_model
-            .get("responseModel")
-            .or_else(|| chat_model.get("model"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let mut model_id = resolve_antigravity_model_id_with_aliases(raw_model_id, model_aliases);
-        if is_pseudo_raw_model(&model_id) {
-            if let Some(display_name) = chat_model.get("modelDisplayName").and_then(Value::as_str) {
-                if let Some(normalized) = normalize_display_name_to_id(display_name) {
-                    model_id = normalized;
-                }
-            }
-        }
+        let RpcChatModel {
+            model_id,
+            model_enum,
+            served_model,
+        } = resolve_rpc_chat_model(chat_model, model_aliases);
 
         let created_at = chat_model
             .get("chatStartMetadata")
@@ -1048,8 +1087,8 @@ fn write_rpc_session_usage(
                 "INSERT OR REPLACE INTO session_usage (
                     id, session_id, client, model_id, provider_id, timestamp, step_index,
                     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                    response_id, pricing_day, parser_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    response_id, pricing_day, parser_version, model_enum, served_model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     storage_message_id,
                     session_id,
@@ -1066,6 +1105,8 @@ fn write_rpc_session_usage(
                     message_key,
                     date_str,
                     PARSER_VERSION,
+                    model_enum,
+                    served_model,
                 ],
             )?;
             write.inserted += 1;
@@ -1468,7 +1509,10 @@ fn proto_token_count(buf: &[u8], field_number: u32) -> i64 {
 struct AntigravityLocalUsage {
     request_uuid: Option<String>,
     response_id: Option<String>,
-    raw_model_id: Option<String>,
+    /// Payload field 19: the backend's served model name.
+    served_model: Option<String>,
+    /// The `model_enum` metadata pair, e.g. `MODEL_PLACEHOLDER_M319`.
+    model_enum: Option<String>,
     tokens: AntigravityTokens,
 }
 
@@ -1504,20 +1548,12 @@ fn parse_gen_metadata_usage(blob: &[u8]) -> Option<AntigravityLocalUsage> {
         proto_token_count(usage, 9),
     )?;
 
-    // `.19` carries a resolved plaintext name but is sometimes a placeholder
-    // like `gemini-default`; the `model_enum` pair resolves through the alias
-    // table in that case.
-    let mut raw_model_id = proto_string(payload, 19);
-    if raw_model_id.as_deref().is_none_or(is_pseudo_raw_model) {
-        if let Some(model_enum) = proto_custom_metadata(payload, "model_enum") {
-            raw_model_id = Some(model_enum);
-        }
-    }
-
+    // Both identities are kept raw; `resolve_antigravity_model` decides.
     Some(AntigravityLocalUsage {
         request_uuid: proto_string(blob, 4),
         response_id: proto_string(usage, 11),
-        raw_model_id,
+        served_model: proto_string(payload, 19),
+        model_enum: proto_custom_metadata(payload, "model_enum"),
         tokens,
     })
 }
@@ -1779,11 +1815,11 @@ fn sync_local_conversations(
                         }
                         return None;
                     };
-                    let model_id = usage
-                        .raw_model_id
-                        .as_deref()
-                        .map(|raw| resolve_antigravity_model_id_with_aliases(raw, model_aliases))
-                        .unwrap_or_else(|| "unknown".to_string());
+                    let model_id = resolve_antigravity_model(
+                        usage.model_enum.as_deref(),
+                        usage.served_model.as_deref(),
+                        model_aliases,
+                    );
                     Some((model_id, timestamp, usage))
                 })
                 .collect();
@@ -1835,8 +1871,8 @@ fn sync_local_conversations(
                     "INSERT OR REPLACE INTO session_usage (
                         id, session_id, client, model_id, provider_id, timestamp, step_index,
                         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                        response_id, pricing_day, parser_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        response_id, pricing_day, parser_version, model_enum, served_model
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     rusqlite::params![
                         storage_message_id,
                         session_id,
@@ -1853,6 +1889,8 @@ fn sync_local_conversations(
                         message_key,
                         local_date_string_from_timestamp(*timestamp),
                         PARSER_VERSION,
+                        usage.model_enum,
+                        usage.served_model,
                     ],
                 )?;
                 inserted_usage_rows += 1;
@@ -2059,122 +2097,169 @@ struct ModelAlias {
     source: String,
 }
 
+/// A seed alias shipped with the binary. Only the label is stored: the model
+/// id is derived from it exactly as for aliases learned from `GetUserStatus`,
+/// so seeded and learned names can never disagree.
 struct StaticModelAlias {
     raw_model_id: &'static str,
-    model_id: &'static str,
-    label: Option<&'static str>,
+    label: &'static str,
     source: &'static str,
 }
 
+/// Aliases known at release time, so a fresh install resolves history without
+/// a running language server. Fold `model-aliases.json` back in here on release.
 const STATIC_MODEL_ALIASES: &[StaticModelAlias] = &[
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M37",
-        model_id: "gemini-3.1-pro-preview-high",
-        label: Some("Gemini 3.1 Pro (High)"),
+        label: "Gemini 3.1 Pro (High)",
         source: "user-initial-mapping;tokscale",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M36",
-        model_id: "gemini-3.1-pro-preview-low",
-        label: Some("Gemini 3.1 Pro (Low)"),
+        label: "Gemini 3.1 Pro (Low)",
         source: "user-initial-mapping;tokscale",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M18",
-        model_id: "gemini-3-flash-preview",
-        label: Some("Gemini 3 Flash"),
+        label: "Gemini 3 Flash",
         source: "user-initial-mapping",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M8",
-        model_id: "gemini-3-pro-preview-high",
-        label: Some("Gemini 3 Pro (High)"),
+        label: "Gemini 3 Pro (High)",
         source: "user-initial-mapping",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M7",
-        model_id: "gemini-3-pro-preview-low",
-        label: Some("Gemini 3 Pro (Low)"),
+        label: "Gemini 3 Pro (Low)",
         source: "user-initial-mapping",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M9",
-        model_id: "gemini-3-pro-preview-image",
-        label: Some("Gemini 3 Pro (Image)"),
+        label: "Gemini 3 Pro (Image)",
         source: "user-initial-mapping",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M26",
-        model_id: "claude-opus-4-6-thinking",
-        label: Some("Claude Opus 4.6 (Thinking)"),
+        label: "Claude Opus 4.6 (Thinking)",
         source: "user-initial-mapping;openusage",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M35",
-        model_id: "claude-sonnet-4-6-thinking",
-        label: Some("Claude Sonnet 4.6 (Thinking)"),
+        label: "Claude Sonnet 4.6 (Thinking)",
         source: "user-initial-mapping;antigravity-mobility-cli",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M12",
-        model_id: "claude-opus-4-5-thinking",
-        label: Some("Claude Opus 4.5 (Thinking)"),
+        label: "Claude Opus 4.5 (Thinking)",
         source: "user-initial-mapping",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
-        model_id: "gpt-oss-120b-medium",
-        label: Some("GPT-OSS 120B (Medium)"),
+        label: "GPT-OSS 120B (Medium)",
         source: "user-initial-mapping;tokscale",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_CLAUDE_4_5_SONNET",
-        model_id: "claude-sonnet-4-5",
-        label: Some("Claude Sonnet 4.5"),
+        label: "Claude Sonnet 4.5",
         source: "user-initial-mapping",
     },
-    // Additional placeholders from dynamic JSON:
     StaticModelAlias {
-        raw_model_id: "MODEL_PLACEHOLDER_M132",
-        model_id: "gemini-3.5-flash-high",
-        label: Some("Gemini 3.5 Flash (High)"),
-        source: "captured-antigravity-get-user-status",
+        raw_model_id: "MODEL_PLACEHOLDER_M47",
+        label: "Gemini 3 Flash",
+        source: "tokscale;antigravity-mobility-cli",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M16",
-        model_id: "gemini-3.1-pro-preview-high",
-        label: Some("Gemini 3.1 Pro (High)"),
+        label: "Gemini 3.1 Pro (High)",
         source: "captured-antigravity-get-user-status",
     },
     StaticModelAlias {
-        raw_model_id: "MODEL_PLACEHOLDER_M187",
-        model_id: "gemini-3.5-flash-low",
-        label: Some("Gemini 3.5 Flash (Low)"),
+        raw_model_id: "MODEL_PLACEHOLDER_M132",
+        label: "Gemini 3.5 Flash (High)",
         source: "captured-antigravity-get-user-status",
     },
     StaticModelAlias {
         raw_model_id: "MODEL_PLACEHOLDER_M20",
-        model_id: "gemini-3.5-flash-medium",
-        label: Some("Gemini 3.5 Flash (Medium)"),
+        label: "Gemini 3.5 Flash (Medium)",
         source: "captured-antigravity-get-user-status",
     },
     StaticModelAlias {
-        raw_model_id: "MODEL_PLACEHOLDER_M47",
-        model_id: "gemini-3-flash-preview",
-        label: Some("Gemini 3 Flash"),
-        source: "tokscale;antigravity-mobility-cli",
+        raw_model_id: "MODEL_PLACEHOLDER_M187",
+        label: "Gemini 3.5 Flash (Low)",
+        source: "captured-antigravity-get-user-status",
+    },
+    // Sub-agent routing enums. `GetUserStatus` never lists them; every local
+    // generation carrying them names `gemini-3.6-flash[-tiered]` in field 19.
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M196",
+        label: "Gemini 3.6 Flash",
+        source: "observed-gen-metadata",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M264",
+        label: "Gemini 3.6 Flash",
+        source: "observed-gen-metadata",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M71",
+        label: "Gemini 3.6 Flash (High)",
+        source: "captured-antigravity-get-user-status",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M72",
+        label: "Gemini 3.6 Flash (Medium)",
+        source: "captured-antigravity-get-user-status",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M73",
+        label: "Gemini 3.6 Flash (Low)",
+        source: "captured-antigravity-get-user-status",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M298",
+        label: "Gemini 3.7 Flash (High)",
+        source: "captured-antigravity-get-user-status",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M299",
+        label: "Gemini 3.7 Flash (Medium)",
+        source: "captured-antigravity-get-user-status",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M300",
+        label: "Gemini 3.7 Flash (Low)",
+        source: "captured-antigravity-get-user-status",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M318",
+        label: "Gemini 3.8 Flash (High)",
+        source: "captured-antigravity-get-user-status",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M319",
+        label: "Gemini 3.8 Flash (Medium)",
+        source: "captured-antigravity-get-user-status",
+    },
+    StaticModelAlias {
+        raw_model_id: "MODEL_PLACEHOLDER_M320",
+        label: "Gemini 3.8 Flash (Low)",
+        source: "captured-antigravity-get-user-status",
     },
 ];
 
 fn static_model_aliases() -> HashMap<String, ModelAlias> {
     let mut aliases = HashMap::new();
     for alias in STATIC_MODEL_ALIASES {
+        let Some(model_id) = antigravity_label_to_model_id(alias.label) else {
+            continue;
+        };
         aliases.insert(
             normalize_alias_key(alias.raw_model_id),
             ModelAlias {
                 raw_model_id: alias.raw_model_id.to_string(),
-                model_id: alias.model_id.to_string(),
-                label: alias.label.map(str::to_string),
+                model_id,
+                label: Some(alias.label.to_string()),
                 source: alias.source.to_string(),
             },
         );
@@ -2310,19 +2395,24 @@ fn load_model_alias_history_map(sessions_dir: &Path) -> Result<HashMap<String, M
                 key.to_ascii_lowercase().starts_with("model")
                     && entry.raw_model_id.to_ascii_lowercase().starts_with("model")
             })
-            .map(|(key, entry)| {
-                (
-                    key,
-                    ModelAlias {
-                        raw_model_id: entry.raw_model_id,
-                        model_id: entry.model_id,
-                        label: entry.label,
-                        source: entry.source,
-                    },
-                )
-            }),
+            .map(|(key, entry)| (key, alias_from_history_entry(&entry))),
     );
     Ok(aliases)
+}
+
+/// The label decides the model id, not the id a history file stored: files
+/// written by older releases carry ids shaped by since-removed rules.
+fn alias_from_history_entry(entry: &ModelAliasHistoryEntry) -> ModelAlias {
+    ModelAlias {
+        raw_model_id: entry.raw_model_id.clone(),
+        model_id: entry
+            .label
+            .as_deref()
+            .and_then(antigravity_label_to_model_id)
+            .unwrap_or_else(|| entry.model_id.clone()),
+        label: entry.label.clone(),
+        source: entry.source.clone(),
+    }
 }
 
 fn merge_and_save_model_alias_history(
@@ -2361,15 +2451,7 @@ fn merge_and_save_model_alias_history(
 
     let mut merged_aliases = static_model_aliases();
     for (key, entry) in &history.aliases {
-        merged_aliases.insert(
-            key.clone(),
-            ModelAlias {
-                raw_model_id: entry.raw_model_id.clone(),
-                model_id: entry.model_id.clone(),
-                label: entry.label.clone(),
-                source: entry.source.clone(),
-            },
-        );
+        merged_aliases.insert(key.clone(), alias_from_history_entry(entry));
     }
     for (key, alias) in dynamic_aliases {
         merged_aliases.insert(key.clone(), alias.clone());
@@ -2408,308 +2490,158 @@ fn merge_and_save_model_alias_history(
     Ok(merged_aliases)
 }
 
-fn normalized_paths() -> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>> {
-    static PATHS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
-    > = std::sync::OnceLock::new();
-    PATHS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
-}
-
+/// Re-derives every cached model id from what Antigravity reported, using the
+/// aliases known now.
+///
+/// It runs on every read, not once per process: an alias learned after a row
+/// was written — an enum first seen while no language server was running, a
+/// placeholder cached before `GetUserStatus` named it — must still correct
+/// that row. Each corrected session is re-stamped as synced so the incremental
+/// ingest carries the correction into the ledger; otherwise rows older than the
+/// ingest window would stay wrong there forever.
 fn normalize_cached_antigravity_artifacts(
     sessions_dir: &Path,
     model_aliases: &HashMap<String, ModelAlias>,
 ) -> Result<()> {
-    let canonical = sessions_dir
-        .canonicalize()
-        .unwrap_or_else(|_| sessions_dir.to_path_buf());
-    {
-        let paths = normalized_paths()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Normalized paths mutex poisoned"))?;
-        if paths.contains(&canonical) {
-            return Ok(());
-        }
-    }
-
     let mut conn = open_cache_db(sessions_dir)?;
 
-    let mut all_aliases = static_model_aliases();
-    for (k, v) in model_aliases {
-        all_aliases.insert(k.clone(), v.clone());
-    }
-
-    let db_models = {
-        let mut db_models = std::collections::HashSet::new();
-        if let Ok(mut stmt) = conn.prepare("SELECT DISTINCT model_id FROM sessions") {
-            if let Ok(mut rows) = stmt.query([]) {
-                while let Ok(Some(row)) = rows.next() {
-                    if let Ok(m) = row.get::<_, String>(0) {
-                        db_models.insert(m.to_lowercase());
-                    }
-                }
-            }
-        }
-        if let Ok(mut stmt) = conn.prepare("SELECT DISTINCT model_id FROM session_usage") {
-            if let Ok(mut rows) = stmt.query([]) {
-                while let Ok(Some(row)) = rows.next() {
-                    if let Ok(m) = row.get::<_, String>(0) {
-                        db_models.insert(m.to_lowercase());
-                    }
-                }
-            }
-        }
-        db_models
+    let identities: Vec<(String, Option<String>, Option<String>)> = {
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT model_id, model_enum, served_model FROM session_usage")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let session_models: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT DISTINCT model_id FROM sessions")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
     };
 
+    let now_ms = Local::now().timestamp_millis();
     let tx = conn.transaction()?;
+    let mut rewritten = 0usize;
 
-    for (alias_key, alias) in &all_aliases {
-        let key_lower = alias_key.to_lowercase();
-        let raw_lower = alias.raw_model_id.to_lowercase();
-        if db_models.contains(&key_lower) || db_models.contains(&raw_lower) {
-            let target_model_id =
-                if let Some(normalized) = format_normalization_fallback(&alias.model_id) {
-                    normalized
-                } else {
-                    alias.model_id.clone()
-                };
-            tx.execute(
-                "UPDATE sessions SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
-                rusqlite::params![&target_model_id, &alias.raw_model_id, alias_key],
-            )?;
-            tx.execute(
-                "UPDATE session_usage SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
-                rusqlite::params![&target_model_id, &alias.raw_model_id, alias_key],
-            )?;
+    for (model_id, model_enum, served_model) in &identities {
+        let target = if model_enum.is_none() && served_model.is_none() {
+            // Cached before the raw identity was stored: the id is all there
+            // is, and it may itself be an enum no alias named at the time.
+            resolve_stored_model_id(model_id, model_aliases)
+        } else {
+            resolve_antigravity_model(
+                model_enum.as_deref(),
+                served_model.as_deref(),
+                model_aliases,
+            )
+        };
+        // Never trade a real id for a pseudo one: the RPC path may have named
+        // the model from `modelDisplayName`, which the cache does not keep.
+        if &target == model_id
+            || (crate::model_id::is_pseudo(&target) && !crate::model_id::is_pseudo(model_id))
+        {
+            continue;
         }
+
+        // Re-stamp while the rows still carry the old id.
+        tx.execute(
+            "UPDATE sessions SET synced_at = ?1
+              WHERE (session_id, client) IN (
+                  SELECT session_id, client FROM session_usage
+                   WHERE model_id = ?2 AND model_enum IS ?3 AND served_model IS ?4
+              )",
+            rusqlite::params![now_ms, model_id, model_enum, served_model],
+        )?;
+        rewritten += tx.execute(
+            "UPDATE session_usage SET model_id = ?1, provider_id = ?2
+              WHERE model_id = ?3 AND model_enum IS ?4 AND served_model IS ?5",
+            rusqlite::params![
+                &target,
+                detect_provider_from_model(&target),
+                model_id,
+                model_enum,
+                served_model
+            ],
+        )?;
     }
 
-    for db_model in &db_models {
-        if let Some(normalized) = format_normalization_fallback(db_model) {
+    for model_id in &session_models {
+        let target = resolve_stored_model_id(model_id, model_aliases);
+        if &target != model_id {
             tx.execute(
-                "UPDATE sessions SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
-                rusqlite::params![&normalized, db_model, db_model.to_lowercase()],
-            )?;
-            tx.execute(
-                "UPDATE session_usage SET model_id = ? WHERE model_id = ? OR LOWER(model_id) = ?;",
-                rusqlite::params![&normalized, db_model, db_model.to_lowercase()],
+                "UPDATE sessions SET model_id = ?1 WHERE model_id = ?2",
+                rusqlite::params![&target, model_id],
             )?;
         }
     }
 
     tx.commit()?;
-
-    {
-        let mut paths = normalized_paths()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Normalized paths mutex poisoned"))?;
-        paths.insert(canonical);
+    if rewritten > 0 {
+        info!(
+            "Antigravity cache: re-resolved the model id of {} usage rows",
+            rewritten
+        );
     }
-
     Ok(())
 }
 
-fn is_pseudo_raw_model(model: &str) -> bool {
-    crate::model_id::is_pseudo(model)
-}
-
-fn normalize_display_name_to_id(display_name: &str) -> Option<String> {
-    let trimmed = display_name.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let lower = trimmed.to_lowercase();
-    if !lower.starts_with("gemini ")
-        && !lower.starts_with("claude ")
-        && !lower.starts_with("gpt-oss ")
-    {
-        return None;
-    }
-
-    let replaced_parens = lower.replace('(', " ").replace(')', " ");
-    let replaced_spaces = replaced_parens.replace(' ', "-");
-
-    let mut normalized = String::new();
-    let mut last_was_dash = false;
-    for c in replaced_spaces.chars() {
-        if c == '-' {
-            if !last_was_dash {
-                normalized.push('-');
-                last_was_dash = true;
-            }
-        } else {
-            normalized.push(c);
-            last_was_dash = false;
-        }
-    }
-
-    let trimmed_normalized = normalized.trim_matches('-');
-    if trimmed_normalized.is_empty() {
-        None
-    } else {
-        Some(trimmed_normalized.to_string())
-    }
-}
-
-#[cfg(test)]
-fn resolve_antigravity_model_id(model_id: &str) -> String {
-    resolve_antigravity_model_id_with_aliases(model_id, &HashMap::new())
-}
-
-fn resolve_antigravity_model_id_with_aliases(
-    model_id: &str,
-    dynamic_aliases: &HashMap<String, ModelAlias>,
+/// Resolves one generation's model id from what Antigravity reported for it.
+///
+/// The enum (`MODEL_PLACEHOLDER_M319`) is Antigravity's stable identity, and
+/// the alias table names it from its `GetUserStatus` label, so it wins whenever
+/// an alias is known. The served name (local `gen_metadata` field 19, RPC
+/// `responseModel`) is the backend's internal id and is sometimes a release
+/// codename — `gemini-3-flash-a` served 3.5 Flash, `gemini-3.8-flash-n` serves
+/// 3.8 Flash — so it only stands in for enums no alias names yet. The raw enum
+/// is the last resort; the cache keeps it so a later alias can still fix the row.
+fn resolve_antigravity_model(
+    model_enum: Option<&str>,
+    served_model: Option<&str>,
+    model_aliases: &HashMap<String, ModelAlias>,
 ) -> String {
-    let resolved = if let Some(alias) = resolve_direct(model_id, dynamic_aliases) {
-        alias
-    } else if let Some(normalized) = format_normalization_fallback(model_id) {
-        if let Some(alias) = resolve_direct(&normalized, dynamic_aliases) {
-            alias
-        } else {
-            normalized
-        }
-    } else {
-        model_id.to_string()
-    };
-
-    if let Some(normalized_resolved) = format_normalization_fallback(&resolved) {
-        normalized_resolved
-    } else {
-        resolved
+    let model_enum = model_enum.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(alias) = model_enum.and_then(|value| find_model_alias(value, model_aliases)) {
+        return format_model_id(&alias.model_id);
     }
+    if let Some(served_model) = served_model.filter(|value| !crate::model_id::is_pseudo(value)) {
+        return format_model_id(served_model);
+    }
+    model_enum
+        .map(format_model_id)
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn resolve_direct(model_id: &str, dynamic_aliases: &HashMap<String, ModelAlias>) -> Option<String> {
-    alias_key_candidates(model_id)
+/// Resolves an id stored without its raw identity, which is either a resolved
+/// name or an enum (possibly already hyphenated as `model-placeholder-m299`).
+fn resolve_stored_model_id(model_id: &str, model_aliases: &HashMap<String, ModelAlias>) -> String {
+    resolve_antigravity_model(Some(model_id), Some(model_id), model_aliases)
+}
+
+fn find_model_alias<'a>(
+    raw_model_id: &str,
+    model_aliases: &'a HashMap<String, ModelAlias>,
+) -> Option<&'a ModelAlias> {
+    alias_key_candidates(raw_model_id)
         .iter()
-        .find_map(|key| dynamic_aliases.get(key).map(|alias| alias.model_id.clone()))
-        .or_else(|| antigravity_model_alias(model_id).map(|s| s.to_string()))
+        .find_map(|key| model_aliases.get(key))
 }
 
-fn format_normalization_fallback(model_id: &str) -> Option<String> {
-    let mut normalized = model_id.trim().to_ascii_lowercase();
-
-    // 0. Handle raw gemini-3-flash-a mapping
-    let mut flash_a_normalized = false;
-    if normalized == "gemini-3-flash-a"
-        || normalized == "antigravity-gemini-3-flash-a"
-        || normalized == "gemini-3-flash-preview-a"
-    {
-        normalized = "gemini-3.5-flash".to_string();
-        flash_a_normalized = true;
-    }
-
-    // 1. Strip antigravity- or anti-gravity- prefix
-    let mut prefix_stripped = false;
-    if !flash_a_normalized {
-        for prefix in ["antigravity-", "anti-gravity-"] {
-            if let Some(stripped) = normalized.strip_prefix(prefix) {
-                normalized = stripped.to_string();
-                prefix_stripped = true;
-                break;
-            }
+/// Spelling only: lowercase, no `antigravity-` prefix, and `.`, `_` and
+/// spaces as single hyphens. Meaning — tier and routing suffixes, `-preview` —
+/// is left to `model_id::canonical`, which every source shares, and pricing
+/// applies the same spelling rules to catalog keys.
+fn format_model_id(model_id: &str) -> String {
+    let mut normalized = model_id
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['.', '_', ' '], "-");
+    for prefix in ["antigravity-", "anti-gravity-"] {
+        if let Some(stripped) = normalized.strip_prefix(prefix) {
+            normalized = stripped.to_string();
+            break;
         }
     }
-
-    // 2. Replace dots, underscores, and spaces with hyphens
-    let mut chars_replaced = false;
-    if !flash_a_normalized
-        && (normalized.contains('.') || normalized.contains('_') || normalized.contains(' '))
-    {
-        normalized = normalized.replace(['.', '_', ' '], "-");
-        chars_replaced = true;
-    }
-
-    // 3. Collapse repeated hyphens
-    if !flash_a_normalized && normalized.contains("--") {
-        let mut out = String::with_capacity(normalized.len());
-        let mut last_was_hyphen = false;
-        for ch in normalized.chars() {
-            if ch == '-' {
-                if !last_was_hyphen {
-                    out.push(ch);
-                }
-                last_was_hyphen = true;
-            } else {
-                out.push(ch);
-                last_was_hyphen = false;
-            }
-        }
-        normalized = out;
-        chars_replaced = true;
-    }
-
-    // 4. Strip a trailing `-tiered` routing suffix, e.g.
-    // gemini-3.6-flash-tiered -> gemini-3-6-flash. Antigravity uses it for
-    // sub-agent routing, so it must not become a separate model family.
-    let mut tiered_stripped = false;
-    if !flash_a_normalized && normalized.ends_with("-tiered") {
-        normalized.truncate(normalized.len() - "-tiered".len());
-        tiered_stripped = true;
-    }
-
-    // 5. Version formatting rule (converting hyphens back to dots for Gemini versions):
-    // e.g. gemini-3-0 -> gemini-3, gemini-3-1 -> gemini-3.1, gemini-3-5 -> gemini-3.5
-    let mut version_formatted = false;
-    if !flash_a_normalized {
-        if normalized.contains("gemini-3-0-pro") {
-            normalized = normalized.replace("gemini-3-0-pro", "gemini-3-pro");
-            version_formatted = true;
-        } else if normalized.contains("gemini-3-1-pro") {
-            normalized = normalized.replace("gemini-3-1-pro", "gemini-3.1-pro");
-            version_formatted = true;
-        } else if normalized.contains("gemini-3-0-flash") {
-            normalized = normalized.replace("gemini-3-0-flash", "gemini-3-flash");
-            version_formatted = true;
-        } else if normalized.contains("gemini-3-5-flash") {
-            normalized = normalized.replace("gemini-3-5-flash", "gemini-3.5-flash");
-            version_formatted = true;
-        }
-    }
-
-    // 6. Preview ruleset logic:
-    // Models in this list must have "-preview".
-    // Models not in this list must NOT have "-preview".
-    let mut preview_processed = false;
-    if !flash_a_normalized && normalized.contains("gemini") {
-        const GEMINI_PREVIEW_MODELS: &[&str] =
-            &["gemini-3-pro", "gemini-3.1-pro", "gemini-3-flash"];
-
-        let belongs_to_preview = GEMINI_PREVIEW_MODELS
-            .iter()
-            .any(|&m| normalized.contains(m));
-
-        if belongs_to_preview {
-            if !normalized.contains("preview") {
-                for base in GEMINI_PREVIEW_MODELS {
-                    if normalized.contains(base) {
-                        let target = format!("{}-preview", base);
-                        normalized = normalized.replace(base, &target);
-                        preview_processed = true;
-                        break;
-                    }
-                }
-            }
-        } else {
-            // Must NOT have preview
-            if normalized.contains("-preview") {
-                normalized = normalized.replace("-preview", "");
-                preview_processed = true;
-            }
-        }
-    }
-
-    if prefix_stripped
-        || chars_replaced
-        || tiered_stripped
-        || version_formatted
-        || preview_processed
-        || flash_a_normalized
-    {
-        Some(normalized)
-    } else {
-        None
-    }
+    crate::model_id::collapse_repeated_hyphens(&normalized)
+        .trim_matches('-')
+        .to_string()
 }
 
 fn normalize_alias_key(model_id: &str) -> String {
@@ -2730,47 +2662,11 @@ fn alias_key_candidates(model_id: &str) -> Vec<String> {
     }
 }
 
+/// Model id from a `GetUserStatus` or display label:
+/// `Gemini 3.1 Pro (High)` → `gemini-3-1-pro-high`.
 fn antigravity_label_to_model_id(label: &str) -> Option<String> {
-    let cleaned = label.trim();
-    if cleaned.is_empty() {
-        return None;
-    }
-
-    let lower = cleaned.to_ascii_lowercase();
-    if !(lower.starts_with("claude ")
-        || lower.starts_with("gemini ")
-        || lower.starts_with("gpt-oss "))
-    {
-        return None;
-    }
-
-    let normalized = lower.replace('(', " ").replace(')', " ");
-    let tokens = normalized
-        .split_whitespace()
-        .filter(|token| !token.is_empty())
-        .map(|token| token.replace('.', "-"))
-        .collect::<Vec<_>>();
-    if tokens.is_empty() {
-        return None;
-    }
-
-    let model_id = tokens.join("-");
-    if let Some(normalized) = format_normalization_fallback(&model_id) {
-        Some(normalized)
-    } else {
-        Some(model_id)
-    }
-}
-
-fn antigravity_model_alias(model_id: &str) -> Option<&'static str> {
-    let keys = alias_key_candidates(model_id);
-    STATIC_MODEL_ALIASES
-        .iter()
-        .find(|alias| {
-            let alias_keys = alias_key_candidates(alias.raw_model_id);
-            keys.iter().any(|key| alias_keys.contains(key))
-        })
-        .map(|alias| alias.model_id)
+    let model_id = format_model_id(&label.replace(['(', ')'], " "));
+    (!crate::model_id::is_pseudo(&model_id)).then_some(model_id)
 }
 
 /// Extracts trajectory entries from the RPC response.
@@ -3802,7 +3698,7 @@ mod tests {
             rusqlite::params!["msg-3", "sess-3", "antigravity-cli", "claude-opus-4.6-thinking", "anthropic", 1672531203000_i64, 0_i64, 300_i64, 70_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", PARSER_VERSION],
         ).unwrap();
 
-        normalize_cached_antigravity_artifacts(&sessions_dir, &HashMap::new()).unwrap();
+        normalize_cached_antigravity_artifacts(&sessions_dir, &static_model_aliases()).unwrap();
 
         let parser = AntigravitySessionParser::new()
             .with_custom_paths(vec![sessions_dir])
@@ -3812,7 +3708,7 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].model_id, "claude-opus-4-6-thinking");
         assert_eq!(messages[0].provider_id, "anthropic");
-        assert_eq!(messages[1].model_id, "gemini-3.5-flash-medium");
+        assert_eq!(messages[1].model_id, "gemini-3-5-flash-medium");
         assert_eq!(messages[1].provider_id, "google");
         assert_eq!(messages[2].model_id, "claude-opus-4-6-thinking");
         assert_eq!(messages[2].provider_id, "anthropic");
@@ -3842,19 +3738,156 @@ mod tests {
             rusqlite::params!["msg-1", "sess-1", "antigravity-cli", "MODEL_PLACEHOLDER_M20", "google", 1672531201000_i64, 0_i64, 1_i64, 2_i64, 0_i64, 0_i64, 0_i64, "2023-01-01", PARSER_VERSION],
         ).unwrap();
 
-        normalize_cached_antigravity_artifacts(&sessions_dir, &HashMap::new()).unwrap();
+        normalize_cached_antigravity_artifacts(&sessions_dir, &static_model_aliases()).unwrap();
 
         let mut stmt = conn
             .prepare("SELECT model_id FROM sessions WHERE session_id = 'sess-1'")
             .unwrap();
         let session_model: String = stmt.query_row([], |row| row.get(0)).unwrap();
-        assert_eq!(session_model, "gemini-3.1-pro-preview-high");
+        assert_eq!(session_model, "gemini-3-1-pro-high");
 
         let mut stmt2 = conn
             .prepare("SELECT model_id FROM session_usage WHERE id = 'msg-1'")
             .unwrap();
         let usage_model: String = stmt2.query_row([], |row| row.get(0)).unwrap();
-        assert_eq!(usage_model, "gemini-3.5-flash-medium");
+        assert_eq!(usage_model, "gemini-3-5-flash-medium");
+    }
+
+    fn insert_cached_usage_row(
+        conn: &rusqlite::Connection,
+        session_id: &str,
+        model_id: &str,
+        model_enum: Option<&str>,
+        served_model: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO sessions (session_id, client, model_id, synced_at)
+             VALUES (?, 'antigravity-cli', ?, 1000)",
+            rusqlite::params![session_id, model_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, pricing_day, parser_version, model_enum, served_model)
+             VALUES (?, ?, 'antigravity-cli', ?, 'other', 1672531201000, 0, 1, 2, 0, 0, 0, '2023-01-01', ?, ?, ?)",
+            rusqlite::params![
+                format!("{session_id}-msg"),
+                session_id,
+                model_id,
+                PARSER_VERSION,
+                model_enum,
+                served_model
+            ],
+        )
+        .unwrap();
+    }
+
+    fn cached_usage_model(conn: &rusqlite::Connection, session_id: &str) -> (String, String, i64) {
+        conn.query_row(
+            "SELECT u.model_id, u.provider_id, s.synced_at
+               FROM session_usage u JOIN sessions s USING (session_id, client)
+              WHERE u.session_id = ?",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_normalize_resolves_hyphenated_placeholder_and_restamps_session() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let conn = open_cache_db(&sessions_dir).unwrap();
+        // Cached by an older release before any alias named the enum: no raw
+        // identity, and the id already hyphenated.
+        insert_cached_usage_row(&conn, "sess-m299", "model-placeholder-m299", None, None);
+
+        normalize_cached_antigravity_artifacts(&sessions_dir, &static_model_aliases()).unwrap();
+
+        let (model_id, provider_id, synced_at) = cached_usage_model(&conn, "sess-m299");
+        assert_eq!(model_id, "gemini-3-7-flash-medium");
+        assert_eq!(provider_id, "google");
+        // Re-stamped so the incremental ingest re-reads the session.
+        assert!(synced_at > 1000);
+    }
+
+    #[test]
+    fn test_normalize_applies_alias_learned_after_the_row_was_written() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let conn = open_cache_db(&sessions_dir).unwrap();
+        // Written while the enum was unknown, so the served codename stood in.
+        insert_cached_usage_row(
+            &conn,
+            "sess-new",
+            "gemini-9-flash-n",
+            Some("MODEL_PLACEHOLDER_M900"),
+            Some("gemini-9-flash-n"),
+        );
+
+        let mut aliases = static_model_aliases();
+        normalize_cached_antigravity_artifacts(&sessions_dir, &aliases).unwrap();
+        assert_eq!(cached_usage_model(&conn, "sess-new").0, "gemini-9-flash-n");
+        assert_eq!(cached_usage_model(&conn, "sess-new").2, 1000);
+
+        // Learned later in the same process, e.g. on the next refresh.
+        aliases.insert(
+            normalize_alias_key("MODEL_PLACEHOLDER_M900"),
+            ModelAlias {
+                raw_model_id: "MODEL_PLACEHOLDER_M900".to_string(),
+                model_id: "gemini-9-flash-medium".to_string(),
+                label: Some("Gemini 9 Flash (Medium)".to_string()),
+                source: "antigravity-get-user-status".to_string(),
+            },
+        );
+        normalize_cached_antigravity_artifacts(&sessions_dir, &aliases).unwrap();
+        let (model_id, _, synced_at) = cached_usage_model(&conn, "sess-new");
+        assert_eq!(model_id, "gemini-9-flash-medium");
+        assert!(synced_at > 1000);
+    }
+
+    #[test]
+    fn test_normalize_keeps_a_display_name_fallback() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conn = open_cache_db(temp_dir.path()).unwrap();
+        let aliases = static_model_aliases();
+        // No enum and a pseudo served name: only `modelDisplayName` names it,
+        // and the cache does not keep that.
+        let resolved = resolve_rpc_chat_model(
+            &json!({ "responseModel": "gemini-default", "modelDisplayName": "Gemini 3.5 Flash" }),
+            &aliases,
+        );
+        assert_eq!(resolved.model_id, "gemini-3-5-flash");
+        insert_cached_usage_row(
+            &conn,
+            "sess",
+            &resolved.model_id,
+            resolved.model_enum.as_deref(),
+            resolved.served_model.as_deref(),
+        );
+
+        normalize_cached_antigravity_artifacts(temp_dir.path(), &aliases).unwrap();
+        assert_eq!(cached_usage_model(&conn, "sess").0, "gemini-3-5-flash");
+    }
+
+    #[test]
+    fn test_corrected_session_is_reread_until_a_refresh_succeeds() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conn = open_cache_db(temp_dir.path()).unwrap();
+        insert_cached_usage_row(&conn, "sess", "model-placeholder-m299", None, None);
+        let parser = AntigravitySessionParser::new()
+            .with_custom_paths(vec![temp_dir.path().to_path_buf()])
+            .with_skip_sync(true);
+        let since = Some(Local::now().date_naive() - chrono::Duration::days(1));
+
+        // The first read corrects the old row; if its ledger ingest then
+        // fails, the next read must still carry the correction.
+        for _ in 0..2 {
+            let messages = parser.parse_sessions(since).unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].model_id, "gemini-3-7-flash-medium");
+        }
     }
 
     #[test]
@@ -3876,14 +3909,14 @@ mod tests {
 
         let saved = merge_and_save_model_alias_history(&sessions_dir, &dynamic_aliases).unwrap();
         assert_eq!(
-            resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M132", &saved),
-            "gemini-3.5-flash-high"
+            resolve_stored_model_id("MODEL_PLACEHOLDER_M132", &saved),
+            "gemini-3-5-flash-high"
         );
 
         let loaded = load_model_alias_history_map(&sessions_dir).unwrap();
         assert_eq!(
-            resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M132", &loaded),
-            "gemini-3.5-flash-high"
+            resolve_stored_model_id("MODEL_PLACEHOLDER_M132", &loaded),
+            "gemini-3-5-flash-high"
         );
 
         let history_path = model_alias_history_path(&sessions_dir).unwrap();
@@ -3902,12 +3935,12 @@ mod tests {
 
         let saved = merge_and_save_model_alias_history(&sessions_dir, &HashMap::new()).unwrap();
         assert_eq!(
-            resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M26", &saved),
+            resolve_stored_model_id("MODEL_PLACEHOLDER_M26", &saved),
             "claude-opus-4-6-thinking"
         );
         assert_eq!(
-            resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M37", &saved),
-            "gemini-3.1-pro-preview-high"
+            resolve_stored_model_id("MODEL_PLACEHOLDER_M37", &saved),
+            "gemini-3-1-pro-high"
         );
 
         let history_path = model_alias_history_path(&sessions_dir).unwrap();
@@ -3935,14 +3968,14 @@ mod tests {
 
         let saved = merge_and_save_model_alias_history(&sessions_dir, &dynamic_aliases).unwrap();
         assert_eq!(
-            resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M37", &saved),
-            "gemini-3.5-flash"
+            resolve_stored_model_id("MODEL_PLACEHOLDER_M37", &saved),
+            "gemini-3-5-flash"
         );
 
         let loaded = load_model_alias_history_map(&sessions_dir).unwrap();
         assert_eq!(
-            resolve_antigravity_model_id_with_aliases("MODEL_PLACEHOLDER_M37", &loaded),
-            "gemini-3.5-flash"
+            resolve_stored_model_id("MODEL_PLACEHOLDER_M37", &loaded),
+            "gemini-3-5-flash"
         );
     }
 
@@ -3969,110 +4002,93 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_antigravity_model_id_with_aliases("gemini-3-pro", &aliases),
+            resolve_stored_model_id("gemini-3-pro", &aliases),
             "gemini-3-pro-preview"
         );
         assert_eq!(
-            resolve_antigravity_model_id_with_aliases("gemini_3_pro", &aliases),
+            resolve_stored_model_id("gemini_3_pro", &aliases),
             "underscore-model"
         );
     }
 
     #[test]
-    fn test_antigravity_gemini_3_pro_aliases_keep_display_and_pricing_ids_aligned() {
-        assert_eq!(
-            resolve_antigravity_model_id("antigravity-gemini-3-pro"),
-            "gemini-3-pro-preview"
-        );
-        assert_eq!(
-            resolve_antigravity_model_id("antigravity-gemini-3-pro-high"),
-            "gemini-3-pro-preview-high"
-        );
-        assert_eq!(
-            resolve_antigravity_model_id("antigravity-gemini-3-pro-low"),
-            "gemini-3-pro-preview-low"
-        );
-        assert_eq!(
-            resolve_antigravity_model_id("gemini-3.0-pro-high"),
-            "gemini-3-pro-preview-high"
-        );
-        assert_eq!(
-            resolve_antigravity_model_id("gemini-3.1-pro-high"),
-            "gemini-3.1-pro-preview-high"
-        );
-        assert_eq!(
-            resolve_antigravity_model_id("gemini-3-1-pro-preview-low"),
-            "gemini-3.1-pro-preview-low"
-        );
-        assert_eq!(
-            resolve_antigravity_model_id("gemini-3-pro-image"),
-            "gemini-3-pro-preview-image"
-        );
+    fn test_served_names_only_get_spelling_normalized() {
+        let aliases = static_model_aliases();
+        for (served, stored, canonical) in [
+            (
+                "antigravity-gemini-3-pro-high",
+                "gemini-3-pro-high",
+                "gemini-3-pro",
+            ),
+            ("gemini-3.1-pro-low", "gemini-3-1-pro-low", "gemini-3-1-pro"),
+            (
+                "gemini-3-1-pro-preview-low",
+                "gemini-3-1-pro-preview-low",
+                "gemini-3-1-pro",
+            ),
+            // `-tiered` is sub-agent routing; grouping and pricing drop it.
+            (
+                "gemini-3.6-flash-tiered",
+                "gemini-3-6-flash-tiered",
+                "gemini-3-6-flash",
+            ),
+            ("gemini_3_8_flash", "gemini-3-8-flash", "gemini-3-8-flash"),
+        ] {
+            let resolved = resolve_stored_model_id(served, &aliases);
+            assert_eq!(resolved, stored, "{served}");
+            assert_eq!(crate::model_id::canonical(&resolved), canonical, "{served}");
+        }
     }
 
     #[test]
-    fn test_antigravity_tiered_response_model_resolves_to_base_model() {
-        // Observed sub-agent generator metadata: responseModel is the concrete
-        // model, with `-tiered` describing routing rather than a model family.
-        assert_eq!(
-            resolve_antigravity_model_id("gemini-3.6-flash-tiered"),
-            "gemini-3-6-flash"
-        );
-        assert_eq!(
-            resolve_antigravity_model_id("gemini-3-6-flash-tiered"),
-            "gemini-3-6-flash"
-        );
-        assert_eq!(
-            resolve_antigravity_model_id("antigravity-gemini-3.6-flash-tiered"),
-            "gemini-3-6-flash"
-        );
-        assert_eq!(
-            resolve_antigravity_model_id("gemini-3.5-flash-tiered"),
-            "gemini-3.5-flash"
-        );
-
-        // Only a final `-tiered` segment is a routing suffix.
-        assert_eq!(
-            resolve_antigravity_model_id("gemini-tiered-flash"),
-            "gemini-tiered-flash"
-        );
+    fn test_antigravity_label_to_model_id_is_generic() {
+        for (label, expected) in [
+            ("Claude Opus 4.5 (Thinking)", "claude-opus-4-5-thinking"),
+            ("Claude Sonnet 4.5", "claude-sonnet-4-5"),
+            ("Gemini 3.1 Pro (High)", "gemini-3-1-pro-high"),
+            ("Gemini 3 Pro Preview (Low)", "gemini-3-pro-preview-low"),
+            ("Gemini 3 Pro (Image)", "gemini-3-pro-image"),
+            ("Gemini (3.5 Flash)", "gemini-3-5-flash"),
+            ("GPT-OSS 120B (Medium)", "gpt-oss-120b-medium"),
+            // Vendors this table has never seen still get a usable id.
+            ("Grok 5 (Fast)", "grok-5-fast"),
+        ] {
+            assert_eq!(
+                antigravity_label_to_model_id(label).as_deref(),
+                Some(expected),
+                "{label}"
+            );
+        }
+        assert_eq!(antigravity_label_to_model_id("   "), None);
+        assert_eq!(antigravity_label_to_model_id("Unknown"), None);
     }
 
     #[test]
-    fn test_antigravity_label_to_model_id_handles_future_label_shapes() {
+    fn test_static_seed_and_learned_alias_resolve_alike() {
+        let learned = {
+            let mut aliases = HashMap::new();
+            collect_model_aliases_from_value(
+                &json!({
+                    "clientModelConfigs": [{
+                        "label": "Gemini 3.8 Flash (Medium)",
+                        "modelOrAlias": { "model": "MODEL_PLACEHOLDER_M319" }
+                    }]
+                }),
+                &mut aliases,
+            );
+            aliases
+        };
         assert_eq!(
-            antigravity_label_to_model_id("Claude Opus 4.5 (Thinking)").as_deref(),
-            Some("claude-opus-4-5-thinking")
+            resolve_stored_model_id("MODEL_PLACEHOLDER_M319", &learned),
+            resolve_stored_model_id("MODEL_PLACEHOLDER_M319", &static_model_aliases()),
         );
-        assert_eq!(
-            antigravity_label_to_model_id("Claude Sonnet 4.5 (Thinking)").as_deref(),
-            Some("claude-sonnet-4-5-thinking")
-        );
-        assert_eq!(
-            antigravity_label_to_model_id("Gemini 3.0 Pro Preview (High)").as_deref(),
-            Some("gemini-3-pro-preview-high")
-        );
-        assert_eq!(
-            antigravity_label_to_model_id("Gemini 3.0 Pro (High)").as_deref(),
-            Some("gemini-3-pro-preview-high")
-        );
-        assert_eq!(
-            antigravity_label_to_model_id("Gemini 3.1 Pro (High)").as_deref(),
-            Some("gemini-3.1-pro-preview-high")
-        );
-        assert_eq!(
-            antigravity_label_to_model_id("Gemini 3.1 Pro Preview (Low)").as_deref(),
-            Some("gemini-3.1-pro-preview-low")
-        );
-        assert_eq!(
-            antigravity_label_to_model_id("Gemini 3 Pro Preview (Low)").as_deref(),
-            Some("gemini-3-pro-preview-low")
-        );
-        assert_eq!(
-            antigravity_label_to_model_id("Gemini 3 Pro (Image)").as_deref(),
-            Some("gemini-3-pro-preview-image")
-        );
-        assert_eq!(antigravity_label_to_model_id("Unknown Beta"), None);
+        // Sub-agent enums that `GetUserStatus` never lists still resolve.
+        for raw in ["MODEL_PLACEHOLDER_M196", "MODEL_PLACEHOLDER_M264"] {
+            assert_eq!(
+                resolve_stored_model_id(raw, &static_model_aliases()),
+                "gemini-3-6-flash"
+            );
+        }
     }
 
     #[test]
@@ -4454,34 +4470,6 @@ mod tests {
         assert!(desk_conns.is_empty());
     }
 
-    #[test]
-    fn test_normalize_display_name_to_id() {
-        assert_eq!(
-            normalize_display_name_to_id("Gemini (3.5 Flash)"),
-            Some("gemini-3.5-flash".to_string())
-        );
-        assert_eq!(
-            normalize_display_name_to_id("Claude (3.5 Sonnet)"),
-            Some("claude-3.5-sonnet".to_string())
-        );
-        assert_eq!(
-            normalize_display_name_to_id("gpt-oss (some model)"),
-            Some("gpt-oss-some-model".to_string())
-        );
-        assert_eq!(normalize_display_name_to_id("gpt-4o"), None);
-        assert_eq!(normalize_display_name_to_id("   "), None);
-    }
-
-    #[test]
-    fn test_is_pseudo_raw_model() {
-        assert!(is_pseudo_raw_model(""));
-        assert!(is_pseudo_raw_model("unknown"));
-        assert!(is_pseudo_raw_model("UNKNOWN"));
-        assert!(is_pseudo_raw_model("auto-review"));
-        assert!(is_pseudo_raw_model("gemini-default"));
-        assert!(!is_pseudo_raw_model("gemini-1.5-pro"));
-    }
-
     fn proto_varint_bytes(value: u64) -> Vec<u8> {
         let mut out = Vec::new();
         let mut value = value;
@@ -4634,7 +4622,8 @@ mod tests {
             usage.response_id.as_deref(),
             Some("bGZmapHNJ8XVz7IPxtDuoAo")
         );
-        assert_eq!(usage.raw_model_id.as_deref(), Some("gemini-3.7-flash"));
+        assert_eq!(usage.served_model.as_deref(), Some("gemini-3.7-flash"));
+        assert_eq!(usage.model_enum, None);
         assert_eq!(
             usage.request_uuid.as_deref(),
             Some("a04cc152-933d-413f-bf77-e5e046d8005c")
@@ -4661,26 +4650,92 @@ mod tests {
         assert_eq!(parse_gen_metadata_usage(&non_generation.encode()), None);
     }
 
+    fn resolve_fixture(fixture: GenMetadataFixture) -> String {
+        let usage = parse_gen_metadata_usage(&fixture.encode()).unwrap();
+        resolve_antigravity_model(
+            usage.model_enum.as_deref(),
+            usage.served_model.as_deref(),
+            &static_model_aliases(),
+        )
+    }
+
     #[test]
-    fn test_parse_gen_metadata_usage_falls_back_to_model_enum() {
+    fn test_local_generation_resolves_enum_first() {
+        // The served name became a release codename while the enum stayed put.
+        let codename = GenMetadataFixture {
+            response_model: Some("gemini-3.8-flash-n".to_string()),
+            model_enum: Some("MODEL_PLACEHOLDER_M319".to_string()),
+            ..GenMetadataFixture::default()
+        };
+        let usage = parse_gen_metadata_usage(&codename.encode()).unwrap();
+        assert_eq!(usage.served_model.as_deref(), Some("gemini-3.8-flash-n"));
+        assert_eq!(usage.model_enum.as_deref(), Some("MODEL_PLACEHOLDER_M319"));
+        let resolved = resolve_fixture(codename);
+        assert_eq!(resolved, "gemini-3-8-flash-medium");
+        assert_eq!(crate::model_id::canonical(&resolved), "gemini-3-8-flash");
+
         let placeholder = GenMetadataFixture {
             response_model: Some("gemini-default".to_string()),
             model_enum: Some("MODEL_PLACEHOLDER_M20".to_string()),
             ..GenMetadataFixture::default()
         };
-        let usage = parse_gen_metadata_usage(&placeholder.encode()).unwrap();
-        assert_eq!(usage.raw_model_id.as_deref(), Some("MODEL_PLACEHOLDER_M20"));
+        assert_eq!(resolve_fixture(placeholder), "gemini-3-5-flash-medium");
 
         let missing = GenMetadataFixture {
             response_model: None,
             model_enum: Some("MODEL_PLACEHOLDER_M132".to_string()),
             ..GenMetadataFixture::default()
         };
-        let usage = parse_gen_metadata_usage(&missing.encode()).unwrap();
-        assert_eq!(
-            usage.raw_model_id.as_deref(),
-            Some("MODEL_PLACEHOLDER_M132")
+        assert_eq!(resolve_fixture(missing), "gemini-3-5-flash-high");
+    }
+
+    #[test]
+    fn test_unknown_enum_falls_back_to_served_name_then_raw_enum() {
+        let served = GenMetadataFixture {
+            response_model: Some("gemini-9.0-flash".to_string()),
+            model_enum: Some("MODEL_PLACEHOLDER_M900".to_string()),
+            ..GenMetadataFixture::default()
+        };
+        assert_eq!(resolve_fixture(served), "gemini-9-0-flash");
+
+        let enum_only = GenMetadataFixture {
+            response_model: Some("gemini-default".to_string()),
+            model_enum: Some("MODEL_PLACEHOLDER_M900".to_string()),
+            ..GenMetadataFixture::default()
+        };
+        assert_eq!(resolve_fixture(enum_only), "model-placeholder-m900");
+
+        let nothing = GenMetadataFixture {
+            response_model: None,
+            model_enum: None,
+            ..GenMetadataFixture::default()
+        };
+        assert_eq!(resolve_fixture(nothing), "unknown");
+    }
+
+    #[test]
+    fn test_rpc_chat_model_resolves_enum_first() {
+        let aliases = static_model_aliases();
+        let codename = resolve_rpc_chat_model(
+            &json!({ "model": "MODEL_PLACEHOLDER_M319", "responseModel": "gemini-3.8-flash-n" }),
+            &aliases,
         );
+        assert_eq!(codename.model_id, "gemini-3-8-flash-medium");
+        assert_eq!(
+            codename.model_enum.as_deref(),
+            Some("MODEL_PLACEHOLDER_M319")
+        );
+        assert_eq!(codename.served_model.as_deref(), Some("gemini-3.8-flash-n"));
+
+        let unknown_enum = resolve_rpc_chat_model(
+            &json!({ "model": "MODEL_PLACEHOLDER_M900", "responseModel": "gemini-9-flash" }),
+            &aliases,
+        );
+        assert_eq!(unknown_enum.model_id, "gemini-9-flash");
+
+        let label_only =
+            resolve_rpc_chat_model(&json!({ "modelDisplayName": "Gemini 3.5 Flash" }), &aliases);
+        assert_eq!(label_only.model_id, "gemini-3-5-flash");
     }
 
     #[test]

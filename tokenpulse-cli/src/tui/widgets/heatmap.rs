@@ -297,18 +297,6 @@ fn cell_values_for_layout(
     cell_values
 }
 
-#[allow(dead_code)]
-pub fn heatmap_scale(
-    points: &[(NaiveDate, f64)],
-    area: Rect,
-    range: Option<(NaiveDate, NaiveDate)>,
-) -> Option<HeatmapScale> {
-    let layout = compute_layout(area, range)?;
-    let values: BTreeMap<NaiveDate, f64> = points.iter().copied().collect();
-    let cell_values = cell_values_for_layout(&layout, &values);
-    Some(HeatmapScale::from_cell_values(&cell_values))
-}
-
 fn distribute_month_label_positions(
     labels: &[(usize, String)],
     layout: &HeatmapLayout,

@@ -92,19 +92,6 @@ pub fn decode_jwt_email(token: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-pub fn decode_jwt_client_id(token: &str) -> Option<String> {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let payload_bytes = decode_base64(parts[1]).ok()?;
-    let json: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
-    json.get("azp")
-        .or_else(|| json.get("aud"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
 pub fn decode_jwt_exp(token: &str) -> Option<i64> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() < 2 {

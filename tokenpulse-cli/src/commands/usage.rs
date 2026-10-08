@@ -100,29 +100,6 @@ pub async fn run(
         );
     }
 
-    if rebuild_all {
-        let started = Instant::now();
-        store.clear_sources(&provider_names, refresh_pricing)?;
-        perf.log_duration(
-            "clear_sources",
-            started.elapsed(),
-            format!("providers={}", provider_names.join(",")),
-        );
-    } else if let Some(range) = refresh_range {
-        let started = Instant::now();
-        store.delete_sources_in_date_range(range, &provider_names, refresh_pricing)?;
-        perf.log_duration(
-            "delete_sources_in_date_range",
-            started.elapsed(),
-            format!(
-                "providers={} start={} end={}",
-                provider_names.join(","),
-                range.start,
-                range.end
-            ),
-        );
-    }
-
     let mut found_any_source = false;
 
     // Resolve each provider's incremental window first (sequential store reads).
@@ -148,6 +125,12 @@ pub async fn run(
         );
         effective_sinces.push(effective_since);
     }
+
+    // A run narrowed by `--since` or a refresh range does not cover everything
+    // written since the previous refresh, so it must not advance the anchor the
+    // next incremental window starts from.
+    let refresh_started_ms = Utc::now().timestamp_millis();
+    let records_refresh = requested_since.is_none() && refresh_range.is_none();
 
     // Parse every provider concurrently — parsing is independent and the
     // heaviest step (Antigravity also syncs over the local network). Ingestion
@@ -195,12 +178,19 @@ pub async fn run(
                     ),
                 );
 
-                if stale_sources.contains(parser.provider_name()) {
+                // Rebuilds, range refreshes and parser upgrades replace the
+                // source's rows only now that its parse has succeeded, in one
+                // transaction; deleting up front lost them when it failed.
+                if rebuild_all
+                    || refresh_range.is_some()
+                    || stale_sources.contains(parser.provider_name())
+                {
                     if !scoped.is_empty() {
                         found_any_source = true;
                         let started = Instant::now();
                         store.replace_source_messages(
                             parser.provider_name(),
+                            refresh_range,
                             &scoped,
                             refresh_pricing,
                         )?;
@@ -217,10 +207,8 @@ pub async fn run(
                     }
                 } else if !scoped.is_empty() {
                     found_any_source = true;
-                    if !rebuild_all
-                        && refresh_range.is_none()
-                        && parser.incremental_ingest_mode()
-                            == IncrementalIngestMode::ReplaceChangedSessions
+                    if parser.incremental_ingest_mode()
+                        == IncrementalIngestMode::ReplaceChangedSessions
                     {
                         let started = Instant::now();
                         store.replace_sessions_messages(&scoped, refresh_pricing)?;
@@ -248,6 +236,9 @@ pub async fn run(
                             ),
                         );
                     }
+                }
+                if records_refresh {
+                    store.record_refresh_started(parser.provider_name(), refresh_started_ms)?;
                 }
             }
             Err(error) => {
@@ -547,6 +538,10 @@ fn build_reload_fn(
             reload_sinces.push(since);
         }
 
+        // As on startup: a reload narrowed by `--since` must not move the anchor.
+        let refresh_started_ms = Utc::now().timestamp_millis();
+        let records_refresh = output_since.is_none();
+
         let reload_outcomes: Vec<(Duration, Result<Vec<UnifiedMessage>>)> = parsers
             .par_iter()
             .zip(reload_sinces.par_iter())
@@ -604,6 +599,9 @@ fn build_reload_fn(
                                 ),
                             );
                         }
+                    }
+                    if records_refresh {
+                        store.record_refresh_started(parser.provider_name(), refresh_started_ms)?;
                     }
                 }
                 Err(error) => {
@@ -1038,7 +1036,7 @@ fn print_rate_limit_reset_credits(snapshot: &tokenpulse_core::QuotaSnapshot) {
         "  Banked resets: {} available",
         snapshot.rate_limit_reset_credits.len()
     );
-    println!("    {:<13} {}", "Banked reset", "Expiration time");
+    println!("    {:<13} Expiration time", "Banked reset");
 
     let mut credits: Vec<_> = snapshot.rate_limit_reset_credits.iter().collect();
     credits.sort_by_key(|credit| (credit.expires_at.is_none(), credit.expires_at));
@@ -1201,7 +1199,12 @@ mod tests {
         if stale_sources.contains(parser.provider_name()) {
             if !messages.is_empty() {
                 store
-                    .replace_source_messages(parser.provider_name(), &messages, refresh_pricing)
+                    .replace_source_messages(
+                        parser.provider_name(),
+                        None,
+                        &messages,
+                        refresh_pricing,
+                    )
                     .unwrap();
             }
         } else if !messages.is_empty() {

@@ -8,7 +8,9 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use tracing::debug;
 
-const PARSER_VERSION: &str = "codex-v3";
+/// Bumped from `codex-v3` when forked and sub-agent sessions stopped counting
+/// the history they inherit from their parent thread.
+const PARSER_VERSION: &str = "codex-v4";
 
 pub struct CodexSessionParser;
 
@@ -26,6 +28,13 @@ impl CodexSessionParser {
         let mut messages = Vec::new();
         let mut current_model: Option<String> = None;
         let mut previous_totals: Option<CodexUsage> = None;
+        // A forked or sub-agent session opens with history carried over from
+        // its parent thread: token counts replayed from the parent's rollout
+        // and a running total that already includes the parent's usage. None
+        // of it ran in this session, which starts working at its first
+        // `turn_context`; until then token counts only seed the running total.
+        let mut inherits_history = false;
+        let mut turn_started = false;
         let mut provider_id = String::from("openai");
         let mut session_id = path
             .file_stem()
@@ -73,7 +82,20 @@ impl CodexSessionParser {
                 if let Some(model) = extract_model(payload.or(Some(&value))) {
                     current_model = Some(model);
                 }
+                inherits_history = payload.is_some_and(|payload| {
+                    ["forked_from_id", "parent_thread_id"]
+                        .iter()
+                        .any(|key| payload.get(*key).and_then(Value::as_str).is_some())
+                        || payload
+                            .get("source")
+                            .and_then(|source| source.get("subagent"))
+                            .is_some()
+                });
                 continue;
+            }
+
+            if entry_type == "turn_context" {
+                turn_started = true;
             }
 
             if let Some(model) = extract_model(payload.or(Some(&value))) {
@@ -93,6 +115,17 @@ impl CodexSessionParser {
                 Some(info) => info,
                 None => continue,
             };
+
+            if inherits_history && !turn_started {
+                if let Some(total_usage) = info
+                    .get("total_token_usage")
+                    .and_then(parse_usage)
+                    .filter(|usage| usage.total() > 0)
+                {
+                    previous_totals = Some(total_usage);
+                }
+                continue;
+            }
 
             if let Some(model) = extract_model(Some(info)) {
                 current_model = Some(model);
@@ -394,6 +427,51 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 15);
         assert_eq!(messages[0].tokens.cache_read, 100);
         assert_eq!(messages[0].tokens.reasoning, 5);
+        assert_eq!(messages[0].tokens.total(), 120);
+    }
+
+    #[test]
+    fn parse_file_skips_history_a_forked_session_inherits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("child.jsonl");
+        // Observed shape: the child's rollout opens with the parent's replayed
+        // token counts, whose running total already holds the parent's usage
+        // (the first one has no `last_token_usage` at all), and only then
+        // starts its own turn.
+        std::fs::write(
+            &path,
+            r#"{"type":"session_meta","payload":{"id":"child","forked_from_id":"parent","model_provider":"openai","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}}}}
+{"type":"compacted","payload":{}}
+{"type":"event_msg","timestamp":"2026-08-12T15:57:06Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":28000000,"output_tokens":700000}}}}
+{"type":"event_msg","timestamp":"2026-08-12T15:57:06Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":30000,"output_tokens":1000},"total_token_usage":{"input_tokens":28030000,"output_tokens":701000}}}}
+{"type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"type":"event_msg","timestamp":"2026-08-12T16:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":40000,"output_tokens":2000},"total_token_usage":{"input_tokens":28070000,"output_tokens":703000}}}}"#,
+        )
+        .unwrap();
+
+        let messages = CodexSessionParser::new().parse_file(&path);
+
+        assert_eq!(messages.len(), 1, "only the child's own turn counts");
+        assert_eq!(messages[0].model_id, "gpt-5.6-sol");
+        assert_eq!(messages[0].tokens.total(), 42_000);
+    }
+
+    #[test]
+    fn parse_file_counts_a_root_session_from_its_first_token_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("root.jsonl");
+        // A session without a parent inherits nothing, so the rule must not
+        // depend on `turn_context` being written at all.
+        std::fs::write(
+            &path,
+            r#"{"type":"session_meta","payload":{"id":"root","model_provider":"openai","source":"cli","model":"gpt-5"}}
+{"type":"event_msg","timestamp":"2026-08-12T16:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20},"total_token_usage":{"input_tokens":100,"output_tokens":20}}}}"#,
+        )
+        .unwrap();
+
+        let messages = CodexSessionParser::new().parse_file(&path);
+
+        assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.total(), 120);
     }
 }

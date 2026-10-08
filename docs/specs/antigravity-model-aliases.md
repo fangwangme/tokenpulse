@@ -1,93 +1,54 @@
 # Antigravity Model Aliases
 
-This document records the evidence used for Antigravity model ID normalization.
-These aliases are applied when writing or normalizing TokenPulse's Antigravity
-cache artifacts, before usage rows are ingested.
+How TokenPulse names the model behind each Antigravity generation, and the
+evidence behind the seeded aliases.
 
-## Rule
+## Resolution
 
-The cache should store meaningful Antigravity model names, not opaque internal
-placeholder IDs. This step does not perform display aggregation or pricing
-canonicalization. Meaningful variants such as `thinking`, `high`, and `low`
-should remain in the cache; later usage summary/model-table code can aggregate
-those variants when needed.
+Every generation reports two identities:
 
-A trailing `-tiered` segment is the exception: it is a routing suffix used by
-sub-agent generators, not a meaningful model variant. Sub-agent metadata such as
-`{"responseModel": "gemini-3.6-flash-tiered", "model": "MODEL_PLACEHOLDER_M196"}`
-still resolves through `responseModel`, but the final `-tiered` is dropped so the
-cache stores the base model (`gemini-3-6-flash`). Only a final `-tiered` segment
-is removed; occurrences elsewhere in a model ID are preserved. The shared usage
-canonicalizer and the pricing candidate normalizer strip the same suffix, so
-display aggregation and pricing lookup stay aligned with the cache.
+- **enum** — `model_enum` in local `gen_metadata` (field 20) or `chatModel.model`
+  over RPC, e.g. `MODEL_PLACEHOLDER_M319`. Stable: the model the user picked.
+- **served name** — field 19 locally, `responseModel` over RPC. The backend's
+  internal id, sometimes a codename (`gemini-3.8-flash-n` serves Gemini 3.8
+  Flash) or a routing variant (`gemini-3.6-flash-tiered`).
 
-The preferred source of truth is the running Antigravity language server:
-`GetUserStatus` returns `clientModelConfigs[]` entries containing both the
-user-facing `label` and the internal `modelOrAlias.model`. TokenPulse should use
-that dynamic mapping first when syncing cache artifacts. Labels from known model
-families (`Claude`, `Gemini`, and `GPT-OSS`) are converted mechanically into
-cache IDs, preserving meaningful suffixes such as `thinking`, `high`, and `low`.
-This is not a guessed placeholder mapping: the placeholder is only connected to
-the model when Antigravity itself returns the pair in `GetUserStatus`.
+`resolve_antigravity_model` takes the first that applies:
 
-The effective cache-write dictionary is built in this order:
+1. the enum's alias, when the alias table names it;
+2. the served name, unless it is a pseudo id (`gemini-default`);
+3. the raw enum (`model-placeholder-m319`);
+4. `unknown`.
 
-1. Static evidence-backed seed aliases from this document and the code table.
-2. The persisted historical ledger from previous runs.
-3. Current online `GetUserStatus` aliases, which override older entries.
+Both raw identities are stored on each cached usage row (`model_enum`,
+`served_model`) and re-resolved on every read. A session whose id changes is
+re-stamped, so an alias learned later corrects history in the cache and, via
+the incremental ingest, in the ledger.
 
-This merged dictionary is written back to the ledger on sync. Static aliases are
-fallbacks for offline syncs, legacy cache normalization, or old sessions whose
-placeholder no longer appears in the live model list.
+An alias's id comes from its **label**: `Gemini 3.1 Pro (High)` →
+`gemini-3-1-pro-high`. Every Antigravity id gets spelling normalization only —
+lowercase, no `antigravity-` prefix, `.`/`_`/spaces as single `-`. Variants
+such as `thinking` or `high` stay; `model_id::canonical` folds them (and
+`-tiered`, `preview`) for display, and pricing applies the same spelling rules
+to catalog keys (`docs/model-pricing-mapping.md`). There are no per-model
+rules.
 
-TokenPulse persists every dynamically observed mapping in:
+## Alias table
 
-`~/.local/share/tokenpulse/antigravity-cache/model-aliases.json`
+Merged in this order, later entries winning:
 
-That file is a historical mapping ledger. Each sync seeds it from the static
-table and merges the current `GetUserStatus` model list into the ledger,
-preserving `firstSeenAt` and updating `lastSeenAt`. Cache normalization reads
-the merged ledger, so old sessions can still be resolved after Antigravity
-removes or renames a model in the active list.
+1. static seeds (`STATIC_MODEL_ALIASES`: enum, label, evidence);
+2. the history file from previous runs;
+3. the live `GetUserStatus` list.
 
-Do not add a static placeholder mapping unless it is backed by another project,
-a public source, or a captured Antigravity `GetUserStatus` response. Unknown
-placeholders stay unchanged.
-
-TokenScale handles unresolved Antigravity IDs at pricing/display time, not at
-cache-write time. Its Antigravity-specific alias table only covers
-`MODEL_PLACEHOLDER_M26`, `MODEL_PLACEHOLDER_M35`, `MODEL_PLACEHOLDER_M36`,
-`MODEL_PLACEHOLDER_M37`, `MODEL_PLACEHOLDER_M47`, and
-`MODEL_OPENAI_GPT_OSS_120B_MEDIUM`. If a placeholder is not in that table,
-TokenScale keeps the raw model ID, then pricing lookup tries exact,
-normalized, prefix/suffix-stripped, and fuzzy matches. If all fail, no pricing
-is applied and display code can only format the raw string. It does not contain
-a historical mapping ledger for unresolved placeholders such as
-`MODEL_PLACEHOLDER_M7`, `MODEL_PLACEHOLDER_M8`, `MODEL_PLACEHOLDER_M12`, or
-`MODEL_PLACEHOLDER_M18`.
-
-## End-to-end flow
-
-1. Antigravity sync detects the running language server and calls
-   `GetUserStatus`.
-2. TokenPulse builds the alias dictionary from static seeds, historical ledger,
-   and current online aliases.
-3. Session metadata is written to the TokenPulse Antigravity cache with
-   meaningful model IDs such as `claude-opus-4-6-thinking`,
-   `gemini-3.1-pro-preview-high`, or `gemini-3.5-flash-medium`, not
-   `MODEL_PLACEHOLDER_*`.
-4. The scanner reads the cache and stores usage rows.
-5. Usage/model summaries group variants by normalizing provider prefixes,
-   quality suffixes, `free`, and `thinking` suffixes. This is where
-   `claude-opus-4-6-thinking` becomes `claude-opus-4-6` for the Models tab.
-6. Pricing lookup uses the raw usage model and provider hint against the merged
-   pricing catalog from LiteLLM, OpenRouter, and models.dev. Pricing aliases may
-   remove Antigravity prefixes or quality suffixes, but must not map one real
-   model version to another. For example, `claude-opus-4-6` must not use
-   `claude-opus-4-5` pricing, and `gemini-3.1-pro` must not use
-   `gemini-3-pro-preview` pricing.
-
-## History file format
+`GetUserStatus` pairs each `clientModelConfigs[].modelOrAlias.model` with its
+`label`; that pairing is the evidence, so any label is accepted. Each sync
+writes the merged table to
+`~/.local/share/tokenpulse/antigravity-cache/model-aliases.json`, keeping
+`firstSeenAt` and updating `lastSeenAt`. On release, fold its new entries into
+`STATIC_MODEL_ALIASES` so fresh installs resolve them offline. Add a seed only
+with evidence: a captured `GetUserStatus`, local generation metadata, another
+project, or a public source.
 
 ```json
 {
@@ -106,96 +67,37 @@ a historical mapping ledger for unresolved placeholders such as
 }
 ```
 
-Keys are normalized to lowercase with dashes converted to underscores so
-`MODEL_PLACEHOLDER_M26`, `model-placeholder-m26`, and
-`model_placeholder_m26` resolve to the same history entry.
+Keys are lowercase; lookups also try dashes as underscores, so
+`MODEL_PLACEHOLDER_M26`, `model-placeholder-m26` and `model_placeholder_m26`
+match the same entry. `modelId` is informational — the label decides the id.
 
-## Adopted mappings
+## Seeds
 
-| Raw Antigravity ID | Cache model ID | Evidence |
+| Enum | Label | Evidence |
 | --- | --- | --- |
-| `MODEL_PLACEHOLDER_M26` | `claude-opus-4-6-thinking` | `openusage` lists this internal ID as "Claude Opus 4.6 (Thinking)"; Antigravity Mobility CLI article lists the same. Tokscale confirms this placeholder belongs to Claude Opus 4.6, but collapses thinking for pricing. |
-| `MODEL_PLACEHOLDER_M35` | `claude-sonnet-4-6-thinking` | Antigravity Mobility CLI article lists this internal ID as "Claude Sonnet 4.6 (Thinking)". Tokscale confirms the placeholder belongs to Claude Sonnet 4.6, but collapses thinking for pricing. |
-| `MODEL_PLACEHOLDER_M36` | `gemini-3.1-pro-preview-low` | Antigravity Mobility CLI article lists this internal ID as "Gemini 3.1 Pro (Low)"; TokenPulse keeps `preview` because Gemini 3.1 Pro is priced and displayed as the preview model family. |
-| `MODEL_PLACEHOLDER_M37` | `gemini-3.1-pro-preview-high` | Antigravity Mobility CLI article lists this internal ID as "Gemini 3.1 Pro (High)"; TokenPulse keeps `preview` because Gemini 3.1 Pro is priced and displayed as the preview model family. |
-| `MODEL_PLACEHOLDER_M47` | `gemini-3-flash-preview` | Antigravity Mobility CLI article lists this internal ID as "Gemini 3 Flash"; Tokscale maps M47 to `gemini-3-flash-preview`. |
-| `MODEL_OPENAI_GPT_OSS_120B_MEDIUM` | `gpt-oss-120b-medium` | Antigravity Mobility CLI article lists this internal ID as "GPT-OSS 120B (Medium)"; Tokscale maps the same placeholder to `gpt-oss-120b-medium`. |
-| `MODEL_PLACEHOLDER_M132` | `gemini-3.5-flash-high` | Captured local Antigravity 2.0.1 `GetUserStatus` response. |
-| `MODEL_PLACEHOLDER_M20` | `gemini-3.5-flash-medium` | Captured local Antigravity 2.0.1 `GetUserStatus` response. |
-| `MODEL_PLACEHOLDER_M16` | `gemini-3.1-pro-preview-high` | Captured local Antigravity 2.0.1 `GetUserStatus` response; normalized with `preview` for the same model-family rule as M37. |
-| `gemini-3-flash-a` | `gemini-3.5-flash` | Product/runtime finding for this branch: Antigravity reports this internal Flash A ID for the Gemini 3.5 Flash model. Public sources confirm Gemini 3.5 Flash availability in Antigravity, but no public source found for the internal `gemini-3-flash-a` ID. Keep this mapping isolated and revisit when Antigravity publishes or another project records the ID. |
+| `M26` | Claude Opus 4.6 (Thinking) | `openusage`; Antigravity Mobility CLI article; `GetUserStatus` |
+| `M35` | Claude Sonnet 4.6 (Thinking) | Antigravity Mobility CLI article; `GetUserStatus` |
+| `M12` | Claude Opus 4.5 (Thinking) | user-provided |
+| `MODEL_CLAUDE_4_5_SONNET` | Claude Sonnet 4.5 | user-provided |
+| `M36` / `M37` | Gemini 3.1 Pro (Low) / (High) | Antigravity Mobility CLI article; Tokscale; `GetUserStatus` |
+| `M16` | Gemini 3.1 Pro (High) | `GetUserStatus` |
+| `M7` / `M8` / `M9` | Gemini 3 Pro (Low) / (High) / (Image) | user-provided |
+| `M18` / `M47` | Gemini 3 Flash | user-provided; M47 also Antigravity Mobility CLI article, Tokscale |
+| `M132` / `M20` / `M187` | Gemini 3.5 Flash (High) / (Medium) / (Low) | `GetUserStatus` |
+| `M71` / `M72` / `M73` | Gemini 3.6 Flash (High) / (Medium) / (Low) | `GetUserStatus` |
+| `M196` / `M264` | Gemini 3.6 Flash | sub-agent enums absent from `GetUserStatus`; field 19 is always `gemini-3.6-flash[-tiered]` |
+| `M298` / `M299` / `M300` | Gemini 3.7 Flash (High) / (Medium) / (Low) | `GetUserStatus` |
+| `M318` / `M319` / `M320` | Gemini 3.8 Flash (High) / (Medium) / (Low) | `GetUserStatus` |
+| `MODEL_OPENAI_GPT_OSS_120B_MEDIUM` | GPT-OSS 120B (Medium) | Antigravity Mobility CLI article; Tokscale; `GetUserStatus` |
 
-## Dynamic mappings captured from Antigravity
+`Mn` stands for `MODEL_PLACEHOLDER_Mn`.
 
-On 2026-05-20, a local Antigravity 2.0.1 language server returned these
-`GetUserStatus` model configs:
+## Sources
 
-| `modelOrAlias.model` | `label` | Cache model ID |
-| --- | --- | --- |
-| `MODEL_PLACEHOLDER_M36` | `Gemini 3.1 Pro (Low)` | `gemini-3.1-pro-low` |
-| `MODEL_PLACEHOLDER_M35` | `Claude Sonnet 4.6 (Thinking)` | `claude-sonnet-4-6-thinking` |
-| `MODEL_PLACEHOLDER_M26` | `Claude Opus 4.6 (Thinking)` | `claude-opus-4-6-thinking` |
-| `MODEL_OPENAI_GPT_OSS_120B_MEDIUM` | `GPT-OSS 120B (Medium)` | `gpt-oss-120b-medium` |
-| `MODEL_PLACEHOLDER_M132` | `Gemini 3.5 Flash (High)` | `gemini-3.5-flash-high` |
-| `MODEL_PLACEHOLDER_M20` | `Gemini 3.5 Flash (Medium)` | `gemini-3.5-flash-medium` |
-| `MODEL_PLACEHOLDER_M16` | `Gemini 3.1 Pro (High)` | `gemini-3.1-pro-high` |
-
-These rows should be written into `model-aliases.json` by sync. They are also
-safe static fallbacks because their source is a captured live Antigravity
-response.
-
-## Format-only aliases
-
-These preserve the same model and variant while making the ID consistent enough
-for display and provider detection.
-
-| Raw ID | Cache model ID |
-| --- | --- |
-| `claude-opus-4.6` | `claude-opus-4-6` |
-| `claude-sonnet-4.6` | `claude-sonnet-4-6` |
-| `claude-haiku-4.6` | `claude-haiku-4-6` |
-| `claude-opus-4.6-thinking` | `claude-opus-4-6-thinking` |
-| `claude-sonnet-4.6-thinking` | `claude-sonnet-4-6-thinking` |
-| `antigravity-claude-opus-4-6-thinking` | `claude-opus-4-6-thinking` |
-| `antigravity-claude-sonnet-4-6-thinking` | `claude-sonnet-4-6-thinking` |
-| `gemini-3.1-pro-high` | `gemini-3.1-pro-high` |
-| `gemini-3.1-pro-low` | `gemini-3.1-pro-low` |
-| `gemini-3-pro-high` | `gemini-3-pro-high` |
-| `gemini-3-pro-low` | `gemini-3-pro-low` |
-| `gemini-3.0-pro-preview-high` | `gemini-3-pro-preview-high` |
-| `gemini-3.0-pro-preview-low` | `gemini-3-pro-preview-low` |
-| `gemini-3-pro-preview-high` | `gemini-3-pro-preview-high` |
-| `gemini-3-pro-preview-low` | `gemini-3-pro-preview-low` |
-| `gemini-3-flash-c` | `gemini-3-flash-preview` |
-| `gemini-3.6-flash-tiered` | `gemini-3-6-flash` |
-| `gemini-3.5-flash-tiered` | `gemini-3.5-flash` |
-
-## Explicitly not mapped
-
-The current local Antigravity data has these placeholders, but no source was
-found that identifies them. Leave them as-is until there is evidence:
-
-| Placeholder |
-| --- |
-| `MODEL_PLACEHOLDER_M7` |
-| `MODEL_PLACEHOLDER_M8` |
-| `MODEL_PLACEHOLDER_M12` |
-| `MODEL_PLACEHOLDER_M18` |
-
-## Sources checked
-
-- Local `tokscale` clone at `/private/tmp/tokscale`, commit
-  `270d64c4d268d5bcc380690441d6a891687d6794`:
-  `crates/tokscale-core/src/pricing/aliases.rs` and
+- `tokscale` (commit `270d64c`): `crates/tokscale-core/src/pricing/aliases.rs`,
   `crates/tokscale-core/src/sessions/antigravity.rs`.
-- `openusage` model notes: `MODEL_PLACEHOLDER_M26` is "Claude Opus 4.6
-  (Thinking)".
-- Antigravity Mobility CLI article: lists `MODEL_PLACEHOLDER_M37`,
-  `MODEL_PLACEHOLDER_M36`, `MODEL_PLACEHOLDER_M47`, `MODEL_PLACEHOLDER_M35`,
-  `MODEL_PLACEHOLDER_M26`, and `MODEL_OPENAI_GPT_OSS_120B_MEDIUM` with display
-  names.
-- Antigravity Token Monitor marketplace page: confirms the same approach of
-  resolving `MODEL_PLACEHOLDER_*` IDs to human-readable names before JSONL
-  serialization, with `responseModel` preferred when present.
-- `opencode-antigravity-auth` API spec: confirms human-readable Antigravity
-  model IDs such as `claude-sonnet-4-6` and `claude-opus-4-6-thinking`.
+- `openusage` model notes: M26 is "Claude Opus 4.6 (Thinking)".
+- Antigravity Mobility CLI article: display names for M26, M35, M36, M37, M47
+  and `MODEL_OPENAI_GPT_OSS_120B_MEDIUM`.
+- `opencode-antigravity-auth` API spec: human-readable ids such as
+  `claude-opus-4-6-thinking`.

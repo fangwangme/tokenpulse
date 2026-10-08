@@ -76,13 +76,10 @@ mod tests {
             "claude-opus-4-6"
         );
         assert_eq!(normalize_model_name("z-ai/glm-5.1-low"), "glm-5-1");
+        assert_eq!(normalize_model_name("gemini-3-pro-medium"), "gemini-3-pro");
         assert_eq!(
-            normalize_model_name("gemini-3-pro-medium"),
-            "gemini-3-pro-preview"
-        );
-        assert_eq!(
-            normalize_model_name("gemini-3-flash"),
-            "gemini-3-flash-preview"
+            normalize_model_name("gemini-3-flash-preview"),
+            "gemini-3-flash"
         );
         assert_eq!(
             normalize_model_name("opencode/deepseek-v4-flash-free"),

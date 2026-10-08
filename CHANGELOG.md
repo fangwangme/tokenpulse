@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-08
+
+### Fixed
+- **Antigravity models resolve from their enum**: a generation reports a
+  stable enum (`MODEL_PLACEHOLDER_M319`) and the backend's served name, which
+  is sometimes a codename (`gemini-3.8-flash-n`). The enum now wins whenever an
+  alias names it, so codenames no longer show up as separate, unpriced models.
+- **Placeholder models get corrected**: each cached row keeps its raw enum and
+  served name and is re-resolved on every refresh, so an alias learned later
+  fixes history in the cache and the ledger. Previously a hyphen/underscore
+  mismatch left `model-placeholder-*` rows stuck.
+- **Gemini 3 Pro Preview is priced again**: lookup candidates now use the same
+  key normalization as the catalog, Gemini also tries `gemini/`, ids are retried
+  with `-preview`, and `vertex_ai/` is the last resort.
+- **Codex sub-agent sessions no longer re-count their parent**: a forked or
+  sub-agent rollout opens with the parent's token history, which was counted
+  again — mostly as `unknown`. Token counts before the session's first turn are
+  now skipped (`codex-v4` re-ingests Codex once).
+- **Models listed only under provider prefixes are priced**: when nothing else
+  matches, the same model under any provider is used, preferring LiteLLM and
+  the majority price (e.g. `muse-spark-1.3-contributor-free`).
+- **`--rebuild-all` and `--refresh-days` no longer lose data on a failed
+  parse**: they deleted a source's rows before parsing it; rows are now
+  replaced in one transaction once the parse succeeds.
+- **Session counts are no longer inflated**: provider and daily summaries
+  summed per-model rollups, so a session spanning days or models counted
+  several times; sessions are now counted distinctly.
+- **Non-ASCII model ids no longer crash parsing**: date-suffix stripping
+  sliced strings at byte offsets.
+
+### Changed
+- **`-preview` no longer splits a model**: grouping and display drop it for
+  every source; pricing still tells `X` and `X-preview` apart. Stored grouping
+  ids are re-derived on startup when the rules change.
+- **Antigravity ids come from labels**: `Gemini 3.1 Pro (High)` →
+  `gemini-3-1-pro-high`, with spelling normalization only. The per-model
+  version, `-preview` and codename rules are gone (`antigravity-v6` re-ingests
+  Antigravity once).
+- **Incremental refreshes start from the previous refresh**: each source scans
+  from a day before its last refresh instead of 7 days before its newest
+  message, falling back to 2 days when no refresh has been recorded.
+
 ## [0.6.0] - 2026-10-03
 
 ### Added

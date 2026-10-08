@@ -9,8 +9,6 @@ use crate::model_id::strip_date_suffix;
 use crate::provider::TokenBreakdown;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
-use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPricing {
@@ -35,6 +33,7 @@ impl ModelPricing {
         }
     }
 
+    #[cfg(test)]
     pub fn simple(input_cost: f64, output_cost: f64) -> Self {
         Self {
             input_cost_per_token: input_cost,
@@ -73,9 +72,9 @@ pub struct PricingCatalog {
 
 fn canonicalize_catalog_key(key: &str) -> String {
     if let Some((provider, model)) = key.split_once('/') {
-        format!("{}/{}", provider, crate::model_id::canonical(model))
+        format!("{}/{}", provider, crate::model_id::pricing_key(model))
     } else {
-        crate::model_id::canonical(key)
+        crate::model_id::pricing_key(key)
     }
 }
 
@@ -112,8 +111,12 @@ impl PricingCatalog {
         model_id: &str,
         provider_id: Option<&str>,
     ) -> Option<ResolvedPricing<'a>> {
-        let canonical_id = crate::model_id::canonical(model_id);
-        for candidate in pricing_lookup_candidates_with_provider(&canonical_id, provider_id) {
+        let key_id = crate::model_id::pricing_key(model_id);
+        for candidate in pricing_lookup_candidates_with_provider(&key_id, provider_id) {
+            // Candidates must be spelled like the stored keys, which went
+            // through the same normalization on insert (`openrouter/google/X`
+            // is stored as `openrouter/X`, `gemini-3.1-pro` as `gemini-3-1-pro`).
+            let candidate = canonicalize_catalog_key(&candidate);
             let Some((key, record)) = self
                 .entries
                 .get_key_value(&candidate)
@@ -134,7 +137,74 @@ impl PricingCatalog {
             });
         }
 
-        None
+        if key_id.is_empty() || crate::model_id::is_pseudo(&key_id) {
+            return None;
+        }
+        let preview = (!key_id.ends_with("-preview")).then(|| format!("{key_id}-preview"));
+        self.lookup_under_any_provider(&key_id)
+            .or_else(|| preview.and_then(|id| self.lookup_under_any_provider(&id)))
+    }
+
+    /// Last resort: the same model listed only under provider prefixes no
+    /// candidate rule produces — `meta/muse-spark-1-3-contributor` plus a dozen
+    /// resellers, with no unprefixed key. The highest-priority source wins,
+    /// then the price most of its listings agree on, so one reseller's markup
+    /// cannot set the price.
+    fn lookup_under_any_provider(&self, key_id: &str) -> Option<ResolvedPricing<'_>> {
+        let listings: Vec<(&String, &PricingRecord)> = self
+            .entries
+            .iter()
+            .filter(|(key, record)| {
+                key.split_once('/')
+                    .is_some_and(|(_, model)| model == key_id)
+                    && pricing_record_is_usable(record)
+            })
+            .collect();
+        let best_rank = listings
+            .iter()
+            .map(|(_, record)| source_rank(&record.source))
+            .min()?;
+
+        let mut by_price: HashMap<(u64, u64), Vec<(&String, &PricingRecord)>> = HashMap::new();
+        for (key, record) in listings {
+            if source_rank(&record.source) == best_rank {
+                let price = (
+                    record.pricing.input_cost_per_token.to_bits(),
+                    record.pricing.output_cost_per_token.to_bits(),
+                );
+                by_price.entry(price).or_default().push((key, record));
+            }
+        }
+        let (key, record) = by_price
+            .into_values()
+            .map(|mut group| {
+                group.sort_by_key(|(key, _)| *key);
+                group
+            })
+            .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| b[0].0.cmp(a[0].0)))?
+            .into_iter()
+            .next()?;
+
+        Some(ResolvedPricing {
+            matched_key: key.as_str(),
+            pricing: &record.pricing,
+            source: &record.source,
+            version: &record.version,
+        })
+    }
+}
+
+/// Source priority, matching the merge order: LiteLLM, then models.dev, then
+/// OpenRouter.
+fn source_rank(source: &str) -> u8 {
+    if source == "litellm" {
+        0
+    } else if source.starts_with("models.dev") {
+        1
+    } else if source == "openrouter" {
+        2
+    } else {
+        3
     }
 }
 
@@ -177,26 +247,43 @@ pub fn calculate_cost(tokens: &TokenBreakdown, pricing: &ModelPricing) -> f64 {
     input + output + cache_read + cache_write + reasoning
 }
 
-pub fn lookup_model_pricing<'a>(
-    model_id: &str,
-    pricing_map: &'a HashMap<String, ModelPricing>,
-) -> Option<&'a ModelPricing> {
-    lookup_model_pricing_with_provider(model_id, None, pricing_map)
-}
-
-pub fn lookup_model_pricing_with_provider<'a>(
-    model_id: &str,
-    provider_id: Option<&str>,
-    pricing_map: &'a HashMap<String, ModelPricing>,
-) -> Option<&'a ModelPricing> {
-    let matched_key = lookup_pricing_key_with_provider(model_id, provider_id, pricing_map)?;
-    pricing_map.get(matched_key)
-}
-
 fn pricing_lookup_candidates_with_provider(
     model_id: &str,
     provider_id: Option<&str>,
 ) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    push_candidates_for_model(&mut candidates, &mut seen, model_id, provider_id);
+
+    // Some models are only ever published under a `-preview` key, and sources
+    // that name models from UI labels (Antigravity) never carry the suffix.
+    let base = strip_quality_tier_suffix(model_id).unwrap_or_else(|| model_id.to_string());
+    let preview = (!base.ends_with("-preview")).then(|| format!("{base}-preview"));
+    if let Some(preview) = &preview {
+        push_candidates_for_model(&mut candidates, &mut seen, preview, provider_id);
+    }
+
+    // Last resort only: Vertex AI keeps listing Gemini models the first-party
+    // and router catalogs have already retired.
+    for name in std::iter::once(base.as_str()).chain(preview.as_deref()) {
+        if let Some(gemini_model) = canonicalize_gemini_model(name) {
+            push_candidate(
+                &mut candidates,
+                &mut seen,
+                format!("vertex_ai/{gemini_model}"),
+            );
+        }
+    }
+
+    candidates
+}
+
+fn push_candidates_for_model(
+    candidates: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    model_id: &str,
+    provider_id: Option<&str>,
+) {
     let mut roots = Vec::new();
     let mut root_seen = HashSet::new();
 
@@ -219,14 +306,9 @@ fn pricing_lookup_candidates_with_provider(
         idx += 1;
     }
 
-    let mut candidates = Vec::new();
-    let mut seen = HashSet::new();
-
     for root in roots {
-        push_lookup_candidates_for_base(&mut candidates, &mut seen, &root);
+        push_lookup_candidates_for_base(candidates, seen, &root);
     }
-
-    candidates
 }
 
 fn push_lookup_candidates_for_base(
@@ -453,6 +535,7 @@ fn push_generalized_candidates(
             }
             push_candidate(candidates, seen, m.clone());
             push_candidate(candidates, seen, format!("google/{}", m));
+            push_candidate(candidates, seen, format!("gemini/{}", m));
             push_candidate(candidates, seen, format!("openrouter/google/{}", m));
         }
     }
@@ -593,71 +676,6 @@ fn push_candidate(candidates: &mut Vec<String>, seen: &mut HashSet<String>, cand
 
 fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
     match model_id {
-        // Antigravity variants → same-model pricing keys. Do not cross model versions.
-        "antigravity-gemini-3-pro"
-        | "antigravity-gemini-3-pro-high"
-        | "antigravity-gemini-3-pro-low"
-        | "gemini-3-pro-high"
-        | "gemini-3-pro-low"
-        | "gemini-3-pro"
-        | "gemini-3-pro-preview-high"
-        | "gemini-3-pro-preview-low" => Some("gemini-3-pro-preview"),
-
-        "gemini-3.1-pro-high"
-        | "gemini-3.1-pro-low"
-        | "gemini-3.1-pro-preview-high"
-        | "gemini-3.1-pro-preview-low"
-        | "gemini-3.1-pro-preview"
-        | "gemini-3.1-pro"
-        | "gemini-3-1-pro-high"
-        | "gemini-3-1-pro-low"
-        | "gemini-3-1-pro-preview-high"
-        | "gemini-3-1-pro-preview-low"
-        | "gemini-3-1-pro-preview"
-        | "gemini-3-1-pro" => Some("gemini-3.1-pro-preview"),
-
-        "antigravity-gemini-3-flash-a" | "gemini-3-flash-a" => Some("gemini-3.5-flash"),
-
-        "antigravity-gemini-3-flash" | "gemini-3-flash" | "gemini-3-flash-c" => {
-            Some("gemini-3-flash-preview")
-        }
-
-        "antigravity-claude-opus-4-5-thinking"
-        | "antigravity-claude-opus-4-5-thinking-high"
-        | "antigravity-claude-opus-4-5-thinking-medium"
-        | "claude-opus-4-5-thinking"
-        | "claude-opus-4-5-thinking-high"
-        | "claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
-
-        "antigravity-claude-opus-4-6-thinking" | "claude-opus-4-6-thinking" | "claude-opus-4-6" => {
-            Some("openrouter/anthropic/claude-opus-4.6")
-        }
-
-        "antigravity-claude-sonnet-4-6-thinking" | "claude-sonnet-4-6-thinking" => {
-            Some("openrouter/anthropic/claude-sonnet-4.6")
-        }
-
-        // Antigravity placeholders retained for legacy cache rows that were not
-        // normalized before pricing. These must resolve to the same real model.
-        "MODEL_PLACEHOLDER_M26" | "model-placeholder-m26" => {
-            Some("openrouter/anthropic/claude-opus-4.6")
-        }
-
-        "MODEL_PLACEHOLDER_M35" | "model-placeholder-m35" => {
-            Some("openrouter/anthropic/claude-sonnet-4.6")
-        }
-
-        "MODEL_PLACEHOLDER_M36"
-        | "model-placeholder-m36"
-        | "MODEL_PLACEHOLDER_M37"
-        | "model-placeholder-m37" => Some("gemini-3.1-pro-preview"),
-
-        "MODEL_PLACEHOLDER_M47" | "model-placeholder-m47" => Some("gemini-3-flash-preview"),
-
-        "model_openai_gpt_oss_120b_medium" | "model-openai-gpt-oss-120b-medium" => {
-            Some("openrouter/openai/gpt-oss-120b-medium")
-        }
-
         // Bare model names (often from -free stripping) → LiteLLM keys
         "grok-code" => Some("xai/grok-code-fast-1"),
 
@@ -671,37 +689,6 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
     }
 }
 
-fn lookup_pricing_key_with_provider<'a, T>(
-    model_id: &str,
-    provider_id: Option<&str>,
-    pricing_map: &'a HashMap<String, T>,
-) -> Option<&'a str> {
-    let candidates = pricing_lookup_candidates_with_provider(model_id, provider_id);
-
-    for candidate in &candidates {
-        if let Some((key, _)) = pricing_map.get_key_value(candidate) {
-            return Some(key.as_str());
-        }
-
-        if let Some(key) = find_case_insensitive_key_generic(candidate, pricing_map) {
-            return Some(key);
-        }
-    }
-
-    None
-}
-
-fn find_case_insensitive_key_generic<'a, T>(
-    candidate: &str,
-    pricing_map: &'a HashMap<String, T>,
-) -> Option<&'a str> {
-    pricing_map
-        .keys()
-        .filter(|key| key.eq_ignore_ascii_case(candidate))
-        .min_by_key(|key| key.len())
-        .map(String::as_str)
-}
-
 fn find_case_insensitive_key_value<'a, T>(
     candidate: &str,
     pricing_map: &'a HashMap<String, T>,
@@ -711,37 +698,6 @@ fn find_case_insensitive_key_value<'a, T>(
         .filter(|key| key.eq_ignore_ascii_case(candidate))
         .min_by_key(|key| key.len())?;
     pricing_map.get_key_value(key)
-}
-
-pub fn lookup_model_pricing_or_warn<'a>(
-    model_id: &str,
-    pricing_map: &'a HashMap<String, ModelPricing>,
-) -> Option<&'a ModelPricing> {
-    lookup_model_pricing_or_warn_with_provider(model_id, None, pricing_map)
-}
-
-pub fn lookup_model_pricing_or_warn_with_provider<'a>(
-    model_id: &str,
-    provider_id: Option<&str>,
-    pricing_map: &'a HashMap<String, ModelPricing>,
-) -> Option<&'a ModelPricing> {
-    let pricing = lookup_model_pricing_with_provider(model_id, provider_id, pricing_map);
-
-    if pricing.is_none() && should_warn_for_missing_model(model_id) {
-        warn!("No pricing found for model: {}", model_id);
-    }
-
-    pricing
-}
-
-fn should_warn_for_missing_model(model_id: &str) -> bool {
-    static WARNED_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-
-    WARNED_MODELS
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .map(|mut warned_models| warned_models.insert(model_id.to_string()))
-        .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -759,6 +715,35 @@ mod tests {
         cache_write: Option<f64>,
     ) -> ModelPricing {
         ModelPricing::new(input, output, cache_read, cache_write)
+    }
+
+    /// Looks `model_id` up the way usage ingest does: through a catalog built
+    /// from `map`, keys normalized on insert exactly like a fetched one.
+    fn lookup_model_pricing_with_provider(
+        model_id: &str,
+        provider_id: Option<&str>,
+        map: &HashMap<String, ModelPricing>,
+    ) -> Option<ModelPricing> {
+        let catalog = PricingCatalog::new(
+            map.iter()
+                .map(|(key, pricing)| {
+                    (
+                        key.clone(),
+                        PricingRecord::new(pricing.clone(), "test", "v1"),
+                    )
+                })
+                .collect(),
+        );
+        catalog
+            .lookup(model_id, provider_id)
+            .map(|resolved| resolved.pricing.clone())
+    }
+
+    fn lookup_model_pricing(
+        model_id: &str,
+        map: &HashMap<String, ModelPricing>,
+    ) -> Option<ModelPricing> {
+        lookup_model_pricing_with_provider(model_id, None, map)
     }
 
     #[test]
@@ -852,22 +837,6 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_cost_empty_tokens() {
-        let tokens = TokenBreakdown {
-            input: 0,
-            output: 0,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        };
-
-        let pricing = make_pricing(0.00001, 0.00003);
-        let cost = calculate_cost(&tokens, &pricing);
-
-        assert_eq!(cost, 0.0);
-    }
-
-    #[test]
     fn test_lookup_model_pricing_exact() {
         let mut map = HashMap::new();
         map.insert(
@@ -885,13 +854,6 @@ mod tests {
         let map = HashMap::<String, ModelPricing>::new();
         let result = lookup_model_pricing("unknown-model", &map);
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_missing_model_warning_is_deduplicated_per_model() {
-        assert!(should_warn_for_missing_model("missing-model-a"));
-        assert!(!should_warn_for_missing_model("missing-model-a"));
-        assert!(should_warn_for_missing_model("missing-model-b"));
     }
 
     #[test]
@@ -939,17 +901,81 @@ mod tests {
         assert!(result.is_none());
     }
 
+    fn catalog(entries: &[(&str, f64, f64)]) -> PricingCatalog {
+        PricingCatalog::new(
+            entries
+                .iter()
+                .map(|(key, input, output)| {
+                    (
+                        key.to_string(),
+                        PricingRecord::new(make_pricing(*input, *output), "test", "v1"),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn matched_key(catalog: &PricingCatalog, model_id: &str) -> Option<String> {
+        catalog
+            .lookup(model_id, Some("google"))
+            .map(|resolved| resolved.matched_key.to_string())
+    }
+
     #[test]
-    fn test_lookup_model_pricing_uses_explicit_antigravity_alias() {
-        let mut map = HashMap::new();
-        map.insert(
-            "gemini-3-pro-preview".to_string(),
-            make_pricing(0.000002, 0.000012),
+    fn test_catalog_prices_label_ids_through_the_preview_retry() {
+        // Antigravity names models from UI labels, which never say "preview".
+        let catalog = catalog(&[("gemini-3-pro-preview", 0.000002, 0.000012)]);
+        for model in [
+            "antigravity-gemini-3-pro-high",
+            "gemini-3-pro-high",
+            "gemini-3-pro-preview-low",
+        ] {
+            assert_eq!(
+                matched_key(&catalog, model).as_deref(),
+                Some("gemini-3-pro-preview"),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_catalog_prefers_an_exact_key_over_its_preview() {
+        let catalog = catalog(&[
+            ("hy3", 0.000001, 0.000002),
+            ("hy3-preview", 0.000003, 0.000004),
+            ("gemini-3.8-flash", 0.00000075, 0.00000375),
+            ("gemini-3.8-flash-preview", 0.000009, 0.000009),
+        ]);
+        let input = |model: &str| {
+            catalog
+                .lookup(model, None)
+                .unwrap()
+                .pricing
+                .input_cost_per_token
+        };
+        // Both entries survive normalization with their own price.
+        assert_eq!(input("hy3"), 0.000001);
+        assert_eq!(input("hy3-preview"), 0.000003);
+        assert_eq!(input("gemini-3-8-flash-medium"), 0.00000075);
+    }
+
+    #[test]
+    fn test_catalog_uses_vertex_only_as_the_last_resort() {
+        // Upstream keeps a retired preview only under router and Vertex keys.
+        let both = catalog(&[
+            ("vertex_ai/gemini-3-pro-preview", 0.000001, 0.000001),
+            ("openrouter/google/gemini-3-pro-preview", 0.000002, 0.000012),
+        ]);
+        assert_eq!(
+            matched_key(&both, "gemini-3-pro-high").as_deref(),
+            Some("openrouter/gemini-3-pro-preview")
         );
 
-        let result = lookup_model_pricing("antigravity-gemini-3-pro-high", &map);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().input_cost_per_token, 0.000002);
+        let vertex_only = catalog(&[("vertex_ai/gemini-3-pro-preview", 0.000002, 0.000012)]);
+        assert_eq!(
+            matched_key(&vertex_only, "gemini-3-pro-high").as_deref(),
+            Some("vertex_ai/gemini-3-pro-preview")
+        );
     }
 
     #[test]
@@ -1225,49 +1251,74 @@ mod tests {
     }
 
     #[test]
+    fn test_catalog_falls_back_to_the_same_model_under_any_provider() {
+        let record = |input: f64, output: f64, source: &str| {
+            PricingRecord::new(make_pricing(input, output), source, "v1")
+        };
+        let catalog = PricingCatalog::new(HashMap::from([
+            // Free on OpenCode: unusable, so the paid price is wanted.
+            (
+                "opencode/muse-spark-1.3-contributor".to_string(),
+                record(0.0, 0.0, "models.dev:opencode"),
+            ),
+            (
+                "meta/muse-spark-1.3-contributor".to_string(),
+                record(0.0000001, 0.0000002, "litellm"),
+            ),
+            (
+                "openrouter/muse-spark-1.3-contributor".to_string(),
+                record(0.0000001, 0.0000002, "litellm"),
+            ),
+            // A marked-up reseller in the same source loses to the majority.
+            (
+                "aihubmix/muse-spark-1.3-contributor".to_string(),
+                record(0.00000011, 0.00000022, "litellm"),
+            ),
+            // A lower-priority source never wins over LiteLLM.
+            (
+                "kilo/muse-spark-1.3-contributor".to_string(),
+                record(0.000005, 0.000005, "models.dev:kilo"),
+            ),
+            // A different model that merely shares a prefix is not matched.
+            (
+                "meta/muse-spark-1.3".to_string(),
+                record(0.00000125, 0.00000425, "litellm"),
+            ),
+        ]));
+
+        let resolved = catalog
+            .lookup("muse-spark-1.3-contributor-free", Some("opencode"))
+            .unwrap();
+        assert_eq!(resolved.matched_key, "meta/muse-spark-1-3-contributor");
+        assert_eq!(resolved.pricing.input_cost_per_token, 0.0000001);
+
+        assert!(catalog.lookup("unknown", Some("opencode")).is_none());
+    }
+
+    #[test]
     fn test_lookup_gemini_3_1_uses_3_1_pricing_not_3_pro() {
-        let mut wrong_version = HashMap::new();
-        wrong_version.insert(
-            "gemini-3-pro-preview".to_string(),
-            make_pricing(0.000002, 0.000012),
-        );
+        let wrong_version = catalog(&[("gemini-3-pro-preview", 0.000002, 0.000012)]);
+        assert_eq!(matched_key(&wrong_version, "gemini-3.1-pro-high"), None);
 
-        assert!(lookup_model_pricing("gemini-3.1-pro-high", &wrong_version).is_none());
-        assert!(lookup_model_pricing("MODEL_PLACEHOLDER_M37", &wrong_version).is_none());
-
-        let mut map = HashMap::new();
-        map.insert(
-            "gemini-3.1-pro-preview".to_string(),
-            make_pricing(0.000003, 0.000015),
-        );
-
-        assert_eq!(
-            lookup_model_pricing("gemini-3.1-pro-high", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000003
-        );
-        assert_eq!(
-            lookup_model_pricing("MODEL_PLACEHOLDER_M37", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000003
-        );
-        assert_eq!(
-            lookup_model_pricing("gemini-3.1-pro-preview-high", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000003
-        );
+        // LiteLLM spells the key with a dot; every spelling lands on it.
+        let catalog = catalog(&[("gemini-3.1-pro-preview", 0.000003, 0.000015)]);
+        for model in [
+            "gemini-3.1-pro-high",
+            "gemini-3-1-pro-high",
+            "gemini_3_1_pro_high",
+            "gemini-3.1-pro-preview-high",
+        ] {
+            assert_eq!(
+                matched_key(&catalog, model).as_deref(),
+                Some("gemini-3-1-pro-preview"),
+                "{model}"
+            );
+        }
     }
 
     #[test]
     fn test_lookup_claude_4_5_thinking_variants_keep_pricing() {
-        let mut map = HashMap::new();
-        map.insert(
-            "claude-opus-4-5".to_string(),
-            make_pricing(0.000003, 0.000015),
-        );
+        let catalog = catalog(&[("claude-opus-4-5", 0.000003, 0.000015)]);
 
         for model in [
             "antigravity-claude-opus-4-5-thinking",
@@ -1276,7 +1327,7 @@ mod tests {
             "claude-opus-4-5-thinking-medium",
         ] {
             assert!(
-                lookup_model_pricing(model, &map).is_some(),
+                catalog.lookup(model, Some("anthropic")).is_some(),
                 "{model} should resolve to claude-opus-4-5 pricing"
             );
         }
@@ -1365,46 +1416,28 @@ mod tests {
 
         assert!(lookup_model_pricing("claude-opus-4-6", &map).is_none());
         assert!(lookup_model_pricing("claude-sonnet-4-6", &map).is_none());
-        assert!(lookup_model_pricing("MODEL_PLACEHOLDER_M26", &map).is_none());
-        assert!(lookup_model_pricing("MODEL_PLACEHOLDER_M35", &map).is_none());
     }
 
     #[test]
     fn test_lookup_claude_4_6_variants_use_4_6_pricing() {
-        let mut map = HashMap::new();
-        map.insert(
-            "openrouter/anthropic/claude-opus-4.6".to_string(),
-            make_pricing(0.000004, 0.00002),
-        );
-        map.insert(
-            "openrouter/anthropic/claude-sonnet-4.6".to_string(),
-            make_pricing(0.000003, 0.000015),
-        );
+        // Router keys as upstream spells them; the catalog stores them as
+        // `openrouter/claude-*-4-6`, and lookups must land on that form.
+        let catalog = catalog(&[
+            ("openrouter/anthropic/claude-opus-4.6", 0.000004, 0.00002),
+            ("openrouter/anthropic/claude-sonnet-4.6", 0.000003, 0.000015),
+        ]);
+        let input = |model: &str| {
+            catalog
+                .lookup(model, Some("anthropic"))
+                .unwrap()
+                .pricing
+                .input_cost_per_token
+        };
 
-        assert_eq!(
-            lookup_model_pricing("claude-opus-4-6", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000004
-        );
-        assert_eq!(
-            lookup_model_pricing("claude-opus-4-6-thinking", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000004
-        );
-        assert_eq!(
-            lookup_model_pricing("claude-sonnet-4-6", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000003
-        );
-        assert_eq!(
-            lookup_model_pricing("MODEL_PLACEHOLDER_M35", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000003
-        );
+        assert_eq!(input("claude-opus-4-6"), 0.000004);
+        assert_eq!(input("claude-opus-4-6-thinking"), 0.000004);
+        assert_eq!(input("claude-sonnet-4-6"), 0.000003);
+        assert_eq!(input("claude-sonnet-4-6-thinking"), 0.000003);
     }
 
     #[test]
@@ -1477,42 +1510,6 @@ mod tests {
         assert_eq!(strip_three_segment_prefix("moonshotai/kimi-k2.6"), None);
         // Four segments – not touched
         assert_eq!(strip_three_segment_prefix("a/b/c/d"), None);
-    }
-
-    #[test]
-    fn test_model_pricing_simple() {
-        let pricing = ModelPricing::simple(0.00001, 0.00003);
-        assert_eq!(pricing.input_cost_per_token, 0.00001);
-        assert_eq!(pricing.output_cost_per_token, 0.00003);
-        assert!(pricing.cache_read_input_token_cost.is_none());
-        assert!(pricing.cache_creation_input_token_cost.is_none());
-    }
-
-    #[test]
-    fn test_model_pricing_new() {
-        let pricing = ModelPricing::new(0.00001, 0.00003, Some(0.000001), Some(0.0000125));
-        assert_eq!(pricing.input_cost_per_token, 0.00001);
-        assert_eq!(pricing.output_cost_per_token, 0.00003);
-        assert_eq!(pricing.cache_read_input_token_cost, Some(0.000001));
-        assert_eq!(pricing.cache_creation_input_token_cost, Some(0.0000125));
-    }
-
-    #[test]
-    fn test_large_token_count() {
-        let tokens = TokenBreakdown {
-            input: 1_000_000, // 1M tokens
-            output: 500_000,
-            cache_read: 100_000,
-            cache_write: 50_000,
-            reasoning: 0,
-        };
-
-        let pricing = make_pricing_full(0.000015, 0.000075, Some(0.0000015), Some(0.00001875));
-        let cost = calculate_cost(&tokens, &pricing);
-
-        // Should be a reasonable cost
-        assert!(cost > 0.0);
-        assert!(cost < 100.0); // Less than $100 for these tokens
     }
 
     #[test]

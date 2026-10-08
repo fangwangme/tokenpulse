@@ -22,15 +22,18 @@ const CANONICAL_SOURCE_SQL: &str =
 /// row for a message that was already counted.
 const LOGICAL_MESSAGE_IDENTITY_SOURCES: &[&str] = &["antigravity"];
 
-/// How far back an incremental refresh re-examines session files.
+/// Slack an incremental refresh adds before the start of the previous one.
 ///
-/// This window only ever moves forward, so anything it skips once is skipped
-/// forever — nothing re-opens an old file until a full rebuild. One day was too
-/// tight to survive a machine migration: restoring a backup writes transcripts
-/// with their original modification times, so files can land on disk already
-/// behind the window. A week of slack costs a few extra file reads per refresh
-/// and gives a restore room to be noticed.
-const INCREMENTAL_LOOKBACK_DAYS: i64 = 7;
+/// Anything a source wrote after the previous refresh began has a newer arrival
+/// time than that start — file arrival takes the later of mtime and ctime, and
+/// restoring a backup cannot back-date ctime — so the previous start alone would
+/// do. The extra day absorbs clock and time-zone shifts between refreshes.
+const REFRESH_SLACK_DAYS: i64 = 1;
+
+/// Window used when no refresh has been recorded yet (the first run after
+/// upgrading from a release that did not record them): this far back from the
+/// newest stored message.
+const FALLBACK_LOOKBACK_DAYS: i64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct DailyUsageRow {
@@ -149,14 +152,53 @@ impl UsageStore {
         Ok(stale_sources)
     }
 
+    /// Records a completed refresh of `source` whose scan began at
+    /// `started_ms`. Kept monotonic: every recorded refresh already covered
+    /// everything written before its own start.
+    pub fn record_refresh_started(&self, source: &str, started_ms: i64) -> Result<()> {
+        let conn = self.open()?;
+        conn.execute(
+            "INSERT INTO source_refresh_state (source, last_refresh_started_ms)
+             VALUES (?1, ?2)
+             ON CONFLICT(source) DO UPDATE SET
+                 last_refresh_started_ms =
+                     MAX(last_refresh_started_ms, excluded.last_refresh_started_ms)",
+            params![source, started_ms],
+        )?;
+        Ok(())
+    }
+
+    fn last_refresh_started_ms(&self, source: &str) -> Result<Option<i64>> {
+        let conn = self.open()?;
+        Ok(conn
+            .query_row(
+                "SELECT last_refresh_started_ms FROM source_refresh_state WHERE source = ?1",
+                params![source],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Where an incremental refresh of `source` starts: just before the
+    /// previous refresh began, so the window follows how long ago the user last
+    /// refreshed instead of a fixed span.
     pub fn default_since(
         &self,
         source: &str,
         requested: Option<NaiveDate>,
     ) -> Result<Option<NaiveDate>> {
-        let inferred = self
-            .latest_message_date(source)?
-            .map(|date| date - Duration::days(INCREMENTAL_LOOKBACK_DAYS));
+        // A source with nothing stored is scanned in full: a refresh recorded
+        // while it was empty must not hide history it gains later, such as an
+        // OpenCode database (filtered by message time) that appears afterwards.
+        let Some(latest) = self.latest_message_date(source)? else {
+            return Ok(requested);
+        };
+        let inferred = match self.last_refresh_started_ms(source)? {
+            Some(started_ms) => chrono::DateTime::from_timestamp_millis(started_ms)
+                .map(|time| time.with_timezone(&chrono::Local).date_naive())
+                .map(|date| date - Duration::days(REFRESH_SLACK_DAYS)),
+            None => Some(latest - Duration::days(FALLBACK_LOOKBACK_DAYS)),
+        };
 
         Ok(match (requested, inferred) {
             (Some(requested), Some(inferred)) => Some(requested.max(inferred)),
@@ -433,22 +475,13 @@ impl UsageStore {
         Ok(affected_dates)
     }
 
-    pub fn delete_sources_in_date_range(
-        &self,
-        range: DateRange,
-        sources: &[String],
-        refresh_pricing: bool,
-    ) -> Result<()> {
-        self.delete_scoped(Some(range), sources, refresh_pricing)
-    }
-
-    pub fn clear_sources(&self, sources: &[String], refresh_pricing: bool) -> Result<()> {
-        self.delete_scoped(None, sources, refresh_pricing)
-    }
-
+    /// Replaces `source`'s ledger rows — within `range`, or all of them — with
+    /// `messages` in one transaction. Callers parse first, so a parse that
+    /// fails or finds nothing never costs the ledger its existing rows.
     pub fn replace_source_messages(
         &self,
         source: &str,
+        range: Option<DateRange>,
         messages: &[UnifiedMessage],
         refresh_pricing: bool,
     ) -> Result<BTreeSet<String>> {
@@ -474,12 +507,18 @@ impl UsageStore {
         let now = Utc::now().timestamp_millis();
         let mut affected_dates = BTreeSet::new();
 
-        let existing_dates = load_source_dates(&tx, source)?;
-        for date in &existing_dates {
-            affected_dates.insert(date.clone());
+        for date in load_source_dates(&tx, source)? {
+            let in_range = match range {
+                Some(range) => NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+                    .is_ok_and(|day| range.contains(day)),
+                None => true,
+            };
+            if in_range {
+                affected_dates.insert(date);
+            }
         }
 
-        delete_scoped_tx(&tx, None, &[source.to_string()], refresh_pricing)?;
+        delete_scoped_tx(&tx, range, &[source.to_string()], refresh_pricing)?;
 
         let mut pricing_snapshot_cache = HashMap::new();
 
@@ -561,55 +600,6 @@ impl UsageStore {
 
         tx.commit()?;
         Ok(affected_dates)
-    }
-
-    pub fn delete_date_range(&self, range: DateRange, refresh_pricing: bool) -> Result<()> {
-        let mut conn = self.open()?;
-        let tx = conn.transaction()?;
-        tx.execute(
-            "DELETE FROM usage_messages WHERE date >= ?1 AND date <= ?2",
-            params![range.start.to_string(), range.end.to_string()],
-        )?;
-        tx.execute(
-            "DELETE FROM daily_model_usage WHERE date >= ?1 AND date <= ?2",
-            params![range.start.to_string(), range.end.to_string()],
-        )?;
-        if refresh_pricing {
-            tx.execute(
-                "DELETE FROM daily_pricing_snapshots WHERE date >= ?1 AND date <= ?2",
-                params![range.start.to_string(), range.end.to_string()],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn clear_all(&self, refresh_pricing: bool) -> Result<()> {
-        let mut conn = self.open()?;
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM usage_messages", [])?;
-        tx.execute("DELETE FROM daily_model_usage", [])?;
-        if refresh_pricing {
-            tx.execute("DELETE FROM daily_pricing_snapshots", [])?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn rebuild_all_daily(&self) -> Result<()> {
-        let mut conn = self.open()?;
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM daily_model_usage", [])?;
-        let mut stmt = tx.prepare("SELECT DISTINCT date FROM usage_messages ORDER BY date")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let dates: Vec<String> = rows.flatten().collect();
-        drop(stmt);
-        let now = Utc::now().timestamp_millis();
-        for date in dates {
-            rebuild_daily_for_date(&tx, &date, now)?;
-        }
-        tx.commit()?;
-        Ok(())
     }
 
     pub fn repair_zero_costs(&self, since: Option<NaiveDate>, sources: &[String]) -> Result<usize> {
@@ -791,24 +781,40 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<DashboardDay>> {
         let conn = self.open()?;
-        let mut sql = format!(
+        // As in `load_provider_summaries`: a session using several models on
+        // one day has a rollup row per model, so sessions come from the ledger.
+        let mut daily_filters = String::new();
+        let mut params = append_common_filters(&mut daily_filters, since, sources);
+        let mut message_filters = String::new();
+        params.extend(append_common_filters(&mut message_filters, since, sources));
+        let sql = format!(
             r#"
-            SELECT date,
-                   SUM(input_tokens),
-                   SUM(output_tokens),
-                   SUM(cache_read_tokens),
-                   SUM(cache_write_tokens),
-                   SUM(reasoning_tokens),
-                   SUM(total_tokens),
-                   SUM(cost_usd),
-                   SUM(message_count),
-                   SUM(session_count)
-            FROM daily_model_usage
-            WHERE 1=1
+            SELECT daily.date, daily.input, daily.output, daily.cache_read,
+                   daily.cache_write, daily.reasoning, daily.tokens, daily.cost,
+                   daily.messages, COALESCE(sessions.count, 0)
+            FROM (
+                SELECT date,
+                       SUM(input_tokens) AS input,
+                       SUM(output_tokens) AS output,
+                       SUM(cache_read_tokens) AS cache_read,
+                       SUM(cache_write_tokens) AS cache_write,
+                       SUM(reasoning_tokens) AS reasoning,
+                       SUM(total_tokens) AS tokens,
+                       SUM(cost_usd) AS cost,
+                       SUM(message_count) AS messages
+                FROM daily_model_usage
+                WHERE 1=1 {daily_filters}
+                GROUP BY date
+            ) AS daily
+            LEFT JOIN (
+                SELECT date, COUNT(DISTINCT {CANONICAL_SOURCE_SQL} || '::' || session_id) AS count
+                FROM usage_messages
+                WHERE 1=1 {message_filters}
+                GROUP BY date
+            ) AS sessions ON sessions.date = daily.date
+            ORDER BY daily.date ASC
             "#,
         );
-        let params = append_common_filters(&mut sql, since, sources);
-        sql.push_str(" GROUP BY date ORDER BY date ASC");
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params), row_to_dashboard_day)?;
@@ -857,19 +863,32 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<ProviderSummary>> {
         let conn = self.open()?;
-        let mut sql = format!(
+        // Sessions are counted from the ledger: one session spanning several
+        // days or models has a row in each daily rollup.
+        let mut daily_filters = String::new();
+        let mut params = append_common_filters(&mut daily_filters, since, sources);
+        let mut message_filters = String::new();
+        params.extend(append_common_filters(&mut message_filters, since, sources));
+        let sql = format!(
             r#"
-            SELECT source,
-                   SUM(cost_usd),
-                   SUM(total_tokens),
-                   SUM(message_count),
-                   SUM(session_count)
-            FROM daily_model_usage
-            WHERE 1=1
+            SELECT daily.source, daily.cost, daily.tokens, daily.messages,
+                   COALESCE(sessions.count, 0)
+            FROM (
+                SELECT source, SUM(cost_usd) AS cost, SUM(total_tokens) AS tokens,
+                       SUM(message_count) AS messages
+                FROM daily_model_usage
+                WHERE 1=1 {daily_filters}
+                GROUP BY source
+            ) AS daily
+            LEFT JOIN (
+                SELECT {CANONICAL_SOURCE_SQL} AS source, COUNT(DISTINCT session_id) AS count
+                FROM usage_messages
+                WHERE 1=1 {message_filters}
+                GROUP BY 1
+            ) AS sessions ON sessions.source = daily.source
+            ORDER BY daily.tokens DESC, daily.source ASC
             "#,
         );
-        let params = append_common_filters(&mut sql, since, sources);
-        sql.push_str(" GROUP BY source ORDER BY SUM(total_tokens) DESC, source ASC");
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params), row_to_provider_summary)?;
@@ -996,27 +1015,6 @@ impl UsageStore {
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
         ensure_schema_initialized(&self.path, &mut conn)?;
         Ok(conn)
-    }
-
-    fn delete_scoped(
-        &self,
-        range: Option<DateRange>,
-        sources: &[String],
-        refresh_pricing: bool,
-    ) -> Result<()> {
-        if sources.is_empty() {
-            return match range {
-                Some(range) => self.delete_date_range(range, refresh_pricing),
-                None => self.clear_all(refresh_pricing),
-            };
-        }
-
-        let mut conn = self.open()?;
-        let tx = conn.transaction()?;
-        delete_scoped_tx(&tx, range, sources, refresh_pricing)?;
-
-        tx.commit()?;
-        Ok(())
     }
 }
 
@@ -1432,7 +1430,7 @@ fn ensure_pricing_snapshot(
             .and_then(|p| p.lookup(&message.model_id, Some(message.provider_id.as_str())));
 
         if looked_up.is_none()
-            && !is_pseudo_model_id(&message.model_id)
+            && !crate::model_id::is_pseudo(&message.model_id)
             && !PricingCache::has_refreshed_this_run()
         {
             match pricing_cache.lazy_refresh_sync() {
@@ -1478,7 +1476,7 @@ fn ensure_pricing_snapshot(
             )?;
             Ok(Some(snapshot))
         } else {
-            if !is_pseudo_model_id(&message.model_id) {
+            if !crate::model_id::is_pseudo(&message.model_id) {
                 warn!(
                     "No pricing catalog entry found for model {} (provider: {}). Using zero-cost fallback.",
                     message.model_id, message.provider_id
@@ -1605,6 +1603,7 @@ fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()
     }
 
     conn.execute_batch(USAGE_SCHEMA_SQL)?;
+    refresh_canonical_model_ids(conn)?;
 
     initialized_paths()
         .lock()
@@ -1613,21 +1612,59 @@ fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()
     Ok(())
 }
 
+/// `canonical_model_id` is stored, but `model_id::canonical` evolves — it
+/// stopped carrying `-preview`, for one. Re-deriving the stored value once per
+/// process keeps old and new rows of a model in one group without a migration
+/// per rule change; the check is a single scan over distinct model ids.
+fn refresh_canonical_model_ids(conn: &mut Connection) -> Result<()> {
+    let stale: Vec<(String, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT model_id, canonical_model_id FROM usage_messages")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.filter_map(|row| {
+            let (model_id, stored) = row.ok()?;
+            let canonical = crate::model_id::canonical(&model_id);
+            (canonical != stored).then_some((model_id, canonical))
+        })
+        .collect()
+    };
+    if stale.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn.transaction()?;
+    let mut affected_dates = BTreeSet::new();
+    for (model_id, canonical) in &stale {
+        tx.execute(
+            "UPDATE usage_messages SET canonical_model_id = ?1 WHERE model_id = ?2",
+            params![canonical, model_id],
+        )?;
+        let mut stmt =
+            tx.prepare("SELECT DISTINCT date FROM usage_messages WHERE model_id = ?1")?;
+        let dates = stmt.query_map(params![model_id], |row| row.get::<_, String>(0))?;
+        affected_dates.extend(dates.flatten());
+    }
+    // The daily rollup is keyed by the canonical id too.
+    let now = Utc::now().timestamp_millis();
+    for date in &affected_dates {
+        rebuild_daily_for_date(&tx, date, now)?;
+    }
+    tx.commit()?;
+    info!(
+        "Usage store: re-canonicalized {} model ids after a naming rule change",
+        stale.len()
+    );
+    Ok(())
+}
+
 fn initialized_paths() -> &'static Mutex<HashSet<PathBuf>> {
     static PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     PATHS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Pseudo-model ids reported by agent logs that do not correspond to a real,
-/// purchasable model: routing aliases ("auto-gemini-3", "gemini-default"),
-/// internal features ("codex-auto-review"), and parser fallbacks ("unknown").
-/// They can never resolve against the pricing catalog, so they must not
-/// trigger on-demand pricing refreshes or keep cost repairs pending forever.
-fn is_pseudo_model_id(model_id: &str) -> bool {
-    crate::model_id::is_pseudo(model_id)
-}
-
-/// SQL twin of [`is_pseudo_model_id`]; keep both in sync.
+/// SQL twin of `model_id::is_pseudo`; keep both in sync.
 const NOT_PSEUDO_MODEL_SQL: &str = "model_id <> '' \
     AND lower(model_id) <> 'unknown' \
     AND lower(model_id) NOT LIKE 'auto-%' \
@@ -1704,6 +1741,11 @@ CREATE TABLE IF NOT EXISTS daily_model_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_daily_model_usage_date ON daily_model_usage(date);
 
+CREATE TABLE IF NOT EXISTS source_refresh_state (
+    source TEXT PRIMARY KEY,
+    last_refresh_started_ms INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS daily_pricing_snapshots (
     date TEXT NOT NULL,
     provider_id TEXT NOT NULL,
@@ -1772,52 +1814,173 @@ mod tests {
     }
 
     #[test]
-    fn default_since_prefers_recent_lookback() {
+    fn default_since_without_recorded_refresh_falls_back_to_latest_message() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+        assert_eq!(store.default_since("claude", None).unwrap(), None);
+
+        // A refresh recorded while the source was empty keeps the full scan,
+        // so history that appears later (an imported database) is not missed.
+        store
+            .record_refresh_started("claude", Utc::now().timestamp_millis())
+            .unwrap();
+        assert_eq!(store.default_since("claude", None).unwrap(), None);
+        store
+            .open()
+            .unwrap()
+            .execute("DELETE FROM source_refresh_state", [])
+            .unwrap();
+
+        store
+            .ingest_messages(&[sample_message("2024-03-10", "m1")], false)
+            .unwrap();
+        let since = store.default_since("claude", None).unwrap().unwrap();
+        assert_eq!(since, NaiveDate::from_ymd_opt(2024, 3, 8).unwrap());
+    }
+
+    #[test]
+    fn default_since_starts_a_day_before_the_last_recorded_refresh() {
         let tempdir = tempfile::tempdir().unwrap();
         let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
         store
             .ingest_messages(&[sample_message("2024-03-10", "m1")], false)
             .unwrap();
-        let since = store.default_since("claude", None).unwrap().unwrap();
+
+        let refresh_started = NaiveDate::from_ymd_opt(2024, 3, 20)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap()
+            .timestamp_millis();
+        store
+            .record_refresh_started("claude", refresh_started)
+            .unwrap();
+        // The refresh anchor wins over the (older) latest message date.
         assert_eq!(
-            since,
-            NaiveDate::from_ymd_opt(2024, 3, 10).unwrap()
-                - Duration::days(INCREMENTAL_LOOKBACK_DAYS)
+            store.default_since("claude", None).unwrap(),
+            Some(NaiveDate::from_ymd_opt(2024, 3, 19).unwrap())
+        );
+
+        // An older refresh finishing later never moves the anchor back.
+        store
+            .record_refresh_started("claude", refresh_started - 86_400_000 * 5)
+            .unwrap();
+        assert_eq!(
+            store.default_since("claude", None).unwrap(),
+            Some(NaiveDate::from_ymd_opt(2024, 3, 19).unwrap())
+        );
+
+        // A requested `--since` still narrows the window, never widens it.
+        let requested = NaiveDate::from_ymd_opt(2024, 3, 25).unwrap();
+        assert_eq!(
+            store.default_since("claude", Some(requested)).unwrap(),
+            Some(requested)
         );
     }
 
     #[test]
-    fn delete_sources_in_date_range_preserves_other_sources() {
+    fn stored_canonical_model_ids_follow_the_current_rules() {
         let tempdir = tempfile::tempdir().unwrap();
         let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+        let mut message = sample_message("2024-03-10", "m1");
+        message.model_id = "gemini-3-pro-preview-high".to_string();
+        store.ingest_messages(&[message], false).unwrap();
 
-        let mut claude = sample_message("2024-03-10", "claude-m1");
-        claude.client = "claude".to_string();
-        let mut codex = sample_message("2024-03-10", "codex-m1");
-        codex.client = "codex".to_string();
-        codex.provider_id = "openai".to_string();
+        let mut conn = store.open().unwrap();
+        // As written by a release whose `canonical` kept `-preview`.
+        conn.execute_batch(
+            "UPDATE usage_messages SET canonical_model_id = 'gemini-3-pro-preview';
+             UPDATE daily_model_usage SET model_id = 'gemini-3-pro-preview';",
+        )
+        .unwrap();
 
-        store
-            .ingest_messages(&[claude.clone(), codex.clone()], false)
+        refresh_canonical_model_ids(&mut conn).unwrap();
+        let canonical: String = conn
+            .query_row("SELECT canonical_model_id FROM usage_messages", [], |row| {
+                row.get(0)
+            })
             .unwrap();
+        assert_eq!(canonical, "gemini-3-pro");
+        // The daily rollup, keyed by the canonical id too, follows.
+        assert_eq!(
+            store.load_daily_rows(None, &[]).unwrap()[0].model_id,
+            "gemini-3-pro"
+        );
+    }
 
+    #[test]
+    fn session_counts_are_distinct_across_days_and_models() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+        let message = |date: &str, key: &str, model: &str| {
+            let mut message = sample_message(date, key);
+            message.model_id = model.to_string();
+            message
+        };
+        // One session, two models on its first day, one on its second.
         store
-            .delete_sources_in_date_range(
-                DateRange {
-                    start: NaiveDate::from_ymd_opt(2024, 3, 10).unwrap(),
-                    end: NaiveDate::from_ymd_opt(2024, 3, 10).unwrap(),
-                },
-                &["claude".to_string()],
+            .ingest_messages(
+                &[
+                    message("2024-03-10", "m1", "claude-3-opus"),
+                    message("2024-03-10", "m2", "claude-3-haiku"),
+                    message("2024-03-11", "m3", "claude-3-opus"),
+                ],
                 false,
             )
             .unwrap();
 
-        let remaining_codex = store.load_messages(None, &["codex".to_string()]).unwrap();
-        let remaining_claude = store.load_messages(None, &["claude".to_string()]).unwrap();
+        assert_eq!(store.load_summary_counts(None, &[]).unwrap().1, 1);
+        assert_eq!(
+            store.load_provider_summaries(None, &[]).unwrap()[0].session_count,
+            1
+        );
+        let days = store.load_dashboard_days(None, &[]).unwrap();
+        assert_eq!(
+            days.iter().map(|day| day.session_count).collect::<Vec<_>>(),
+            [1, 1]
+        );
+    }
 
-        assert_eq!(remaining_codex.len(), 1);
-        assert_eq!(remaining_codex[0].client, "codex");
-        assert!(remaining_claude.is_empty());
+    #[test]
+    fn replace_source_messages_in_range_preserves_other_sources_and_dates() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        let claude_old = sample_message("2024-03-01", "claude-old");
+        let claude_in_range = sample_message("2024-03-10", "claude-m1");
+        let mut codex = sample_message("2024-03-10", "codex-m1");
+        codex.client = "codex".to_string();
+        codex.provider_id = "openai".to_string();
+        store
+            .ingest_messages(&[claude_old, claude_in_range, codex], false)
+            .unwrap();
+
+        let reparsed = sample_message("2024-03-10", "claude-m2");
+        store
+            .replace_source_messages(
+                "claude",
+                Some(DateRange {
+                    start: NaiveDate::from_ymd_opt(2024, 3, 10).unwrap(),
+                    end: NaiveDate::from_ymd_opt(2024, 3, 10).unwrap(),
+                }),
+                &[reparsed],
+                false,
+            )
+            .unwrap();
+
+        let keys = |source: &str| {
+            let mut keys: Vec<String> = store
+                .load_messages(None, &[source.to_string()])
+                .unwrap()
+                .into_iter()
+                .map(|message| message.message_key)
+                .collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(keys("claude"), ["claude-m2", "claude-old"]);
+        assert_eq!(keys("codex"), ["codex-m1"]);
     }
 
     #[test]
@@ -1831,7 +1994,9 @@ mod tests {
         message.parser_version = "gemini-v2".to_string();
 
         store.ingest_messages(&[message], false).unwrap();
-        store.replace_source_messages("gemini", &[], false).unwrap();
+        store
+            .replace_source_messages("gemini", None, &[], false)
+            .unwrap();
 
         let remaining = store.load_messages(None, &["gemini".to_string()]).unwrap();
         assert_eq!(remaining.len(), 1);
@@ -1857,7 +2022,7 @@ mod tests {
 
         store.ingest_messages(&[old], false).unwrap();
         store
-            .replace_source_messages("gemini", &[replacement], false)
+            .replace_source_messages("gemini", None, &[replacement], false)
             .unwrap();
 
         let remaining = store.load_messages(None, &["gemini".to_string()]).unwrap();
@@ -2161,28 +2326,6 @@ mod tests {
     }
 
     #[test]
-    fn pseudo_model_ids_are_detected() {
-        for id in [
-            "",
-            "unknown",
-            "Unknown",
-            "auto-gemini-3",
-            "codex-auto-review",
-            "gemini-default",
-        ] {
-            assert!(is_pseudo_model_id(id), "{id:?} should be pseudo");
-        }
-        for id in [
-            "gpt-5.4",
-            "claude-opus-4-6",
-            "moonshotai/kimi-k2.5",
-            "gemini-3-flash-preview",
-        ] {
-            assert!(!is_pseudo_model_id(id), "{id:?} should not be pseudo");
-        }
-    }
-
-    #[test]
     fn pseudo_models_do_not_keep_repairs_pending() {
         let tempdir = tempfile::tempdir().unwrap();
         let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
@@ -2299,7 +2442,7 @@ mod tests {
         msg_v3.parser_version = "antigravity-v3".to_string();
 
         store
-            .replace_source_messages("antigravity", &[msg_v3], false)
+            .replace_source_messages("antigravity", None, &[msg_v3], false)
             .unwrap();
 
         // 4. Verify stale rows under all antigravity client kinds were cleaned up

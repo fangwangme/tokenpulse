@@ -144,6 +144,9 @@ Important rule:
 - primary token source is `last_token_usage`
 - supports fallback delta computation from `total_token_usage`
 - includes cumulative-regression guards
+- a forked or sub-agent session (`forked_from_id`, `parent_thread_id` or
+  `source.subagent` in `session_meta`) opens with its parent's token history;
+  token counts before its first `turn_context` only seed the running total
 
 ### OpenCode
 
@@ -251,7 +254,7 @@ tokenpulse --log
 
 Antigravity usage sync maintains a local cache database in `~/.local/share/tokenpulse/antigravity-cache/cache.db`. Regular runs rebuild sessions whose Antigravity or Antigravity CLI conversation files were modified in the last two days. Running with `--rebuild-all` clears the database of parsed messages and fully rebuilds the local SQLite cache database by querying all discoverable sessions from a running Antigravity language server.
 
-Token usage comes from the conversation databases themselves, so it no longer depends on a running language server. Both `~/.gemini/antigravity-cli/conversations/` (CLI) and `~/.gemini/antigravity/conversations/` (Desktop) are scanned; `antigravity-ide/` and `antigravity-backup/` are not, because they hold only encrypted `.pb` files and `backup` duplicates `ide`. For each `.db` conversation the parser decodes the protobuf blobs in the `gen_metadata` table and writes one `session_usage` row per generation, tagged with the current `parser_version` (`antigravity-v3`):
+Token usage comes from the conversation databases themselves, so it no longer depends on a running language server. Both `~/.gemini/antigravity-cli/conversations/` (CLI) and `~/.gemini/antigravity/conversations/` (Desktop) are scanned; `antigravity-ide/` and `antigravity-backup/` are not, because they hold only encrypted `.pb` files and `backup` duplicates `ide`. For each `.db` conversation the parser decodes the protobuf blobs in the `gen_metadata` table and writes one `session_usage` row per generation, tagged with the current `parser_version` (`antigravity-v6`):
 
 | `gen_metadata` field | language-server field | column |
 |---|---|---|
@@ -260,7 +263,10 @@ Token usage comes from the conversation databases themselves, so it no longer de
 | `1.4.9` | `thinkingOutputTokens` | `reasoning_tokens` |
 | `1.4.10` | `responseOutputTokens` | `output_tokens` |
 | `1.4.11` | `responseId` | `response_id` |
-| `1.19`, else the `model_enum` pair in `1.20` | `responseModel` | `model_id` |
+| the `model_enum` pair in `1.20` | `model` | `model_enum` |
+| `1.19` | `responseModel` | `served_model` |
+
+`model_id` is resolved enum-first through the alias table and re-resolved on every read; see `docs/specs/antigravity-model-aliases.md`.
 
 `output_tokens` deliberately comes from `1.4.10` rather than `1.4.3` (`outputTokens`): `1.4.3` already contains the thinking tokens, and cost calculation adds reasoning on top of output, so `1.4.3` would double-count. Both the local parser and the language-server path funnel through one `normalize_antigravity_tokens` function that applies this rule and verifies `thinking + response == total`, so the two sources cannot drift apart; a record failing that check is logged and skipped rather than stored. When a source reports only the total, the disjoint output is recovered as `total - thinking`. Antigravity reports no cache-write tokens on either path, so `cache_write_tokens` is always 0. Wall-clock times are joined from `steps.metadata` through the request UUID the two tables share; a `Timestamp` whose nanoseconds fall outside `[0, 1e9)` is not one and is skipped.
 
@@ -270,7 +276,9 @@ Encrypted `.pb` conversations carry no readable usage and remain the language se
 
 Antigravity CLI and Desktop are treated as sub-clients of the same `antigravity` source. The parser stores the concrete runtime in `client_detail` (`antigravity-cli` or `antigravity-desktop`) and uses a storage key shaped like `client:session_id:message_id`, while usage aggregates deduplicate on the logical `antigravity + session_id + message_id` key. This allows the same message to exist in both CLI and Desktop cache paths without counting its tokens twice.
 
-Claude Code, Codex, Copilot, Gemini CLI, and PI do not maintain separate raw cache databases. Their normal incremental path discovers session files by mtime, parses matching files concurrently, and replaces only the sessions represented by those files. Range refreshes and full rebuilds still use the broader source/date clearing paths.
+Claude Code, Codex, Copilot, Gemini CLI, and PI do not maintain separate raw cache databases. Their normal incremental path discovers session files by arrival time (the later of mtime and ctime), parses matching files concurrently, and replaces only the sessions represented by those files. Range refreshes, full rebuilds and parser upgrades replace a source's ledger rows (within the range, if any) in one transaction, and only once its parse has succeeded; a failed or empty parse leaves them untouched.
+
+The incremental window starts a day before the source's previous refresh (recorded in `source_refresh_state` in `usage.db`). Without a recorded refresh it starts two days before the newest stored message; a source with no data is scanned in full. Runs narrowed by `--since` or `--refresh-days` do not move the anchor.
 
 Non-TUI output includes:
 

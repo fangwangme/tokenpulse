@@ -66,6 +66,8 @@ impl fmt::Debug for ClaudeOAuth {
     }
 }
 
+// The keychain sources are only ever constructed on macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ClaudeCredentialSource {
     CurrentUserKeychain { account: String },
@@ -448,6 +450,7 @@ fn parse_credentials(content: &str, source: &str) -> Option<ClaudeCredentials> {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn ordered_unique_candidates<const N: usize>(
     candidates: [Option<ClaudeCredentialCandidate>; N],
 ) -> Vec<ClaudeCredentialCandidate> {

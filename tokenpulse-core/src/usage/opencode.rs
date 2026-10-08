@@ -891,8 +891,11 @@ mod tests {
             )
             .unwrap();
 
-        let messages =
-            parse_databases(&[db.path.clone()], NaiveDate::from_ymd_opt(2020, 1, 1)).unwrap();
+        let messages = parse_databases(
+            std::slice::from_ref(&db.path),
+            NaiveDate::from_ymd_opt(2020, 1, 1),
+        )
+        .unwrap();
 
         assert_eq!(keys(&messages), ["msg_old"]);
         assert_eq!(messages[0].timestamp, T0);
@@ -1237,7 +1240,7 @@ mod tests {
         );
         db.v2_at("v2_new", "ses_v2", "assistant", 2, on, v2_assistant("m", 1));
 
-        let messages = parse_databases(&[db.path.clone()], Some(since)).unwrap();
+        let messages = parse_databases(std::slice::from_ref(&db.path), Some(since)).unwrap();
 
         assert_eq!(keys(&messages), ["v1_new", "v2_new"]);
         assert_eq!(parse(&[&db]).len(), 4);
