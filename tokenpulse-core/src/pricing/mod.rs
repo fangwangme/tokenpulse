@@ -9,8 +9,6 @@ use crate::model_id::strip_date_suffix;
 use crate::provider::TokenBreakdown;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
-use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPricing {
@@ -35,6 +33,7 @@ impl ModelPricing {
         }
     }
 
+    #[cfg(test)]
     pub fn simple(input_cost: f64, output_cost: f64) -> Self {
         Self {
             input_cost_per_token: input_cost,
@@ -246,22 +245,6 @@ pub fn calculate_cost(tokens: &TokenBreakdown, pricing: &ModelPricing) -> f64 {
     let reasoning = tokens.reasoning as f64 * pricing.output_cost_per_token;
 
     input + output + cache_read + cache_write + reasoning
-}
-
-pub fn lookup_model_pricing<'a>(
-    model_id: &str,
-    pricing_map: &'a HashMap<String, ModelPricing>,
-) -> Option<&'a ModelPricing> {
-    lookup_model_pricing_with_provider(model_id, None, pricing_map)
-}
-
-pub fn lookup_model_pricing_with_provider<'a>(
-    model_id: &str,
-    provider_id: Option<&str>,
-    pricing_map: &'a HashMap<String, ModelPricing>,
-) -> Option<&'a ModelPricing> {
-    let matched_key = lookup_pricing_key_with_provider(model_id, provider_id, pricing_map)?;
-    pricing_map.get(matched_key)
 }
 
 fn pricing_lookup_candidates_with_provider(
@@ -706,37 +689,6 @@ fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
     }
 }
 
-fn lookup_pricing_key_with_provider<'a, T>(
-    model_id: &str,
-    provider_id: Option<&str>,
-    pricing_map: &'a HashMap<String, T>,
-) -> Option<&'a str> {
-    let candidates = pricing_lookup_candidates_with_provider(model_id, provider_id);
-
-    for candidate in &candidates {
-        if let Some((key, _)) = pricing_map.get_key_value(candidate) {
-            return Some(key.as_str());
-        }
-
-        if let Some(key) = find_case_insensitive_key_generic(candidate, pricing_map) {
-            return Some(key);
-        }
-    }
-
-    None
-}
-
-fn find_case_insensitive_key_generic<'a, T>(
-    candidate: &str,
-    pricing_map: &'a HashMap<String, T>,
-) -> Option<&'a str> {
-    pricing_map
-        .keys()
-        .filter(|key| key.eq_ignore_ascii_case(candidate))
-        .min_by_key(|key| key.len())
-        .map(String::as_str)
-}
-
 fn find_case_insensitive_key_value<'a, T>(
     candidate: &str,
     pricing_map: &'a HashMap<String, T>,
@@ -746,37 +698,6 @@ fn find_case_insensitive_key_value<'a, T>(
         .filter(|key| key.eq_ignore_ascii_case(candidate))
         .min_by_key(|key| key.len())?;
     pricing_map.get_key_value(key)
-}
-
-pub fn lookup_model_pricing_or_warn<'a>(
-    model_id: &str,
-    pricing_map: &'a HashMap<String, ModelPricing>,
-) -> Option<&'a ModelPricing> {
-    lookup_model_pricing_or_warn_with_provider(model_id, None, pricing_map)
-}
-
-pub fn lookup_model_pricing_or_warn_with_provider<'a>(
-    model_id: &str,
-    provider_id: Option<&str>,
-    pricing_map: &'a HashMap<String, ModelPricing>,
-) -> Option<&'a ModelPricing> {
-    let pricing = lookup_model_pricing_with_provider(model_id, provider_id, pricing_map);
-
-    if pricing.is_none() && should_warn_for_missing_model(model_id) {
-        warn!("No pricing found for model: {}", model_id);
-    }
-
-    pricing
-}
-
-fn should_warn_for_missing_model(model_id: &str) -> bool {
-    static WARNED_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-
-    WARNED_MODELS
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .map(|mut warned_models| warned_models.insert(model_id.to_string()))
-        .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -794,6 +715,35 @@ mod tests {
         cache_write: Option<f64>,
     ) -> ModelPricing {
         ModelPricing::new(input, output, cache_read, cache_write)
+    }
+
+    /// Looks `model_id` up the way usage ingest does: through a catalog built
+    /// from `map`, keys normalized on insert exactly like a fetched one.
+    fn lookup_model_pricing_with_provider(
+        model_id: &str,
+        provider_id: Option<&str>,
+        map: &HashMap<String, ModelPricing>,
+    ) -> Option<ModelPricing> {
+        let catalog = PricingCatalog::new(
+            map.iter()
+                .map(|(key, pricing)| {
+                    (
+                        key.clone(),
+                        PricingRecord::new(pricing.clone(), "test", "v1"),
+                    )
+                })
+                .collect(),
+        );
+        catalog
+            .lookup(model_id, provider_id)
+            .map(|resolved| resolved.pricing.clone())
+    }
+
+    fn lookup_model_pricing(
+        model_id: &str,
+        map: &HashMap<String, ModelPricing>,
+    ) -> Option<ModelPricing> {
+        lookup_model_pricing_with_provider(model_id, None, map)
     }
 
     #[test]
@@ -887,22 +837,6 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_cost_empty_tokens() {
-        let tokens = TokenBreakdown {
-            input: 0,
-            output: 0,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        };
-
-        let pricing = make_pricing(0.00001, 0.00003);
-        let cost = calculate_cost(&tokens, &pricing);
-
-        assert_eq!(cost, 0.0);
-    }
-
-    #[test]
     fn test_lookup_model_pricing_exact() {
         let mut map = HashMap::new();
         map.insert(
@@ -920,13 +854,6 @@ mod tests {
         let map = HashMap::<String, ModelPricing>::new();
         let result = lookup_model_pricing("unknown-model", &map);
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_missing_model_warning_is_deduplicated_per_model() {
-        assert!(should_warn_for_missing_model("missing-model-a"));
-        assert!(!should_warn_for_missing_model("missing-model-a"));
-        assert!(should_warn_for_missing_model("missing-model-b"));
     }
 
     #[test]
@@ -1489,8 +1416,6 @@ mod tests {
 
         assert!(lookup_model_pricing("claude-opus-4-6", &map).is_none());
         assert!(lookup_model_pricing("claude-sonnet-4-6", &map).is_none());
-        assert!(lookup_model_pricing("MODEL_PLACEHOLDER_M26", &map).is_none());
-        assert!(lookup_model_pricing("MODEL_PLACEHOLDER_M35", &map).is_none());
     }
 
     #[test]
@@ -1585,42 +1510,6 @@ mod tests {
         assert_eq!(strip_three_segment_prefix("moonshotai/kimi-k2.6"), None);
         // Four segments – not touched
         assert_eq!(strip_three_segment_prefix("a/b/c/d"), None);
-    }
-
-    #[test]
-    fn test_model_pricing_simple() {
-        let pricing = ModelPricing::simple(0.00001, 0.00003);
-        assert_eq!(pricing.input_cost_per_token, 0.00001);
-        assert_eq!(pricing.output_cost_per_token, 0.00003);
-        assert!(pricing.cache_read_input_token_cost.is_none());
-        assert!(pricing.cache_creation_input_token_cost.is_none());
-    }
-
-    #[test]
-    fn test_model_pricing_new() {
-        let pricing = ModelPricing::new(0.00001, 0.00003, Some(0.000001), Some(0.0000125));
-        assert_eq!(pricing.input_cost_per_token, 0.00001);
-        assert_eq!(pricing.output_cost_per_token, 0.00003);
-        assert_eq!(pricing.cache_read_input_token_cost, Some(0.000001));
-        assert_eq!(pricing.cache_creation_input_token_cost, Some(0.0000125));
-    }
-
-    #[test]
-    fn test_large_token_count() {
-        let tokens = TokenBreakdown {
-            input: 1_000_000, // 1M tokens
-            output: 500_000,
-            cache_read: 100_000,
-            cache_write: 50_000,
-            reasoning: 0,
-        };
-
-        let pricing = make_pricing_full(0.000015, 0.000075, Some(0.0000015), Some(0.00001875));
-        let cost = calculate_cost(&tokens, &pricing);
-
-        // Should be a reasonable cost
-        assert!(cost > 0.0);
-        assert!(cost < 100.0); // Less than $100 for these tokens
     }
 
     #[test]

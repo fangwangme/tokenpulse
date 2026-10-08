@@ -41,11 +41,13 @@ impl AntigravitySessionParser {
         self
     }
 
+    #[cfg(test)]
     pub fn with_custom_paths(mut self, paths: Vec<PathBuf>) -> Self {
         self.custom_paths = Some(paths);
         self
     }
 
+    #[cfg(test)]
     pub fn with_skip_sync(mut self, skip_sync: bool) -> Self {
         self.skip_sync = skip_sync;
         self
@@ -450,10 +452,6 @@ fn migrate_legacy_usage_rows(conn: &rusqlite::Connection) -> Result<()> {
 fn count_antigravity_session_cache_rows(conn: &rusqlite::Connection) -> usize {
     conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
         .unwrap_or(0)
-}
-
-pub fn sync_antigravity(sessions_dir: &Path) -> Result<()> {
-    sync_antigravity_with_options(sessions_dir, AntigravitySyncOptions::default())
 }
 
 fn block_on_async<F: std::future::Future>(future: F) -> F::Output {
@@ -939,7 +937,7 @@ fn resolve_rpc_chat_model(
         served_model.as_deref(),
         model_aliases,
     );
-    if is_pseudo_raw_model(&model_id) {
+    if crate::model_id::is_pseudo(&model_id) {
         if let Some(label_id) = text("modelDisplayName")
             .as_deref()
             .and_then(antigravity_label_to_model_id)
@@ -2579,10 +2577,6 @@ fn normalize_cached_antigravity_artifacts(
     Ok(())
 }
 
-fn is_pseudo_raw_model(model: &str) -> bool {
-    crate::model_id::is_pseudo(model)
-}
-
 /// Resolves one generation's model id from what Antigravity reported for it.
 ///
 /// The enum (`MODEL_PLACEHOLDER_M319`) is Antigravity's stable identity, and
@@ -2601,7 +2595,7 @@ fn resolve_antigravity_model(
     if let Some(alias) = model_enum.and_then(|value| find_model_alias(value, model_aliases)) {
         return format_model_id(&alias.model_id);
     }
-    if let Some(served_model) = served_model.filter(|value| !is_pseudo_raw_model(value)) {
+    if let Some(served_model) = served_model.filter(|value| !crate::model_id::is_pseudo(value)) {
         return format_model_id(served_model);
     }
     model_enum
@@ -2666,7 +2660,7 @@ fn alias_key_candidates(model_id: &str) -> Vec<String> {
 /// `Gemini 3.1 Pro (High)` → `gemini-3-1-pro-high`.
 fn antigravity_label_to_model_id(label: &str) -> Option<String> {
     let model_id = format_model_id(&label.replace(['(', ')'], " "));
-    (!is_pseudo_raw_model(&model_id)).then_some(model_id)
+    (!crate::model_id::is_pseudo(&model_id)).then_some(model_id)
 }
 
 /// Extracts trajectory entries from the RPC response.
@@ -4425,16 +4419,6 @@ mod tests {
         let desk_conns =
             resolve_candidate_connections(&[AntigravityRuntimeKind::Desktop], &only_ide_running);
         assert!(desk_conns.is_empty());
-    }
-
-    #[test]
-    fn test_is_pseudo_raw_model() {
-        assert!(is_pseudo_raw_model(""));
-        assert!(is_pseudo_raw_model("unknown"));
-        assert!(is_pseudo_raw_model("UNKNOWN"));
-        assert!(is_pseudo_raw_model("auto-review"));
-        assert!(is_pseudo_raw_model("gemini-default"));
-        assert!(!is_pseudo_raw_model("gemini-1.5-pro"));
     }
 
     fn proto_varint_bytes(value: u64) -> Vec<u8> {

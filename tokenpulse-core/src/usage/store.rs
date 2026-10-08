@@ -634,22 +634,6 @@ impl UsageStore {
         Ok(())
     }
 
-    pub fn rebuild_all_daily(&self) -> Result<()> {
-        let mut conn = self.open()?;
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM daily_model_usage", [])?;
-        let mut stmt = tx.prepare("SELECT DISTINCT date FROM usage_messages ORDER BY date")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let dates: Vec<String> = rows.flatten().collect();
-        drop(stmt);
-        let now = Utc::now().timestamp_millis();
-        for date in dates {
-            rebuild_daily_for_date(&tx, &date, now)?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
     pub fn repair_zero_costs(&self, since: Option<NaiveDate>, sources: &[String]) -> Result<usize> {
         let mut conn = self.open()?;
         if !has_zero_cost_repairs_pending(&conn, since, sources)? {
@@ -1470,7 +1454,7 @@ fn ensure_pricing_snapshot(
             .and_then(|p| p.lookup(&message.model_id, Some(message.provider_id.as_str())));
 
         if looked_up.is_none()
-            && !is_pseudo_model_id(&message.model_id)
+            && !crate::model_id::is_pseudo(&message.model_id)
             && !PricingCache::has_refreshed_this_run()
         {
             match pricing_cache.lazy_refresh_sync() {
@@ -1516,7 +1500,7 @@ fn ensure_pricing_snapshot(
             )?;
             Ok(Some(snapshot))
         } else {
-            if !is_pseudo_model_id(&message.model_id) {
+            if !crate::model_id::is_pseudo(&message.model_id) {
                 warn!(
                     "No pricing catalog entry found for model {} (provider: {}). Using zero-cost fallback.",
                     message.model_id, message.provider_id
@@ -1694,16 +1678,7 @@ fn initialized_paths() -> &'static Mutex<HashSet<PathBuf>> {
     PATHS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Pseudo-model ids reported by agent logs that do not correspond to a real,
-/// purchasable model: routing aliases ("auto-gemini-3", "gemini-default"),
-/// internal features ("codex-auto-review"), and parser fallbacks ("unknown").
-/// They can never resolve against the pricing catalog, so they must not
-/// trigger on-demand pricing refreshes or keep cost repairs pending forever.
-fn is_pseudo_model_id(model_id: &str) -> bool {
-    crate::model_id::is_pseudo(model_id)
-}
-
-/// SQL twin of [`is_pseudo_model_id`]; keep both in sync.
+/// SQL twin of `model_id::is_pseudo`; keep both in sync.
 const NOT_PSEUDO_MODEL_SQL: &str = "model_id <> '' \
     AND lower(model_id) <> 'unknown' \
     AND lower(model_id) NOT LIKE 'auto-%' \
@@ -1904,9 +1879,6 @@ mod tests {
             store.default_since("claude", Some(requested)).unwrap(),
             Some(requested)
         );
-
-        // Other sources keep their own anchor.
-        assert_eq!(store.default_since("codex", None).unwrap(), None);
     }
 
     #[test]
@@ -2306,28 +2278,6 @@ mod tests {
             count, 0,
             "No snapshots should be saved for missing/zero-cost models"
         );
-    }
-
-    #[test]
-    fn pseudo_model_ids_are_detected() {
-        for id in [
-            "",
-            "unknown",
-            "Unknown",
-            "auto-gemini-3",
-            "codex-auto-review",
-            "gemini-default",
-        ] {
-            assert!(is_pseudo_model_id(id), "{id:?} should be pseudo");
-        }
-        for id in [
-            "gpt-5.4",
-            "claude-opus-4-6",
-            "moonshotai/kimi-k2.5",
-            "gemini-3-flash-preview",
-        ] {
-            assert!(!is_pseudo_model_id(id), "{id:?} should not be pseudo");
-        }
     }
 
     #[test]

@@ -19,10 +19,9 @@ pub use pi::PiSessionParser;
 pub use store::{DailyUsageRow, DateRange, UsageStore};
 pub use utils::{detect_provider_from_model, normalize_model_name};
 
-use crate::provider::UnifiedMessage;
 use chrono::{Datelike, Days, NaiveDate};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardDay {
@@ -114,90 +113,6 @@ pub struct UsageSummary {
     pub by_model: Vec<ModelSummary>,
 }
 
-pub fn compute_usage_summary(messages: &[UnifiedMessage]) -> UsageSummary {
-    let mut provider_map: HashMap<String, Vec<&UnifiedMessage>> = HashMap::new();
-    let mut model_map: HashMap<String, Vec<&UnifiedMessage>> = HashMap::new();
-
-    for message in messages {
-        provider_map
-            .entry(message.client.clone())
-            .or_default()
-            .push(message);
-        model_map
-            .entry(normalize_model_name(&message.model_id))
-            .or_default()
-            .push(message);
-    }
-
-    let total_tokens: i64 = messages.iter().map(UnifiedMessage::total_tokens).sum();
-
-    let mut by_provider: Vec<ProviderSummary> = provider_map
-        .into_iter()
-        .map(|(provider, entries)| {
-            let mut sessions = BTreeSet::new();
-            for entry in &entries {
-                sessions.insert(entry.session_id.clone());
-            }
-            let cost: f64 = entries.iter().map(|entry| entry.cost).sum();
-            let tokens: i64 = entries.iter().map(|entry| entry.total_tokens()).sum();
-            ProviderSummary {
-                provider,
-                cost,
-                tokens,
-                message_count: entries.len(),
-                session_count: sessions.len(),
-                percent: percent(tokens, total_tokens),
-            }
-        })
-        .collect();
-    by_provider.sort_by(|left, right| right.tokens.cmp(&left.tokens));
-
-    let mut by_model: Vec<ModelSummary> = model_map
-        .into_iter()
-        .map(|(model, entries)| {
-            let mut sessions = BTreeSet::new();
-            let mut sources = BTreeSet::new();
-            let mut providers = BTreeSet::new();
-            for entry in &entries {
-                sessions.insert(entry.session_id.clone());
-                sources.insert(entry.client.clone());
-                providers.insert(entry.provider_id.clone());
-            }
-            let cost: f64 = entries.iter().map(|entry| entry.cost).sum();
-            let tokens: i64 = entries.iter().map(|entry| entry.total_tokens()).sum();
-            let input_tokens: i64 = entries.iter().map(|entry| entry.tokens.input).sum();
-            let output_tokens: i64 = entries.iter().map(|entry| entry.tokens.output).sum();
-            let cache_read_tokens: i64 = entries.iter().map(|entry| entry.tokens.cache_read).sum();
-            let cache_write_tokens: i64 =
-                entries.iter().map(|entry| entry.tokens.cache_write).sum();
-            ModelSummary {
-                model,
-                provider: providers.into_iter().collect::<Vec<_>>().join(","),
-                source: sources.into_iter().collect::<Vec<_>>().join(","),
-                cost,
-                tokens,
-                input_tokens,
-                output_tokens,
-                cache_tokens: cache_read_tokens + cache_write_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-                message_count: entries.len(),
-                session_count: sessions.len(),
-                percent: percent(tokens, total_tokens),
-            }
-        })
-        .collect();
-    by_model.sort_by(|left, right| right.tokens.cmp(&left.tokens));
-
-    build_usage_summary_from_daily(
-        compute_daily(messages),
-        by_provider,
-        by_model,
-        messages.len(),
-        compute_session_count(messages),
-    )
-}
-
 pub fn build_usage_summary_from_daily(
     mut daily: Vec<DashboardDay>,
     mut by_provider: Vec<ProviderSummary>,
@@ -260,59 +175,6 @@ pub fn build_usage_summary_from_daily(
         by_provider,
         by_model,
     }
-}
-
-pub fn compute_daily(messages: &[UnifiedMessage]) -> Vec<DashboardDay> {
-    let mut grouped: BTreeMap<String, Vec<&UnifiedMessage>> = BTreeMap::new();
-    for message in messages {
-        grouped
-            .entry(message.date.clone())
-            .or_default()
-            .push(message);
-    }
-
-    let mut daily: Vec<DashboardDay> = grouped
-        .into_iter()
-        .map(|(date, entries)| {
-            let mut sessions = BTreeSet::new();
-            let mut input_tokens = 0i64;
-            let mut output_tokens = 0i64;
-            let mut cache_read_tokens = 0i64;
-            let mut cache_write_tokens = 0i64;
-            let mut reasoning_tokens = 0i64;
-            let mut total_tokens = 0i64;
-            let mut total_cost_usd = 0.0f64;
-
-            for entry in &entries {
-                sessions.insert((entry.client.clone(), entry.session_id.clone()));
-                input_tokens += entry.tokens.input;
-                output_tokens += entry.tokens.output;
-                cache_read_tokens += entry.tokens.cache_read;
-                cache_write_tokens += entry.tokens.cache_write;
-                reasoning_tokens += entry.tokens.reasoning;
-                total_tokens += entry.total_tokens();
-                total_cost_usd += entry.cost;
-            }
-
-            DashboardDay {
-                date,
-                total_tokens,
-                total_cost_usd,
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-                reasoning_tokens,
-                message_count: entries.len() as i64,
-                session_count: sessions.len() as i64,
-                intensity_tokens: 0,
-                intensity_cost: 0,
-            }
-        })
-        .collect();
-
-    apply_intensity_buckets(&mut daily);
-    daily
 }
 
 pub fn compute_weekly_rollups(daily: &[DashboardDay]) -> Vec<UsageRollup> {
@@ -391,14 +253,6 @@ fn monthly_group(date: NaiveDate) -> Option<(String, NaiveDate, NaiveDate)> {
     Some((start.format("%Y-%m").to_string(), start, end))
 }
 
-fn compute_session_count(messages: &[UnifiedMessage]) -> usize {
-    let mut unique_sessions = BTreeSet::new();
-    for message in messages {
-        unique_sessions.insert((message.client.clone(), message.session_id.clone()));
-    }
-    unique_sessions.len()
-}
-
 fn apply_intensity_buckets(daily: &mut [DashboardDay]) {
     apply_metric_buckets(
         daily,
@@ -448,106 +302,29 @@ fn parse_day(value: &str) -> Option<NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::TokenBreakdown;
-
-    fn make_message(
-        client: &str,
-        provider_id: &str,
-        model: &str,
-        session_id: &str,
-        message_key: &str,
-        date: &str,
-        cost: f64,
-    ) -> UnifiedMessage {
-        let timestamp = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-            .unwrap()
-            .and_hms_opt(12, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_millis();
-
-        UnifiedMessage {
-            client: client.to_string(),
-            client_detail: None,
-            model_id: model.to_string(),
-            provider_id: provider_id.to_string(),
-            session_id: session_id.to_string(),
-            message_key: message_key.to_string(),
-            timestamp,
-            date: date.to_string(),
-            tokens: TokenBreakdown {
-                input: 100,
-                output: 50,
-                cache_read: 10,
-                cache_write: 5,
-                reasoning: 0,
-            },
-            cost,
-            pricing_day: date.to_string(),
-            parser_version: "test".to_string(),
-        }
-    }
-
-    #[test]
-    fn compute_usage_summary_groups_daily_weekly_and_monthly() {
-        let messages = vec![
-            make_message(
-                "claude",
-                "anthropic",
-                "claude-sonnet-4-20250514",
-                "s1",
-                "m1",
-                "2026-03-01",
-                1.25,
-            ),
-            make_message(
-                "codex",
-                "anthropic",
-                "claude-sonnet-4.0",
-                "s2",
-                "m2",
-                "2026-03-02",
-                0.75,
-            ),
-            make_message("codex", "openai", "o3", "s2", "m3", "2026-03-08", 2.00),
-        ];
-
-        let summary = compute_usage_summary(&messages);
-
-        assert_eq!(summary.total_tokens, 495);
-        assert_eq!(summary.message_count, 3);
-        assert_eq!(summary.session_count, 2);
-        assert_eq!(summary.daily.len(), 3);
-        assert_eq!(summary.weekly.len(), 2);
-        assert_eq!(summary.monthly.len(), 1);
-        assert_eq!(summary.daily[0].intensity_tokens, 4);
-        assert_eq!(summary.daily[1].intensity_tokens, 4);
-        assert_eq!(summary.daily[2].intensity_tokens, 4);
-        assert_eq!(summary.weekly[0].label, "2026-03-01..2026-03-07");
-        assert_eq!(summary.monthly[0].label, "2026-03");
-        assert!((summary.total_cost - 4.0).abs() < 0.001);
-        assert_eq!(summary.by_model.len(), 2);
-        assert_eq!(summary.by_model[0].model, "claude-sonnet-4");
-        assert_eq!(summary.by_model[0].source, "claude,codex");
-        assert_eq!(summary.by_model[0].provider, "anthropic");
-    }
 
     #[test]
     fn build_usage_summary_recomputes_share_percentages() {
-        let daily = vec![DashboardDay {
-            date: "2026-03-20".to_string(),
-            total_tokens: 1_000,
-            total_cost_usd: 5.0,
-            input_tokens: 400,
-            output_tokens: 300,
-            cache_read_tokens: 200,
-            cache_write_tokens: 100,
+        let day = |date: &str, total_tokens: i64, total_cost_usd: f64| DashboardDay {
+            date: date.to_string(),
+            total_tokens,
+            total_cost_usd,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             reasoning_tokens: 0,
-            message_count: 5,
-            session_count: 2,
+            message_count: 1,
+            session_count: 1,
             intensity_tokens: 0,
             intensity_cost: 0,
-        }];
+        };
+        // Unsorted on purpose; two ISO weeks, one month.
+        let daily = vec![
+            day("2026-03-08", 200, 1.0),
+            day("2026-03-01", 500, 2.5),
+            day("2026-03-02", 300, 1.5),
+        ];
 
         let summary = build_usage_summary_from_daily(
             daily,
@@ -576,7 +353,12 @@ mod tests {
 
         assert_eq!(summary.by_provider[0].provider, "codex");
         assert!((summary.by_provider[0].percent - 60.0).abs() < 0.001);
+        assert_eq!(summary.daily[0].date, "2026-03-01");
         assert_eq!(summary.daily[0].intensity_tokens, 4);
-        assert_eq!(summary.daily[0].intensity_cost, 4);
+        assert_eq!(summary.weekly.len(), 2);
+        assert_eq!(summary.weekly[0].label, "2026-03-01..2026-03-07");
+        assert_eq!(summary.monthly.len(), 1);
+        assert_eq!(summary.monthly[0].label, "2026-03");
+        assert!((summary.total_cost - 5.0).abs() < 0.001);
     }
 }

@@ -95,6 +95,11 @@ fn strip_variant_suffixes(model_id: &str) -> String {
     normalized.trim_matches('-').to_string()
 }
 
+/// Pseudo-model ids reported by agent logs that do not correspond to a real,
+/// purchasable model: routing aliases (`auto-gemini-3`, `gemini-default`),
+/// internal features (`codex-auto-review`), and parser fallbacks (`unknown`).
+/// They can never resolve against the pricing catalog, so they must not
+/// trigger on-demand pricing refreshes or keep cost repairs pending forever.
 pub(crate) fn is_pseudo(model_id: &str) -> bool {
     let id = model_id.trim().to_ascii_lowercase();
     id.is_empty()
@@ -146,6 +151,23 @@ mod tests {
         // `tiered` is only a routing suffix at the end of the id.
         assert_eq!(canonical("gemini-tiered-flash"), "gemini-tiered-flash");
         assert_eq!(canonical("tiered-model-x"), "tiered-model-x");
+    }
+
+    #[test]
+    fn test_is_pseudo() {
+        for id in [
+            "",
+            "unknown",
+            "Unknown",
+            "auto-gemini-3",
+            "codex-auto-review",
+            "gemini-default",
+        ] {
+            assert!(is_pseudo(id), "{id:?} should be pseudo");
+        }
+        for id in ["gpt-5.4", "claude-opus-4-6", "moonshotai/kimi-k2.5"] {
+            assert!(!is_pseudo(id), "{id:?} should not be pseudo");
+        }
     }
 
     #[test]
