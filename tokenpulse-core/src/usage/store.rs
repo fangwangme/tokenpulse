@@ -187,13 +187,17 @@ impl UsageStore {
         source: &str,
         requested: Option<NaiveDate>,
     ) -> Result<Option<NaiveDate>> {
+        // A source with nothing stored is scanned in full: a refresh recorded
+        // while it was empty must not hide history it gains later, such as an
+        // OpenCode database (filtered by message time) that appears afterwards.
+        let Some(latest) = self.latest_message_date(source)? else {
+            return Ok(requested);
+        };
         let inferred = match self.last_refresh_started_ms(source)? {
             Some(started_ms) => chrono::DateTime::from_timestamp_millis(started_ms)
                 .map(|time| time.with_timezone(&chrono::Local).date_naive())
                 .map(|date| date - Duration::days(REFRESH_SLACK_DAYS)),
-            None => self
-                .latest_message_date(source)?
-                .map(|date| date - Duration::days(FALLBACK_LOOKBACK_DAYS)),
+            None => Some(latest - Duration::days(FALLBACK_LOOKBACK_DAYS)),
         };
 
         Ok(match (requested, inferred) {
@@ -471,22 +475,13 @@ impl UsageStore {
         Ok(affected_dates)
     }
 
-    pub fn delete_sources_in_date_range(
-        &self,
-        range: DateRange,
-        sources: &[String],
-        refresh_pricing: bool,
-    ) -> Result<()> {
-        self.delete_scoped(Some(range), sources, refresh_pricing)
-    }
-
-    pub fn clear_sources(&self, sources: &[String], refresh_pricing: bool) -> Result<()> {
-        self.delete_scoped(None, sources, refresh_pricing)
-    }
-
+    /// Replaces `source`'s ledger rows — within `range`, or all of them — with
+    /// `messages` in one transaction. Callers parse first, so a parse that
+    /// fails or finds nothing never costs the ledger its existing rows.
     pub fn replace_source_messages(
         &self,
         source: &str,
+        range: Option<DateRange>,
         messages: &[UnifiedMessage],
         refresh_pricing: bool,
     ) -> Result<BTreeSet<String>> {
@@ -512,12 +507,18 @@ impl UsageStore {
         let now = Utc::now().timestamp_millis();
         let mut affected_dates = BTreeSet::new();
 
-        let existing_dates = load_source_dates(&tx, source)?;
-        for date in &existing_dates {
-            affected_dates.insert(date.clone());
+        for date in load_source_dates(&tx, source)? {
+            let in_range = match range {
+                Some(range) => NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+                    .is_ok_and(|day| range.contains(day)),
+                None => true,
+            };
+            if in_range {
+                affected_dates.insert(date);
+            }
         }
 
-        delete_scoped_tx(&tx, None, &[source.to_string()], refresh_pricing)?;
+        delete_scoped_tx(&tx, range, &[source.to_string()], refresh_pricing)?;
 
         let mut pricing_snapshot_cache = HashMap::new();
 
@@ -599,39 +600,6 @@ impl UsageStore {
 
         tx.commit()?;
         Ok(affected_dates)
-    }
-
-    pub fn delete_date_range(&self, range: DateRange, refresh_pricing: bool) -> Result<()> {
-        let mut conn = self.open()?;
-        let tx = conn.transaction()?;
-        tx.execute(
-            "DELETE FROM usage_messages WHERE date >= ?1 AND date <= ?2",
-            params![range.start.to_string(), range.end.to_string()],
-        )?;
-        tx.execute(
-            "DELETE FROM daily_model_usage WHERE date >= ?1 AND date <= ?2",
-            params![range.start.to_string(), range.end.to_string()],
-        )?;
-        if refresh_pricing {
-            tx.execute(
-                "DELETE FROM daily_pricing_snapshots WHERE date >= ?1 AND date <= ?2",
-                params![range.start.to_string(), range.end.to_string()],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn clear_all(&self, refresh_pricing: bool) -> Result<()> {
-        let mut conn = self.open()?;
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM usage_messages", [])?;
-        tx.execute("DELETE FROM daily_model_usage", [])?;
-        if refresh_pricing {
-            tx.execute("DELETE FROM daily_pricing_snapshots", [])?;
-        }
-        tx.commit()?;
-        Ok(())
     }
 
     pub fn repair_zero_costs(&self, since: Option<NaiveDate>, sources: &[String]) -> Result<usize> {
@@ -813,24 +781,40 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<DashboardDay>> {
         let conn = self.open()?;
-        let mut sql = format!(
+        // As in `load_provider_summaries`: a session using several models on
+        // one day has a rollup row per model, so sessions come from the ledger.
+        let mut daily_filters = String::new();
+        let mut params = append_common_filters(&mut daily_filters, since, sources);
+        let mut message_filters = String::new();
+        params.extend(append_common_filters(&mut message_filters, since, sources));
+        let sql = format!(
             r#"
-            SELECT date,
-                   SUM(input_tokens),
-                   SUM(output_tokens),
-                   SUM(cache_read_tokens),
-                   SUM(cache_write_tokens),
-                   SUM(reasoning_tokens),
-                   SUM(total_tokens),
-                   SUM(cost_usd),
-                   SUM(message_count),
-                   SUM(session_count)
-            FROM daily_model_usage
-            WHERE 1=1
+            SELECT daily.date, daily.input, daily.output, daily.cache_read,
+                   daily.cache_write, daily.reasoning, daily.tokens, daily.cost,
+                   daily.messages, COALESCE(sessions.count, 0)
+            FROM (
+                SELECT date,
+                       SUM(input_tokens) AS input,
+                       SUM(output_tokens) AS output,
+                       SUM(cache_read_tokens) AS cache_read,
+                       SUM(cache_write_tokens) AS cache_write,
+                       SUM(reasoning_tokens) AS reasoning,
+                       SUM(total_tokens) AS tokens,
+                       SUM(cost_usd) AS cost,
+                       SUM(message_count) AS messages
+                FROM daily_model_usage
+                WHERE 1=1 {daily_filters}
+                GROUP BY date
+            ) AS daily
+            LEFT JOIN (
+                SELECT date, COUNT(DISTINCT {CANONICAL_SOURCE_SQL} || '::' || session_id) AS count
+                FROM usage_messages
+                WHERE 1=1 {message_filters}
+                GROUP BY date
+            ) AS sessions ON sessions.date = daily.date
+            ORDER BY daily.date ASC
             "#,
         );
-        let params = append_common_filters(&mut sql, since, sources);
-        sql.push_str(" GROUP BY date ORDER BY date ASC");
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params), row_to_dashboard_day)?;
@@ -879,19 +863,32 @@ impl UsageStore {
         sources: &[String],
     ) -> Result<Vec<ProviderSummary>> {
         let conn = self.open()?;
-        let mut sql = format!(
+        // Sessions are counted from the ledger: one session spanning several
+        // days or models has a row in each daily rollup.
+        let mut daily_filters = String::new();
+        let mut params = append_common_filters(&mut daily_filters, since, sources);
+        let mut message_filters = String::new();
+        params.extend(append_common_filters(&mut message_filters, since, sources));
+        let sql = format!(
             r#"
-            SELECT source,
-                   SUM(cost_usd),
-                   SUM(total_tokens),
-                   SUM(message_count),
-                   SUM(session_count)
-            FROM daily_model_usage
-            WHERE 1=1
+            SELECT daily.source, daily.cost, daily.tokens, daily.messages,
+                   COALESCE(sessions.count, 0)
+            FROM (
+                SELECT source, SUM(cost_usd) AS cost, SUM(total_tokens) AS tokens,
+                       SUM(message_count) AS messages
+                FROM daily_model_usage
+                WHERE 1=1 {daily_filters}
+                GROUP BY source
+            ) AS daily
+            LEFT JOIN (
+                SELECT {CANONICAL_SOURCE_SQL} AS source, COUNT(DISTINCT session_id) AS count
+                FROM usage_messages
+                WHERE 1=1 {message_filters}
+                GROUP BY 1
+            ) AS sessions ON sessions.source = daily.source
+            ORDER BY daily.tokens DESC, daily.source ASC
             "#,
         );
-        let params = append_common_filters(&mut sql, since, sources);
-        sql.push_str(" GROUP BY source ORDER BY SUM(total_tokens) DESC, source ASC");
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params), row_to_provider_summary)?;
@@ -1018,27 +1015,6 @@ impl UsageStore {
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
         ensure_schema_initialized(&self.path, &mut conn)?;
         Ok(conn)
-    }
-
-    fn delete_scoped(
-        &self,
-        range: Option<DateRange>,
-        sources: &[String],
-        refresh_pricing: bool,
-    ) -> Result<()> {
-        if sources.is_empty() {
-            return match range {
-                Some(range) => self.delete_date_range(range, refresh_pricing),
-                None => self.clear_all(refresh_pricing),
-            };
-        }
-
-        let mut conn = self.open()?;
-        let tx = conn.transaction()?;
-        delete_scoped_tx(&tx, range, sources, refresh_pricing)?;
-
-        tx.commit()?;
-        Ok(())
     }
 }
 
@@ -1659,11 +1635,21 @@ fn refresh_canonical_model_ids(conn: &mut Connection) -> Result<()> {
     }
 
     let tx = conn.transaction()?;
+    let mut affected_dates = BTreeSet::new();
     for (model_id, canonical) in &stale {
         tx.execute(
             "UPDATE usage_messages SET canonical_model_id = ?1 WHERE model_id = ?2",
             params![canonical, model_id],
         )?;
+        let mut stmt =
+            tx.prepare("SELECT DISTINCT date FROM usage_messages WHERE model_id = ?1")?;
+        let dates = stmt.query_map(params![model_id], |row| row.get::<_, String>(0))?;
+        affected_dates.extend(dates.flatten());
+    }
+    // The daily rollup is keyed by the canonical id too.
+    let now = Utc::now().timestamp_millis();
+    for date in &affected_dates {
+        rebuild_daily_for_date(&tx, date, now)?;
     }
     tx.commit()?;
     info!(
@@ -1833,6 +1819,18 @@ mod tests {
         let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
         assert_eq!(store.default_since("claude", None).unwrap(), None);
 
+        // A refresh recorded while the source was empty keeps the full scan,
+        // so history that appears later (an imported database) is not missed.
+        store
+            .record_refresh_started("claude", Utc::now().timestamp_millis())
+            .unwrap();
+        assert_eq!(store.default_since("claude", None).unwrap(), None);
+        store
+            .open()
+            .unwrap()
+            .execute("DELETE FROM source_refresh_state", [])
+            .unwrap();
+
         store
             .ingest_messages(&[sample_message("2024-03-10", "m1")], false)
             .unwrap();
@@ -1891,9 +1889,9 @@ mod tests {
 
         let mut conn = store.open().unwrap();
         // As written by a release whose `canonical` kept `-preview`.
-        conn.execute(
-            "UPDATE usage_messages SET canonical_model_id = 'gemini-3-pro-preview'",
-            [],
+        conn.execute_batch(
+            "UPDATE usage_messages SET canonical_model_id = 'gemini-3-pro-preview';
+             UPDATE daily_model_usage SET model_id = 'gemini-3-pro-preview';",
         )
         .unwrap();
 
@@ -1904,40 +1902,85 @@ mod tests {
             })
             .unwrap();
         assert_eq!(canonical, "gemini-3-pro");
+        // The daily rollup, keyed by the canonical id too, follows.
+        assert_eq!(
+            store.load_daily_rows(None, &[]).unwrap()[0].model_id,
+            "gemini-3-pro"
+        );
     }
 
     #[test]
-    fn delete_sources_in_date_range_preserves_other_sources() {
+    fn session_counts_are_distinct_across_days_and_models() {
         let tempdir = tempfile::tempdir().unwrap();
         let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
-
-        let mut claude = sample_message("2024-03-10", "claude-m1");
-        claude.client = "claude".to_string();
-        let mut codex = sample_message("2024-03-10", "codex-m1");
-        codex.client = "codex".to_string();
-        codex.provider_id = "openai".to_string();
-
+        let message = |date: &str, key: &str, model: &str| {
+            let mut message = sample_message(date, key);
+            message.model_id = model.to_string();
+            message
+        };
+        // One session, two models on its first day, one on its second.
         store
-            .ingest_messages(&[claude.clone(), codex.clone()], false)
-            .unwrap();
-
-        store
-            .delete_sources_in_date_range(
-                DateRange {
-                    start: NaiveDate::from_ymd_opt(2024, 3, 10).unwrap(),
-                    end: NaiveDate::from_ymd_opt(2024, 3, 10).unwrap(),
-                },
-                &["claude".to_string()],
+            .ingest_messages(
+                &[
+                    message("2024-03-10", "m1", "claude-3-opus"),
+                    message("2024-03-10", "m2", "claude-3-haiku"),
+                    message("2024-03-11", "m3", "claude-3-opus"),
+                ],
                 false,
             )
             .unwrap();
 
-        let remaining_codex = store.load_messages(None, &["codex".to_string()]).unwrap();
-        let remaining_claude = store.load_messages(None, &["claude".to_string()]).unwrap();
+        assert_eq!(store.load_summary_counts(None, &[]).unwrap().1, 1);
+        assert_eq!(
+            store.load_provider_summaries(None, &[]).unwrap()[0].session_count,
+            1
+        );
+        let days = store.load_dashboard_days(None, &[]).unwrap();
+        assert_eq!(
+            days.iter().map(|day| day.session_count).collect::<Vec<_>>(),
+            [1, 1]
+        );
+    }
 
-        assert_eq!(remaining_codex.len(), 1);
-        assert_eq!(remaining_codex[0].client, "codex");
-        assert!(remaining_claude.is_empty());
+    #[test]
+    fn replace_source_messages_in_range_preserves_other_sources_and_dates() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+
+        let claude_old = sample_message("2024-03-01", "claude-old");
+        let claude_in_range = sample_message("2024-03-10", "claude-m1");
+        let mut codex = sample_message("2024-03-10", "codex-m1");
+        codex.client = "codex".to_string();
+        codex.provider_id = "openai".to_string();
+        store
+            .ingest_messages(&[claude_old, claude_in_range, codex], false)
+            .unwrap();
+
+        let reparsed = sample_message("2024-03-10", "claude-m2");
+        store
+            .replace_source_messages(
+                "claude",
+                Some(DateRange {
+                    start: NaiveDate::from_ymd_opt(2024, 3, 10).unwrap(),
+                    end: NaiveDate::from_ymd_opt(2024, 3, 10).unwrap(),
+                }),
+                &[reparsed],
+                false,
+            )
+            .unwrap();
+
+        let keys = |source: &str| {
+            let mut keys: Vec<String> = store
+                .load_messages(None, &[source.to_string()])
+                .unwrap()
+                .into_iter()
+                .map(|message| message.message_key)
+                .collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(keys("claude"), ["claude-m2", "claude-old"]);
+        assert_eq!(keys("codex"), ["codex-m1"]);
     }
 
     #[test]
@@ -1951,7 +1994,9 @@ mod tests {
         message.parser_version = "gemini-v2".to_string();
 
         store.ingest_messages(&[message], false).unwrap();
-        store.replace_source_messages("gemini", &[], false).unwrap();
+        store
+            .replace_source_messages("gemini", None, &[], false)
+            .unwrap();
 
         let remaining = store.load_messages(None, &["gemini".to_string()]).unwrap();
         assert_eq!(remaining.len(), 1);
@@ -1977,7 +2022,7 @@ mod tests {
 
         store.ingest_messages(&[old], false).unwrap();
         store
-            .replace_source_messages("gemini", &[replacement], false)
+            .replace_source_messages("gemini", None, &[replacement], false)
             .unwrap();
 
         let remaining = store.load_messages(None, &["gemini".to_string()]).unwrap();
@@ -2397,7 +2442,7 @@ mod tests {
         msg_v3.parser_version = "antigravity-v3".to_string();
 
         store
-            .replace_source_messages("antigravity", &[msg_v3], false)
+            .replace_source_messages("antigravity", None, &[msg_v3], false)
             .unwrap();
 
         // 4. Verify stale rows under all antigravity client kinds were cleaned up

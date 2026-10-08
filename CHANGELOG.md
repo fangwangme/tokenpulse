@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Models listed only under provider prefixes are priced**: when nothing else
   matches, the same model under any provider is used, preferring LiteLLM and
   the majority price (e.g. `muse-spark-1.3-contributor-free`).
+- **`--rebuild-all` and `--refresh-days` no longer lose data on a failed
+  parse**: they deleted a source's rows before parsing it; rows are now
+  replaced in one transaction once the parse succeeds.
+- **Session counts are no longer inflated**: provider and daily summaries
+  summed per-model rollups, so a session spanning days or models counted
+  several times; sessions are now counted distinctly.
+- **Non-ASCII model ids no longer crash parsing**: date-suffix stripping
+  sliced strings at byte offsets.
 
 ### Changed
 - **`-preview` no longer splits a model**: grouping and display drop it for

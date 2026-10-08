@@ -1,27 +1,23 @@
 pub(crate) fn strip_date_suffix(model_id: &str) -> Option<String> {
-    if model_id.len() > 9 {
-        let suffix = &model_id[model_id.len() - 8..];
-        if suffix.chars().all(|ch| ch.is_ascii_digit())
-            && model_id.as_bytes()[model_id.len() - 9] == b'-'
-        {
-            return Some(model_id[..model_id.len() - 9].to_string());
+    // Checked as bytes: slicing is only safe once the suffix is known ASCII,
+    // and model ids can be any text.
+    let bytes = model_id.as_bytes();
+    let len = bytes.len();
+    if len > 9 && bytes[len - 9] == b'-' && bytes[len - 8..].iter().all(u8::is_ascii_digit) {
+        return Some(model_id[..len - 9].to_string());
+    }
+    if len > 11 && bytes[len - 11] == b'-' {
+        let is_dash_date = bytes[len - 10..].iter().enumerate().all(|(idx, byte)| {
+            if idx == 4 || idx == 7 {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_digit()
+            }
+        });
+        if is_dash_date {
+            return Some(model_id[..len - 11].to_string());
         }
     }
-
-    if model_id.len() > 11 {
-        let suffix = &model_id[model_id.len() - 10..];
-        let bytes = suffix.as_bytes();
-        let is_dash_date = bytes[4] == b'-'
-            && bytes[7] == b'-'
-            && suffix
-                .chars()
-                .enumerate()
-                .all(|(idx, ch)| idx == 4 || idx == 7 || ch.is_ascii_digit());
-        if is_dash_date && model_id.as_bytes()[model_id.len() - 11] == b'-' {
-            return Some(model_id[..model_id.len() - 11].to_string());
-        }
-    }
-
     None
 }
 
@@ -151,6 +147,13 @@ mod tests {
         // `tiered` is only a routing suffix at the end of the id.
         assert_eq!(canonical("gemini-tiered-flash"), "gemini-tiered-flash");
         assert_eq!(canonical("tiered-model-x"), "tiered-model-x");
+    }
+
+    #[test]
+    fn test_non_ascii_model_ids_do_not_panic() {
+        assert_eq!(canonical("自定义模型"), "自定义模型");
+        assert_eq!(canonical("模型-20250101"), "模型");
+        assert_eq!(canonical("模型-2025-01-01"), "模型");
     }
 
     #[test]

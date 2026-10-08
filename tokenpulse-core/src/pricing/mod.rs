@@ -137,8 +137,12 @@ impl PricingCatalog {
             });
         }
 
+        if key_id.is_empty() || crate::model_id::is_pseudo(&key_id) {
+            return None;
+        }
+        let preview = (!key_id.ends_with("-preview")).then(|| format!("{key_id}-preview"));
         self.lookup_under_any_provider(&key_id)
-            .or_else(|| self.lookup_under_any_provider(&format!("{key_id}-preview")))
+            .or_else(|| preview.and_then(|id| self.lookup_under_any_provider(&id)))
     }
 
     /// Last resort: the same model listed only under provider prefixes no
@@ -147,10 +151,6 @@ impl PricingCatalog {
     /// then the price most of its listings agree on, so one reseller's markup
     /// cannot set the price.
     fn lookup_under_any_provider(&self, key_id: &str) -> Option<ResolvedPricing<'_>> {
-        if key_id.is_empty() || crate::model_id::is_pseudo(key_id) {
-            return None;
-        }
-
         let listings: Vec<(&String, &PricingRecord)> = self
             .entries
             .iter()

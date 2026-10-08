@@ -276,7 +276,7 @@ Encrypted `.pb` conversations carry no readable usage and remain the language se
 
 Antigravity CLI and Desktop are treated as sub-clients of the same `antigravity` source. The parser stores the concrete runtime in `client_detail` (`antigravity-cli` or `antigravity-desktop`) and uses a storage key shaped like `client:session_id:message_id`, while usage aggregates deduplicate on the logical `antigravity + session_id + message_id` key. This allows the same message to exist in both CLI and Desktop cache paths without counting its tokens twice.
 
-Claude Code, Codex, Copilot, Gemini CLI, and PI do not maintain separate raw cache databases. Their normal incremental path discovers session files by arrival time (the later of mtime and ctime), parses matching files concurrently, and replaces only the sessions represented by those files. Range refreshes and full rebuilds still use the broader source/date clearing paths.
+Claude Code, Codex, Copilot, Gemini CLI, and PI do not maintain separate raw cache databases. Their normal incremental path discovers session files by arrival time (the later of mtime and ctime), parses matching files concurrently, and replaces only the sessions represented by those files. Range refreshes, full rebuilds and parser upgrades replace a source's ledger rows (within the range, if any) in one transaction, and only once its parse has succeeded; a failed or empty parse leaves them untouched.
 
 The incremental window starts a day before the source's previous refresh (recorded in `source_refresh_state` in `usage.db`). Without a recorded refresh it starts two days before the newest stored message; a source with no data is scanned in full. Runs narrowed by `--since` or `--refresh-days` do not move the anchor.
 

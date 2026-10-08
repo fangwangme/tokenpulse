@@ -83,7 +83,6 @@ impl SessionParser for AntigravitySessionParser {
 
         for root in self.session_paths() {
             // Sync first!
-            let sync_started_ms = Local::now().timestamp_millis();
             if !self.skip_sync {
                 if let Err(e) = sync_antigravity_with_options(
                     &root,
@@ -122,14 +121,17 @@ impl SessionParser for AntigravitySessionParser {
                     .unwrap()
                     .and_utc()
                     .timestamp_millis();
+                // Sessions synced or re-resolved since the window opened are
+                // read whatever their age, until a refresh succeeds and moves
+                // the window: a run whose ledger ingest failed would otherwise
+                // lose the correction for good.
                 query.push_str(
                     " WHERE timestamp >= ?1
                        OR (client || ':' || session_id) IN (
-                           SELECT client || ':' || session_id FROM sessions WHERE synced_at >= ?2
+                           SELECT client || ':' || session_id FROM sessions WHERE synced_at >= ?1
                        )",
                 );
                 params.push(since_ms);
-                params.push(sync_started_ms);
             }
             query.push_str(" ORDER BY timestamp ASC");
 
@@ -2531,7 +2533,11 @@ fn normalize_cached_antigravity_artifacts(
                 model_aliases,
             )
         };
-        if &target == model_id {
+        // Never trade a real id for a pseudo one: the RPC path may have named
+        // the model from `modelDisplayName`, which the cache does not keep.
+        if &target == model_id
+            || (crate::model_id::is_pseudo(&target) && !crate::model_id::is_pseudo(model_id))
+        {
             continue;
         }
 
@@ -3839,6 +3845,49 @@ mod tests {
         let (model_id, _, synced_at) = cached_usage_model(&conn, "sess-new");
         assert_eq!(model_id, "gemini-9-flash-medium");
         assert!(synced_at > 1000);
+    }
+
+    #[test]
+    fn test_normalize_keeps_a_display_name_fallback() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conn = open_cache_db(temp_dir.path()).unwrap();
+        let aliases = static_model_aliases();
+        // No enum and a pseudo served name: only `modelDisplayName` names it,
+        // and the cache does not keep that.
+        let resolved = resolve_rpc_chat_model(
+            &json!({ "responseModel": "gemini-default", "modelDisplayName": "Gemini 3.5 Flash" }),
+            &aliases,
+        );
+        assert_eq!(resolved.model_id, "gemini-3-5-flash");
+        insert_cached_usage_row(
+            &conn,
+            "sess",
+            &resolved.model_id,
+            resolved.model_enum.as_deref(),
+            resolved.served_model.as_deref(),
+        );
+
+        normalize_cached_antigravity_artifacts(temp_dir.path(), &aliases).unwrap();
+        assert_eq!(cached_usage_model(&conn, "sess").0, "gemini-3-5-flash");
+    }
+
+    #[test]
+    fn test_corrected_session_is_reread_until_a_refresh_succeeds() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conn = open_cache_db(temp_dir.path()).unwrap();
+        insert_cached_usage_row(&conn, "sess", "model-placeholder-m299", None, None);
+        let parser = AntigravitySessionParser::new()
+            .with_custom_paths(vec![temp_dir.path().to_path_buf()])
+            .with_skip_sync(true);
+        let since = Some(Local::now().date_naive() - chrono::Duration::days(1));
+
+        // The first read corrects the old row; if its ledger ingest then
+        // fails, the next read must still carry the correction.
+        for _ in 0..2 {
+            let messages = parser.parse_sessions(since).unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].model_id, "gemini-3-7-flash-medium");
+        }
     }
 
     #[test]
