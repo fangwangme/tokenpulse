@@ -11,12 +11,17 @@
 
 use crate::config::NotificationLevel;
 use std::io::Write;
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
-use tracing::{debug, warn};
+use tracing::debug;
+#[cfg(target_os = "macos")]
+use tracing::warn;
 
 /// The built-in recovery chime, embedded so there is no runtime asset
 /// dependency. Regenerate with `tokenpulse-core/assets/generate_chime.py`.
+#[cfg(target_os = "macos")]
 const CHIME_WAV: &[u8] = include_bytes!("../../assets/quota-restored.wav");
+#[cfg(target_os = "macos")]
 const CHIME_FILE_NAME: &str = "tokenpulse-quota-restored.wav";
 
 /// Config value selecting the built-in chime.
@@ -203,6 +208,7 @@ pub fn send_system_notification(message: &str) {
     });
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn escape_applescript(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
