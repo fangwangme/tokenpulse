@@ -16,18 +16,20 @@ The pricing cache may use another spelling again. The mapping layer should there
 
 ## Lookup Pipeline
 
-`lookup_model_pricing()` builds ordered candidates, then checks each candidate by exact match and case-insensitive match.
+`PricingCatalog::lookup()` normalizes the model id with `model_id::pricing_key`, builds ordered candidates, and normalizes every candidate with the same rule the catalog applied to its keys on insert before checking it. Both sides therefore share one key space: lowercase, `.`/`_`/spaces as `-`, date and tier suffixes stripped, and a three-segment key reduced to provider plus model (`openrouter/google/gemini-3-pro-preview` is stored and looked up as `openrouter/gemini-3-pro-preview`). `pricing_key` keeps `-preview`: catalogs list `X` and `X-preview` separately, sometimes at different prices, so the two must never collapse into one key.
 
 The current candidate order is:
 
-1. Raw model id from the ledger.
+1. The model id itself, then its provider-hinted form.
 2. Explicit aliases for model families that cannot be inferred safely.
-3. Generalized normalization candidates.
+3. Generalized family candidates — for Gemini: bare, `google/`, `gemini/`, `openrouter/google/`.
 4. `-free` stripped candidates and their normalized forms.
 5. Quality-tier suffix normalization where applicable.
 6. Common provider-prefix candidates for unprefixed models.
 7. Date-suffix stripped candidates and their normalized forms.
 8. Slash-to-dot variants for providers that publish keys with dot separators.
+9. Steps 1–8 again for `<model>-preview`, when the id does not already end in it. Some models are only ever published as previews, and sources that name models from UI labels (Antigravity) never carry the suffix.
+10. `vertex_ai/<model>` and `vertex_ai/<model>-preview` for Gemini, last of all. Vertex keeps listing models the first-party and router catalogs have retired, but it must never outrank them.
 
 This keeps exact pricing preferred, while still recovering from common provider spelling differences.
 
@@ -83,6 +85,8 @@ Examples:
 | `z-ai/glm-5.1-low` | `z-ai/glm-5.1` |
 
 This normalization is intentionally applied only at the end of the model id so names that contain those words in the middle are preserved.
+
+Display and aggregation (`model_id::canonical`) additionally drop every `preview` segment: vendors attach it arbitrarily, and a GA release is a new version rather than the same model promoted, so `gemini-3-pro-preview-high` and `gemini-3-pro-high` group as `gemini-3-pro`. Pricing does not drop it (see the lookup pipeline above). Stored grouping ids in `usage.db` are re-derived on startup whenever these rules change.
 
 ## Pricing Sources
 

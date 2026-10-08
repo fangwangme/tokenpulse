@@ -149,6 +149,12 @@ pub async fn run(
         effective_sinces.push(effective_since);
     }
 
+    // A run narrowed by `--since` or a refresh range does not cover everything
+    // written since the previous refresh, so it must not advance the anchor the
+    // next incremental window starts from.
+    let refresh_started_ms = Utc::now().timestamp_millis();
+    let records_refresh = requested_since.is_none() && refresh_range.is_none();
+
     // Parse every provider concurrently — parsing is independent and the
     // heaviest step (Antigravity also syncs over the local network). Ingestion
     // below stays sequential so SQLite writes remain serialized and ordered.
@@ -248,6 +254,9 @@ pub async fn run(
                             ),
                         );
                     }
+                }
+                if records_refresh {
+                    store.record_refresh_started(parser.provider_name(), refresh_started_ms)?;
                 }
             }
             Err(error) => {
@@ -547,6 +556,10 @@ fn build_reload_fn(
             reload_sinces.push(since);
         }
 
+        // As on startup: a reload narrowed by `--since` must not move the anchor.
+        let refresh_started_ms = Utc::now().timestamp_millis();
+        let records_refresh = output_since.is_none();
+
         let reload_outcomes: Vec<(Duration, Result<Vec<UnifiedMessage>>)> = parsers
             .par_iter()
             .zip(reload_sinces.par_iter())
@@ -604,6 +617,9 @@ fn build_reload_fn(
                                 ),
                             );
                         }
+                    }
+                    if records_refresh {
+                        store.record_refresh_started(parser.provider_name(), refresh_started_ms)?;
                     }
                 }
                 Err(error) => {

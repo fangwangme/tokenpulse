@@ -22,15 +22,18 @@ const CANONICAL_SOURCE_SQL: &str =
 /// row for a message that was already counted.
 const LOGICAL_MESSAGE_IDENTITY_SOURCES: &[&str] = &["antigravity"];
 
-/// How far back an incremental refresh re-examines session files.
+/// Slack an incremental refresh adds before the start of the previous one.
 ///
-/// This window only ever moves forward, so anything it skips once is skipped
-/// forever — nothing re-opens an old file until a full rebuild. One day was too
-/// tight to survive a machine migration: restoring a backup writes transcripts
-/// with their original modification times, so files can land on disk already
-/// behind the window. A week of slack costs a few extra file reads per refresh
-/// and gives a restore room to be noticed.
-const INCREMENTAL_LOOKBACK_DAYS: i64 = 7;
+/// Anything a source wrote after the previous refresh began has a newer arrival
+/// time than that start — file arrival takes the later of mtime and ctime, and
+/// restoring a backup cannot back-date ctime — so the previous start alone would
+/// do. The extra day absorbs clock and time-zone shifts between refreshes.
+const REFRESH_SLACK_DAYS: i64 = 1;
+
+/// Window used when no refresh has been recorded yet (the first run after
+/// upgrading from a release that did not record them): this far back from the
+/// newest stored message.
+const FALLBACK_LOOKBACK_DAYS: i64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct DailyUsageRow {
@@ -149,14 +152,49 @@ impl UsageStore {
         Ok(stale_sources)
     }
 
+    /// Records a completed refresh of `source` whose scan began at
+    /// `started_ms`. Kept monotonic: every recorded refresh already covered
+    /// everything written before its own start.
+    pub fn record_refresh_started(&self, source: &str, started_ms: i64) -> Result<()> {
+        let conn = self.open()?;
+        conn.execute(
+            "INSERT INTO source_refresh_state (source, last_refresh_started_ms)
+             VALUES (?1, ?2)
+             ON CONFLICT(source) DO UPDATE SET
+                 last_refresh_started_ms =
+                     MAX(last_refresh_started_ms, excluded.last_refresh_started_ms)",
+            params![source, started_ms],
+        )?;
+        Ok(())
+    }
+
+    fn last_refresh_started_ms(&self, source: &str) -> Result<Option<i64>> {
+        let conn = self.open()?;
+        Ok(conn
+            .query_row(
+                "SELECT last_refresh_started_ms FROM source_refresh_state WHERE source = ?1",
+                params![source],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Where an incremental refresh of `source` starts: just before the
+    /// previous refresh began, so the window follows how long ago the user last
+    /// refreshed instead of a fixed span.
     pub fn default_since(
         &self,
         source: &str,
         requested: Option<NaiveDate>,
     ) -> Result<Option<NaiveDate>> {
-        let inferred = self
-            .latest_message_date(source)?
-            .map(|date| date - Duration::days(INCREMENTAL_LOOKBACK_DAYS));
+        let inferred = match self.last_refresh_started_ms(source)? {
+            Some(started_ms) => chrono::DateTime::from_timestamp_millis(started_ms)
+                .map(|time| time.with_timezone(&chrono::Local).date_naive())
+                .map(|date| date - Duration::days(REFRESH_SLACK_DAYS)),
+            None => self
+                .latest_message_date(source)?
+                .map(|date| date - Duration::days(FALLBACK_LOOKBACK_DAYS)),
+        };
 
         Ok(match (requested, inferred) {
             (Some(requested), Some(inferred)) => Some(requested.max(inferred)),
@@ -1605,11 +1643,49 @@ fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()
     }
 
     conn.execute_batch(USAGE_SCHEMA_SQL)?;
+    refresh_canonical_model_ids(conn)?;
 
     initialized_paths()
         .lock()
         .map_err(|_| anyhow!("Usage store schema mutex poisoned"))?
         .insert(path.clone());
+    Ok(())
+}
+
+/// `canonical_model_id` is stored, but `model_id::canonical` evolves — it
+/// stopped carrying `-preview`, for one. Re-deriving the stored value once per
+/// process keeps old and new rows of a model in one group without a migration
+/// per rule change; the check is a single scan over distinct model ids.
+fn refresh_canonical_model_ids(conn: &mut Connection) -> Result<()> {
+    let stale: Vec<(String, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT model_id, canonical_model_id FROM usage_messages")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.filter_map(|row| {
+            let (model_id, stored) = row.ok()?;
+            let canonical = crate::model_id::canonical(&model_id);
+            (canonical != stored).then_some((model_id, canonical))
+        })
+        .collect()
+    };
+    if stale.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn.transaction()?;
+    for (model_id, canonical) in &stale {
+        tx.execute(
+            "UPDATE usage_messages SET canonical_model_id = ?1 WHERE model_id = ?2",
+            params![canonical, model_id],
+        )?;
+    }
+    tx.commit()?;
+    info!(
+        "Usage store: re-canonicalized {} model ids after a naming rule change",
+        stale.len()
+    );
     Ok(())
 }
 
@@ -1704,6 +1780,11 @@ CREATE TABLE IF NOT EXISTS daily_model_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_daily_model_usage_date ON daily_model_usage(date);
 
+CREATE TABLE IF NOT EXISTS source_refresh_state (
+    source TEXT PRIMARY KEY,
+    last_refresh_started_ms INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS daily_pricing_snapshots (
     date TEXT NOT NULL,
     provider_id TEXT NOT NULL,
@@ -1772,18 +1853,85 @@ mod tests {
     }
 
     #[test]
-    fn default_since_prefers_recent_lookback() {
+    fn default_since_without_recorded_refresh_falls_back_to_latest_message() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+        assert_eq!(store.default_since("claude", None).unwrap(), None);
+
+        store
+            .ingest_messages(&[sample_message("2024-03-10", "m1")], false)
+            .unwrap();
+        let since = store.default_since("claude", None).unwrap().unwrap();
+        assert_eq!(since, NaiveDate::from_ymd_opt(2024, 3, 8).unwrap());
+    }
+
+    #[test]
+    fn default_since_starts_a_day_before_the_last_recorded_refresh() {
         let tempdir = tempfile::tempdir().unwrap();
         let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
         store
             .ingest_messages(&[sample_message("2024-03-10", "m1")], false)
             .unwrap();
-        let since = store.default_since("claude", None).unwrap().unwrap();
+
+        let refresh_started = NaiveDate::from_ymd_opt(2024, 3, 20)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap()
+            .timestamp_millis();
+        store
+            .record_refresh_started("claude", refresh_started)
+            .unwrap();
+        // The refresh anchor wins over the (older) latest message date.
         assert_eq!(
-            since,
-            NaiveDate::from_ymd_opt(2024, 3, 10).unwrap()
-                - Duration::days(INCREMENTAL_LOOKBACK_DAYS)
+            store.default_since("claude", None).unwrap(),
+            Some(NaiveDate::from_ymd_opt(2024, 3, 19).unwrap())
         );
+
+        // An older refresh finishing later never moves the anchor back.
+        store
+            .record_refresh_started("claude", refresh_started - 86_400_000 * 5)
+            .unwrap();
+        assert_eq!(
+            store.default_since("claude", None).unwrap(),
+            Some(NaiveDate::from_ymd_opt(2024, 3, 19).unwrap())
+        );
+
+        // A requested `--since` still narrows the window, never widens it.
+        let requested = NaiveDate::from_ymd_opt(2024, 3, 25).unwrap();
+        assert_eq!(
+            store.default_since("claude", Some(requested)).unwrap(),
+            Some(requested)
+        );
+
+        // Other sources keep their own anchor.
+        assert_eq!(store.default_since("codex", None).unwrap(), None);
+    }
+
+    #[test]
+    fn stored_canonical_model_ids_follow_the_current_rules() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+        let mut message = sample_message("2024-03-10", "m1");
+        message.model_id = "gemini-3-pro-preview-high".to_string();
+        store.ingest_messages(&[message], false).unwrap();
+
+        let mut conn = store.open().unwrap();
+        // As written by a release whose `canonical` kept `-preview`.
+        conn.execute(
+            "UPDATE usage_messages SET canonical_model_id = 'gemini-3-pro-preview'",
+            [],
+        )
+        .unwrap();
+
+        refresh_canonical_model_ids(&mut conn).unwrap();
+        let canonical: String = conn
+            .query_row("SELECT canonical_model_id FROM usage_messages", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(canonical, "gemini-3-pro");
     }
 
     #[test]

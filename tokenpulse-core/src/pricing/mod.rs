@@ -73,9 +73,9 @@ pub struct PricingCatalog {
 
 fn canonicalize_catalog_key(key: &str) -> String {
     if let Some((provider, model)) = key.split_once('/') {
-        format!("{}/{}", provider, crate::model_id::canonical(model))
+        format!("{}/{}", provider, crate::model_id::pricing_key(model))
     } else {
-        crate::model_id::canonical(key)
+        crate::model_id::pricing_key(key)
     }
 }
 
@@ -112,8 +112,12 @@ impl PricingCatalog {
         model_id: &str,
         provider_id: Option<&str>,
     ) -> Option<ResolvedPricing<'a>> {
-        let canonical_id = crate::model_id::canonical(model_id);
-        for candidate in pricing_lookup_candidates_with_provider(&canonical_id, provider_id) {
+        let key_id = crate::model_id::pricing_key(model_id);
+        for candidate in pricing_lookup_candidates_with_provider(&key_id, provider_id) {
+            // Candidates must be spelled like the stored keys, which went
+            // through the same normalization on insert (`openrouter/google/X`
+            // is stored as `openrouter/X`, `gemini-3.1-pro` as `gemini-3-1-pro`).
+            let candidate = canonicalize_catalog_key(&candidate);
             let Some((key, record)) = self
                 .entries
                 .get_key_value(&candidate)
@@ -197,6 +201,39 @@ fn pricing_lookup_candidates_with_provider(
     model_id: &str,
     provider_id: Option<&str>,
 ) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    push_candidates_for_model(&mut candidates, &mut seen, model_id, provider_id);
+
+    // Some models are only ever published under a `-preview` key, and sources
+    // that name models from UI labels (Antigravity) never carry the suffix.
+    let base = strip_quality_tier_suffix(model_id).unwrap_or_else(|| model_id.to_string());
+    let preview = (!base.ends_with("-preview")).then(|| format!("{base}-preview"));
+    if let Some(preview) = &preview {
+        push_candidates_for_model(&mut candidates, &mut seen, preview, provider_id);
+    }
+
+    // Last resort only: Vertex AI keeps listing Gemini models the first-party
+    // and router catalogs have already retired.
+    for name in std::iter::once(base.as_str()).chain(preview.as_deref()) {
+        if let Some(gemini_model) = canonicalize_gemini_model(name) {
+            push_candidate(
+                &mut candidates,
+                &mut seen,
+                format!("vertex_ai/{gemini_model}"),
+            );
+        }
+    }
+
+    candidates
+}
+
+fn push_candidates_for_model(
+    candidates: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    model_id: &str,
+    provider_id: Option<&str>,
+) {
     let mut roots = Vec::new();
     let mut root_seen = HashSet::new();
 
@@ -219,14 +256,9 @@ fn pricing_lookup_candidates_with_provider(
         idx += 1;
     }
 
-    let mut candidates = Vec::new();
-    let mut seen = HashSet::new();
-
     for root in roots {
-        push_lookup_candidates_for_base(&mut candidates, &mut seen, &root);
+        push_lookup_candidates_for_base(candidates, seen, &root);
     }
-
-    candidates
 }
 
 fn push_lookup_candidates_for_base(
@@ -453,6 +485,7 @@ fn push_generalized_candidates(
             }
             push_candidate(candidates, seen, m.clone());
             push_candidate(candidates, seen, format!("google/{}", m));
+            push_candidate(candidates, seen, format!("gemini/{}", m));
             push_candidate(candidates, seen, format!("openrouter/google/{}", m));
         }
     }
@@ -593,71 +626,6 @@ fn push_candidate(candidates: &mut Vec<String>, seen: &mut HashSet<String>, cand
 
 fn explicit_model_alias(model_id: &str) -> Option<&'static str> {
     match model_id {
-        // Antigravity variants → same-model pricing keys. Do not cross model versions.
-        "antigravity-gemini-3-pro"
-        | "antigravity-gemini-3-pro-high"
-        | "antigravity-gemini-3-pro-low"
-        | "gemini-3-pro-high"
-        | "gemini-3-pro-low"
-        | "gemini-3-pro"
-        | "gemini-3-pro-preview-high"
-        | "gemini-3-pro-preview-low" => Some("gemini-3-pro-preview"),
-
-        "gemini-3.1-pro-high"
-        | "gemini-3.1-pro-low"
-        | "gemini-3.1-pro-preview-high"
-        | "gemini-3.1-pro-preview-low"
-        | "gemini-3.1-pro-preview"
-        | "gemini-3.1-pro"
-        | "gemini-3-1-pro-high"
-        | "gemini-3-1-pro-low"
-        | "gemini-3-1-pro-preview-high"
-        | "gemini-3-1-pro-preview-low"
-        | "gemini-3-1-pro-preview"
-        | "gemini-3-1-pro" => Some("gemini-3.1-pro-preview"),
-
-        "antigravity-gemini-3-flash-a" | "gemini-3-flash-a" => Some("gemini-3.5-flash"),
-
-        "antigravity-gemini-3-flash" | "gemini-3-flash" | "gemini-3-flash-c" => {
-            Some("gemini-3-flash-preview")
-        }
-
-        "antigravity-claude-opus-4-5-thinking"
-        | "antigravity-claude-opus-4-5-thinking-high"
-        | "antigravity-claude-opus-4-5-thinking-medium"
-        | "claude-opus-4-5-thinking"
-        | "claude-opus-4-5-thinking-high"
-        | "claude-opus-4-5-thinking-medium" => Some("claude-opus-4-5"),
-
-        "antigravity-claude-opus-4-6-thinking" | "claude-opus-4-6-thinking" | "claude-opus-4-6" => {
-            Some("openrouter/anthropic/claude-opus-4.6")
-        }
-
-        "antigravity-claude-sonnet-4-6-thinking" | "claude-sonnet-4-6-thinking" => {
-            Some("openrouter/anthropic/claude-sonnet-4.6")
-        }
-
-        // Antigravity placeholders retained for legacy cache rows that were not
-        // normalized before pricing. These must resolve to the same real model.
-        "MODEL_PLACEHOLDER_M26" | "model-placeholder-m26" => {
-            Some("openrouter/anthropic/claude-opus-4.6")
-        }
-
-        "MODEL_PLACEHOLDER_M35" | "model-placeholder-m35" => {
-            Some("openrouter/anthropic/claude-sonnet-4.6")
-        }
-
-        "MODEL_PLACEHOLDER_M36"
-        | "model-placeholder-m36"
-        | "MODEL_PLACEHOLDER_M37"
-        | "model-placeholder-m37" => Some("gemini-3.1-pro-preview"),
-
-        "MODEL_PLACEHOLDER_M47" | "model-placeholder-m47" => Some("gemini-3-flash-preview"),
-
-        "model_openai_gpt_oss_120b_medium" | "model-openai-gpt-oss-120b-medium" => {
-            Some("openrouter/openai/gpt-oss-120b-medium")
-        }
-
         // Bare model names (often from -free stripping) → LiteLLM keys
         "grok-code" => Some("xai/grok-code-fast-1"),
 
@@ -939,17 +907,81 @@ mod tests {
         assert!(result.is_none());
     }
 
+    fn catalog(entries: &[(&str, f64, f64)]) -> PricingCatalog {
+        PricingCatalog::new(
+            entries
+                .iter()
+                .map(|(key, input, output)| {
+                    (
+                        key.to_string(),
+                        PricingRecord::new(make_pricing(*input, *output), "test", "v1"),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn matched_key(catalog: &PricingCatalog, model_id: &str) -> Option<String> {
+        catalog
+            .lookup(model_id, Some("google"))
+            .map(|resolved| resolved.matched_key.to_string())
+    }
+
     #[test]
-    fn test_lookup_model_pricing_uses_explicit_antigravity_alias() {
-        let mut map = HashMap::new();
-        map.insert(
-            "gemini-3-pro-preview".to_string(),
-            make_pricing(0.000002, 0.000012),
+    fn test_catalog_prices_label_ids_through_the_preview_retry() {
+        // Antigravity names models from UI labels, which never say "preview".
+        let catalog = catalog(&[("gemini-3-pro-preview", 0.000002, 0.000012)]);
+        for model in [
+            "antigravity-gemini-3-pro-high",
+            "gemini-3-pro-high",
+            "gemini-3-pro-preview-low",
+        ] {
+            assert_eq!(
+                matched_key(&catalog, model).as_deref(),
+                Some("gemini-3-pro-preview"),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_catalog_prefers_an_exact_key_over_its_preview() {
+        let catalog = catalog(&[
+            ("hy3", 0.000001, 0.000002),
+            ("hy3-preview", 0.000003, 0.000004),
+            ("gemini-3.8-flash", 0.00000075, 0.00000375),
+            ("gemini-3.8-flash-preview", 0.000009, 0.000009),
+        ]);
+        let input = |model: &str| {
+            catalog
+                .lookup(model, None)
+                .unwrap()
+                .pricing
+                .input_cost_per_token
+        };
+        // Both entries survive normalization with their own price.
+        assert_eq!(input("hy3"), 0.000001);
+        assert_eq!(input("hy3-preview"), 0.000003);
+        assert_eq!(input("gemini-3-8-flash-medium"), 0.00000075);
+    }
+
+    #[test]
+    fn test_catalog_uses_vertex_only_as_the_last_resort() {
+        // Upstream keeps a retired preview only under router and Vertex keys.
+        let both = catalog(&[
+            ("vertex_ai/gemini-3-pro-preview", 0.000001, 0.000001),
+            ("openrouter/google/gemini-3-pro-preview", 0.000002, 0.000012),
+        ]);
+        assert_eq!(
+            matched_key(&both, "gemini-3-pro-high").as_deref(),
+            Some("openrouter/gemini-3-pro-preview")
         );
 
-        let result = lookup_model_pricing("antigravity-gemini-3-pro-high", &map);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().input_cost_per_token, 0.000002);
+        let vertex_only = catalog(&[("vertex_ai/gemini-3-pro-preview", 0.000002, 0.000012)]);
+        assert_eq!(
+            matched_key(&vertex_only, "gemini-3-pro-high").as_deref(),
+            Some("vertex_ai/gemini-3-pro-preview")
+        );
     }
 
     #[test]
@@ -1226,48 +1258,28 @@ mod tests {
 
     #[test]
     fn test_lookup_gemini_3_1_uses_3_1_pricing_not_3_pro() {
-        let mut wrong_version = HashMap::new();
-        wrong_version.insert(
-            "gemini-3-pro-preview".to_string(),
-            make_pricing(0.000002, 0.000012),
-        );
+        let wrong_version = catalog(&[("gemini-3-pro-preview", 0.000002, 0.000012)]);
+        assert_eq!(matched_key(&wrong_version, "gemini-3.1-pro-high"), None);
 
-        assert!(lookup_model_pricing("gemini-3.1-pro-high", &wrong_version).is_none());
-        assert!(lookup_model_pricing("MODEL_PLACEHOLDER_M37", &wrong_version).is_none());
-
-        let mut map = HashMap::new();
-        map.insert(
-            "gemini-3.1-pro-preview".to_string(),
-            make_pricing(0.000003, 0.000015),
-        );
-
-        assert_eq!(
-            lookup_model_pricing("gemini-3.1-pro-high", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000003
-        );
-        assert_eq!(
-            lookup_model_pricing("MODEL_PLACEHOLDER_M37", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000003
-        );
-        assert_eq!(
-            lookup_model_pricing("gemini-3.1-pro-preview-high", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000003
-        );
+        // LiteLLM spells the key with a dot; every spelling lands on it.
+        let catalog = catalog(&[("gemini-3.1-pro-preview", 0.000003, 0.000015)]);
+        for model in [
+            "gemini-3.1-pro-high",
+            "gemini-3-1-pro-high",
+            "gemini_3_1_pro_high",
+            "gemini-3.1-pro-preview-high",
+        ] {
+            assert_eq!(
+                matched_key(&catalog, model).as_deref(),
+                Some("gemini-3-1-pro-preview"),
+                "{model}"
+            );
+        }
     }
 
     #[test]
     fn test_lookup_claude_4_5_thinking_variants_keep_pricing() {
-        let mut map = HashMap::new();
-        map.insert(
-            "claude-opus-4-5".to_string(),
-            make_pricing(0.000003, 0.000015),
-        );
+        let catalog = catalog(&[("claude-opus-4-5", 0.000003, 0.000015)]);
 
         for model in [
             "antigravity-claude-opus-4-5-thinking",
@@ -1276,7 +1288,7 @@ mod tests {
             "claude-opus-4-5-thinking-medium",
         ] {
             assert!(
-                lookup_model_pricing(model, &map).is_some(),
+                catalog.lookup(model, Some("anthropic")).is_some(),
                 "{model} should resolve to claude-opus-4-5 pricing"
             );
         }
@@ -1371,40 +1383,24 @@ mod tests {
 
     #[test]
     fn test_lookup_claude_4_6_variants_use_4_6_pricing() {
-        let mut map = HashMap::new();
-        map.insert(
-            "openrouter/anthropic/claude-opus-4.6".to_string(),
-            make_pricing(0.000004, 0.00002),
-        );
-        map.insert(
-            "openrouter/anthropic/claude-sonnet-4.6".to_string(),
-            make_pricing(0.000003, 0.000015),
-        );
+        // Router keys as upstream spells them; the catalog stores them as
+        // `openrouter/claude-*-4-6`, and lookups must land on that form.
+        let catalog = catalog(&[
+            ("openrouter/anthropic/claude-opus-4.6", 0.000004, 0.00002),
+            ("openrouter/anthropic/claude-sonnet-4.6", 0.000003, 0.000015),
+        ]);
+        let input = |model: &str| {
+            catalog
+                .lookup(model, Some("anthropic"))
+                .unwrap()
+                .pricing
+                .input_cost_per_token
+        };
 
-        assert_eq!(
-            lookup_model_pricing("claude-opus-4-6", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000004
-        );
-        assert_eq!(
-            lookup_model_pricing("claude-opus-4-6-thinking", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000004
-        );
-        assert_eq!(
-            lookup_model_pricing("claude-sonnet-4-6", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000003
-        );
-        assert_eq!(
-            lookup_model_pricing("MODEL_PLACEHOLDER_M35", &map)
-                .unwrap()
-                .input_cost_per_token,
-            0.000003
-        );
+        assert_eq!(input("claude-opus-4-6"), 0.000004);
+        assert_eq!(input("claude-opus-4-6-thinking"), 0.000004);
+        assert_eq!(input("claude-sonnet-4-6"), 0.000003);
+        assert_eq!(input("claude-sonnet-4-6-thinking"), 0.000003);
     }
 
     #[test]
