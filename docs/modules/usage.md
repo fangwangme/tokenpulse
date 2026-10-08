@@ -144,12 +144,9 @@ Important rule:
 - primary token source is `last_token_usage`
 - supports fallback delta computation from `total_token_usage`
 - includes cumulative-regression guards
-- forked and sub-agent sessions (`session_meta` with `forked_from_id`,
-  `parent_thread_id`, or a `source.subagent`) open with history inherited from
-  the parent thread: replayed token counts and a running total that already
-  includes the parent's usage. Token counts before the session's first
-  `turn_context` only seed the running total and are never counted; root
-  sessions are unaffected
+- a forked or sub-agent session (`forked_from_id`, `parent_thread_id` or
+  `source.subagent` in `session_meta`) opens with its parent's token history;
+  token counts before its first `turn_context` only seed the running total
 
 ### OpenCode
 
@@ -269,7 +266,7 @@ Token usage comes from the conversation databases themselves, so it no longer de
 | the `model_enum` pair in `1.20` | `model` | `model_enum` |
 | `1.19` | `responseModel` | `served_model` |
 
-`model_id` is resolved from the two raw identities enum-first, through the alias table, and re-resolved on every read so a later-learned alias corrects old rows; see `docs/specs/antigravity-model-aliases.md`.
+`model_id` is resolved enum-first through the alias table and re-resolved on every read; see `docs/specs/antigravity-model-aliases.md`.
 
 `output_tokens` deliberately comes from `1.4.10` rather than `1.4.3` (`outputTokens`): `1.4.3` already contains the thinking tokens, and cost calculation adds reasoning on top of output, so `1.4.3` would double-count. Both the local parser and the language-server path funnel through one `normalize_antigravity_tokens` function that applies this rule and verifies `thinking + response == total`, so the two sources cannot drift apart; a record failing that check is logged and skipped rather than stored. When a source reports only the total, the disjoint output is recovered as `total - thinking`. Antigravity reports no cache-write tokens on either path, so `cache_write_tokens` is always 0. Wall-clock times are joined from `steps.metadata` through the request UUID the two tables share; a `Timestamp` whose nanoseconds fall outside `[0, 1e9)` is not one and is skipped.
 
@@ -281,7 +278,7 @@ Antigravity CLI and Desktop are treated as sub-clients of the same `antigravity`
 
 Claude Code, Codex, Copilot, Gemini CLI, and PI do not maintain separate raw cache databases. Their normal incremental path discovers session files by arrival time (the later of mtime and ctime), parses matching files concurrently, and replaces only the sessions represented by those files. Range refreshes and full rebuilds still use the broader source/date clearing paths.
 
-The incremental window follows the previous refresh rather than a fixed span: each source records when its last successful refresh began (`source_refresh_state` in `usage.db`), and the next one scans from a day before that date. A source without a recorded refresh — the first run after upgrading — scans from two days before its newest stored message, and one with no data at all is scanned in full. Runs narrowed by `--since` or `--refresh-days` do not move the anchor, because they did not cover everything written since the previous refresh.
+The incremental window starts a day before the source's previous refresh (recorded in `source_refresh_state` in `usage.db`). Without a recorded refresh it starts two days before the newest stored message; a source with no data is scanned in full. Runs narrowed by `--since` or `--refresh-days` do not move the anchor.
 
 Non-TUI output includes:
 

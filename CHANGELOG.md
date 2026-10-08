@@ -8,63 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.1] - 2026-10-08
 
 ### Fixed
-- **Antigravity models resolve from their enum, not the backend's codename**:
-  each generation reports both a stable enum (`MODEL_PLACEHOLDER_M319`) and the
-  backend's served model name, and the served name was preferred. When it
-  became a release codename (`gemini-3.8-flash-n`), Gemini 3.8 Flash usage
-  showed up as a separate, zero-cost model. The enum now wins whenever an alias
-  names it, from the local conversation databases and the language-server RPC
-  alike; the served name only stands in for enums no alias knows yet.
-- **Placeholder models no longer get stuck**: a `model-placeholder-*` row cached
-  before its alias was learned was never corrected, because the cache cleanup
-  compared underscored alias keys against hyphenated ids, ran only once per
-  process, and never re-sent corrected rows to the ledger. The raw enum and
-  served name are now kept with each cached row, every refresh re-resolves
-  them against the aliases known at that point, and corrected sessions are
-  re-ingested. The sub-agent enums `M196`/`M264` (Gemini 3.6 Flash) and every
-  Gemini 3.6/3.7/3.8 Flash alias captured so far ship as built-in seeds.
-- **Gemini 3 Pro Preview is priced again**: upstream catalogs dropped its bare
-  and `gemini/` keys, and lookups could never match the remaining router key
-  because catalog keys were normalized and lookup candidates were not.
-  Candidates now share the catalog's spelling rules (`.`, `_` and `-` alike,
-  `openrouter/google/X` as `openrouter/X`), Gemini lookups also try `gemini/`,
-  a model missing under its own name is retried as `<model>-preview`, and
-  `vertex_ai/` is tried last, only when nothing else matches.
-
-- **Codex forked and sub-agent sessions no longer re-count their parent's
-  usage**: such a session's rollout opens with history inherited from the
-  parent thread — the parent's replayed token counts, and a running total
-  that already includes everything the parent used. The first of those has no
-  per-call usage, so the whole inherited total was counted as one message,
-  and none of them carried a model, so all of it surfaced as tens of millions
-  of `unknown` tokens. Token counts before the session's first turn now only
-  seed the running total. The parser version moves to `codex-v4`, which
-  re-ingests Codex usage once.
-- **Models listed only under provider prefixes are priced**: when no lookup
-  rule matches, the same model under any provider prefix is used, preferring
-  the highest-priority source and the price most of its listings agree on.
-  This prices models such as `muse-spark-1.3-contributor-free` (OpenCode's
-  free tier, catalogued only as `meta/…` and by resellers) at the paid rate.
+- **Antigravity models resolve from their enum**: a generation reports a
+  stable enum (`MODEL_PLACEHOLDER_M319`) and the backend's served name, which
+  is sometimes a codename (`gemini-3.8-flash-n`). The enum now wins whenever an
+  alias names it, so codenames no longer show up as separate, unpriced models.
+- **Placeholder models get corrected**: each cached row keeps its raw enum and
+  served name and is re-resolved on every refresh, so an alias learned later
+  fixes history in the cache and the ledger. Previously a hyphen/underscore
+  mismatch left `model-placeholder-*` rows stuck.
+- **Gemini 3 Pro Preview is priced again**: lookup candidates now use the same
+  key normalization as the catalog, Gemini also tries `gemini/`, ids are retried
+  with `-preview`, and `vertex_ai/` is the last resort.
+- **Codex sub-agent sessions no longer re-count their parent**: a forked or
+  sub-agent rollout opens with the parent's token history, which was counted
+  again — mostly as `unknown`. Token counts before the session's first turn are
+  now skipped (`codex-v4` re-ingests Codex once).
+- **Models listed only under provider prefixes are priced**: when nothing else
+  matches, the same model under any provider is used, preferring LiteLLM and
+  the majority price (e.g. `muse-spark-1.3-contributor-free`).
 
 ### Changed
-- **One model name per model, without `-preview`**: model grouping and display
-  drop the `preview` segment for every source, since vendors attach it
-  arbitrarily. Pricing still distinguishes `X` from `X-preview` where a catalog
-  prices them differently. Stored grouping ids are re-derived on startup
-  whenever the naming rules change, so old and new rows stay in one group.
-- **Antigravity model ids follow labels, with no per-model rules**: ids come
-  from the `GetUserStatus` label (`Gemini 3.1 Pro (High)` →
-  `gemini-3-1-pro-high`) with spelling normalization only. The hard-coded
-  version list, `-preview` list, `gemini-3-flash-a` mapping and the
-  Antigravity block of pricing aliases are gone. The parser version moves to
-  `antigravity-v6`, which re-derives Antigravity usage once.
-- **Incremental refreshes start from the previous refresh**: the scan window
-  was anchored on each source's newest message and reached back a fixed 7
-  days, so an idle source kept an old anchor and a bulk metadata change made
-  every refresh re-read every session file. Each source now records when its
-  last refresh began, and the next one scans from a day before that; until a
-  source has a recorded refresh, it scans from two days before its newest
-  message.
+- **`-preview` no longer splits a model**: grouping and display drop it for
+  every source; pricing still tells `X` and `X-preview` apart. Stored grouping
+  ids are re-derived on startup when the rules change.
+- **Antigravity ids come from labels**: `Gemini 3.1 Pro (High)` →
+  `gemini-3-1-pro-high`, with spelling normalization only. The per-model
+  version, `-preview` and codename rules are gone (`antigravity-v6` re-ingests
+  Antigravity once).
+- **Incremental refreshes start from the previous refresh**: each source scans
+  from a day before its last refresh instead of 7 days before its newest
+  message, falling back to 2 days when no refresh has been recorded.
 
 ## [0.6.0] - 2026-10-03
 

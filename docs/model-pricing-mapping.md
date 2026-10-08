@@ -1,122 +1,72 @@
 # Model Pricing Mapping
 
-This document explains how TokenPulse maps model ids found in local agent logs to pricing keys from the merged pricing catalog.
+How TokenPulse maps model ids from agent logs to keys in the merged pricing
+catalog. Logs and catalogs spell the same model differently (`glm-5.1`,
+`glm5.1`, `z-ai/glm-5.1`, `openrouter/z-ai/glm-5.1`), so general rules are
+preferred over one-off aliases.
 
-## Goal
+## Two normalizations
 
-Agent logs are not consistent. The same model can appear as:
+`model_id` defines both; they share the spelling rules — lowercase, last path
+segment only, date suffix and `antigravity-` prefix dropped, `.`/`_`/spaces as
+`-`, and trailing `-high`, `-medium`, `-low`, `-thinking`, `-tiered` (Antigravity
+sub-agent routing) and `-free` stripped.
 
-- `glm-5.1`
-- `glm5.1`
-- `z-ai/glm-5.1`
-- `zai/glm-5.1`
-- `openrouter/z-ai/glm-5.1`
+- **`pricing_key`** — catalog keys and lookups. Keeps `-preview`: catalogs list
+  `X` and `X-preview` separately, sometimes at different prices.
+- **`canonical`** — display and grouping. Also drops every `preview` segment;
+  vendors attach it arbitrarily and a GA release is a new version, not the
+  preview promoted. Stored grouping ids in `usage.db` are re-derived on startup
+  when these rules change.
 
-The pricing cache may use another spelling again. The mapping layer should therefore prefer general normalization rules over one-off aliases.
+| Raw model id | `canonical` | `pricing_key` |
+|---|---|---|
+| `antigravity-claude-opus-4-5-thinking-high` | `claude-opus-4-5` | `claude-opus-4-5` |
+| `gemini-3.1-pro-preview-high` | `gemini-3-1-pro` | `gemini-3-1-pro-preview` |
+| `gemini-3.6-flash-tiered` | `gemini-3-6-flash` | `gemini-3-6-flash` |
+| `z-ai/glm-5.1-low` | `glm-5-1` | `glm-5-1` |
 
-## Lookup Pipeline
+## Lookup
 
-`PricingCatalog::lookup()` normalizes the model id with `model_id::pricing_key`, builds ordered candidates, and normalizes every candidate with the same rule the catalog applied to its keys on insert before checking it. Both sides therefore share one key space: lowercase, `.`/`_`/spaces as `-`, date and tier suffixes stripped, and a three-segment key reduced to provider plus model (`openrouter/google/gemini-3-pro-preview` is stored and looked up as `openrouter/gemini-3-pro-preview`). `pricing_key` keeps `-preview`: catalogs list `X` and `X-preview` separately, sometimes at different prices, so the two must never collapse into one key.
+`PricingCatalog::lookup()` builds ordered candidates from the `pricing_key`,
+normalizes each one the way catalog keys were normalized on insert
+(`openrouter/google/X` is stored and looked up as `openrouter/X`), and returns
+the first usable record:
 
-The current candidate order is:
+1. the id itself, then its provider-hinted form;
+2. explicit aliases (below);
+3. family candidates — Gemini: bare, `google/`, `gemini/`, `openrouter/google/`;
+   GLM, Kimi, MiniMax, DeepSeek, Qwen, Claude and GPT have their own;
+4. `-free`, tier, date and three-segment-prefix variants, plus slash-to-dot
+   forms;
+5. steps 1–4 again for `<model>-preview` — some models only ever ship as
+   previews, and label-derived ids (Antigravity) never carry the suffix;
+6. `vertex_ai/<model>[-preview]` for Gemini — Vertex keeps models other
+   catalogs have retired, but never outranks them;
+7. the same model under any provider prefix, for models no rule reaches (e.g.
+   `muse-spark-1-3-contributor`, listed only as `meta/…` and by resellers):
+   highest-priority source first, then the price most listings agree on, so one
+   reseller's markup cannot win.
 
-1. The model id itself, then its provider-hinted form.
-2. Explicit aliases for model families that cannot be inferred safely.
-3. Generalized family candidates — for Gemini: bare, `google/`, `gemini/`, `openrouter/google/`.
-4. `-free` stripped candidates and their normalized forms.
-5. Quality-tier suffix normalization where applicable.
-6. Common provider-prefix candidates for unprefixed models.
-7. Date-suffix stripped candidates and their normalized forms.
-8. Slash-to-dot variants for providers that publish keys with dot separators.
-9. Steps 1–8 again for `<model>-preview`, when the id does not already end in it. Some models are only ever published as previews, and sources that name models from UI labels (Antigravity) never carry the suffix.
-10. `vertex_ai/<model>` and `vertex_ai/<model>-preview` for Gemini. Vertex keeps listing models the first-party and router catalogs have retired, but it must never outrank them.
-11. The same model under any provider prefix (`*/<model>`, then `*/<model>-preview`), for models no rule reaches — e.g. `muse-spark-1-3-contributor`, listed only as `meta/…` and by resellers. The highest-priority source wins (LiteLLM, then models.dev, then OpenRouter), then the price most of its listings agree on, so a single reseller's markup cannot set the price.
+A zero price (a provider's free tier, such as `opencode/…`) is never usable, so
+the lookup continues to the paid price of the same model.
 
-A provider-specific zero price (a `-free` tier such as `opencode/…`) is never usable, so the lookup continues to the paid price of the same model.
+### GLM / Z.ai
 
-This keeps exact pricing preferred, while still recovering from common provider spelling differences.
+Bare GLM ids, including compact forms like `glm5.1`, become `glm-{version}`
+with `zai/` and `zai.` candidates; `z-ai/` and `z.ai/` are read as `zai/`. A
+future `glm-5.2` resolves as soon as the catalog lists a matching key.
 
-## GLM / Z.ai Rules
+## Sources
 
-GLM models are handled by a generic canonicalization rule instead of enumerating every released version.
+No prices are hardcoded. The catalog merges LiteLLM, then models.dev, then
+OpenRouter; normalization decides which keys to try, source priority decides
+which record wins.
 
-The rule:
+## Explicit aliases
 
-1. Normalize `_` to `-`.
-2. Recognize bare GLM model ids that begin with `glm`, including compact forms like `glm5.1`.
-3. Canonicalize them to `glm-{version-or-suffix}`.
-4. Add Z.ai provider candidates:
-   - `zai/{canonical_model}`
-   - `zai.{canonical_model}`
-5. Normalize provider spellings:
-   - `z-ai/` -> `zai/`
-   - `z.ai/` -> `zai/`
-
-Examples:
-
-| Input model id | Generated pricing candidates |
-|---|---|
-| `glm5.1` | `glm-5.1`, `zai/glm-5.1`, `zai.glm-5.1` |
-| `glm-4.7-free` | `glm-4.7`, `zai/glm-4.7`, `zai.glm-4.7` |
-| `z-ai/glm5.1` | `zai/glm5.1`, `zai/glm-5.1`, `zai.glm-5.1` |
-| `openrouter/z-ai/glm-5.1` | raw key, `openrouter/zai/glm-5.1`, GLM family candidates |
-
-This means a future `glm-5.2` should resolve automatically as soon as the pricing cache contains a compatible `zai/glm-5.2` or `zai.glm-5.2` key.
-
-## Quality Tier Suffixes
-
-Some coding agents append reasoning or service-tier labels to the model id. These labels should not split model rollups because they describe how the same model was invoked, not a separate base model.
-
-For display and aggregation, TokenPulse strips final tier suffixes:
-
-- `-high`
-- `-medium`
-- `-low`
-- `-tiered`
-
-`-tiered` is Antigravity's routing suffix for sub-agent generators. It describes
-how the request was routed, not a quality tier and not a separate model family,
-so it is stripped by the same rule.
-
-Examples:
-
-| Raw model id | Aggregated model name |
-|---|---|
-| `antigravity-claude-opus-4-5-thinking-high` | `antigravity-claude-opus-4-5-thinking` |
-| `gemini-3-pro-medium` | `gemini-3-pro` |
-| `gemini-3.6-flash-tiered` | `gemini-3-6-flash` |
-| `z-ai/glm-5.1-low` | `z-ai/glm-5.1` |
-
-This normalization is intentionally applied only at the end of the model id so names that contain those words in the middle are preserved.
-
-Display and aggregation (`model_id::canonical`) additionally drop every `preview` segment: vendors attach it arbitrarily, and a GA release is a new version rather than the same model promoted, so `gemini-3-pro-preview-high` and `gemini-3-pro-high` group as `gemini-3-pro`. Pricing does not drop it (see the lookup pipeline above). Stored grouping ids in `usage.db` are re-derived on startup whenever these rules change.
-
-## Pricing Sources
-
-TokenPulse does not hardcode model prices.
-
-Pricing comes from a merged catalog with this priority:
-
-1. LiteLLM
-2. models.dev
-3. OpenRouter
-
-Mapping stays separate from source data. Normalization decides which lookup keys to try; source priority decides which matched record wins.
-
-## When To Add Explicit Aliases
-
-Add an explicit alias only when a rule would be unsafe or ambiguous.
-
-Good reasons:
-
-- The logged model id is a product label, not a model id.
-- The provider uses a renamed model family with no stable textual relation.
-- A routing provider logs a synthetic model id that must resolve to a specific vendor key.
-
-Avoid explicit aliases for simple spelling differences such as:
-
-- Hyphen vs no hyphen (`glm5.1` vs `glm-5.1`)
-- Provider spelling (`z-ai` vs `zai`)
-- Slash vs dot provider separators
-
-Those should be handled by generalized candidates.
+Add one only when a rule would be unsafe or ambiguous: the logged id is a
+product label, a family was renamed with no textual relation
+(`grok-code` → `xai/grok-code-fast-1`), or a router logs a synthetic id. Never
+for spelling differences (`glm5.1` vs `glm-5.1`, `z-ai` vs `zai`, slash vs
+dot) — the normalizations cover those.
