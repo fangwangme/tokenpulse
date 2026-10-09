@@ -529,49 +529,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detect_provider_openai_models() {
-        assert_eq!(
-            detect_provider_from_model("gpt-4o-mini-2024-07-18"),
-            "openai"
-        );
-        assert_eq!(detect_provider_from_model("gpt-4o"), "openai");
-        assert_eq!(detect_provider_from_model("codex-mini-latest"), "openai");
-        assert_eq!(detect_provider_from_model("o1-preview"), "openai");
-        assert_eq!(detect_provider_from_model("o3-mini"), "openai");
-        assert_eq!(detect_provider_from_model("o4-mini"), "openai");
-    }
-
-    #[test]
-    fn detect_provider_anthropic_models() {
-        assert_eq!(detect_provider_from_model("claude-3.5-sonnet"), "anthropic");
-        assert_eq!(
-            detect_provider_from_model("claude-sonnet-4-20250514"),
-            "anthropic"
-        );
-    }
-
-    #[test]
-    fn detect_provider_google_models() {
-        assert_eq!(detect_provider_from_model("gemini-2.0-flash"), "google");
-    }
-
-    #[test]
-    fn detect_provider_nvidia_bucket_models() {
-        assert_eq!(detect_provider_from_model("deepseek-r1"), "other");
-        assert_eq!(detect_provider_from_model("glm-4.7"), "other");
-        assert_eq!(detect_provider_from_model("MiniMax-M2.5"), "other");
-        assert_eq!(
-            detect_provider_from_model("nvidia/llama-3.1-nemotron"),
-            "other"
-        );
-    }
-
-    #[test]
-    fn detect_provider_unknown() {
-        assert_eq!(detect_provider_from_model("some-model"), "other");
-    }
-
-    #[test]
     fn extract_hr_time_parses_correctly() {
         let value: Value = serde_json::from_str(r#"{"hrTime": [1700000000, 500000000]}"#).unwrap();
         assert_eq!(extract_hr_time(&value), Some(1700000000500));

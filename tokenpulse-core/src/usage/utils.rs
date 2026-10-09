@@ -40,13 +40,6 @@ pub fn detect_provider_from_model(model: &str) -> String {
         || normalized.starts_with("gemini")
     {
         "google".to_string()
-    } else if normalized.contains("nvidia")
-        || normalized.contains("nemotron")
-        || normalized.contains("deepseek")
-        || normalized.contains("glm")
-        || normalized.contains("minimax")
-    {
-        "other".to_string()
     } else {
         "other".to_string()
     }

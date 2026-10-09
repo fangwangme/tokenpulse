@@ -109,8 +109,8 @@ cargo install --path tokenpulse-cli
 
 ## Features
 
-- **Unified dashboard** — usage (Overview/Models/Daily/Keeper/Activity) and quota in
-  one TUI, or plain-text/JSON/CSV output
+- **Unified dashboard** — usage (Overview/Models/Daily/Activity/Quota/Keeper/Settings)
+  and quota in one interactive TUI, plus plain-text/JSON/CSV exports for scripting
 - **Session Keeper & Automated Heartbeats** — scheduled lightweight heartbeats for
   Claude Code, Codex, and Google Antigravity to trigger 5h cooldown timers early
   and auto-sync immediately after weekly quota resets. Off by default; each ping
@@ -133,8 +133,8 @@ cargo install --path tokenpulse-cli
   of the visible window peak; theme-invariant backgrounds and borders
 - **Activity heatmap** — mouse-selectable with clickable legend ranges,
   agent/model drill-down, and scrollable selected-day detail
-- **Models table** — `%` column showing share of the active sort metric; quick
-  filter (`/`) and source filter overlay (`s`)
+- **Models table** — `%` column showing share of the active sort metric,
+  sorting by cost/tokens/date, and source filter overlay (`s`)
 - **Company-aware model coloring** — agent / provider separation in the data
   model
 - **Plain-text mode** — for scripting and remote shells
@@ -193,7 +193,6 @@ tokenpulse --rebuild-all
 > **Antigravity Sync after Rebuild**: If you rebuild the database (e.g. via `--rebuild-all`), you must run the Antigravity CLI and Desktop concurrently once to allow full synchronization of usage history. This is required because they need to be active at the same time to sync and align the data.
 
 ```bash
-
 # Write timing diagnostics to a log file
 tokenpulse --log
 ```

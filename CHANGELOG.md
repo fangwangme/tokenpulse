@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-10-09
+
+### Fixed
+- **Models page text search removed to prevent keyboard lock**: pressing `/` on
+  the Models page previously set an input intercept flag that swallowed arrow
+  keys and Tab. Switching tabs with the mouse left the state active, freezing
+  keyboard navigation across other pages. The text filter has been removed in
+  favor of source filtering (`s`), sorting (`c`/`t`/`d`), and direct row navigation.
+- **Pruned dead code and over-defensive unit tests**: removed unused `HeatmapMetric::label`,
+  simplified provider detection branches, pruned duplicate provider test assertions, and consolidated
+  tab documentation across `docs/modules/tui.md` and `docs/modules/usage.md`.
+
 ## [0.6.1] - 2026-10-08
 
 ### Fixed

@@ -297,99 +297,13 @@ quota fetcher and contact no quota API, showing only unexpired cached
 snapshots. This matches the TUI, where the same setting gates startup,
 auto-refresh, and manual `r`. `--csv` never fetches quota.
 
-## TUI Model
+## Interactive TUI
 
-The usage TUI is organized into six tabs:
+When stdin/stdout are attached to a terminal, `tokenpulse` automatically opens the interactive TUI.
+The TUI is organized into seven tabs (`Overview`, `Models`, `Daily`, `Activity`, `Quota`, `Keeper`, `Settings`).
 
-- `Overview` - 60-day stacked bar chart by model company + scrollable top models table
-- `Models` - Full searchable/sortable model table with company-colored model names, sort-aware share percentage, and colored numeric columns
-- `Daily` - Daily summary bar and table with sorting and 7-day token trends on wide terminals
-- `Activity` - GitHub-style calendar heatmap with range stats and selected-day drill-down
-- `Quota` - Live quota monitoring dashboard with expected-progress markers, reset times, and credits/balance tracking
-- `Settings` - Interactive settings panel to toggle refresh intervals, theme preference, and configure provider visibility
-
-### Source Filtering
-
-All tabs support runtime source filtering:
-- Press `s` to open filter overlay
-- Toggle individual providers on/off
-- Data in all views updates immediately
-- Config file (`~/.local/share/tokenpulse/config.toml`) controls which providers are loaded
-
-### `Overview`
-
-- chart shows the last 60 days of token usage
-- press `t` or `c` to switch the chart between tokens and cost
-- stacked bars are grouped by model company (`OpenAI`, `Google`, `Anthropic`, `Others`)
-- top models are normalized before ranking
-- top models use row selection; the visible window only moves when the selected row reaches an edge
-- model and agent columns are intentionally wider so long names are still legible
-- each row shows cost share using the actual filtered total cost
-
-Primary historical dashboard view:
-
-- 60-day stacked bar chart (tokens by company)
-- Scrollable top models by cost
-- Company-colored legend
-
-### `Models`
-
-Model attribution view:
-
-- Sortable table (cost, tokens, date)
-- Quick filter with `/`
-- Company-colored model names
-- Wider agent column for multi-agent attribution strings
-- `%` column reflects the active sort basis for the filtered model total: cost share for cost/date sort, token share for token sort
-- Semantic numeric colors: tokens=green, cost=gold, messages=blue
-- Filtered by enabled sources
-
-### `Daily`
-
-Daily operations view:
-
-- Summary bar with Today, This Week, This Month, period cost, tokens, messages, and sessions
-- Daily table with today highlighted
-- 7-day token sparkline on wide terminals
-- Semantic numeric colors by column
-- Sortable by date/cost/tokens
-
-### `Activity`
-
-Activity calendar heatmap:
-
-- 2 switchable metrics: total tokens and cost
-- 3 window modes (past 26 weeks, past 52 weeks, past 365 days)
-- GitHub-style calendar layout; intensity uses visible-window peak scaling, not equal-count quantiles
-- `<= 0` renders as empty, and positive values use five buckets at 20/40/60/80% of the visible window max
-- Cost uses a GitHub-green palette, tokens use a Kaggle-blue palette, and the heatmap surface is theme-invariant (with soft gray background and cell border colors) for consistent low-level readability across both light and dark themes
-- Narrow terminals clip to the most recent visible weeks instead of merging multiple dates into one cell
-- Clickable legend levels show the current token/cost range for that intensity bucket
-- Range overview includes Today, This Week, This Month, and all-time cost
-- Day drill-down with:
-  - Agent totals with per-agent cost
-  - Token summary (total/input/output/cache/reasoning/messages/sessions)
-  - Per-agent model list with per-model cost
-  - Scrollable selected-day detail panel when content exceeds the viewport, with the scroll hint rendered separately so the last model token line stays visible
-### `Quota`
-
-Quota usage monitoring view:
-
-- Displays rate limits (e.g. Session 5h, Weekly 7d) with progress gauges, expected progress indicators, and time to reset/limit.
-- Displays remaining balance or used credits depending on the active display mode.
-
-### `Settings`
-
-Settings and configuration view:
-
-- Toggle quota display mode (`used` or `remaining` credit balance)
-- Enable/disable individual providers
-- Set and save `auto_refresh_interval` (0, 1, 2, 5, 10, 15 min) — shared by quota + usage
-- Cycle through theme preference (`auto`, `dark`, `light`)
-- Toggle active Antigravity session scanning and alias synchronization (`scan_antigravity`: true / false)
-- Enable / disable quota balance refresh (`refresh_quota`: true / false, default true)
-- Space or Enter keys cycle or toggle the active setting, and Up/Down (`j`/`k`) keys move selection.
-
+- All tabs support runtime source filtering via `s` (toggle individual providers on/off; updates immediately).
+- For complete view layouts, metrics, and keybindings, see [`docs/modules/tui.md`](tui.md).
 
 ## Known Limits
 

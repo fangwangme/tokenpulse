@@ -15,14 +15,6 @@ pub enum HeatmapMetric {
 }
 
 impl HeatmapMetric {
-    #[allow(dead_code)]
-    pub fn label(self) -> &'static str {
-        match self {
-            HeatmapMetric::TotalTokens => "Total Tokens",
-            HeatmapMetric::Cost => "Cost",
-        }
-    }
-
     pub fn short_label(self) -> &'static str {
         match self {
             HeatmapMetric::TotalTokens => "tokens",
