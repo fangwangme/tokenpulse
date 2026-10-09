@@ -133,8 +133,8 @@ cargo install --path tokenpulse-cli
   of the visible window peak; theme-invariant backgrounds and borders
 - **Activity heatmap** — mouse-selectable with clickable legend ranges,
   agent/model drill-down, and scrollable selected-day detail
-- **Models table** — `%` column showing share of the active sort metric; quick
-  filter (`/`) and source filter overlay (`s`)
+- **Models table** — `%` column showing share of the active sort metric,
+  sorting by cost/tokens/date, and source filter overlay (`s`)
 - **Company-aware model coloring** — agent / provider separation in the data
   model
 - **Plain-text mode** — for scripting and remote shells

@@ -361,7 +361,6 @@ Cache: ~/.local/share/tokenpulse/pricing.json (24h TTL)
 - [x] Color theming
 - [x] Usage `--json` export mode
 - [x] Overview token/cost chart toggle and scrollable top models table
-- [x] Models quick filter (`/`)
 - [x] Daily token trend column
 - [x] Source filter overlay (`s`)
 - [x] Solid-cell heatmap intensity
