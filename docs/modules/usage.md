@@ -299,13 +299,14 @@ auto-refresh, and manual `r`. `--csv` never fetches quota.
 
 ## TUI Model
 
-The usage TUI is organized into six tabs:
+The usage TUI is organized into seven tabs (switchable with `←`/`→` or `h`/`l`):
 
 - `Overview` - 60-day stacked bar chart by model company + scrollable top models table
-- `Models` - Full searchable/sortable model table with company-colored model names, sort-aware share percentage, and colored numeric columns
+- `Models` - Full sortable model table with company-colored model names, sort-aware share percentage, and colored numeric columns
 - `Daily` - Daily summary bar and table with sorting and 7-day token trends on wide terminals
 - `Activity` - GitHub-style calendar heatmap with range stats and selected-day drill-down
 - `Quota` - Live quota monitoring dashboard with expected-progress markers, reset times, and credits/balance tracking
+- `Keeper` - Automated agent wakeup and execution logs
 - `Settings` - Interactive settings panel to toggle refresh intervals, theme preference, and configure provider visibility
 
 ### Source Filtering
@@ -337,7 +338,6 @@ Primary historical dashboard view:
 Model attribution view:
 
 - Sortable table (cost, tokens, date)
-- Quick filter with `/`
 - Company-colored model names
 - Wider agent column for multi-agent attribution strings
 - `%` column reflects the active sort basis for the filtered model total: cost share for cost/date sort, token share for token sort

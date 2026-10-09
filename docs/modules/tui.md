@@ -128,7 +128,6 @@ plan capitalized for display.
 
 ### Tab 2: Models
 - Full sortable table: #, Model, Agent, Tokens, Cost, %, Messages
-- Quick text filter with `/`
 - Models colored by detected company family (`OpenAI`, `Google`, `Anthropic`, `Others`)
 - Numeric columns use semantic colors so `Cost`, `Tokens`, and `Msgs` stand out separately
 - Sort by cost (c), tokens (t), or date (d)
@@ -208,8 +207,6 @@ plan capitalized for display.
 | `c`                   | Cost sort/metric, or overview cost chart |
 | `t`                   | Token sort/metric, or overview token chart |
 | `d`                   | Sort by date                             |
-| `/`                   | Open Models quick filter                 |
-| `Ctrl+L`              | Clear Models quick filter                |
 | `s`                   | Open/close source filter overlay         |
 | `w`                   | Cycle activity window (26w/52w/365d)     |
 | `n`                   | Jump to today/now (Daily/Activity)       |

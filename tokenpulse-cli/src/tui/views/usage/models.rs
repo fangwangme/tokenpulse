@@ -22,14 +22,9 @@ pub fn render_models_page(
     state: &UsageState,
     theme: &Theme,
 ) {
-    let title = if state.model_filter.is_empty() {
-        " Models ".to_string()
-    } else {
-        format!(" Models /{} ", state.model_filter)
-    };
     let block = Block::default()
         .title(Span::styled(
-            title,
+            " Models ",
             Style::default().fg(theme.accent).bold(),
         ))
         .borders(Borders::ALL)
@@ -40,11 +35,7 @@ pub fn render_models_page(
     let filtered = filtered_model_rows_for_state(dashboard, state);
 
     if filtered.is_empty() {
-        let empty = if state.model_filter.is_empty() {
-            empty_data_message(state, "No model data")
-        } else {
-            format!("No models match /{}", state.model_filter)
-        };
+        let empty = empty_data_message(state, "No model data");
         f.render_widget(
             Paragraph::new(empty).style(Style::default().fg(theme.dim)),
             inner,
@@ -426,23 +417,7 @@ pub fn filtered_models_for_state(
     dashboard: &UsageDashboard,
     state: &UsageState,
 ) -> Vec<ModelSummary> {
-    let models = dashboard.filtered_models(&state.enabled_sources);
-    let query = state.model_filter.trim().to_ascii_lowercase();
-    if query.is_empty() {
-        return models;
-    }
-
-    models
-        .into_iter()
-        .filter(|model| {
-            model.model.to_ascii_lowercase().contains(&query)
-                || model.provider.to_ascii_lowercase().contains(&query)
-                || model.source.to_ascii_lowercase().contains(&query)
-                || format_source_list(&model.source)
-                    .to_ascii_lowercase()
-                    .contains(&query)
-        })
-        .collect()
+    dashboard.filtered_models(&state.enabled_sources)
 }
 
 pub fn filtered_model_rows_for_state(

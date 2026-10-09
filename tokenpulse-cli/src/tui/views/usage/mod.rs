@@ -685,8 +685,6 @@ pub struct UsageState {
     pub selected_row: usize,
     pub sort_field: SortField,
     pub sort_ascending: bool,
-    pub model_filter: String,
-    pub model_filter_active: bool,
     // Source filter overlay
     pub show_source_filter: bool,
     pub source_filter_cursor: usize,
@@ -816,8 +814,6 @@ impl UsageState {
             selected_row: 0,
             sort_field: SortField::Cost,
             sort_ascending: false,
-            model_filter: String::new(),
-            model_filter_active: false,
             show_source_filter: false,
             source_filter_cursor: 0,
             all_sources,
@@ -1306,7 +1302,6 @@ where
                     let saved_page = state.page;
                     let saved_sort_field = state.sort_field;
                     let saved_sort_ascending = state.sort_ascending;
-                    let saved_model_filter = std::mem::take(&mut state.model_filter);
                     let saved_sources = state.enabled_sources.clone();
                     let saved_heatmap_date = state.selected_heatmap_date;
                     let saved_selected_row = state.selected_row;
@@ -1328,7 +1323,6 @@ where
                     state.page = saved_page;
                     state.sort_field = saved_sort_field;
                     state.sort_ascending = saved_sort_ascending;
-                    state.model_filter = saved_model_filter;
                     let new_all: BTreeSet<String> = state.all_sources.iter().cloned().collect();
                     let filtered: BTreeSet<String> = saved_sources
                         .into_iter()
@@ -1649,32 +1643,6 @@ where
                         continue;
                     }
 
-                    if state.model_filter_active {
-                        match key.code {
-                            KeyCode::Esc | KeyCode::Enter => {
-                                state.model_filter_active = false;
-                            }
-                            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                state.model_filter.clear();
-                                state.reset_scroll();
-                            }
-                            KeyCode::Backspace => {
-                                state.model_filter.pop();
-                                state.reset_scroll();
-                                state.model_filter_active = true;
-                            }
-                            KeyCode::Char(ch) => {
-                                if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    state.model_filter.push(ch);
-                                    state.reset_scroll();
-                                    state.model_filter_active = true;
-                                }
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-
                     if matches!(key.code, KeyCode::Char('r'))
                         && !key.modifiers.contains(KeyModifiers::CONTROL)
                     {
@@ -1710,10 +1678,6 @@ where
                     match state.page {
                         UsagePage::Models => match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => break,
-                            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                state.model_filter.clear();
-                                state.reset_scroll();
-                            }
                             KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
                             KeyCode::Right | KeyCode::Char('l') => state.next_page(),
                             KeyCode::Up | KeyCode::Char('k') => {
@@ -1744,9 +1708,6 @@ where
                             KeyCode::Char('c') => state.toggle_sort(SortField::Cost),
                             KeyCode::Char('t') => state.toggle_sort(SortField::Tokens),
                             KeyCode::Char('d') => state.toggle_sort(SortField::Date),
-                            KeyCode::Char('/') => {
-                                state.model_filter_active = true;
-                            }
                             KeyCode::Char('s') => {
                                 state.show_source_filter = true;
                             }
@@ -2444,13 +2405,6 @@ fn render_footer(
                 spans.extend(key_help("←→", "tab", theme));
                 spans.extend(key_help("↑↓", "select", theme));
 
-                let filter_desc = if state.model_filter.is_empty() {
-                    "filter".to_string()
-                } else {
-                    format!("filter ({})", state.model_filter)
-                };
-                spans.extend(key_help("/", filter_desc, theme));
-
                 let dir = if state.sort_ascending { "↑" } else { "↓" };
                 let field = match state.sort_field {
                     SortField::Cost => "cost",
@@ -2749,7 +2703,6 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
         }
         UsagePage::Models => {
             keybindings.extend([
-                ("/", "search filter models by name"),
                 ("c", "sort table by Cost value"),
                 ("t", "sort table by Tokens value"),
                 ("d", "sort table by Date value"),
