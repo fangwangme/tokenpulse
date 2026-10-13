@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Removed static `model` field from `AgentKeeperConfig`**: eliminated the
   stale model configuration string from `config.toml`, setup defaults, and
   legacy migration routines.
+- **Overview chart continuous timeline**: zero-token days are now preserved as
+  empty slots on the overview chart timeline rather than being omitted, preventing
+  misleading adjacencies between non-consecutive dates.
 
 ## [0.6.2] - 2026-10-09
 

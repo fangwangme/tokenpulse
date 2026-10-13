@@ -176,6 +176,23 @@ pub struct DailyStats {
 }
 
 impl DailyStats {
+    pub fn empty(date: NaiveDate) -> Self {
+        Self {
+            date,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: 0,
+            cost_usd: 0.0,
+            messages: 0,
+            sessions: 0,
+            providers: HashMap::new(),
+            models: HashMap::new(),
+        }
+    }
+
     pub fn from_day(day: &DashboardDay) -> Option<Self> {
         Some(Self {
             date: NaiveDate::parse_from_str(&day.date, "%Y-%m-%d").ok()?,
@@ -515,9 +532,40 @@ impl UsageDashboard {
         streak
     }
 
-    pub fn recent_days(&self, limit: usize) -> Vec<&DailyStats> {
-        let start = self.daily.len().saturating_sub(limit);
-        self.daily[start..].iter().collect()
+    pub fn recent_days(&self, limit: usize) -> Vec<DailyStats> {
+        if limit == 0 || self.daily.is_empty() {
+            return Vec::new();
+        }
+
+        let first_recorded = self.daily.first().unwrap().date;
+        let latest_recorded = self.daily.last().unwrap().date;
+
+        let today = Local::now().date_naive();
+        let end = if today >= latest_recorded && (today - latest_recorded).num_days() < limit as i64
+        {
+            today
+        } else {
+            latest_recorded
+        };
+
+        let window_start = end - Duration::days(limit.saturating_sub(1) as i64);
+        let start = window_start.max(first_recorded);
+
+        let by_date: HashMap<NaiveDate, &DailyStats> =
+            self.daily.iter().map(|d| (d.date, d)).collect();
+
+        let mut result = Vec::with_capacity((end - start).num_days() as usize + 1);
+        let mut cursor = start;
+        while cursor <= end {
+            if let Some(stats) = by_date.get(&cursor) {
+                result.push((*stats).clone());
+            } else {
+                result.push(DailyStats::empty(cursor));
+            }
+            cursor += Duration::days(1);
+        }
+
+        result
     }
 
     pub fn all_sources(&self) -> Vec<String> {
@@ -3254,5 +3302,67 @@ mod tests {
         assert_eq!(interpolate_color(c1, c2, 0.0), Color::Rgb(0, 0, 0));
         assert_eq!(interpolate_color(c1, c2, 1.0), Color::Rgb(100, 200, 50));
         assert_eq!(interpolate_color(c1, c2, 0.5), Color::Rgb(50, 100, 25));
+    }
+
+    fn test_day_stat(date: NaiveDate, tokens: i64) -> DailyStats {
+        let mut d = DailyStats::empty(date);
+        d.total_tokens = tokens;
+        d
+    }
+
+    #[test]
+    fn test_recent_days_empty_dashboard() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        assert!(dashboard.recent_days(10).is_empty());
+        assert!(dashboard.recent_days(0).is_empty());
+    }
+
+    #[test]
+    fn test_recent_days_fills_gaps_between_dates() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let d3 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let dashboard = UsageDashboard {
+            daily: vec![test_day_stat(d1, 100), test_day_stat(d3, 300)],
+        };
+        // Historical dates (> limit days ago from today), so anchor ends at d3
+        let recent = dashboard.recent_days(10);
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].date, d1);
+        assert_eq!(recent[0].total_tokens, 100);
+        assert_eq!(recent[1].date, NaiveDate::from_ymd_opt(2024, 1, 2).unwrap());
+        assert_eq!(recent[1].total_tokens, 0);
+        assert_eq!(recent[2].date, d3);
+        assert_eq!(recent[2].total_tokens, 300);
+    }
+
+    #[test]
+    fn test_recent_days_caps_at_limit() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let d10 = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+        let dashboard = UsageDashboard {
+            daily: vec![test_day_stat(d1, 100), test_day_stat(d10, 500)],
+        };
+        let recent = dashboard.recent_days(5);
+        assert_eq!(recent.len(), 5);
+        assert_eq!(recent[0].date, NaiveDate::from_ymd_opt(2024, 1, 6).unwrap());
+        assert_eq!(recent[4].date, d10);
+        assert_eq!(recent[4].total_tokens, 500);
+    }
+
+    #[test]
+    fn test_recent_days_includes_up_to_today_when_recent() {
+        let today = Local::now().date_naive();
+        let two_days_ago = today - Duration::days(2);
+        let dashboard = UsageDashboard {
+            daily: vec![test_day_stat(two_days_ago, 500)],
+        };
+        let recent = dashboard.recent_days(10);
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].date, two_days_ago);
+        assert_eq!(recent[0].total_tokens, 500);
+        assert_eq!(recent[1].date, today - Duration::days(1));
+        assert_eq!(recent[1].total_tokens, 0);
+        assert_eq!(recent[2].date, today);
+        assert_eq!(recent[2].total_tokens, 0);
     }
 }
