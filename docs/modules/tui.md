@@ -150,7 +150,7 @@ plan capitalized for display.
 - Clickable legend cells — click an intensity level to show its current value range
 - The heatmap surface is theme-invariant, using soft gray background and cell border colors in both app themes so low activity levels remain visible and intensity direction stays consistent
 - Drill-down: select any day to see token summary (with cache read/write split as `CR`/`CW`), agent totals, and per-agent model cost breakdown
-- Selected-day panel supports scroll via `[` / `]` (or PageUp / PageDown) and mouse wheel when the detail list is taller than the viewport, with a dedicated bottom-row scroll hint so the final token-detail line is not overwritten
+- Selected-day panel supports scroll via `[` / `]` and mouse wheel when the detail list is taller than the viewport, with a dedicated bottom-row scroll hint so the final token-detail line is not overwritten
 - Streak tracking: current streak and longest streak
 
 ### Tab 5: Quota
@@ -210,7 +210,7 @@ plan capitalized for display.
 | `s`                   | Open/close source filter overlay         |
 | `w`                   | Cycle activity window (26w/52w/365d)     |
 | `n`                   | Jump to today/now (Daily/Activity)       |
-| `PgUp` / `PgDn`       | Scroll selected-day detail (Activity)    |
+| `[` / `]`             | Scroll selected-day detail (Activity)    |
 | `a`                   | Toggle all sources (in filter overlay)   |
 | `Space` / `Enter`     | Toggle source (in filter overlay)        |
 | `b`                   | Cycle and save theme (auto/dark/light)   |
