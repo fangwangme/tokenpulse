@@ -812,7 +812,7 @@ impl UsageState {
             heatmap_detail_scroll: 0,
             scroll_offset: 0,
             selected_row: 0,
-            sort_field: SortField::Cost,
+            sort_field: SortField::Tokens,
             sort_ascending: false,
             show_source_filter: false,
             source_filter_cursor: 0,

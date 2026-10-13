@@ -312,8 +312,6 @@ pub struct AgentKeeperConfig {
     pub weekly_keeper_enabled: bool,
     #[serde(default = "default_command")]
     pub command: String,
-    #[serde(default = "default_model")]
-    pub model: String,
     #[serde(default = "default_prompt")]
     pub prompt: String,
 }
@@ -323,10 +321,6 @@ fn default_daily_wakeup_time() -> String {
 }
 
 fn default_command() -> String {
-    String::new()
-}
-
-fn default_model() -> String {
     String::new()
 }
 
@@ -343,7 +337,6 @@ impl Default for AgentKeeperConfig {
             daily_wakeup_time: default_daily_wakeup_time(),
             weekly_keeper_enabled: default_true(),
             command: default_command(),
-            model: default_model(),
             prompt: default_prompt(),
         }
     }
@@ -358,7 +351,6 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             daily_wakeup_time: "10:30".to_string(),
             weekly_keeper_enabled: true,
             command: "claude -p \"{prompt}\" --model {model} --no-session-persistence".to_string(),
-            model: "haiku".to_string(),
             prompt: "Hi".to_string(),
         },
     );
@@ -370,7 +362,6 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             weekly_keeper_enabled: true,
             command: "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
                 .to_string(),
-            model: "gpt-5.6-luna".to_string(),
             prompt: "Hi".to_string(),
         },
     );
@@ -381,7 +372,6 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             daily_wakeup_time: "10:30".to_string(),
             weekly_keeper_enabled: true,
             command: "agy --model {model} --prompt \"{prompt}\"".to_string(),
-            model: "gemini-3.7-flash-low".to_string(),
             prompt: "Hi".to_string(),
         },
     );
@@ -501,14 +491,6 @@ impl ConfigManager {
                     || is_legacy_keeper_command(name, &agent_cfg.command)
                 {
                     agent_cfg.command = default_cfg.command.clone();
-                    modified = true;
-                }
-                if agent_cfg.model == "claude-3-5-haiku-20241022" {
-                    agent_cfg.model = "haiku".to_string();
-                    modified = true;
-                }
-                if agent_cfg.model == "gpt-5.6-luna-low" {
-                    agent_cfg.model = "gpt-5.6-luna".to_string();
                     modified = true;
                 }
             } else {
@@ -974,7 +956,6 @@ enabled = true
         assert!(claude.session_keeper_enabled);
         assert_eq!(claude.daily_wakeup_time, "10:30");
         assert!(claude.weekly_keeper_enabled);
-        assert_eq!(claude.model, "haiku");
         assert_eq!(
             claude.command,
             "claude -p \"{prompt}\" --model {model} --no-session-persistence"
@@ -982,7 +963,8 @@ enabled = true
 
         let codex = config.keeper.agents.get("codex").unwrap();
         assert!(codex.session_keeper_enabled);
-        assert_eq!(codex.model, "gpt-5.6-luna");
+        assert_eq!(codex.daily_wakeup_time, "10:30");
+        assert!(codex.weekly_keeper_enabled);
         assert_eq!(
             codex.command,
             "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
@@ -990,7 +972,8 @@ enabled = true
 
         let antigravity = config.keeper.agents.get("antigravity").unwrap();
         assert!(antigravity.session_keeper_enabled);
-        assert_eq!(antigravity.model, "gemini-3.7-flash-low");
+        assert_eq!(antigravity.daily_wakeup_time, "10:30");
+        assert!(antigravity.weekly_keeper_enabled);
         assert_eq!(
             antigravity.command,
             "agy --model {model} --prompt \"{prompt}\""
@@ -1023,7 +1006,6 @@ version = 3
 enabled = true
 [keeper.agents.claude]
 command = 'claude --bare -p "{prompt}" --model {model} --my-flag'
-model = "haiku"
 "#;
         fs::write(&config_path, custom).unwrap();
 
@@ -1058,13 +1040,10 @@ version = 3
 enabled = true
 [keeper.agents.antigravity]
 command = 'agy query "{prompt}" --model {model}'
-model = "gemini-3.7-flash-low"
 [keeper.agents.claude]
 command = 'claude -p "{prompt}" --model {model}'
-model = "claude-3-5-haiku-20241022"
 [keeper.agents.codex]
 command = 'codex exec "{prompt}" -m {model}'
-model = "gpt-5.6-luna-low"
 "#;
         fs::write(&config_path, legacy_toml).unwrap();
 
@@ -1079,14 +1058,12 @@ model = "gpt-5.6-luna-low"
             claude.command,
             "claude -p \"{prompt}\" --model {model} --no-session-persistence"
         );
-        assert_eq!(claude.model, "haiku");
 
         let codex = loaded.keeper.agents.get("codex").unwrap();
         assert_eq!(
             codex.command,
             "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
         );
-        assert_eq!(codex.model, "gpt-5.6-luna");
     }
     /// One bad value plus settings worth keeping: what `config enable` and the
     /// Keeper toggles used to replace with defaults.

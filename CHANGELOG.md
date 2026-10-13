@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-10-13
+
+### Added
+- **Keeper dynamic cheapest model resolution**: Keeper heartbeat commands no
+  longer rely on static model configurations. They now dynamically resolve the
+  newest active cheapest model from local catalogs prior to execution:
+  - Claude Code: dynamically resolves the newest active `Haiku` model from
+    `~/.claude/cache/model-catalog/*.json` (e.g. `claude-haiku-5-5`).
+  - OpenAI Codex: dynamically resolves the newest active `luna` model from
+    `~/.codex/models_cache.json` (e.g. `gpt-6-luna`), excluding older versions.
+  - Google Antigravity: dynamically resolves the newest active `flash` model
+    with `-low` tier from `~/.local/share/tokenpulse/antigravity-cache/model-aliases.json`
+    (e.g. `gemini-3.8-flash-low`).
+  - Zero tolerance: if dynamic resolution fails to locate an active model,
+    the ping records a clear failure rather than silently falling back to a stale default.
+
+### Changed
+- **Default table sort switched to Tokens**: the global initial dashboard
+  sort order across views has been changed from `SortField::Cost` to
+  `SortField::Tokens` (descending). All runtime `t` (Tokens), `c` (Cost), and
+  `d` (Date) keybindings remain unchanged.
+- **Removed static `model` field from `AgentKeeperConfig`**: eliminated the
+  stale model configuration string from `config.toml`, setup defaults, and
+  legacy migration routines.
+
 ## [0.6.2] - 2026-10-09
 
 ### Fixed

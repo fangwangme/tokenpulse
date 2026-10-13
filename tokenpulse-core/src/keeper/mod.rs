@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tracing::info;
 
+pub mod models;
+pub use models::resolve_cheapest_model;
+
 #[derive(Debug, Clone, Copy)]
 pub enum KeeperTriggerType {
     Daily,
@@ -381,13 +384,47 @@ pub async fn execute_agent_ping(
 ) -> KeeperExecutionRecord {
     let start_instant = Instant::now();
     let timestamp = Local::now();
-    let command_str = format_keeper_command(&config.command, &config.model, &config.prompt);
+
+    let model = if config.command.contains("{model}") {
+        match resolve_cheapest_model(agent) {
+            Ok(m) => m,
+            Err(err) => {
+                tracing::error!(
+                    "Keeper: Failed to resolve cheapest model for agent '{}': {}",
+                    agent,
+                    err
+                );
+                return KeeperExecutionRecord {
+                    agent: agent.to_string(),
+                    trigger_type,
+                    model: "unresolved".to_string(),
+                    prompt: config.prompt.clone(),
+                    command_executed: format_keeper_command(
+                        &config.command,
+                        "unresolved",
+                        &config.prompt,
+                    ),
+                    timestamp,
+                    duration_ms: 0,
+                    success: false,
+                    exit_code: None,
+                    output_snippet: sanitize_output_snippet(&format!(
+                        "Model resolution failed: {err}"
+                    )),
+                };
+            }
+        }
+    } else {
+        resolve_cheapest_model(agent).unwrap_or_else(|_| "custom".to_string())
+    };
+
+    let command_str = format_keeper_command(&config.command, &model, &config.prompt);
 
     info!(
-        "Keeper: Executing {} ping for agent '{}' with model '{}': {}",
+        "Keeper: Executing {} ping for agent '{}' with dynamic model '{}': {}",
         trigger_type.label(),
         agent,
-        config.model,
+        model,
         command_str
     );
 
@@ -432,7 +469,7 @@ pub async fn execute_agent_ping(
     KeeperExecutionRecord {
         agent: agent.to_string(),
         trigger_type,
-        model: config.model.clone(),
+        model,
         prompt: config.prompt.clone(),
         command_executed: command_str,
         timestamp,
@@ -531,12 +568,13 @@ pub fn failed_ping_record(
     reason: &str,
 ) -> KeeperExecutionRecord {
     let timestamp = Local::now();
+    let model = resolve_cheapest_model(agent).unwrap_or_else(|_| "unresolved".to_string());
     KeeperExecutionRecord {
         agent: agent.to_string(),
         trigger_type,
-        model: config.model.clone(),
+        model: model.clone(),
         prompt: config.prompt.clone(),
-        command_executed: format_keeper_command(&config.command, &config.model, &config.prompt),
+        command_executed: format_keeper_command(&config.command, &model, &config.prompt),
         timestamp,
         duration_ms: 0,
         success: false,
@@ -873,7 +911,6 @@ mod tests {
             daily_wakeup_time: "10:30".to_string(),
             weekly_keeper_enabled: true,
             command: command.to_string(),
-            model: "m".to_string(),
             prompt: "p".to_string(),
         }
     }

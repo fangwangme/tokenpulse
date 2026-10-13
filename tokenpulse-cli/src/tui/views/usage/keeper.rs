@@ -318,9 +318,11 @@ fn render_agent_cards(
                 ),
             ]));
 
+            let dynamic_model = tokenpulse_core::keeper::resolve_cheapest_model(agent_id)
+                .unwrap_or_else(|_| "unresolved".to_string());
             lines.push(Line::from(vec![
                 Span::styled("Model: ", Style::default().fg(theme.dim)),
-                Span::styled(&agent_cfg.model, Style::default().fg(theme.fg).bold()),
+                Span::styled(dynamic_model, Style::default().fg(theme.fg).bold()),
             ]));
 
             let (status_label, status_str, status_style) =
