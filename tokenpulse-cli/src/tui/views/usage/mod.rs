@@ -26,6 +26,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Terminal,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
@@ -176,6 +177,23 @@ pub struct DailyStats {
 }
 
 impl DailyStats {
+    pub fn empty(date: NaiveDate) -> Self {
+        Self {
+            date,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: 0,
+            cost_usd: 0.0,
+            messages: 0,
+            sessions: 0,
+            providers: HashMap::new(),
+            models: HashMap::new(),
+        }
+    }
+
     pub fn from_day(day: &DashboardDay) -> Option<Self> {
         Some(Self {
             date: NaiveDate::parse_from_str(&day.date, "%Y-%m-%d").ok()?,
@@ -515,9 +533,36 @@ impl UsageDashboard {
         streak
     }
 
-    pub fn recent_days(&self, limit: usize) -> Vec<&DailyStats> {
-        let start = self.daily.len().saturating_sub(limit);
-        self.daily[start..].iter().collect()
+    /// The last `limit` calendar days up to today, with days that have no usage
+    /// filled in as empty stats so the chart keeps true date spacing.
+    pub fn recent_days(&self, limit: usize) -> Vec<Cow<'_, DailyStats>> {
+        self.recent_days_as_of(limit, Local::now().date_naive())
+    }
+
+    fn recent_days_as_of(&self, limit: usize, today: NaiveDate) -> Vec<Cow<'_, DailyStats>> {
+        let (Some(first), Some(last)) = (self.daily.first(), self.daily.last()) else {
+            return Vec::new();
+        };
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        // Future-dated rows (clock skew) still get a slot.
+        let end = today.max(last.date);
+        let start = (end - Duration::days(limit as i64 - 1)).max(first.date);
+
+        // `daily` is sorted by date, so one cursor walks it alongside the calendar.
+        let mut recorded = self.daily[self.daily.partition_point(|d| d.date < start)..]
+            .iter()
+            .peekable();
+        start
+            .iter_days()
+            .take_while(|date| *date <= end)
+            .map(|date| match recorded.next_if(|d| d.date == date) {
+                Some(day) => Cow::Borrowed(day),
+                None => Cow::Owned(DailyStats::empty(date)),
+            })
+            .collect()
     }
 
     pub fn all_sources(&self) -> Vec<String> {
@@ -707,6 +752,10 @@ pub struct UsageState {
     pub keeper_weekly_triggered: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub keeper_logs: Vec<tokenpulse_core::keeper::KeeperExecutionRecord>,
     pub keeper_pings_in_progress: BTreeSet<String>,
+    /// Cheapest model per Keeper agent (error text on failure), resolved at
+    /// startup and then once a day instead of on every frame or ping.
+    pub keeper_models: HashMap<String, Result<String, String>>,
+    pub keeper_models_resolved_on: Option<NaiveDate>,
     pub keeper_log_scroll: usize,
     pub last_keeper_check: Instant,
     // Quota recovery notification & ambient animation state
@@ -812,7 +861,7 @@ impl UsageState {
             heatmap_detail_scroll: 0,
             scroll_offset: 0,
             selected_row: 0,
-            sort_field: SortField::Cost,
+            sort_field: SortField::Tokens,
             sort_ascending: false,
             show_source_filter: false,
             source_filter_cursor: 0,
@@ -831,6 +880,8 @@ impl UsageState {
             keeper_weekly_triggered: HashMap::new(),
             keeper_logs: Vec::new(),
             keeper_pings_in_progress: BTreeSet::new(),
+            keeper_models: HashMap::new(),
+            keeper_models_resolved_on: None,
             keeper_log_scroll: 0,
             last_keeper_check: Instant::now(),
             exhausted_windows,
@@ -953,6 +1004,35 @@ impl UsageState {
         }
     }
 
+    /// Resolves every Keeper agent's model on the first call of each day.
+    fn refresh_keeper_models(&mut self, today: NaiveDate) {
+        if self.keeper_models_resolved_on == Some(today) {
+            return;
+        }
+        self.keeper_models = keeper::KEEPER_AGENTS
+            .iter()
+            .map(|agent| (agent.to_string(), resolve_keeper_model(agent)))
+            .collect();
+        self.keeper_models_resolved_on = Some(today);
+    }
+
+    /// Re-resolves only the agents that failed, e.g. once a refresh has written
+    /// the Antigravity alias file a fresh install did not have at startup.
+    fn retry_failed_keeper_models(&mut self) {
+        for (agent, model) in &mut self.keeper_models {
+            if model.is_err() {
+                *model = resolve_keeper_model(agent);
+            }
+        }
+    }
+
+    fn keeper_model(&self, agent: &str) -> Result<String, String> {
+        self.keeper_models
+            .get(agent)
+            .cloned()
+            .unwrap_or_else(|| Err("model not resolved yet".to_string()))
+    }
+
     /// Carries the Keeper's runtime state onto a freshly rebuilt dashboard state.
     ///
     /// A usage refresh replaces `UsageState` wholesale and then restores fields
@@ -965,6 +1045,8 @@ impl UsageState {
         self.keeper_daily_triggered = std::mem::take(&mut previous.keeper_daily_triggered);
         self.keeper_weekly_triggered = std::mem::take(&mut previous.keeper_weekly_triggered);
         self.keeper_pings_in_progress = std::mem::take(&mut previous.keeper_pings_in_progress);
+        self.keeper_models = std::mem::take(&mut previous.keeper_models);
+        self.keeper_models_resolved_on = previous.keeper_models_resolved_on;
         self.selected_keeper_index = previous.selected_keeper_index;
         self.keeper_log_scroll = previous.keeper_log_scroll;
         self.last_keeper_check = previous.last_keeper_check;
@@ -1085,6 +1167,10 @@ pub enum TuiMessage {
     KeeperPingCompleted(tokenpulse_core::keeper::KeeperExecutionRecord),
 }
 
+fn resolve_keeper_model(agent: &str) -> Result<String, String> {
+    tokenpulse_core::keeper::resolve_cheapest_model(agent).map_err(|e| format!("{e:#}"))
+}
+
 /// Runs one Keeper ping and always reports back.
 ///
 /// The completion message is what clears `keeper_pings_in_progress`, so a task
@@ -1096,13 +1182,15 @@ fn spawn_keeper_ping(
     msg_tx: tokio::sync::mpsc::Sender<TuiMessage>,
     agent: String,
     agent_cfg: tokenpulse_core::config::AgentKeeperConfig,
+    model: Result<String, String>,
     trigger_type: tokenpulse_core::keeper::KeeperTriggerType,
 ) {
     tokio::spawn(async move {
         let ping_agent = agent.clone();
         let ping_cfg = agent_cfg.clone();
         let handle = tokio::spawn(async move {
-            tokenpulse_core::keeper::execute_agent_ping(&ping_agent, &ping_cfg, trigger_type).await
+            tokenpulse_core::keeper::execute_agent_ping(&ping_agent, &ping_cfg, model, trigger_type)
+                .await
         });
 
         let record = match handle.await {
@@ -1294,6 +1382,8 @@ where
     }
 
     loop {
+        state.refresh_keeper_models(Local::now().date_naive());
+
         // Process background messages
         while let Ok(msg) = msg_rx.try_recv() {
             match msg {
@@ -1316,6 +1406,7 @@ where
                         UsageState::new(&dashboard, saved_quota_snapshots),
                     );
                     state.adopt_keeper_state(&mut previous);
+                    state.retry_failed_keeper_models();
                     state.last_refresh = saved_last_refresh;
                     state.quota_refresh_in_progress = saved_quota_refresh_in_progress;
                     state.usage_refresh_in_progress = false;
@@ -1543,6 +1634,7 @@ where
                             msg_tx.clone(),
                             agent_id.to_string(),
                             agent_cfg.clone(),
+                            state.keeper_model(agent_id),
                             tokenpulse_core::keeper::KeeperTriggerType::Daily,
                         );
                     }
@@ -1573,6 +1665,7 @@ where
                             msg_tx.clone(),
                             agent_id.to_string(),
                             agent_cfg.clone(),
+                            state.keeper_model(agent_id),
                             tokenpulse_core::keeper::KeeperTriggerType::Weekly,
                         );
                     }
@@ -1790,10 +1883,10 @@ where
                                     dashboard.move_selection(state.selected_heatmap_date, 1);
                                 state.set_selected_heatmap_date(offset);
                             }
-                            KeyCode::PageUp => {
+                            KeyCode::Char('[') => {
                                 state.scroll_heatmap_detail_up();
                             }
-                            KeyCode::PageDown => {
+                            KeyCode::Char(']') => {
                                 let frame = terminal.size()?;
                                 let max = heatmap::heatmap_detail_scroll_max(
                                     &dashboard,
@@ -1933,6 +2026,7 @@ where
                                             msg_tx.clone(),
                                             agent.to_string(),
                                             agent_cfg.clone(),
+                                            state.keeper_model(agent),
                                             tokenpulse_core::keeper::KeeperTriggerType::Manual,
                                         );
                                     }
@@ -2475,7 +2569,7 @@ fn render_footer(
                 spans.extend(key_help("r", "refresh", theme));
                 spans.extend(key_help("←→", "tab", theme));
                 spans.extend(key_help("n", "today", theme));
-                spans.extend(key_help("pgup/pgdn", "detail", theme));
+                spans.extend(key_help("[/]", "detail", theme));
                 spans.extend(key_help(
                     "t/c",
                     format!("metric ({})", state.heatmap_metric.short_label()),
@@ -2722,7 +2816,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
                 ("n", "scroll list selection to Today"),
                 ("t", "toggle heatmap metric to Tokens"),
                 ("c", "toggle heatmap metric to Cost"),
-                ("pgup/pgdn", "scroll selected day details"),
+                ("[ / ]", "scroll selected day details"),
             ]);
         }
         UsagePage::Keeper => {
@@ -3254,5 +3348,61 @@ mod tests {
         assert_eq!(interpolate_color(c1, c2, 0.0), Color::Rgb(0, 0, 0));
         assert_eq!(interpolate_color(c1, c2, 1.0), Color::Rgb(100, 200, 50));
         assert_eq!(interpolate_color(c1, c2, 0.5), Color::Rgb(50, 100, 25));
+    }
+
+    fn test_day_stat(date: NaiveDate, tokens: i64) -> DailyStats {
+        let mut d = DailyStats::empty(date);
+        d.total_tokens = tokens;
+        d
+    }
+
+    #[test]
+    fn test_recent_days_empty_dashboard() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        assert!(dashboard.recent_days(10).is_empty());
+        assert!(dashboard.recent_days(0).is_empty());
+    }
+
+    #[test]
+    fn test_recent_days_fills_gaps_up_to_today() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let d3 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let today = NaiveDate::from_ymd_opt(2024, 1, 5).unwrap();
+        let dashboard = UsageDashboard {
+            daily: vec![test_day_stat(d1, 100), test_day_stat(d3, 300)],
+        };
+        let recent = dashboard.recent_days_as_of(10, today);
+        let dates: Vec<_> = recent.iter().map(|d| d.date).collect();
+        let tokens: Vec<_> = recent.iter().map(|d| d.total_tokens).collect();
+        assert_eq!(dates, d1.iter_days().take(5).collect::<Vec<_>>());
+        assert_eq!(tokens, vec![100, 0, 300, 0, 0]);
+    }
+
+    #[test]
+    fn test_recent_days_caps_at_limit() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let d10 = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+        let dashboard = UsageDashboard {
+            daily: vec![test_day_stat(d1, 100), test_day_stat(d10, 500)],
+        };
+        let recent = dashboard.recent_days_as_of(5, d10);
+        assert_eq!(recent.len(), 5);
+        assert_eq!(recent[0].date, NaiveDate::from_ymd_opt(2024, 1, 6).unwrap());
+        assert_eq!(recent[4].date, d10);
+        assert_eq!(recent[4].total_tokens, 500);
+    }
+
+    /// Usage older than the window no longer drags the chart back in time.
+    #[test]
+    fn test_recent_days_stays_anchored_to_today_when_data_is_old() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let today = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+        let dashboard = UsageDashboard {
+            daily: vec![test_day_stat(d1, 100)],
+        };
+        let recent = dashboard.recent_days_as_of(5, today);
+        assert_eq!(recent.len(), 5);
+        assert_eq!(recent[4].date, today);
+        assert!(recent.iter().all(|d| d.total_tokens == 0));
     }
 }

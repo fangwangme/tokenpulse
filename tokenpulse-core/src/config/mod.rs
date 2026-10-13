@@ -17,8 +17,9 @@ pub struct Config {
 }
 
 /// Current config schema version. `ConfigManager::load` migrates anything older
-/// and rewrites the file.
-pub const CONFIG_VERSION: u32 = 4;
+/// and rewrites the file. v5 dropped the Keeper agents' `model` key: the rewrite
+/// removes it, since the model is now resolved from local catalogs.
+pub const CONFIG_VERSION: u32 = 5;
 
 fn default_version() -> u32 {
     CONFIG_VERSION
@@ -312,8 +313,6 @@ pub struct AgentKeeperConfig {
     pub weekly_keeper_enabled: bool,
     #[serde(default = "default_command")]
     pub command: String,
-    #[serde(default = "default_model")]
-    pub model: String,
     #[serde(default = "default_prompt")]
     pub prompt: String,
 }
@@ -323,10 +322,6 @@ fn default_daily_wakeup_time() -> String {
 }
 
 fn default_command() -> String {
-    String::new()
-}
-
-fn default_model() -> String {
     String::new()
 }
 
@@ -343,7 +338,6 @@ impl Default for AgentKeeperConfig {
             daily_wakeup_time: default_daily_wakeup_time(),
             weekly_keeper_enabled: default_true(),
             command: default_command(),
-            model: default_model(),
             prompt: default_prompt(),
         }
     }
@@ -358,7 +352,6 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             daily_wakeup_time: "10:30".to_string(),
             weekly_keeper_enabled: true,
             command: "claude -p \"{prompt}\" --model {model} --no-session-persistence".to_string(),
-            model: "haiku".to_string(),
             prompt: "Hi".to_string(),
         },
     );
@@ -370,7 +363,6 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             weekly_keeper_enabled: true,
             command: "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
                 .to_string(),
-            model: "gpt-5.6-luna".to_string(),
             prompt: "Hi".to_string(),
         },
     );
@@ -381,7 +373,6 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             daily_wakeup_time: "10:30".to_string(),
             weekly_keeper_enabled: true,
             command: "agy --model {model} --prompt \"{prompt}\"".to_string(),
-            model: "gemini-3.7-flash-low".to_string(),
             prompt: "Hi".to_string(),
         },
     );
@@ -501,14 +492,6 @@ impl ConfigManager {
                     || is_legacy_keeper_command(name, &agent_cfg.command)
                 {
                     agent_cfg.command = default_cfg.command.clone();
-                    modified = true;
-                }
-                if agent_cfg.model == "claude-3-5-haiku-20241022" {
-                    agent_cfg.model = "haiku".to_string();
-                    modified = true;
-                }
-                if agent_cfg.model == "gpt-5.6-luna-low" {
-                    agent_cfg.model = "gpt-5.6-luna".to_string();
                     modified = true;
                 }
             } else {
@@ -862,7 +845,7 @@ usage_auto_refresh_secs = 900
 
         // The rewritten file drops the legacy keys in favor of the unified one.
         let written_content = fs::read_to_string(&manager.config_path).unwrap();
-        assert!(written_content.contains("version = 4"));
+        assert!(written_content.contains(&format!("version = {CONFIG_VERSION}")));
         assert!(written_content.contains("auto_refresh_secs = 120"));
         assert!(!written_content.contains("quota_auto_refresh_secs"));
         assert!(!written_content.contains("usage_auto_refresh_secs"));
@@ -889,8 +872,8 @@ show_account = true
         );
 
         assert_eq!(loaded.display.account_display, AccountDisplay::Full);
-        assert_eq!(loaded.version, 4);
-        assert!(written.contains("version = 4"));
+        assert_eq!(loaded.version, CONFIG_VERSION);
+        assert!(written.contains(&format!("version = {CONFIG_VERSION}")));
         assert!(written.contains(r#"account_display = "full""#));
         assert!(!written.contains("show_account"));
     }
@@ -906,8 +889,8 @@ show_account = false
         );
 
         assert_eq!(loaded.display.account_display, AccountDisplay::None);
-        assert_eq!(loaded.version, 4);
-        assert!(written.contains("version = 4"));
+        assert_eq!(loaded.version, CONFIG_VERSION);
+        assert!(written.contains(&format!("version = {CONFIG_VERSION}")));
         assert!(written.contains(r#"account_display = "none""#));
         assert!(!written.contains("show_account"));
     }
@@ -959,7 +942,7 @@ enabled = true
         );
 
         assert!(loaded.providers.get("claude").unwrap().enabled);
-        assert_eq!(loaded.version, 4);
+        assert_eq!(loaded.version, CONFIG_VERSION);
     }
 
     #[test]
@@ -974,7 +957,6 @@ enabled = true
         assert!(claude.session_keeper_enabled);
         assert_eq!(claude.daily_wakeup_time, "10:30");
         assert!(claude.weekly_keeper_enabled);
-        assert_eq!(claude.model, "haiku");
         assert_eq!(
             claude.command,
             "claude -p \"{prompt}\" --model {model} --no-session-persistence"
@@ -982,7 +964,6 @@ enabled = true
 
         let codex = config.keeper.agents.get("codex").unwrap();
         assert!(codex.session_keeper_enabled);
-        assert_eq!(codex.model, "gpt-5.6-luna");
         assert_eq!(
             codex.command,
             "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
@@ -990,7 +971,6 @@ enabled = true
 
         let antigravity = config.keeper.agents.get("antigravity").unwrap();
         assert!(antigravity.session_keeper_enabled);
-        assert_eq!(antigravity.model, "gemini-3.7-flash-low");
         assert_eq!(
             antigravity.command,
             "agy --model {model} --prompt \"{prompt}\""
@@ -1023,7 +1003,6 @@ version = 3
 enabled = true
 [keeper.agents.claude]
 command = 'claude --bare -p "{prompt}" --model {model} --my-flag'
-model = "haiku"
 "#;
         fs::write(&config_path, custom).unwrap();
 
@@ -1058,13 +1037,10 @@ version = 3
 enabled = true
 [keeper.agents.antigravity]
 command = 'agy query "{prompt}" --model {model}'
-model = "gemini-3.7-flash-low"
 [keeper.agents.claude]
 command = 'claude -p "{prompt}" --model {model}'
-model = "claude-3-5-haiku-20241022"
 [keeper.agents.codex]
 command = 'codex exec "{prompt}" -m {model}'
-model = "gpt-5.6-luna-low"
 "#;
         fs::write(&config_path, legacy_toml).unwrap();
 
@@ -1079,15 +1055,38 @@ model = "gpt-5.6-luna-low"
             claude.command,
             "claude -p \"{prompt}\" --model {model} --no-session-persistence"
         );
-        assert_eq!(claude.model, "haiku");
 
         let codex = loaded.keeper.agents.get("codex").unwrap();
         assert_eq!(
             codex.command,
             "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
         );
-        assert_eq!(codex.model, "gpt-5.6-luna");
     }
+
+    #[test]
+    fn test_v4_keeper_model_key_is_dropped() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+version = 4
+[keeper.agents.claude]
+command = 'claude -p "{prompt}" --model {model} --no-session-persistence'
+model = "haiku"
+"#,
+        )
+        .unwrap();
+
+        let manager = ConfigManager {
+            config_path: config_path.clone(),
+        };
+        assert_eq!(manager.load().unwrap().version, CONFIG_VERSION);
+        assert!(!fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("model = "));
+    }
+
     /// One bad value plus settings worth keeping: what `config enable` and the
     /// Keeper toggles used to replace with defaults.
     const BROKEN_CONFIG: &str = r#"

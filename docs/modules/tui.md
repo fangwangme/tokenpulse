@@ -123,14 +123,14 @@ plan capitalized for display.
 7 tabs switchable with ←/→:
 
 ### Tab 1: Overview
-- Top: stacked bar chart switchable between daily tokens and daily cost, last 60 days, colored by model company
+- Top: stacked bar chart switchable between daily tokens and daily cost across a continuous calendar timeline, padding zero-token days as blank slots and colored by model company
 - Bottom: row-selectable top models table with visible scroll hint, cost percentage, and wider model/agent columns
 
 ### Tab 2: Models
 - Full sortable table: #, Model, Agent, Tokens, Cost, %, Messages
 - Models colored by detected company family (`OpenAI`, `Google`, `Anthropic`, `Others`)
 - Numeric columns use semantic colors so `Cost`, `Tokens`, and `Msgs` stand out separately
-- Sort by cost (c), tokens (t), or date (d)
+- Sort by tokens (t, default), cost (c), or date (d)
 - `%` follows the active sort basis: cost share for cost/date sort, token share for token sort
 
 ### Tab 3: Daily
@@ -150,7 +150,7 @@ plan capitalized for display.
 - Clickable legend cells — click an intensity level to show its current value range
 - The heatmap surface is theme-invariant, using soft gray background and cell border colors in both app themes so low activity levels remain visible and intensity direction stays consistent
 - Drill-down: select any day to see token summary (with cache read/write split as `CR`/`CW`), agent totals, and per-agent model cost breakdown
-- Selected-day panel supports scroll when the detail list is taller than the viewport, with a dedicated bottom-row scroll hint so the final token-detail line is not overwritten
+- Selected-day panel supports scroll via `[` / `]` and mouse wheel when the detail list is taller than the viewport, with a dedicated bottom-row scroll hint so the final token-detail line is not overwritten
 - Streak tracking: current streak and longest streak
 
 ### Tab 5: Quota
@@ -162,8 +162,8 @@ plan capitalized for display.
 ### Tab 6: Keeper
 - Scheduled activation engine for Claude Code, Codex, and Antigravity — keeps sessions warm and anchors rate-limit windows at a chosen time.
 - Disabled by default: every ping spends real quota, so the master switch (`keeper_engine` in Settings) must be turned on explicitly.
-- Header bar shows the master switch state and the path to the config file, where wakeup times, models, prompts, and commands are edited.
-- One card per agent with two independent switches, the next trigger time, the configured model, and the status of the last (or in-flight) run:
+- Header bar shows the master switch state and the path to the config file, where wakeup times, prompts, and commands are edited.
+- One card per agent with two independent switches, the next trigger time, the dynamically resolved cheapest model (e.g. Haiku / Luna / Flash-Low), and the status of the last (or in-flight) run:
   - **5h daily wakeup** — fires at `daily_wakeup_time` (default `10:30`). A missed run is only caught up within 2 hours of that time, so launching the TUI late in the day does not fire a stale ping at the wrong hour.
   - **Weekly auto-sync** — fires 1 minute after the provider's weekly quota reset, read from the live quota snapshot.
 - Last-fired dates persist to `keeper_state.json` beside the config, so restarting the TUI does not re-fire a trigger that already ran.
@@ -210,7 +210,7 @@ plan capitalized for display.
 | `s`                   | Open/close source filter overlay         |
 | `w`                   | Cycle activity window (26w/52w/365d)     |
 | `n`                   | Jump to today/now (Daily/Activity)       |
-| `PgUp` / `PgDn`       | Scroll selected-day detail (Activity)    |
+| `[` / `]`             | Scroll selected-day detail (Activity)    |
 | `a`                   | Toggle all sources (in filter overlay)   |
 | `Space` / `Enter`     | Toggle source (in filter overlay)        |
 | `b`                   | Cycle and save theme (auto/dark/light)   |

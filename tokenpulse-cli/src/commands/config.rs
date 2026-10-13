@@ -93,12 +93,14 @@ pub fn run(action: ConfigAction) -> Result<()> {
             println!("Keeper:");
             println!("  keeper_engine: {}", config.keeper.enabled);
             for (name, agent) in &config.keeper.agents {
+                let model_display = tokenpulse_core::keeper::resolve_cheapest_model(name)
+                    .unwrap_or_else(|e| format!("unresolved: {e}"));
                 println!(
                     "  {name}: 5h={} weekly={} at {} ({})",
                     agent.session_keeper_enabled,
                     agent.weekly_keeper_enabled,
                     agent.daily_wakeup_time,
-                    agent.model
+                    model_display
                 );
             }
         }

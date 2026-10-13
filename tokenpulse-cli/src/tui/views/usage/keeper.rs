@@ -318,9 +318,13 @@ fn render_agent_cards(
                 ),
             ]));
 
+            let dynamic_model = match state.keeper_models.get(agent_id) {
+                Some(Ok(model)) => model.as_str(),
+                _ => "unresolved",
+            };
             lines.push(Line::from(vec![
                 Span::styled("Model: ", Style::default().fg(theme.dim)),
-                Span::styled(&agent_cfg.model, Style::default().fg(theme.fg).bold()),
+                Span::styled(dynamic_model, Style::default().fg(theme.fg).bold()),
             ]));
 
             let (status_label, status_str, status_style) =
