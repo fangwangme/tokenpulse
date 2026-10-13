@@ -1838,10 +1838,10 @@ where
                                     dashboard.move_selection(state.selected_heatmap_date, 1);
                                 state.set_selected_heatmap_date(offset);
                             }
-                            KeyCode::PageUp => {
+                            KeyCode::PageUp | KeyCode::Char('[') => {
                                 state.scroll_heatmap_detail_up();
                             }
-                            KeyCode::PageDown => {
+                            KeyCode::PageDown | KeyCode::Char(']') => {
                                 let frame = terminal.size()?;
                                 let max = heatmap::heatmap_detail_scroll_max(
                                     &dashboard,
@@ -2523,7 +2523,7 @@ fn render_footer(
                 spans.extend(key_help("r", "refresh", theme));
                 spans.extend(key_help("←→", "tab", theme));
                 spans.extend(key_help("n", "today", theme));
-                spans.extend(key_help("pgup/pgdn", "detail", theme));
+                spans.extend(key_help("[/]", "detail", theme));
                 spans.extend(key_help(
                     "t/c",
                     format!("metric ({})", state.heatmap_metric.short_label()),
@@ -2770,7 +2770,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
                 ("n", "scroll list selection to Today"),
                 ("t", "toggle heatmap metric to Tokens"),
                 ("c", "toggle heatmap metric to Cost"),
-                ("pgup/pgdn", "scroll selected day details"),
+                ("[ / ] (or pgup/pgdn)", "scroll selected day details"),
             ]);
         }
         UsagePage::Keeper => {

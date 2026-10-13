@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Overview chart continuous timeline**: zero-token days are now preserved as
   empty slots on the overview chart timeline rather than being omitted, preventing
   misleading adjacencies between non-consecutive dates.
+- **Activity detail scroll with `[` and `]`**: added `[` and `]` as ergonomic
+  detail scroll keys on the Activity (Heatmap) page alongside `PageUp` and
+  `PageDown`, providing single-key scrolling on compact keyboards without dedicated
+  page navigation keys.
 
 ## [0.6.2] - 2026-10-09
 
