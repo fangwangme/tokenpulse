@@ -164,7 +164,6 @@ pub fn resolve_codex_cheapest_model_from_file(file: &Path) -> Result<String> {
         })?;
 
     let mut active_lunas = Vec::new();
-    let mut older_lunas = Vec::new();
 
     for m in models {
         let slug = m.get("slug").and_then(|v| v.as_str());
@@ -181,22 +180,14 @@ pub fn resolve_codex_cheapest_model_from_file(file: &Path) -> Result<String> {
             let is_older = description.to_ascii_lowercase().contains("older")
                 || display_name.to_ascii_lowercase().contains("older");
 
-            if is_older {
-                older_lunas.push(slug_str.to_string());
-            } else {
+            if !is_older {
                 active_lunas.push(slug_str.to_string());
             }
         }
     }
 
-    // Prefer active (non-older) luna models; sort by version descending
     sort_version_strings_descending(&mut active_lunas);
     if let Some(best) = active_lunas.into_iter().next() {
-        return Ok(best);
-    }
-
-    sort_version_strings_descending(&mut older_lunas);
-    if let Some(best) = older_lunas.into_iter().next() {
         return Ok(best);
     }
 
@@ -401,6 +392,24 @@ mod tests {
         let cache_file = temp.path().join("missing.json");
         let err = resolve_codex_cheapest_model_from_file(&cache_file).unwrap_err();
         assert!(err.to_string().contains("Codex models cache not found"));
+    }
+
+    #[test]
+    fn test_resolve_codex_cheapest_model_only_older_fails() {
+        let temp = tempdir().unwrap();
+        let cache_file = temp.path().join("models_cache.json");
+        let json_content = r#"{
+            "models": [
+                {
+                    "slug": "gpt-5.6-luna",
+                    "display_name": "GPT-5.6-Luna",
+                    "description": "Older fast and efficient model."
+                }
+            ]
+        }"#;
+        fs::write(&cache_file, json_content).unwrap();
+        let err = resolve_codex_cheapest_model_from_file(&cache_file).unwrap_err();
+        assert!(err.to_string().contains("No active Luna model found"));
     }
 
     #[test]

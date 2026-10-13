@@ -127,14 +127,13 @@ cargo install --path tokenpulse-cli
   (0/1/2/5/10/15 min, default 5 min); cycle or toggle in the Settings tab, with
   a countdown shown in the footer
 - **`r` to refresh** — in both quota and usage views without restarting TUI
-- **60-day stacked bar chart** — switchable between token and cost views
+- **Stacked bar chart** — continuous daily timeline switchable between token and cost views, preserving zero-usage dates as empty slots
 - **Heatmap** — solid-cell coloring for value levels; GitHub-green palette for
   cost, Kaggle-blue palette for tokens; five intensity levels at 20/40/60/80%
   of the visible window peak; theme-invariant backgrounds and borders
 - **Activity heatmap** — mouse-selectable with clickable legend ranges,
   agent/model drill-down, and scrollable selected-day detail
-- **Models table** — `%` column showing share of the active sort metric,
-  sorting by cost/tokens/date, and source filter overlay (`s`)
+- **Models table** — default sorted by tokens (`t`), toggleable to cost (`c`) or date (`d`), with `%` share of the active sort metric and source filter overlay (`s`)
 - **Company-aware model coloring** — agent / provider separation in the data
   model
 - **Plain-text mode** — for scripting and remote shells
@@ -260,8 +259,10 @@ The **Keeper** tab lets you manage scheduled pings and wakeups for Claude Code, 
 
 Every ping spends real quota, so the engine ships **disabled**. Turn it on with
 the `keeper_engine` row in the Settings tab, then enable the switches you want
-per agent. Wakeup times, models, prompts, and commands live in `config.toml`
-under `[keeper]`; the tab header shows the exact path.
+per agent. Wakeup times, prompts, and command templates live in `config.toml`
+under `[keeper]`; Keeper dynamically resolves the cheapest active model for each
+agent (Claude Haiku, Codex Luna, Antigravity Flash-Low) from local catalogs
+before execution. The tab header shows the exact configuration path.
 
 - **`←` / `→` (or `h` / `l`)** — Switch between dashboard tabs
 - **`↑` / `↓` (or `k` / `j` / `Tab`)** — Select agent card (Claude Code / Codex / Antigravity)

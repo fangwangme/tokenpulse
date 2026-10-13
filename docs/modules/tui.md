@@ -123,14 +123,14 @@ plan capitalized for display.
 7 tabs switchable with ←/→:
 
 ### Tab 1: Overview
-- Top: stacked bar chart switchable between daily tokens and daily cost, last 60 days, colored by model company
+- Top: stacked bar chart switchable between daily tokens and daily cost across a continuous calendar timeline, padding zero-token days as blank slots and colored by model company
 - Bottom: row-selectable top models table with visible scroll hint, cost percentage, and wider model/agent columns
 
 ### Tab 2: Models
 - Full sortable table: #, Model, Agent, Tokens, Cost, %, Messages
 - Models colored by detected company family (`OpenAI`, `Google`, `Anthropic`, `Others`)
 - Numeric columns use semantic colors so `Cost`, `Tokens`, and `Msgs` stand out separately
-- Sort by cost (c), tokens (t), or date (d)
+- Sort by tokens (t, default), cost (c), or date (d)
 - `%` follows the active sort basis: cost share for cost/date sort, token share for token sort
 
 ### Tab 3: Daily
@@ -162,8 +162,8 @@ plan capitalized for display.
 ### Tab 6: Keeper
 - Scheduled activation engine for Claude Code, Codex, and Antigravity — keeps sessions warm and anchors rate-limit windows at a chosen time.
 - Disabled by default: every ping spends real quota, so the master switch (`keeper_engine` in Settings) must be turned on explicitly.
-- Header bar shows the master switch state and the path to the config file, where wakeup times, models, prompts, and commands are edited.
-- One card per agent with two independent switches, the next trigger time, the configured model, and the status of the last (or in-flight) run:
+- Header bar shows the master switch state and the path to the config file, where wakeup times, prompts, and commands are edited.
+- One card per agent with two independent switches, the next trigger time, the dynamically resolved cheapest model (e.g. Haiku / Luna / Flash-Low), and the status of the last (or in-flight) run:
   - **5h daily wakeup** — fires at `daily_wakeup_time` (default `10:30`). A missed run is only caught up within 2 hours of that time, so launching the TUI late in the day does not fire a stale ping at the wrong hour.
   - **Weekly auto-sync** — fires 1 minute after the provider's weekly quota reset, read from the live quota snapshot.
 - Last-fired dates persist to `keeper_state.json` beside the config, so restarting the TUI does not re-fire a trigger that already ran.
