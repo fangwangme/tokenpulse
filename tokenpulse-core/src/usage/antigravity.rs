@@ -21,6 +21,20 @@ const MODEL_ALIAS_HISTORY_FILE_NAME: &str = "model-aliases.json";
 const ANTIGRAVITY_LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
 const ANTIGRAVITY_RPC_BODY_CAP: usize = 64 * 1024 * 1024;
 
+/// Root of TokenPulse's Antigravity cache: `~/.local/share/tokenpulse/antigravity-cache`.
+pub fn default_cache_root() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".local")
+        .join("share")
+        .join("tokenpulse")
+        .join("antigravity-cache")
+}
+
+/// The model alias history the sync writes under [`default_cache_root`].
+pub fn default_model_alias_history_path() -> PathBuf {
+    default_cache_root().join(MODEL_ALIAS_HISTORY_FILE_NAME)
+}
+
 pub struct AntigravitySessionParser {
     rebuild_cache: bool,
     custom_paths: Option<Vec<PathBuf>>,
@@ -69,12 +83,7 @@ impl SessionParser for AntigravitySessionParser {
         if let Some(ref paths) = self.custom_paths {
             paths.clone()
         } else {
-            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-            vec![home
-                .join(".local")
-                .join("share")
-                .join("tokenpulse")
-                .join("antigravity-cache")]
+            vec![default_cache_root()]
         }
     }
 

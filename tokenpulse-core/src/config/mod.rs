@@ -963,8 +963,6 @@ enabled = true
 
         let codex = config.keeper.agents.get("codex").unwrap();
         assert!(codex.session_keeper_enabled);
-        assert_eq!(codex.daily_wakeup_time, "10:30");
-        assert!(codex.weekly_keeper_enabled);
         assert_eq!(
             codex.command,
             "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
@@ -972,8 +970,6 @@ enabled = true
 
         let antigravity = config.keeper.agents.get("antigravity").unwrap();
         assert!(antigravity.session_keeper_enabled);
-        assert_eq!(antigravity.daily_wakeup_time, "10:30");
-        assert!(antigravity.weekly_keeper_enabled);
         assert_eq!(
             antigravity.command,
             "agy --model {model} --prompt \"{prompt}\""

@@ -10,14 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Keeper dynamic cheapest model resolution**: Keeper heartbeat commands no
   longer rely on static model configurations. They now dynamically resolve the
-  newest active cheapest model from local catalogs prior to execution:
+  newest active cheapest model from local catalogs, once at TUI startup and
+  then once a day (agents that failed are retried on each refresh):
   - Claude Code: dynamically resolves the newest active `Haiku` model from
     `~/.claude/cache/model-catalog/*.json` (e.g. `claude-haiku-5-5`).
   - OpenAI Codex: dynamically resolves the newest active `luna` model from
-    `~/.codex/models_cache.json` (e.g. `gpt-6-luna`), excluding older versions.
+    `~/.codex/models_cache.json` (e.g. `gpt-6-luna`), excluding hidden and
+    older versions.
   - Google Antigravity: dynamically resolves the newest active `flash` model
     with `-low` tier from `~/.local/share/tokenpulse/antigravity-cache/model-aliases.json`
-    (e.g. `gemini-3.8-flash-low`).
+    (e.g. `gemini-3.8-flash-low`, the dotted id `agy models` lists).
   - Zero tolerance: if dynamic resolution fails to locate an active model,
     the ping records a clear failure rather than silently falling back to a stale default.
 

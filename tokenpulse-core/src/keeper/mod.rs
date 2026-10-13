@@ -376,17 +376,28 @@ pub fn find_snapshot_for_agent<'a>(
         })
 }
 
+/// Recorded model when resolution failed or never ran.
+const UNRESOLVED_MODEL: &str = "unresolved";
+/// Recorded model for a command template without `{model}`.
+const CUSTOM_MODEL: &str = "custom";
+
 /// Asynchronously executes a CLI heartbeat command.
+///
+/// `model` is the caller's cached [`resolve_cheapest_model`] result (an error
+/// message on failure); it is ignored when the command template has no `{model}`.
 pub async fn execute_agent_ping(
     agent: &str,
     config: &AgentKeeperConfig,
+    model: Result<String, String>,
     trigger_type: KeeperTriggerType,
 ) -> KeeperExecutionRecord {
     let start_instant = Instant::now();
     let timestamp = Local::now();
 
-    let model = if config.command.contains("{model}") {
-        match resolve_cheapest_model(agent) {
+    let model = if !config.command.contains("{model}") {
+        CUSTOM_MODEL.to_string()
+    } else {
+        match model {
             Ok(m) => m,
             Err(err) => {
                 tracing::error!(
@@ -397,11 +408,11 @@ pub async fn execute_agent_ping(
                 return KeeperExecutionRecord {
                     agent: agent.to_string(),
                     trigger_type,
-                    model: "unresolved".to_string(),
+                    model: UNRESOLVED_MODEL.to_string(),
                     prompt: config.prompt.clone(),
                     command_executed: format_keeper_command(
                         &config.command,
-                        "unresolved",
+                        UNRESOLVED_MODEL,
                         &config.prompt,
                     ),
                     timestamp,
@@ -414,14 +425,12 @@ pub async fn execute_agent_ping(
                 };
             }
         }
-    } else {
-        resolve_cheapest_model(agent).unwrap_or_else(|_| "custom".to_string())
     };
 
     let command_str = format_keeper_command(&config.command, &model, &config.prompt);
 
     info!(
-        "Keeper: Executing {} ping for agent '{}' with dynamic model '{}': {}",
+        "Keeper: Executing {} ping for agent '{}' with model '{}': {}",
         trigger_type.label(),
         agent,
         model,
@@ -568,13 +577,14 @@ pub fn failed_ping_record(
     reason: &str,
 ) -> KeeperExecutionRecord {
     let timestamp = Local::now();
-    let model = resolve_cheapest_model(agent).unwrap_or_else(|_| "unresolved".to_string());
+    // The model the failed ping used is unknown here; re-resolving could name a
+    // different one if a catalog changed in between.
     KeeperExecutionRecord {
         agent: agent.to_string(),
         trigger_type,
-        model: model.clone(),
+        model: UNRESOLVED_MODEL.to_string(),
         prompt: config.prompt.clone(),
-        command_executed: format_keeper_command(&config.command, &model, &config.prompt),
+        command_executed: format_keeper_command(&config.command, UNRESOLVED_MODEL, &config.prompt),
         timestamp,
         duration_ms: 0,
         success: false,
@@ -923,6 +933,7 @@ mod tests {
         let record = execute_agent_ping(
             "claude",
             &ping_config(&format!("printf '%s' 'Hello! {reply}'")),
+            Ok("m".to_string()),
             KeeperTriggerType::Manual,
         )
         .await;
@@ -932,11 +943,48 @@ mod tests {
         assert_eq!(record.output_snippet.chars().count(), 107);
     }
 
+    /// No fallback model: a failed resolution fails the ping without running it.
+    #[tokio::test]
+    async fn test_unresolved_model_fails_without_running_command() {
+        let marker = std::env::temp_dir().join("tokenpulse_keeper_unresolved_test");
+        let _ = std::fs::remove_file(&marker);
+
+        let config = ping_config(&format!("touch {} --model {{model}}", marker.display()));
+        let record = execute_agent_ping(
+            "claude",
+            &config,
+            Err("no catalog".to_string()),
+            KeeperTriggerType::Manual,
+        )
+        .await;
+
+        assert!(!record.success);
+        assert_eq!(record.model, "unresolved");
+        assert!(record.output_snippet.contains("no catalog"));
+        assert!(!marker.exists(), "command ran without a resolved model");
+    }
+
+    /// A template without `{model}` never needs the cached model.
+    #[tokio::test]
+    async fn test_command_without_model_ignores_resolution_error() {
+        let record = execute_agent_ping(
+            "claude",
+            &ping_config("printf ok"),
+            Err("no catalog".to_string()),
+            KeeperTriggerType::Manual,
+        )
+        .await;
+
+        assert!(record.success);
+        assert_eq!(record.model, "custom");
+    }
+
     #[tokio::test]
     async fn test_ping_output_is_single_line_without_control_chars() {
         let record = execute_agent_ping(
             "claude",
             &ping_config("printf 'line1\\nline2'; printf '\\x1b[31mwarn\\x1b[0m' 1>&2"),
+            Ok("m".to_string()),
             KeeperTriggerType::Manual,
         )
         .await;
@@ -953,7 +1001,13 @@ mod tests {
 
         let mut config = ping_config("echo \"{prompt}\"");
         config.prompt = format!("hi\"; touch {}; echo \"", marker.display());
-        execute_agent_ping("claude", &config, KeeperTriggerType::Manual).await;
+        execute_agent_ping(
+            "claude",
+            &config,
+            Ok("m".to_string()),
+            KeeperTriggerType::Manual,
+        )
+        .await;
 
         assert!(!marker.exists(), "prompt escaped the command template");
         let _ = std::fs::remove_file(&marker);

@@ -26,6 +26,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Terminal,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
@@ -532,40 +533,36 @@ impl UsageDashboard {
         streak
     }
 
-    pub fn recent_days(&self, limit: usize) -> Vec<DailyStats> {
-        if limit == 0 || self.daily.is_empty() {
+    /// The last `limit` calendar days up to today, with days that have no usage
+    /// filled in as empty stats so the chart keeps true date spacing.
+    pub fn recent_days(&self, limit: usize) -> Vec<Cow<'_, DailyStats>> {
+        self.recent_days_as_of(limit, Local::now().date_naive())
+    }
+
+    fn recent_days_as_of(&self, limit: usize, today: NaiveDate) -> Vec<Cow<'_, DailyStats>> {
+        let (Some(first), Some(last)) = (self.daily.first(), self.daily.last()) else {
+            return Vec::new();
+        };
+        if limit == 0 {
             return Vec::new();
         }
 
-        let first_recorded = self.daily.first().unwrap().date;
-        let latest_recorded = self.daily.last().unwrap().date;
+        // Future-dated rows (clock skew) still get a slot.
+        let end = today.max(last.date);
+        let start = (end - Duration::days(limit as i64 - 1)).max(first.date);
 
-        let today = Local::now().date_naive();
-        let end = if today >= latest_recorded && (today - latest_recorded).num_days() < limit as i64
-        {
-            today
-        } else {
-            latest_recorded
-        };
-
-        let window_start = end - Duration::days(limit.saturating_sub(1) as i64);
-        let start = window_start.max(first_recorded);
-
-        let by_date: HashMap<NaiveDate, &DailyStats> =
-            self.daily.iter().map(|d| (d.date, d)).collect();
-
-        let mut result = Vec::with_capacity((end - start).num_days() as usize + 1);
-        let mut cursor = start;
-        while cursor <= end {
-            if let Some(stats) = by_date.get(&cursor) {
-                result.push((*stats).clone());
-            } else {
-                result.push(DailyStats::empty(cursor));
-            }
-            cursor += Duration::days(1);
-        }
-
-        result
+        // `daily` is sorted by date, so one cursor walks it alongside the calendar.
+        let mut recorded = self.daily[self.daily.partition_point(|d| d.date < start)..]
+            .iter()
+            .peekable();
+        start
+            .iter_days()
+            .take_while(|date| *date <= end)
+            .map(|date| match recorded.next_if(|d| d.date == date) {
+                Some(day) => Cow::Borrowed(day),
+                None => Cow::Owned(DailyStats::empty(date)),
+            })
+            .collect()
     }
 
     pub fn all_sources(&self) -> Vec<String> {
@@ -755,6 +752,10 @@ pub struct UsageState {
     pub keeper_weekly_triggered: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub keeper_logs: Vec<tokenpulse_core::keeper::KeeperExecutionRecord>,
     pub keeper_pings_in_progress: BTreeSet<String>,
+    /// Cheapest model per Keeper agent (error text on failure), resolved at
+    /// startup and then once a day instead of on every frame or ping.
+    pub keeper_models: HashMap<String, Result<String, String>>,
+    pub keeper_models_resolved_on: Option<NaiveDate>,
     pub keeper_log_scroll: usize,
     pub last_keeper_check: Instant,
     // Quota recovery notification & ambient animation state
@@ -879,6 +880,8 @@ impl UsageState {
             keeper_weekly_triggered: HashMap::new(),
             keeper_logs: Vec::new(),
             keeper_pings_in_progress: BTreeSet::new(),
+            keeper_models: HashMap::new(),
+            keeper_models_resolved_on: None,
             keeper_log_scroll: 0,
             last_keeper_check: Instant::now(),
             exhausted_windows,
@@ -1001,6 +1004,35 @@ impl UsageState {
         }
     }
 
+    /// Resolves every Keeper agent's model on the first call of each day.
+    fn refresh_keeper_models(&mut self, today: NaiveDate) {
+        if self.keeper_models_resolved_on == Some(today) {
+            return;
+        }
+        self.keeper_models = keeper::KEEPER_AGENTS
+            .iter()
+            .map(|agent| (agent.to_string(), resolve_keeper_model(agent)))
+            .collect();
+        self.keeper_models_resolved_on = Some(today);
+    }
+
+    /// Re-resolves only the agents that failed, e.g. once a refresh has written
+    /// the Antigravity alias file a fresh install did not have at startup.
+    fn retry_failed_keeper_models(&mut self) {
+        for (agent, model) in &mut self.keeper_models {
+            if model.is_err() {
+                *model = resolve_keeper_model(agent);
+            }
+        }
+    }
+
+    fn keeper_model(&self, agent: &str) -> Result<String, String> {
+        self.keeper_models
+            .get(agent)
+            .cloned()
+            .unwrap_or_else(|| Err("model not resolved yet".to_string()))
+    }
+
     /// Carries the Keeper's runtime state onto a freshly rebuilt dashboard state.
     ///
     /// A usage refresh replaces `UsageState` wholesale and then restores fields
@@ -1013,6 +1045,8 @@ impl UsageState {
         self.keeper_daily_triggered = std::mem::take(&mut previous.keeper_daily_triggered);
         self.keeper_weekly_triggered = std::mem::take(&mut previous.keeper_weekly_triggered);
         self.keeper_pings_in_progress = std::mem::take(&mut previous.keeper_pings_in_progress);
+        self.keeper_models = std::mem::take(&mut previous.keeper_models);
+        self.keeper_models_resolved_on = previous.keeper_models_resolved_on;
         self.selected_keeper_index = previous.selected_keeper_index;
         self.keeper_log_scroll = previous.keeper_log_scroll;
         self.last_keeper_check = previous.last_keeper_check;
@@ -1133,6 +1167,10 @@ pub enum TuiMessage {
     KeeperPingCompleted(tokenpulse_core::keeper::KeeperExecutionRecord),
 }
 
+fn resolve_keeper_model(agent: &str) -> Result<String, String> {
+    tokenpulse_core::keeper::resolve_cheapest_model(agent).map_err(|e| format!("{e:#}"))
+}
+
 /// Runs one Keeper ping and always reports back.
 ///
 /// The completion message is what clears `keeper_pings_in_progress`, so a task
@@ -1144,13 +1182,15 @@ fn spawn_keeper_ping(
     msg_tx: tokio::sync::mpsc::Sender<TuiMessage>,
     agent: String,
     agent_cfg: tokenpulse_core::config::AgentKeeperConfig,
+    model: Result<String, String>,
     trigger_type: tokenpulse_core::keeper::KeeperTriggerType,
 ) {
     tokio::spawn(async move {
         let ping_agent = agent.clone();
         let ping_cfg = agent_cfg.clone();
         let handle = tokio::spawn(async move {
-            tokenpulse_core::keeper::execute_agent_ping(&ping_agent, &ping_cfg, trigger_type).await
+            tokenpulse_core::keeper::execute_agent_ping(&ping_agent, &ping_cfg, model, trigger_type)
+                .await
         });
 
         let record = match handle.await {
@@ -1342,6 +1382,8 @@ where
     }
 
     loop {
+        state.refresh_keeper_models(Local::now().date_naive());
+
         // Process background messages
         while let Ok(msg) = msg_rx.try_recv() {
             match msg {
@@ -1364,6 +1406,7 @@ where
                         UsageState::new(&dashboard, saved_quota_snapshots),
                     );
                     state.adopt_keeper_state(&mut previous);
+                    state.retry_failed_keeper_models();
                     state.last_refresh = saved_last_refresh;
                     state.quota_refresh_in_progress = saved_quota_refresh_in_progress;
                     state.usage_refresh_in_progress = false;
@@ -1591,6 +1634,7 @@ where
                             msg_tx.clone(),
                             agent_id.to_string(),
                             agent_cfg.clone(),
+                            state.keeper_model(agent_id),
                             tokenpulse_core::keeper::KeeperTriggerType::Daily,
                         );
                     }
@@ -1621,6 +1665,7 @@ where
                             msg_tx.clone(),
                             agent_id.to_string(),
                             agent_cfg.clone(),
+                            state.keeper_model(agent_id),
                             tokenpulse_core::keeper::KeeperTriggerType::Weekly,
                         );
                     }
@@ -1981,6 +2026,7 @@ where
                                             msg_tx.clone(),
                                             agent.to_string(),
                                             agent_cfg.clone(),
+                                            state.keeper_model(agent),
                                             tokenpulse_core::keeper::KeeperTriggerType::Manual,
                                         );
                                     }
@@ -3318,21 +3364,18 @@ mod tests {
     }
 
     #[test]
-    fn test_recent_days_fills_gaps_between_dates() {
+    fn test_recent_days_fills_gaps_up_to_today() {
         let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         let d3 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let today = NaiveDate::from_ymd_opt(2024, 1, 5).unwrap();
         let dashboard = UsageDashboard {
             daily: vec![test_day_stat(d1, 100), test_day_stat(d3, 300)],
         };
-        // Historical dates (> limit days ago from today), so anchor ends at d3
-        let recent = dashboard.recent_days(10);
-        assert_eq!(recent.len(), 3);
-        assert_eq!(recent[0].date, d1);
-        assert_eq!(recent[0].total_tokens, 100);
-        assert_eq!(recent[1].date, NaiveDate::from_ymd_opt(2024, 1, 2).unwrap());
-        assert_eq!(recent[1].total_tokens, 0);
-        assert_eq!(recent[2].date, d3);
-        assert_eq!(recent[2].total_tokens, 300);
+        let recent = dashboard.recent_days_as_of(10, today);
+        let dates: Vec<_> = recent.iter().map(|d| d.date).collect();
+        let tokens: Vec<_> = recent.iter().map(|d| d.total_tokens).collect();
+        assert_eq!(dates, d1.iter_days().take(5).collect::<Vec<_>>());
+        assert_eq!(tokens, vec![100, 0, 300, 0, 0]);
     }
 
     #[test]
@@ -3342,27 +3385,24 @@ mod tests {
         let dashboard = UsageDashboard {
             daily: vec![test_day_stat(d1, 100), test_day_stat(d10, 500)],
         };
-        let recent = dashboard.recent_days(5);
+        let recent = dashboard.recent_days_as_of(5, d10);
         assert_eq!(recent.len(), 5);
         assert_eq!(recent[0].date, NaiveDate::from_ymd_opt(2024, 1, 6).unwrap());
         assert_eq!(recent[4].date, d10);
         assert_eq!(recent[4].total_tokens, 500);
     }
 
+    /// Usage older than the window no longer drags the chart back in time.
     #[test]
-    fn test_recent_days_includes_up_to_today_when_recent() {
-        let today = Local::now().date_naive();
-        let two_days_ago = today - Duration::days(2);
+    fn test_recent_days_stays_anchored_to_today_when_data_is_old() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let today = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
         let dashboard = UsageDashboard {
-            daily: vec![test_day_stat(two_days_ago, 500)],
+            daily: vec![test_day_stat(d1, 100)],
         };
-        let recent = dashboard.recent_days(10);
-        assert_eq!(recent.len(), 3);
-        assert_eq!(recent[0].date, two_days_ago);
-        assert_eq!(recent[0].total_tokens, 500);
-        assert_eq!(recent[1].date, today - Duration::days(1));
-        assert_eq!(recent[1].total_tokens, 0);
-        assert_eq!(recent[2].date, today);
-        assert_eq!(recent[2].total_tokens, 0);
+        let recent = dashboard.recent_days_as_of(5, today);
+        assert_eq!(recent.len(), 5);
+        assert_eq!(recent[4].date, today);
+        assert!(recent.iter().all(|d| d.total_tokens == 0));
     }
 }

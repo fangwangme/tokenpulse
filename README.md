@@ -262,7 +262,7 @@ the `keeper_engine` row in the Settings tab, then enable the switches you want
 per agent. Wakeup times, prompts, and command templates live in `config.toml`
 under `[keeper]`; Keeper dynamically resolves the cheapest active model for each
 agent (Claude Haiku, Codex Luna, Antigravity Flash-Low) from local catalogs
-before execution. The tab header shows the exact configuration path.
+at startup and once a day. The tab header shows the exact configuration path.
 
 - **`←` / `→` (or `h` / `l`)** — Switch between dashboard tabs
 - **`↑` / `↓` (or `k` / `j` / `Tab`)** — Select agent card (Claude Code / Codex / Antigravity)
