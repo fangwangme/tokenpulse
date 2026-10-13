@@ -17,8 +17,9 @@ pub struct Config {
 }
 
 /// Current config schema version. `ConfigManager::load` migrates anything older
-/// and rewrites the file.
-pub const CONFIG_VERSION: u32 = 4;
+/// and rewrites the file. v5 dropped the Keeper agents' `model` key: the rewrite
+/// removes it, since the model is now resolved from local catalogs.
+pub const CONFIG_VERSION: u32 = 5;
 
 fn default_version() -> u32 {
     CONFIG_VERSION
@@ -844,7 +845,7 @@ usage_auto_refresh_secs = 900
 
         // The rewritten file drops the legacy keys in favor of the unified one.
         let written_content = fs::read_to_string(&manager.config_path).unwrap();
-        assert!(written_content.contains("version = 4"));
+        assert!(written_content.contains(&format!("version = {CONFIG_VERSION}")));
         assert!(written_content.contains("auto_refresh_secs = 120"));
         assert!(!written_content.contains("quota_auto_refresh_secs"));
         assert!(!written_content.contains("usage_auto_refresh_secs"));
@@ -871,8 +872,8 @@ show_account = true
         );
 
         assert_eq!(loaded.display.account_display, AccountDisplay::Full);
-        assert_eq!(loaded.version, 4);
-        assert!(written.contains("version = 4"));
+        assert_eq!(loaded.version, CONFIG_VERSION);
+        assert!(written.contains(&format!("version = {CONFIG_VERSION}")));
         assert!(written.contains(r#"account_display = "full""#));
         assert!(!written.contains("show_account"));
     }
@@ -888,8 +889,8 @@ show_account = false
         );
 
         assert_eq!(loaded.display.account_display, AccountDisplay::None);
-        assert_eq!(loaded.version, 4);
-        assert!(written.contains("version = 4"));
+        assert_eq!(loaded.version, CONFIG_VERSION);
+        assert!(written.contains(&format!("version = {CONFIG_VERSION}")));
         assert!(written.contains(r#"account_display = "none""#));
         assert!(!written.contains("show_account"));
     }
@@ -941,7 +942,7 @@ enabled = true
         );
 
         assert!(loaded.providers.get("claude").unwrap().enabled);
-        assert_eq!(loaded.version, 4);
+        assert_eq!(loaded.version, CONFIG_VERSION);
     }
 
     #[test]
@@ -1061,6 +1062,31 @@ command = 'codex exec "{prompt}" -m {model}'
             "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
         );
     }
+
+    #[test]
+    fn test_v4_keeper_model_key_is_dropped() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+version = 4
+[keeper.agents.claude]
+command = 'claude -p "{prompt}" --model {model} --no-session-persistence'
+model = "haiku"
+"#,
+        )
+        .unwrap();
+
+        let manager = ConfigManager {
+            config_path: config_path.clone(),
+        };
+        assert_eq!(manager.load().unwrap().version, CONFIG_VERSION);
+        assert!(!fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("model = "));
+    }
+
     /// One bad value plus settings worth keeping: what `config enable` and the
     /// Keeper toggles used to replace with defaults.
     const BROKEN_CONFIG: &str = r#"

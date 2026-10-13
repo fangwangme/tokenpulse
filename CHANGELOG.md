@@ -30,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `d` (Date) keybindings remain unchanged.
 - **Removed static `model` field from `AgentKeeperConfig`**: eliminated the
   stale model configuration string from `config.toml`, setup defaults, and
-  legacy migration routines.
+  legacy migration routines. The config moves to version 5, and the one-time
+  rewrite on load drops existing `model = ...` lines from `[keeper.agents.*]`.
 - **Overview chart continuous timeline**: zero-token days are now preserved as
   empty slots on the overview chart timeline rather than being omitted, preventing
   misleading adjacencies between non-consecutive dates.
