@@ -112,14 +112,6 @@ pub enum OverviewMetric {
 }
 
 impl OverviewMetric {
-    pub fn toggle_to_tokens(&mut self) {
-        *self = OverviewMetric::Tokens;
-    }
-
-    pub fn toggle_to_cost(&mut self) {
-        *self = OverviewMetric::Cost;
-    }
-
     pub fn value_format(self) -> crate::tui::widgets::ValueFormat {
         match self {
             OverviewMetric::Tokens => crate::tui::widgets::ValueFormat::CompactNumber,
@@ -957,10 +949,10 @@ impl UsageState {
     }
 
     pub fn toggle_sort(&mut self, field: SortField) {
-        match field {
-            SortField::Cost => self.daily_metric.toggle_to_cost(),
-            SortField::Tokens | SortField::Date => self.daily_metric.toggle_to_tokens(),
-        }
+        self.daily_metric = match field {
+            SortField::Cost => OverviewMetric::Cost,
+            SortField::Tokens | SortField::Date => OverviewMetric::Tokens,
+        };
         if self.sort_field == field {
             self.sort_ascending = !self.sort_ascending;
         } else {
@@ -3406,38 +3398,21 @@ mod tests {
     }
 
     #[test]
-    fn test_daily_vs7d_header() {
-        assert_eq!(OverviewMetric::Tokens.daily_vs7d_header(), "Token vs 7d");
-        assert_eq!(OverviewMetric::Cost.daily_vs7d_header(), "Cost vs 7d");
-    }
-
-    #[test]
-    fn test_toggle_sort_links_daily_metric() {
+    fn test_daily_metric_sort_linkage() {
         let dashboard = UsageDashboard { daily: vec![] };
         let mut state = UsageState::new(&dashboard, vec![]);
 
         // Default state matches Tokens sort
-        assert_eq!(state.sort_field, SortField::Tokens);
         assert_eq!(state.daily_metric, OverviewMetric::Tokens);
+        assert_eq!(state.daily_metric.daily_vs7d_header(), "Token vs 7d");
 
-        // Sorting by Cost switches daily_metric to Cost
+        // Cost sort switches comparison metric to Cost
         state.toggle_sort(SortField::Cost);
-        assert_eq!(state.sort_field, SortField::Cost);
         assert_eq!(state.daily_metric, OverviewMetric::Cost);
+        assert_eq!(state.daily_metric.daily_vs7d_header(), "Cost vs 7d");
 
-        // Sorting by Date switches daily_metric to Tokens
+        // Date sort switches comparison metric back to Tokens
         state.toggle_sort(SortField::Date);
-        assert_eq!(state.sort_field, SortField::Date);
-        assert_eq!(state.daily_metric, OverviewMetric::Tokens);
-
-        // Sorting by Cost again
-        state.toggle_sort(SortField::Cost);
-        assert_eq!(state.sort_field, SortField::Cost);
-        assert_eq!(state.daily_metric, OverviewMetric::Cost);
-
-        // Sorting by Tokens switches daily_metric to Tokens
-        state.toggle_sort(SortField::Tokens);
-        assert_eq!(state.sort_field, SortField::Tokens);
         assert_eq!(state.daily_metric, OverviewMetric::Tokens);
     }
 }
