@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-10-15
+
+### Fixed
+- **Daily WoW comparison header formatting**: added space to the 7-day WoW comparison column
+  header on the Daily Breakdown page (`Token vs 7d` / `Cost vs 7d`) to prevent cramped text (#76).
+- **Daily comparison metric linked to sort field**: sorting by Tokens (`t`) or Date (`d`)
+  now aligns the Daily comparison column to tokens (`Token vs 7d`), sorting by Cost (`c`)
+  aligns it to cost (`Cost vs 7d`), and the initial dashboard state defaults to `Token vs 7d`
+  to match the initial Tokens sort order (#76).
+
 ## [0.6.3] - 2026-10-13
 
 ### Added
