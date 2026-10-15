@@ -47,8 +47,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # `.cargo/config.toml` builds into `.local/target`, not `./target`. Keyed
+      # by target because both macOS builds share a runner image and job id.
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          workspaces: ". -> .local/target"
 
       - name: Build release binary
         run: cargo build --release -p tokenpulse-cli --locked --target ${{ matrix.target }}

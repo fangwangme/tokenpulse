@@ -1,12 +1,23 @@
 name: CI
 
+# Development happens on Linux, so this runs only on macOS: it is the one place
+# the `cfg(target_os = "macos")` code paths get compiled and tested before a
+# release. Pushes that change only docs or notes skip CI with `[skip ci]`.
 on:
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - ".agents/**"
   push:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - ".agents/**"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -14,19 +25,24 @@ concurrency:
 
 jobs:
   test:
-    name: Test & Format Check
+    name: Test & Smoke Check
     runs-on: macos-14
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
 
+      # `.cargo/config.toml` builds into `.local/target`, not `./target`.
+      # The prefix bump drops the old entries that held only the registry.
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          workspaces: ". -> .local/target"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -34,22 +50,5 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --locked
 
-  build:
-    name: Build & Smoke Test
-    needs: test
-    runs-on: macos-14
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        run: cargo build --release -p tokenpulse-cli --locked
-
       - name: Smoke test CLI
-        run: .local/target/release/tokenpulse --help
+        run: cargo run -p tokenpulse-cli --locked -- --help

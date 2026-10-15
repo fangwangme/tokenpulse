@@ -15,6 +15,9 @@
 - User-visible changes directly bump the version in `Cargo.toml` and record their
   `CHANGELOG.md` section under `## [X.Y.Z] - YYYY-MM-DD` in the same PR, so that
   merging the PR allows immediate tagging and releasing without extra steps.
+- A push that changes only docs or notes puts `[skip ci]` in its commit
+  message. CI's `paths-ignore` skips only PRs that are doc-only as a whole,
+  because GitHub matches PR paths against the full diff, not the latest push.
 
 ## Review Focus
 - CI format failures must be checked at the workflow/toolchain level, not just
