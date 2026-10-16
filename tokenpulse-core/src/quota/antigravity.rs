@@ -622,7 +622,14 @@ impl QuotaFetcher for AntigravityQuotaFetcher {
             }
         }
 
-        debug!("No running Language Server processes succeeded. Attempting direct Cloud Code API fallback.");
+        if connections.is_empty() {
+            debug!("No running Language Server processes detected. Attempting direct Cloud Code API fallback.");
+        } else {
+            debug!(
+                "{} Language Server connection(s) detected, but quota RPC probes failed. Attempting direct Cloud Code API fallback.",
+                connections.len()
+            );
+        }
         match self.fetch_quota_via_cloud_code().await {
             Ok(snapshot) => {
                 info!("Antigravity quota fetched directly via Cloud Code API");

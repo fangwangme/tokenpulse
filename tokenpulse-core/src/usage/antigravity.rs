@@ -2802,8 +2802,8 @@ pub async fn detect_antigravity_connections_with_client(
     let candidates = detect_process_candidates()?;
     let mut connections = Vec::new();
 
-    for candidate in candidates {
-        let ports = candidate_probe_ports(&candidate, find_listening_ports(candidate.pid)?);
+    for candidate in &candidates {
+        let ports = candidate_probe_ports(candidate, find_listening_ports(candidate.pid)?);
         let preferred_scheme = match candidate.runtime_kind {
             AntigravityRuntimeKind::Cli => Some("http"),
             _ => Some("https"),
@@ -2855,6 +2855,15 @@ pub async fn detect_antigravity_connections_with_client(
                 }
             }
         }
+    }
+
+    if candidates.is_empty() && connections.is_empty() {
+        debug!("No running Antigravity process candidates detected");
+    } else if !candidates.is_empty() && connections.is_empty() {
+        debug!(
+            "Found {} Antigravity candidate process(es), but none authenticated or responded to language server probe",
+            candidates.len()
+        );
     }
 
     connections.sort_by(|left, right| {
