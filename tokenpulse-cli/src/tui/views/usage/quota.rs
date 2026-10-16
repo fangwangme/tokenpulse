@@ -377,6 +377,7 @@ fn render_window_block(
         return;
     }
 
+    let is_fully_reset = window.used_percent <= 0.0;
     let shown_percent = quota_percent(display_mode, window.used_percent);
     let reset_str = window
         .resets_at
@@ -384,7 +385,11 @@ fn render_window_block(
         .map(|time| format_reset_duration(time.signed_duration_since(chrono::Utc::now())))
         .unwrap_or_else(|| "n/a".to_string());
 
-    let pace_result = calculate_pace(window);
+    let pace_result = if is_fully_reset {
+        None
+    } else {
+        calculate_pace(window)
+    };
     let gauge_color = pace_result
         .as_ref()
         .map(|(status, _, _)| theme.pace_color(status))
@@ -400,12 +405,14 @@ fn render_window_block(
     // countdown stay on the bar itself.
     if compact {
         let label = super::truncate(tag, area.width.saturating_sub(18) as usize);
-        let gauge = GradientGauge::new(&label, shown_percent)
+        let mut gauge = GradientGauge::new(&label, shown_percent)
             .color(gauge_color)
             .expected_percent(expected_pct)
             .label_width(tag_width.min(area.width.saturating_sub(30) as usize))
-            .width(area.width.saturating_sub(22) as usize)
-            .time(&reset_str);
+            .width(area.width.saturating_sub(22) as usize);
+        if !is_fully_reset {
+            gauge = gauge.time(&reset_str);
+        }
         f.render_widget(gauge, area);
         return;
     }
@@ -441,26 +448,26 @@ fn render_window_block(
 
     // The tag is padded to the card's longest so every window's figures start
     // in the same column.
-    let mut detail_spans = vec![
-        Span::styled(
-            format!("{:<width$} ", format!("{tag}:"), width = tag_width + 1),
-            tag_style(theme),
-        ),
-        Span::styled(
+    let mut detail_spans = vec![Span::styled(
+        format!("{:<width$} ", format!("{tag}:"), width = tag_width + 1),
+        tag_style(theme),
+    )];
+    if !is_fully_reset {
+        detail_spans.push(Span::styled(
             format!("reset {reset_str}"),
             Style::default().fg(balance_color),
-        ),
-        Span::raw("   "),
-        Span::styled(
-            format!("used {:.0}%", window.used_percent),
-            Style::default().fg(balance_color),
-        ),
-        Span::raw("   "),
-        Span::styled(
-            format!("remaining {:.0}%", remaining_percent),
-            Style::default().fg(balance_color),
-        ),
-    ];
+        ));
+        detail_spans.push(Span::raw("   "));
+    }
+    detail_spans.push(Span::styled(
+        format!("used {:.0}%", window.used_percent),
+        Style::default().fg(balance_color),
+    ));
+    detail_spans.push(Span::raw("   "));
+    detail_spans.push(Span::styled(
+        format!("remaining {:.0}%", remaining_percent),
+        Style::default().fg(balance_color),
+    ));
     if let Some((status, text, _)) = pace_result {
         detail_spans.push(Span::raw("   "));
         detail_spans.push(Span::styled(
@@ -965,5 +972,83 @@ mod tests {
         );
         assert_eq!(tag("Primary window", None, None), "PRIMARY WINDOW");
         assert_eq!(tag("Gemini (monthly)", None, Some("Gemini")), "GEMINI");
+    }
+
+    #[test]
+    fn fully_reset_window_suppresses_countdown_and_pace() {
+        let snapshot = QuotaSnapshot {
+            provider: "antigravity".to_string(),
+            account: None,
+            plan: None,
+            windows: vec![
+                window("Claude (5h)", Some(FIVE_HOURS_MS), Some("Claude"), 0.0),
+                window("Claude (7d)", Some(SEVEN_DAYS_MS), Some("Claude"), 25.0),
+            ],
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: chrono::Utc::now(),
+        };
+
+        let normal_rows = render_card(&snapshot, AccountDisplay::None, false);
+        let detail_reset: Vec<&String> = normal_rows
+            .iter()
+            .filter(|row| row.contains("5H · CLAUDE:"))
+            .collect();
+        assert_eq!(detail_reset.len(), 1);
+        let detail_0 = detail_reset[0];
+        assert!(
+            !detail_0.contains("reset"),
+            "0% used detail row should not contain reset countdown: {detail_0}"
+        );
+        assert!(
+            detail_0.contains("used 0%"),
+            "detail row should contain used 0%: {detail_0}"
+        );
+        assert!(
+            detail_0.contains("remaining 100%"),
+            "detail row should contain remaining 100%: {detail_0}"
+        );
+
+        let detail_active: Vec<&String> = normal_rows
+            .iter()
+            .filter(|row| row.contains("WEEKLY · CLAUDE:"))
+            .collect();
+        assert_eq!(detail_active.len(), 1);
+        assert!(
+            detail_active[0].contains("reset"),
+            "active window detail row should contain reset countdown: {}",
+            detail_active[0]
+        );
+
+        let compact_rows = render_card(&snapshot, AccountDisplay::None, true);
+        let bar_reset: Vec<&String> = compact_rows
+            .iter()
+            .filter(|row| row.contains("5H · CLAUDE"))
+            .collect();
+        assert_eq!(bar_reset.len(), 1);
+        let bar_0 = bar_reset[0];
+        assert!(
+            !bar_0.contains("reset"),
+            "compact bar should not contain reset countdown: {bar_0}"
+        );
+        assert!(
+            !bar_0.contains('m') && !bar_0.contains('h') && !bar_0.contains('d'),
+            "0% used compact bar should not contain time duration: {bar_0}"
+        );
+        assert!(
+            bar_0.ends_with("100%"),
+            "0% used compact bar should end with remaining percentage: {bar_0}"
+        );
+
+        let bar_active: Vec<&String> = compact_rows
+            .iter()
+            .filter(|row| row.contains("WEEKLY · CLAUDE"))
+            .collect();
+        assert_eq!(bar_active.len(), 1);
+        assert!(
+            bar_active[0].contains('h') || bar_active[0].contains('m'),
+            "active compact bar should retain duration: {}",
+            bar_active[0]
+        );
     }
 }

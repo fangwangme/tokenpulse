@@ -2802,11 +2802,20 @@ pub async fn detect_antigravity_connections_with_client(
     let candidates = detect_process_candidates()?;
     let mut connections = Vec::new();
 
-    for candidate in candidates {
-        let ports = candidate_probe_ports(&candidate, find_listening_ports(candidate.pid)?);
+    for candidate in &candidates {
+        let ports = candidate_probe_ports(candidate, find_listening_ports(candidate.pid)?);
+        let preferred_scheme = match candidate.runtime_kind {
+            AntigravityRuntimeKind::Cli => Some("http"),
+            _ => Some("https"),
+        };
         for port in ports {
-            if let Some(scheme) =
-                probe_heartbeat(client, port, candidate.csrf_token.as_deref()).await
+            if let Some(scheme) = probe_heartbeat_with_preferred_scheme(
+                client,
+                port,
+                candidate.csrf_token.as_deref(),
+                preferred_scheme,
+            )
+            .await
             {
                 connections.push(AntigravityConnection {
                     pid: candidate.pid,
@@ -2819,6 +2828,42 @@ pub async fn detect_antigravity_connections_with_client(
                 break;
             }
         }
+    }
+
+    if connections.is_empty() {
+        if let Ok(addr) = std::env::var("ANTIGRAVITY_LS_ADDRESS") {
+            let csrf_token = std::env::var("ANTIGRAVITY_CSRF_TOKEN").ok();
+            let (env_port, env_scheme) = parse_ls_address(&addr);
+            if let Some(port) = env_port {
+                let preferred = env_scheme.or(Some("http"));
+                if let Some(scheme) = probe_heartbeat_with_preferred_scheme(
+                    client,
+                    port,
+                    csrf_token.as_deref(),
+                    preferred,
+                )
+                .await
+                {
+                    connections.push(AntigravityConnection {
+                        pid: std::process::id(),
+                        port,
+                        csrf_token,
+                        scheme: scheme.to_string(),
+                        fingerprint: format!("env:{}:{}", scheme, port),
+                        runtime_kind: AntigravityRuntimeKind::Cli,
+                    });
+                }
+            }
+        }
+    }
+
+    if candidates.is_empty() && connections.is_empty() {
+        debug!("No running Antigravity process candidates detected");
+    } else if !candidates.is_empty() && connections.is_empty() {
+        debug!(
+            "Found {} Antigravity candidate process(es), but none authenticated or responded to language server probe",
+            candidates.len()
+        );
     }
 
     connections.sort_by(|left, right| {
@@ -2835,8 +2880,12 @@ pub async fn detect_antigravity_connections_with_client(
 fn candidate_probe_ports(candidate: &ProcessCandidate, mut ports: Vec<u16>) -> Vec<u16> {
     if let Some(declared_port) = candidate.declared_port {
         if !ports.contains(&declared_port) {
-            ports.push(declared_port);
+            ports.insert(0, declared_port);
+        } else {
+            ports.retain(|&p| p != declared_port);
+            ports.insert(0, declared_port);
         }
+        return ports;
     }
 
     ports.sort_unstable();
@@ -2847,6 +2896,7 @@ fn candidate_probe_ports(candidate: &ProcessCandidate, mut ports: Vec<u16>) -> V
 fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
     let output = run_command("ps", &["-ww", "-eo", "pid,ppid,args"])?;
     let mut candidates = Vec::new();
+    let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -2865,6 +2915,8 @@ fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
         let Ok(ppid) = parts[1].parse::<u32>() else {
             continue;
         };
+        children_map.entry(ppid).or_default().push(pid);
+
         let command = parts[2..].join(" ");
         if !is_antigravity_process(&command) || is_electron_helper_process(&command) {
             continue;
@@ -2897,6 +2949,39 @@ fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
         });
     }
 
+    for candidate in &mut candidates {
+        if candidate.runtime_kind == AntigravityRuntimeKind::Cli {
+            if candidate.csrf_token.is_none() {
+                if let Ok(token) = std::env::var("ANTIGRAVITY_CSRF_TOKEN") {
+                    let trimmed = token.trim();
+                    if !trimmed.is_empty() {
+                        candidate.csrf_token = Some(trimmed.to_string());
+                    }
+                }
+            }
+            if candidate.declared_port.is_none() {
+                if let Ok(addr) = std::env::var("ANTIGRAVITY_LS_ADDRESS") {
+                    let (port, _) = parse_ls_address(&addr);
+                    if let Some(port) = port {
+                        candidate.declared_port = Some(port);
+                    }
+                }
+            }
+
+            if candidate.csrf_token.is_none() || candidate.declared_port.is_none() {
+                let empty_children = Vec::new();
+                let children = children_map.get(&candidate.pid).unwrap_or(&empty_children);
+                let (env_token, env_port) = resolve_candidate_env_tokens(candidate.pid, children);
+                if candidate.csrf_token.is_none() {
+                    candidate.csrf_token = env_token;
+                }
+                if candidate.declared_port.is_none() {
+                    candidate.declared_port = env_port;
+                }
+            }
+        }
+    }
+
     candidates.sort_by(|left, right| {
         right
             .pid
@@ -2907,6 +2992,101 @@ fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
     candidates.dedup_by(|left, right| left.pid == right.pid);
 
     Ok(candidates)
+}
+
+fn resolve_candidate_env_tokens(pid: u32, child_pids: &[u32]) -> (Option<String>, Option<u16>) {
+    let mut targets = Vec::with_capacity(1 + child_pids.len());
+    targets.push(pid);
+    targets.extend_from_slice(child_pids);
+
+    for target_pid in targets {
+        if let Some((token, port)) = inspect_pid_env(target_pid) {
+            if token.is_some() || port.is_some() {
+                return (token, port);
+            }
+        }
+    }
+    (None, None)
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_pid_env(pid: u32) -> Option<(Option<String>, Option<u16>)> {
+    let bytes = std::fs::read(format!("/proc/{}/environ", pid)).ok()?;
+    let (token, addr) = parse_environ_tokens(&bytes);
+    let port = addr.as_deref().and_then(|a| parse_ls_address(a).0);
+    Some((token, port))
+}
+
+#[cfg(target_os = "macos")]
+fn inspect_pid_env(pid: u32) -> Option<(Option<String>, Option<u16>)> {
+    let output = run_command("ps", &["eww", "-o", "command=", "-p", &pid.to_string()]).ok()?;
+    let (token, addr) = parse_env_string(&output);
+    let port = addr.as_deref().and_then(|a| parse_ls_address(a).0);
+    Some((token, port))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn inspect_pid_env(_pid: u32) -> Option<(Option<String>, Option<u16>)> {
+    None
+}
+
+pub(crate) fn parse_environ_tokens(bytes: &[u8]) -> (Option<String>, Option<String>) {
+    let mut csrf_token = None;
+    let mut ls_address = None;
+    for chunk in bytes.split(|&b| b == 0) {
+        if let Ok(s) = std::str::from_utf8(chunk) {
+            if let Some(token) = s.strip_prefix("ANTIGRAVITY_CSRF_TOKEN=") {
+                let trimmed = token.trim();
+                if !trimmed.is_empty() {
+                    csrf_token = Some(trimmed.to_string());
+                }
+            } else if let Some(addr) = s.strip_prefix("ANTIGRAVITY_LS_ADDRESS=") {
+                let trimmed = addr.trim();
+                if !trimmed.is_empty() {
+                    ls_address = Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    (csrf_token, ls_address)
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn parse_env_string(text: &str) -> (Option<String>, Option<String>) {
+    let mut csrf_token = None;
+    let mut ls_address = None;
+    for token in text.split_whitespace() {
+        if let Some(val) = token.strip_prefix("ANTIGRAVITY_CSRF_TOKEN=") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                csrf_token = Some(trimmed.to_string());
+            }
+        } else if let Some(val) = token.strip_prefix("ANTIGRAVITY_LS_ADDRESS=") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                ls_address = Some(trimmed.to_string());
+            }
+        }
+    }
+    (csrf_token, ls_address)
+}
+
+pub(crate) fn parse_ls_address(addr: &str) -> (Option<u16>, Option<&'static str>) {
+    let trimmed = addr.trim();
+    let (scheme, without_scheme) = if let Some(rest) = trimmed.strip_prefix("https://") {
+        (Some("https"), rest)
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        (Some("http"), rest)
+    } else {
+        (None, trimmed)
+    };
+
+    let port = if let Some(idx) = without_scheme.rfind(':') {
+        without_scheme[idx + 1..].parse::<u16>().ok()
+    } else {
+        without_scheme.parse::<u16>().ok()
+    };
+    (port, scheme)
 }
 
 /// Electron renderer/GPU/utility children inherit the app bundle path, so the
@@ -3197,13 +3377,27 @@ fn parse_port_from_line(line: &str) -> Option<u16> {
     None
 }
 
+#[allow(dead_code)]
 async fn probe_heartbeat(
     client: &reqwest::Client,
     port: u16,
     csrf_token: Option<&str>,
 ) -> Option<&'static str> {
-    // Only probe https (pure h2) per user decision
-    for scheme in ["https"] {
+    probe_heartbeat_with_preferred_scheme(client, port, csrf_token, None).await
+}
+
+async fn probe_heartbeat_with_preferred_scheme(
+    client: &reqwest::Client,
+    port: u16,
+    csrf_token: Option<&str>,
+    preferred_scheme: Option<&str>,
+) -> Option<&'static str> {
+    let schemes: &[&str] = match preferred_scheme {
+        Some("http") => &["http", "https"],
+        Some("https") => &["https", "http"],
+        _ => &["https", "http"],
+    };
+    for &scheme in schemes {
         if probe_heartbeat_with_scheme(client, scheme, port, csrf_token).await {
             return Some(scheme);
         }
@@ -3218,7 +3412,7 @@ async fn probe_heartbeat_with_scheme(
     csrf_token: Option<&str>,
 ) -> bool {
     let body = json!({ "uuid": "00000000-0000-0000-0000-000000000000" });
-    let Ok((status, text)) = language_server_request_text(
+    let res = language_server_request_text(
         client,
         scheme,
         port,
@@ -3228,10 +3422,21 @@ async fn probe_heartbeat_with_scheme(
         Duration::from_secs(1),
         ANTIGRAVITY_RPC_BODY_CAP,
     )
-    .await
-    else {
+    .await;
+
+    let Ok((status, text)) = res else {
         return false;
     };
+
+    if status == 401 && (text.contains("CSRF token") || text.contains("unauthenticated")) {
+        debug!(
+            "Antigravity LS scheme={} port={} requires CSRF token; rejected or missing (token present: {})",
+            scheme,
+            port,
+            csrf_token.is_some()
+        );
+        return false;
+    }
 
     status == 200
         && heartbeat_response_looks_well_formed(&text)
@@ -5489,5 +5694,56 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_environ_tokens() {
+        let env_bytes = b"PATH=/usr/bin\0ANTIGRAVITY_CSRF_TOKEN=my-secret-token\0USER=test\0ANTIGRAVITY_LS_ADDRESS=localhost:37309\0FOO=BAR\0";
+        let (token, addr) = parse_environ_tokens(env_bytes);
+        assert_eq!(token.as_deref(), Some("my-secret-token"));
+        assert_eq!(addr.as_deref(), Some("localhost:37309"));
+
+        let empty_bytes = b"PATH=/usr/bin\0";
+        let (token, addr) = parse_environ_tokens(empty_bytes);
+        assert!(token.is_none());
+        assert!(addr.is_none());
+    }
+
+    #[test]
+    fn test_parse_env_string() {
+        let env_str = "PATH=/usr/bin ANTIGRAVITY_CSRF_TOKEN=my-mac-token ANTIGRAVITY_LS_ADDRESS=127.0.0.1:45539 USER=test";
+        let (token, addr) = parse_env_string(env_str);
+        assert_eq!(token.as_deref(), Some("my-mac-token"));
+        assert_eq!(addr.as_deref(), Some("127.0.0.1:45539"));
+    }
+
+    #[test]
+    fn test_parse_ls_address() {
+        assert_eq!(parse_ls_address("localhost:37309"), (Some(37309), None));
+        assert_eq!(
+            parse_ls_address("http://127.0.0.1:37309"),
+            (Some(37309), Some("http"))
+        );
+        assert_eq!(
+            parse_ls_address("https://127.0.0.1:45539"),
+            (Some(45539), Some("https"))
+        );
+        assert_eq!(parse_ls_address("37309"), (Some(37309), None));
+        assert_eq!(parse_ls_address("invalid"), (None, None));
+    }
+
+    #[test]
+    fn test_candidate_probe_ports_prioritizes_declared_port() {
+        let candidate = ProcessCandidate {
+            pid: 1234,
+            ppid: 1,
+            declared_port: Some(37309),
+            csrf_token: None,
+            runtime_kind: AntigravityRuntimeKind::Cli,
+        };
+        let ports = candidate_probe_ports(&candidate, vec![45539, 37309, 8080]);
+        assert_eq!(ports[0], 37309);
+        assert!(ports.contains(&45539));
+        assert!(ports.contains(&8080));
     }
 }

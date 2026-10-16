@@ -49,20 +49,6 @@ pub async fn run(
         .transpose()?;
     let refresh_range = refresh_days.as_deref().map(parse_date_range).transpose()?;
 
-    if !use_tui
-        && provider_names.contains(&"antigravity".to_string())
-        && config.display.scan_antigravity
-    {
-        let conns_res = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(tokenpulse_core::usage::detect_antigravity_connections())
-        });
-        if let Ok(conns) = conns_res {
-            if conns.is_empty() {
-                eprintln!("Warning: No running Antigravity language servers detected. New sessions will not be synced.");
-            }
-        }
-    }
     let parsers = build_parsers(&provider_names, rebuild_all);
     let store = UsageStore::new();
     let mut stale_sources = HashSet::new();

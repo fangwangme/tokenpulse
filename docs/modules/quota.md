@@ -122,13 +122,17 @@ No missing 5-hour or 7-day window is synthesized. Reset-credit fetching and disp
 ## Antigravity
 
 ### Credential Flow
-No external auth lookup. Antigravity quota is read from a running local Antigravity language server.
+The primary source is a running local Antigravity language server, authenticated with its CSRF token:
+- **Desktop**: the token is the `--csrf_token` argument of the `language_server` process.
+- **CLI (`agy`)**: the LS is embedded in the `agy` process and the token is not on its command line. `agy` only exports it as `ANTIGRAVITY_CSRF_TOKEN` / `ANTIGRAVITY_LS_ADDRESS` to its own child processes, so it is found only when tokenpulse runs inside an `agy` session or an `agy` child process still carries it. A tokenpulse started from an unrelated terminal cannot reach the CLI LS.
+
+The Cloud Code fallback reads the OAuth token cached at `~/.gemini/antigravity-cli/antigravity-oauth-token` (macOS: the `gemini`/`antigravity` Keychain item) and refreshes it when expired.
 
 ### Quota Probe
 1. Discover running Antigravity CLI/Desktop language server processes
-2. Prefer CLI LS, then Desktop LS, then unknown Antigravity LS processes
-3. Send a Connect-RPC `RetrieveUserQuotaSummary` request to the local language server; on success, make a best-effort `GetUserStatus` call for account email + plan name
-4. If no language server responds, fall back to the Cloud Code quota API. That response has no plan or account, so the snapshot leaves both empty rather than guessing one
+2. Prefer Desktop LS, then CLI LS, then unknown Antigravity LS processes
+3. Send a Connect-RPC `RetrieveUserQuotaSummary` request to the local language server; on success, make a best-effort `GetUserStatus` call for account email + plan name (`userTier.name`, falling back to `planStatus.planInfo.planName`)
+4. If no language server responds, fall back to the Cloud Code quota API. That response has no plan or account, so the snapshot leaves both empty rather than guessing one. With only `agy` running, this is the expected path.
 
 ### Response Mapping
 `RetrieveUserQuotaSummary` returns one group per model family, each with a `5h` and a `weekly` bucket. Each bucket maps to a `RateWindow`:

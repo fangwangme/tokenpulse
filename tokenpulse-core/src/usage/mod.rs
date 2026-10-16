@@ -231,8 +231,8 @@ where
 }
 
 fn weekly_group(date: NaiveDate) -> Option<(String, NaiveDate, NaiveDate)> {
-    let days_from_sunday = i64::from(date.weekday().num_days_from_sunday());
-    let start = date.checked_sub_days(Days::new(days_from_sunday as u64))?;
+    let days_from_monday = i64::from(date.weekday().num_days_from_monday());
+    let start = date.checked_sub_days(Days::new(days_from_monday as u64))?;
     let end = start.checked_add_days(Days::new(6))?;
     Some((
         format!("{}..{}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d")),
@@ -356,9 +356,32 @@ mod tests {
         assert_eq!(summary.daily[0].date, "2026-03-01");
         assert_eq!(summary.daily[0].intensity_tokens, 4);
         assert_eq!(summary.weekly.len(), 2);
-        assert_eq!(summary.weekly[0].label, "2026-03-01..2026-03-07");
+        assert_eq!(summary.weekly[0].label, "2026-02-23..2026-03-01");
+        assert_eq!(summary.weekly[1].label, "2026-03-02..2026-03-08");
         assert_eq!(summary.monthly.len(), 1);
         assert_eq!(summary.monthly[0].label, "2026-03");
         assert!((summary.total_cost - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_weekly_group_aligns_to_monday() {
+        // 2026-10-12 is Monday, 2026-10-18 is Sunday
+        let monday = NaiveDate::from_ymd_opt(2026, 10, 12).unwrap();
+        let wednesday = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap();
+        let sunday = NaiveDate::from_ymd_opt(2026, 10, 18).unwrap();
+
+        let (m_label, m_start, m_end) = weekly_group(monday).unwrap();
+        let (w_label, w_start, w_end) = weekly_group(wednesday).unwrap();
+        let (s_label, s_start, s_end) = weekly_group(sunday).unwrap();
+
+        assert_eq!(m_label, "2026-10-12..2026-10-18");
+        assert_eq!(w_label, "2026-10-12..2026-10-18");
+        assert_eq!(s_label, "2026-10-12..2026-10-18");
+        assert_eq!(m_start, monday);
+        assert_eq!(m_end, sunday);
+        assert_eq!(w_start, monday);
+        assert_eq!(w_end, sunday);
+        assert_eq!(s_start, monday);
+        assert_eq!(s_end, sunday);
     }
 }

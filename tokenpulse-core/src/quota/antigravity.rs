@@ -95,6 +95,14 @@ struct UserStatus {
     email: Option<String>,
     #[serde(default, rename = "planStatus")]
     plan_status: Option<PlanStatus>,
+    #[serde(default, rename = "userTier")]
+    user_tier: Option<UserTier>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserTier {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -554,10 +562,16 @@ fn user_metadata_from_status(status: LsUserStatusResponse) -> UserMetadata {
         .and_then(|u| u.email.clone())
         .filter(|email| !email.trim().is_empty());
     let plan = user
-        .and_then(|u| u.plan_status)
-        .and_then(|p| p.plan_info)
-        .and_then(|i| i.plan_name)
-        .filter(|name| !name.trim().is_empty());
+        .as_ref()
+        .and_then(|u| u.user_tier.as_ref())
+        .and_then(|t| t.name.clone())
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            user.and_then(|u| u.plan_status)
+                .and_then(|p| p.plan_info)
+                .and_then(|i| i.plan_name)
+                .filter(|name| !name.trim().is_empty())
+        });
     UserMetadata { account, plan }
 }
 
@@ -608,7 +622,14 @@ impl QuotaFetcher for AntigravityQuotaFetcher {
             }
         }
 
-        debug!("No running Language Server processes succeeded. Attempting direct Cloud Code API fallback.");
+        if connections.is_empty() {
+            debug!("No running Language Server processes detected. Attempting direct Cloud Code API fallback.");
+        } else {
+            debug!(
+                "{} Language Server connection(s) detected, but quota RPC probes failed. Attempting direct Cloud Code API fallback.",
+                connections.len()
+            );
+        }
         match self.fetch_quota_via_cloud_code().await {
             Ok(snapshot) => {
                 info!("Antigravity quota fetched directly via Cloud Code API");
@@ -746,6 +767,20 @@ mod tests {
         let metadata = user_metadata_from_status(parsed);
         assert_eq!(metadata.account.as_deref(), Some("user@example.com"));
         assert_eq!(metadata.plan.as_deref(), Some("Pro"));
+
+        let parsed_with_tier: LsUserStatusResponse = serde_json::from_str(
+            r#"{
+                "userStatus": {
+                    "email": "user2@example.com",
+                    "userTier": { "name": "Google AI Pro" },
+                    "planStatus": { "planInfo": { "planName": "Pro" } }
+                }
+            }"#,
+        )
+        .unwrap();
+        let metadata_tier = user_metadata_from_status(parsed_with_tier);
+        assert_eq!(metadata_tier.account.as_deref(), Some("user2@example.com"));
+        assert_eq!(metadata_tier.plan.as_deref(), Some("Google AI Pro"));
     }
 
     #[test]
@@ -765,5 +800,44 @@ mod tests {
 
         // Malformed string should be treated as expired
         assert!(is_antigravity_token_expired("not-a-date"));
+    }
+
+    #[test]
+    fn test_ordered_connections_prioritizes_desktop_over_cli() {
+        let conn_cli_1 = AntigravityConnection {
+            pid: 100,
+            port: 1001,
+            csrf_token: None,
+            scheme: "http".to_string(),
+            fingerprint: "pid:100:http:1001".to_string(),
+            runtime_kind: AntigravityRuntimeKind::Cli,
+        };
+        let conn_desktop = AntigravityConnection {
+            pid: 200,
+            port: 2001,
+            csrf_token: Some("token".to_string()),
+            scheme: "https".to_string(),
+            fingerprint: "pid:200:https:2001".to_string(),
+            runtime_kind: AntigravityRuntimeKind::Desktop,
+        };
+        let conn_cli_2 = AntigravityConnection {
+            pid: 300,
+            port: 3001,
+            csrf_token: None,
+            scheme: "http".to_string(),
+            fingerprint: "pid:300:http:3001".to_string(),
+            runtime_kind: AntigravityRuntimeKind::Cli,
+        };
+
+        let raw = vec![conn_cli_1, conn_desktop, conn_cli_2];
+        let ordered = ordered_connections(&raw);
+
+        assert_eq!(ordered.len(), 3);
+        assert_eq!(ordered[0].runtime_kind, AntigravityRuntimeKind::Desktop);
+        assert_eq!(ordered[0].pid, 200);
+        assert_eq!(ordered[1].runtime_kind, AntigravityRuntimeKind::Cli);
+        assert_eq!(ordered[1].pid, 100);
+        assert_eq!(ordered[2].runtime_kind, AntigravityRuntimeKind::Cli);
+        assert_eq!(ordered[2].pid, 300);
     }
 }

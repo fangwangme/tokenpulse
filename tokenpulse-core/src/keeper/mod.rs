@@ -259,8 +259,56 @@ fn local_datetime_at(date: NaiveDate, time: NaiveTime) -> Option<DateTime<Local>
     }
 }
 
-/// Evaluates whether the Weekly auto-sync trigger should fire.
-/// Fires when current time >= `resets_at + 1 minute` (buffer) and has not triggered for this cycle.
+/// Returns true if a RateWindow represents a major quota cycle (e.g. weekly or monthly)
+/// and not a short session window (e.g. 5h) or daily window.
+///
+/// A window with neither a period nor an explicit weekly/monthly label is not a
+/// cycle: Codex reports its 5h bucket as a bare "Primary window" when the
+/// duration is missing, and treating that as weekly would ping on every 5h reset.
+pub fn is_weekly_cycle_window(window: &crate::provider::RateWindow) -> bool {
+    // Explicit 6+ days duration (e.g. 7d = 604_800_000ms, 30d = 2_592_000_000ms)
+    if let Some(ms) = window.period_duration_ms {
+        return ms >= 6 * 24 * 60 * 60 * 1000;
+    }
+
+    let lower = window.label.to_lowercase();
+    lower.contains("7d")
+        || lower.contains("7 d")
+        || lower.contains("7-day")
+        || lower.contains("week")
+        || lower.contains("month")
+        || lower.contains("30d")
+}
+
+/// Detects if an agent's major cycle quota window transitioned from partially/fully
+/// consumed (`used_percent > 0.0`) back to fully reset (`used_percent <= 0.0`).
+pub fn did_agent_cycle_reset_to_full(
+    prev_snapshot: Option<&crate::provider::QuotaSnapshot>,
+    new_snapshot: &crate::provider::QuotaSnapshot,
+) -> bool {
+    let Some(prev) = prev_snapshot else {
+        return false;
+    };
+
+    for new_window in &new_snapshot.windows {
+        if !is_weekly_cycle_window(new_window) {
+            continue;
+        }
+        if new_window.used_percent <= 0.0 {
+            if let Some(prev_window) = prev.windows.iter().find(|w| w.label == new_window.label) {
+                if prev_window.used_percent > 0.0 {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Evaluates whether the Weekly auto-sync trigger should fire based on expected reset time.
+/// Fires when current time >= `resets_at + 1 minute` (buffer to avoid provider/client clock skew)
+/// and has not already triggered for this cycle.
 pub fn should_trigger_weekly(
     quota_resets_at: Option<DateTime<Utc>>,
     last_triggered_time: Option<DateTime<Utc>>,
@@ -270,7 +318,6 @@ pub fn should_trigger_weekly(
         return false;
     };
 
-    // Add 1 minute buffer after reset
     let trigger_threshold = resets_at + chrono::Duration::minutes(1);
 
     if now < trigger_threshold {
@@ -278,28 +325,33 @@ pub fn should_trigger_weekly(
     }
 
     match last_triggered_time {
-        Some(last_time) => last_time < resets_at,
+        Some(last_time) => {
+            if now.signed_duration_since(last_time) < chrono::Duration::hours(12) {
+                return false;
+            }
+            last_time < resets_at
+        }
         None => true,
     }
 }
 
 /// Calculates next weekly trigger time.
+/// Displays expected `resets_at` timestamp if available and not yet triggered for this cycle.
 pub fn compute_next_weekly_trigger(
     quota_resets_at: Option<DateTime<Utc>>,
     last_triggered_time: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
     let resets_at = quota_resets_at?;
-    let trigger_threshold = resets_at + chrono::Duration::minutes(1);
 
     if let Some(last_time) = last_triggered_time {
-        if last_time >= resets_at && now >= trigger_threshold {
+        if last_time >= resets_at && now >= resets_at {
             // Already triggered for this reset cycle
             return None;
         }
     }
 
-    Some(trigger_threshold)
+    Some(resets_at)
 }
 
 /// Matches a QuotaSnapshot provider name to a Keeper agent ID.
@@ -317,46 +369,15 @@ fn matches_keeper_agent(provider: &str, agent_id: &str) -> bool {
     }
 }
 
-/// Extracts the weekly window reset time from a QuotaSnapshot.
-/// Accurately recognizes "7d", "7-day", "week", "weekly", period_duration_ms >= 6 days,
-/// and Antigravity's "Gemini (7d)" / "Claude (7d)" windows.
+/// Extracts the weekly/cycle window reset time from a QuotaSnapshot.
 pub fn extract_weekly_reset_time(
     snapshot: &crate::provider::QuotaSnapshot,
 ) -> Option<DateTime<Utc>> {
-    // 1. Check explicit 7d/weekly windows first
-    for window in &snapshot.windows {
-        let label_lower = window.label.to_lowercase();
-        let is_weekly = label_lower.contains("7d")
-            || label_lower.contains("7 d")
-            || label_lower.contains("7-day")
-            || label_lower.contains("week")
-            || window
-                .period_duration_ms
-                .is_some_and(|ms| ms >= 6 * 24 * 60 * 60 * 1000);
-
-        if is_weekly {
-            if let Some(resets_at) = window.resets_at {
-                return Some(resets_at);
-            }
-        }
-    }
-
-    // 2. Fallback to any window with reset_time that is not a short session window.
-    //    A window that declares a sub-day period is never the weekly one, even if
-    //    its label does not say "5h".
-    snapshot.windows.iter().find_map(|w| {
-        let label_lower = w.label.to_lowercase();
-        let looks_short = label_lower.contains("5h")
-            || label_lower.contains("5-hour")
-            || label_lower.contains("5 hour")
-            || w.period_duration_ms
-                .is_some_and(|ms| ms < 24 * 60 * 60 * 1000);
-        if looks_short {
-            None
-        } else {
-            w.resets_at
-        }
-    })
+    snapshot
+        .windows
+        .iter()
+        .find(|w| is_weekly_cycle_window(w) && w.resets_at.is_some())
+        .and_then(|w| w.resets_at)
 }
 
 /// Finds the quota snapshot backing a Keeper agent, preferring an exact
@@ -832,10 +853,85 @@ mod tests {
     }
 
     #[test]
+    fn test_did_agent_cycle_reset_to_full() {
+        use crate::provider::{QuotaSnapshot, RateWindow};
+
+        let make_snap = |gemini_5h_used: f64, gemini_7d_used: f64| QuotaSnapshot {
+            provider: "antigravity".to_string(),
+            plan: None,
+            account: None,
+            windows: vec![
+                RateWindow {
+                    label: "Gemini (5h)".to_string(),
+                    model_family: Some("Gemini".to_string()),
+                    used_percent: gemini_5h_used,
+                    resets_at: None,
+                    period_duration_ms: Some(5 * 60 * 60 * 1000),
+                },
+                RateWindow {
+                    label: "Gemini (7d)".to_string(),
+                    model_family: Some("Gemini".to_string()),
+                    used_percent: gemini_7d_used,
+                    resets_at: None,
+                    period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
+                },
+            ],
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: Utc::now(),
+        };
+
+        // None previous snapshot -> should NOT trigger
+        let snap_full = make_snap(0.0, 0.0);
+        assert!(!did_agent_cycle_reset_to_full(None, &snap_full));
+
+        // 7d window was 25% used, now reset to 0% -> SHOULD trigger
+        let prev_used = make_snap(50.0, 25.0);
+        let curr_reset = make_snap(10.0, 0.0);
+        assert!(did_agent_cycle_reset_to_full(Some(&prev_used), &curr_reset));
+
+        // 7d window was already 0%, still 0% -> should NOT trigger (avoid repeat)
+        let prev_already_zero = make_snap(20.0, 0.0);
+        let curr_still_zero = make_snap(0.0, 0.0);
+        assert!(!did_agent_cycle_reset_to_full(
+            Some(&prev_already_zero),
+            &curr_still_zero
+        ));
+
+        // Only 5h session window reset, but 7d cycle was NOT reset -> should NOT trigger weekly keeper
+        let prev_5h_used = make_snap(40.0, 30.0);
+        let curr_5h_reset = make_snap(0.0, 30.0);
+        assert!(!did_agent_cycle_reset_to_full(
+            Some(&prev_5h_used),
+            &curr_5h_reset
+        ));
+    }
+
+    #[test]
+    fn test_compute_next_weekly_trigger() {
+        let reset_time = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 8, 15, 10, 0, 0).unwrap();
+
+        // Not triggered yet -> returns expected reset_time directly
+        assert_eq!(
+            compute_next_weekly_trigger(Some(reset_time), None, now),
+            Some(reset_time)
+        );
+
+        // Already triggered after reset_time -> returns None
+        let triggered_after = Utc.with_ymd_and_hms(2026, 8, 15, 12, 5, 0).unwrap();
+        let now_after = Utc.with_ymd_and_hms(2026, 8, 15, 13, 0, 0).unwrap();
+        assert_eq!(
+            compute_next_weekly_trigger(Some(reset_time), Some(triggered_after), now_after),
+            None
+        );
+    }
+
+    #[test]
     fn test_should_trigger_weekly_logic() {
         let reset_time = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
 
-        // 30 seconds after reset -> not reached threshold (1 min) yet
+        // 30 seconds after reset -> not reached threshold (1 min buffer) yet
         let before_threshold = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 30).unwrap();
         assert!(!should_trigger_weekly(
             Some(reset_time),
@@ -843,7 +939,7 @@ mod tests {
             before_threshold
         ));
 
-        // 2 minutes after reset -> should trigger
+        // 2 minutes after reset -> reached threshold -> should trigger
         let after_threshold = Utc.with_ymd_and_hms(2026, 8, 15, 12, 2, 0).unwrap();
         assert!(should_trigger_weekly(
             Some(reset_time),
@@ -852,12 +948,39 @@ mod tests {
         ));
 
         // Already triggered after reset_time -> should NOT trigger again
-        let triggered_after = Utc.with_ymd_and_hms(2026, 8, 15, 12, 2, 30).unwrap();
+        let triggered_after = Utc.with_ymd_and_hms(2026, 8, 15, 12, 2, 0).unwrap();
         assert!(!should_trigger_weekly(
             Some(reset_time),
             Some(triggered_after),
             after_threshold
         ));
+    }
+
+    #[test]
+    fn test_weekly_fallback_fires_next_cycle_after_observed_reset_ping() {
+        // The observed-reset path pings shortly after the cycle rolls over and
+        // stamps that observation time. The next cycle's fallback must still fire.
+        let observed_at = Utc.with_ymd_and_hms(2026, 8, 15, 12, 5, 0).unwrap();
+        let next_reset = Utc.with_ymd_and_hms(2026, 8, 22, 12, 0, 0).unwrap();
+
+        // Same cycle: the 12h guard keeps the fallback from double-pinging.
+        let same_cycle = Utc.with_ymd_and_hms(2026, 8, 15, 12, 6, 0).unwrap();
+        assert!(!should_trigger_weekly(
+            Some(observed_at - chrono::Duration::minutes(5)),
+            Some(observed_at),
+            same_cycle
+        ));
+
+        let after_next_reset = Utc.with_ymd_and_hms(2026, 8, 22, 12, 2, 0).unwrap();
+        assert!(should_trigger_weekly(
+            Some(next_reset),
+            Some(observed_at),
+            after_next_reset
+        ));
+        assert_eq!(
+            compute_next_weekly_trigger(Some(next_reset), Some(observed_at), same_cycle),
+            Some(next_reset)
+        );
     }
 
     #[test]
@@ -913,6 +1036,33 @@ mod tests {
         assert!(matches_keeper_agent("anthropic", "claude"));
         assert!(matches_keeper_agent("codex", "codex"));
         assert!(matches_keeper_agent("openai", "codex"));
+    }
+
+    #[test]
+    fn test_is_weekly_cycle_window_requires_period_or_explicit_label() {
+        use crate::provider::RateWindow;
+
+        let window = |label: &str, period_duration_ms: Option<i64>| RateWindow {
+            label: label.to_string(),
+            model_family: None,
+            used_percent: 0.0,
+            resets_at: None,
+            period_duration_ms,
+        };
+
+        assert!(is_weekly_cycle_window(&window(
+            "Weekly (7d)",
+            Some(7 * 24 * 60 * 60 * 1000)
+        )));
+        assert!(is_weekly_cycle_window(&window("Gemini (7d)", None)));
+        assert!(!is_weekly_cycle_window(&window(
+            "Window (1d)",
+            Some(24 * 60 * 60 * 1000)
+        )));
+        // Codex buckets without a reported duration are not assumed weekly.
+        assert!(!is_weekly_cycle_window(&window("Primary window", None)));
+        assert!(!is_weekly_cycle_window(&window("Secondary window", None)));
+        assert!(!is_weekly_cycle_window(&window("Gemini (daily)", None)));
     }
 
     fn ping_config(command: &str) -> AgentKeeperConfig {

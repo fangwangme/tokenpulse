@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-10-16
+
+### Added
+- **Linux system theme auto-following**: with `theme = auto`, the TUI now tracks the
+  desktop light/dark preference on Linux at each refresh, read from the XDG Desktop
+  Portal `color-scheme` setting via `busctl` (1s timeout) with a `gsettings`
+  fallback. An explicit `TOKENPULSE_THEME` or `TERM_BACKGROUND` still wins (#80).
+- **Keeper weekly ping on observed quota reset**: when a quota reload shows an
+  agent's weekly (or longer) window back at 0% used, Keeper pings right away to
+  anchor the new cycle instead of waiting for the scheduled check. The scheduled
+  check still fires 1 minute after `resets_at` as a fallback, and both paths share
+  a 12-hour guard so one cycle is pinged once (#80).
+
+### Changed
+- **Monday-first Activity Heatmap and weekly rollups**: the heatmap grid and weekly
+  aggregation now start weeks on Monday, weekday labels read `Mon`..`Sun`, and the
+  grid gets a 5-column left margin (#80).
+- **Weekly cycle detection is stricter**: a quota window counts as a weekly cycle
+  only when it reports a period of 6+ days or is explicitly labelled weekly/7d/
+  monthly, so an unlabelled Codex window without a reported duration no longer
+  drives the weekly Keeper (#80).
+
+### Fixed
+- **Fully reset quota windows**: windows at 0% used no longer show a reset countdown
+  or pace warning (#80).
+- **Antigravity plan name**: the plan now comes from the language server's
+  `userTier` (e.g. `Google AI Pro`), falling back to `planStatus` (#80).
+- **Antigravity language server discovery**: probes try both `http` and `https`
+  and stop wasting a timeout on each plain-HTTP port, cutting discovery from
+  seconds to a fraction of a second. The embedded `agy` CLI language server is
+  used when its CSRF token is available (tokenpulse running inside an `agy`
+  session); otherwise quota falls back to the Cloud Code API as before (#80).
+- **Removed a misleading `--no-tui` warning**: "No running Antigravity language
+  servers detected. New sessions will not be synced." was printed even though
+  Antigravity sessions sync from local conversation databases (#80).
+
 ## [0.6.4] - 2026-10-15
 
 ### Fixed

@@ -219,15 +219,15 @@ fn compute_layout(area: Rect, range: Option<(NaiveDate, NaiveDate)>) -> Option<H
         (end - Duration::days(364), end)
     });
     let mut start = window_start;
-    while start.weekday() != Weekday::Sun {
+    while start.weekday() != Weekday::Mon {
         start -= Duration::days(1);
     }
 
     let total_days = (end - start).num_days().max(0) as usize + 1;
     let total_weeks = ((total_days + 6) / 7).max(1);
-    let grid_x = area.x + 4;
+    let grid_x = area.x + 5;
     let grid_y = area.y + 1;
-    let grid_width = area.width.saturating_sub(4) as usize;
+    let grid_width = area.width.saturating_sub(5) as usize;
 
     if grid_width == 0 {
         return None;
@@ -274,7 +274,7 @@ fn cell_values_for_layout(
             break;
         }
 
-        let row = cursor.weekday().num_days_from_sunday() as usize;
+        let row = cursor.weekday().num_days_from_monday() as usize;
         let value = if cursor >= layout.window_start {
             values.get(&cursor).copied().unwrap_or(0.0)
         } else {
@@ -434,7 +434,7 @@ impl<'a> Widget for YearHeatmap<'a> {
                 break;
             }
 
-            let row = cursor.weekday().num_days_from_sunday() as usize;
+            let row = cursor.weekday().num_days_from_monday() as usize;
             let key = (display_col, row);
             if self.selected == Some(cursor) {
                 selected_cell = Some(key);
@@ -453,7 +453,7 @@ impl<'a> Widget for YearHeatmap<'a> {
         let scale = HeatmapScale::from_cell_values(&cell_values);
         let thresholds = scale.thresholds;
 
-        let weekday_labels = ["S", "M", "T", "W", "T", "F", "S"];
+        let weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
         for (row, label) in weekday_labels.iter().enumerate() {
             let y = grid_y + row as u16;
             if y < area.y + area.height {
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn heatmap_keeps_selected_day_highlight() {
-        let start = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap();
+        let start = NaiveDate::from_ymd_opt(2024, 1, 8).unwrap();
         let end = start + Duration::days(69);
         let selected = start + Duration::days(63);
         let points = vec![(selected, 42.0)];
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn heatmap_uses_solid_cells_without_texture_patterns() {
-        let start = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap();
+        let start = NaiveDate::from_ymd_opt(2024, 1, 8).unwrap();
         let end = start + Duration::days(34);
         let points = vec![(start, 1.0), (start + Duration::days(7), 10.0)];
         let area = Rect::new(0, 0, 72, 10);
@@ -616,11 +616,11 @@ mod tests {
 
     #[test]
     fn narrow_heatmap_clips_old_weeks_without_merging_cells() {
-        let start = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap();
+        let start = NaiveDate::from_ymd_opt(2024, 1, 8).unwrap();
         let end = start + Duration::days(370);
-        let old_sunday = start;
-        let recent_sunday = end - Duration::days(end.weekday().num_days_from_sunday() as i64);
-        let points = vec![(old_sunday, 99.0), (recent_sunday, 1.0)];
+        let old_monday = start;
+        let recent_monday = end - Duration::days(end.weekday().num_days_from_monday() as i64);
+        let points = vec![(old_monday, 99.0), (recent_monday, 1.0)];
         let area = Rect::new(0, 0, 30, 10);
         let mut buf = Buffer::empty(area);
 
@@ -634,7 +634,7 @@ mod tests {
 
         let first_visible_date =
             date_at_position(area, Some((start, end)), layout.grid_x, layout.grid_y);
-        assert_ne!(first_visible_date, Some(old_sunday));
+        assert_ne!(first_visible_date, Some(old_monday));
 
         let recent_col = layout.display_cols - 1;
         let recent_x = display_col_x(&layout, recent_col);
@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn narrow_heatmap_returns_no_layout() {
-        let start = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap();
+        let start = NaiveDate::from_ymd_opt(2024, 1, 8).unwrap();
         let end = start + Duration::days(69);
         let selected = start + Duration::days(63);
         let points = vec![(selected, 42.0)];
@@ -655,12 +655,12 @@ mod tests {
             .range_opt(Some((start, end)))
             .render(area, &mut buf);
 
-        assert_eq!(buf[(area.x + 4, area.y + 1)].symbol(), " ");
+        assert_eq!(buf[(area.x + 5, area.y + 1)].symbol(), " ");
     }
 
     #[test]
     fn date_at_position_matches_rendered_cell() {
-        let start = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap();
+        let start = NaiveDate::from_ymd_opt(2024, 1, 8).unwrap();
         let end = start + Duration::days(34);
         let selected = start + Duration::days(10);
         let area = Rect::new(0, 0, 72, 10);
@@ -671,6 +671,35 @@ mod tests {
         let date = date_at_position(area, Some((start, end)), x, y);
 
         assert_eq!(date, Some(selected));
+    }
+
+    #[test]
+    fn weekday_labels_render_three_letter_monday_start() {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 8).unwrap();
+        let end = start + Duration::days(34);
+        let area = Rect::new(0, 0, 72, 10);
+        let mut buf = Buffer::empty(area);
+
+        YearHeatmap::new(&[], HeatmapMetric::TotalTokens)
+            .range_opt(Some((start, end)))
+            .render(area, &mut buf);
+
+        let layout = compute_layout(area, Some((start, end))).unwrap();
+        assert_eq!(layout.grid_x, area.x + 5);
+
+        let row_text = |row: u16| -> String {
+            (0..3)
+                .map(|col| buf[(area.x + col, layout.grid_y + row)].symbol())
+                .collect()
+        };
+
+        assert_eq!(row_text(0), "Mon");
+        assert_eq!(row_text(1), "Tue");
+        assert_eq!(row_text(2), "Wed");
+        assert_eq!(row_text(3), "Thu");
+        assert_eq!(row_text(4), "Fri");
+        assert_eq!(row_text(5), "Sat");
+        assert_eq!(row_text(6), "Sun");
     }
 
     #[test]
@@ -706,7 +735,7 @@ mod tests {
             display_cols: 10,
             cell_width: 2,
             grid_width: 36,
-            grid_x: 4,
+            grid_x: 5,
             grid_y: 1,
         };
 
