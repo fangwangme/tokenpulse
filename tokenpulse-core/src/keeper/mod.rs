@@ -335,7 +335,12 @@ pub fn should_trigger_weekly(
     }
 
     match last_triggered_time {
-        Some(last_time) => last_time < resets_at,
+        Some(last_time) => {
+            if now.signed_duration_since(last_time) < chrono::Duration::hours(12) {
+                return false;
+            }
+            last_time < resets_at
+        }
         None => true,
     }
 }
