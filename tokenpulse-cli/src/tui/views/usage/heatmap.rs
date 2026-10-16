@@ -12,6 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use std::collections::BTreeSet;
+use tokenpulse_core::usage::week_start;
 
 const HEATMAP_LEGEND_BUCKETS: usize = 5;
 const LEGEND_COLOR_BLOCKS_OFFSET: u16 = 43;
@@ -22,6 +23,17 @@ pub fn render_heatmap_page(
     dashboard: &UsageDashboard,
     state: &UsageState,
     theme: &Theme,
+) {
+    render_heatmap_page_on(f, area, dashboard, state, theme, Local::now().date_naive());
+}
+
+fn render_heatmap_page_on(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    dashboard: &UsageDashboard,
+    state: &UsageState,
+    theme: &Theme,
+    today: NaiveDate,
 ) {
     let selected_day =
         dashboard.selected_day_in_fixed_window(state.selected_heatmap_date, &state.enabled_sources);
@@ -64,7 +76,7 @@ pub fn render_heatmap_page(
     // Bottom panels: range summary and selected day detail
     let info = heatmap_info_sections(sections[1]);
 
-    render_heatmap_summary_card(f, info[0], dashboard, &state.enabled_sources, theme);
+    render_heatmap_summary_card(f, info[0], dashboard, &state.enabled_sources, theme, today);
     render_heatmap_day_detail(
         f,
         info[1],
@@ -91,7 +103,7 @@ pub fn heatmap_info_sections(area: Rect) -> std::rc::Rc<[Rect]> {
     } else {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(14), Constraint::Min(6)])
+            .constraints([Constraint::Length(15), Constraint::Min(6)])
             .split(area)
     }
 }
@@ -168,6 +180,7 @@ fn render_heatmap_summary_card(
     dashboard: &UsageDashboard,
     enabled: &BTreeSet<String>,
     theme: &Theme,
+    today: NaiveDate,
 ) {
     let block = Block::default()
         .title(Span::styled(
@@ -180,8 +193,6 @@ fn render_heatmap_summary_card(
     f.render_widget(block, area);
 
     let days = dashboard.filtered_daily(enabled);
-    let today = Local::now().date_naive();
-    let week_start = today - Duration::days(6);
 
     let active_days = dashboard.active_days_in_fixed_window(HeatmapMetric::TotalTokens, enabled);
     let current_streak =
@@ -189,63 +200,7 @@ fn render_heatmap_summary_card(
     let longest_streak =
         dashboard.longest_streak_in_fixed_window(HeatmapMetric::TotalTokens, enabled);
 
-    // Tokens calculations
-    let today_tokens = days
-        .iter()
-        .find(|d| d.date == today)
-        .map(|d| d.total_tokens)
-        .unwrap_or(0);
-    let week_tokens: i64 = days
-        .iter()
-        .filter(|d| d.date >= week_start && d.date <= today)
-        .map(|d| d.total_tokens)
-        .sum();
-    let month_tokens: i64 = days
-        .iter()
-        .filter(|d| d.date.year() == today.year() && d.date.month() == today.month())
-        .map(|d| d.total_tokens)
-        .sum();
-    let year_tokens: i64 = days
-        .iter()
-        .filter(|d| d.date.year() == today.year())
-        .map(|d| d.total_tokens)
-        .sum();
-    let total_tokens: i64 = days.iter().map(|d| d.total_tokens).sum();
-    let max_tokens = days.iter().map(|d| d.total_tokens).max().unwrap_or(0);
-    let avg_tokens = if days.is_empty() {
-        0.0
-    } else {
-        total_tokens as f64 / days.len() as f64
-    };
-
-    // Cost calculations
-    let today_cost = days
-        .iter()
-        .find(|d| d.date == today)
-        .map(|d| d.cost_usd)
-        .unwrap_or(0.0);
-    let week_cost: f64 = days
-        .iter()
-        .filter(|d| d.date >= week_start && d.date <= today)
-        .map(|d| d.cost_usd)
-        .sum();
-    let month_cost: f64 = days
-        .iter()
-        .filter(|d| d.date.year() == today.year() && d.date.month() == today.month())
-        .map(|d| d.cost_usd)
-        .sum();
-    let year_cost: f64 = days
-        .iter()
-        .filter(|d| d.date.year() == today.year())
-        .map(|d| d.cost_usd)
-        .sum();
-    let total_cost: f64 = days.iter().map(|d| d.cost_usd).sum();
-    let max_cost = days.iter().map(|d| d.cost_usd).fold(0.0, f64::max);
-    let avg_cost = if days.is_empty() {
-        0.0
-    } else {
-        total_cost / days.len() as f64
-    };
+    let mut overview_rows = range_overview_rows(&days, today);
 
     let mut lines = vec![
         Line::from(vec![
@@ -265,10 +220,10 @@ fn render_heatmap_summary_card(
         ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("Period     ", Style::default().fg(theme.dim).underlined()),
+            Span::styled("Period      ", Style::default().fg(theme.dim).underlined()),
             Span::raw(" "),
             Span::styled(
-                "Tokens      ",
+                "Tokens    ",
                 Style::default()
                     .fg(Color::Rgb(52, 211, 153))
                     .bold()
@@ -285,45 +240,121 @@ fn render_heatmap_summary_card(
         ]),
     ];
 
-    let mut add_row = |label: &str, tokens: f64, cost: f64, is_avg: bool| {
-        let tokens_str = if is_avg {
-            format_compact(tokens.round() as i64)
-        } else {
-            format_compact(tokens as i64)
+    // When the card is short, drop the spacer and then the rolling rows so the
+    // calendar rows and Total/Average/Max stay visible before trailing rows go.
+    let max_lines = inner.height as usize;
+    if lines.len() + overview_rows.len() > max_lines {
+        lines.remove(2);
+    }
+    while lines.len() + overview_rows.len() > max_lines {
+        let Some(index) = overview_rows.iter().rposition(|row| row.rolling) else {
+            break;
         };
-        let cost_str = format_cost_compact(cost);
+        overview_rows.remove(index);
+    }
 
+    for row in &overview_rows {
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{:width$}", label, width = 10),
+                format!("{:width$}", row.label, width = 12),
                 Style::default().fg(theme.dim),
             ),
             Span::raw(" "),
             Span::styled(
-                format!("{:width$}", tokens_str, width = 12),
+                format!(
+                    "{:width$}",
+                    format_compact(row.tokens.round() as i64),
+                    width = 10
+                ),
                 Style::default().fg(Color::Rgb(52, 211, 153)),
             ),
             Span::raw(" "),
-            Span::styled(cost_str, Style::default().fg(Color::Rgb(250, 204, 21))),
+            Span::styled(
+                format_cost_compact(row.cost_usd),
+                Style::default().fg(Color::Rgb(250, 204, 21)),
+            ),
         ]));
-    };
-
-    add_row("Today", today_tokens as f64, today_cost, false);
-    add_row("Week", week_tokens as f64, week_cost, false);
-    add_row("Month", month_tokens as f64, month_cost, false);
-    add_row("Year", year_tokens as f64, year_cost, false);
-    add_row("Total", total_tokens as f64, total_cost, false);
-    add_row("Average", avg_tokens, avg_cost, true);
-    add_row("Max", max_tokens as f64, max_cost, false);
-
-    // Trim trailing lines that don't fit
-    let max_lines = inner.height as usize;
+    }
     lines.truncate(max_lines);
 
     f.render_widget(
         Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),
         inner,
     );
+}
+
+struct RangeOverviewRow {
+    label: &'static str,
+    tokens: f64,
+    cost_usd: f64,
+    rolling: bool,
+}
+
+/// Window rows in display order, with whether each is a rolling window.
+const RANGE_WINDOWS: [(&str, bool); 7] = [
+    ("Today", false),
+    ("Week", false),
+    ("Last 7 days", true),
+    ("Month", false),
+    ("Last 30 days", true),
+    ("Year", false),
+    ("Total", false),
+];
+
+fn range_overview_rows(days: &[DailyStats], today: NaiveDate) -> Vec<RangeOverviewRow> {
+    let week_start = week_start(today).unwrap_or(today);
+    let last7_start = today - Duration::days(6);
+    let last30_start = today - Duration::days(29);
+
+    let mut sums = [(0i64, 0.0f64); RANGE_WINDOWS.len()];
+    let (mut max_tokens, mut max_cost) = (0i64, 0.0f64);
+    for day in days {
+        let date = day.date;
+        let since = |start: NaiveDate| date >= start && date <= today;
+        let in_window = [
+            date == today,
+            since(week_start),
+            since(last7_start),
+            date.year() == today.year() && date.month() == today.month(),
+            since(last30_start),
+            date.year() == today.year(),
+            true,
+        ];
+        for (sum, hit) in sums.iter_mut().zip(in_window) {
+            if hit {
+                sum.0 += day.total_tokens;
+                sum.1 += day.cost_usd;
+            }
+        }
+        max_tokens = max_tokens.max(day.total_tokens);
+        max_cost = max_cost.max(day.cost_usd);
+    }
+
+    let (total_tokens, total_cost) = sums[RANGE_WINDOWS.len() - 1];
+    let day_count = days.len().max(1) as f64;
+    let mut rows: Vec<RangeOverviewRow> = RANGE_WINDOWS
+        .iter()
+        .zip(sums)
+        .map(|(&(label, rolling), (tokens, cost_usd))| RangeOverviewRow {
+            label,
+            tokens: tokens as f64,
+            cost_usd,
+            rolling,
+        })
+        .collect();
+    rows.push(RangeOverviewRow {
+        label: "Average",
+        tokens: total_tokens as f64 / day_count,
+        cost_usd: total_cost / day_count,
+        rolling: false,
+    });
+    rows.push(RangeOverviewRow {
+        label: "Max",
+        tokens: max_tokens as f64,
+        cost_usd: max_cost,
+        rolling: false,
+    });
+    rows
 }
 
 fn render_heatmap_day_detail(
@@ -661,5 +692,163 @@ fn format_metric(metric: HeatmapMetric, value: f64) -> String {
     match metric {
         HeatmapMetric::Cost => format_cost_compact(value),
         HeatmapMetric::TotalTokens => format_compact(value.round() as i64),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::views::usage::DayBreakdown;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    const ROW_LABELS: [&str; 9] = [
+        "Today",
+        "Week",
+        "Last 7 days",
+        "Month",
+        "Last 30 days",
+        "Year",
+        "Total",
+        "Average",
+        "Max",
+    ];
+
+    fn fixed_today() -> NaiveDate {
+        // A Wednesday, so the natural week has data before and on it.
+        NaiveDate::from_ymd_opt(2024, 1, 10).unwrap()
+    }
+
+    fn test_day(date: NaiveDate, tokens: i64) -> DailyStats {
+        let mut day = DailyStats::empty(date);
+        day.total_tokens = tokens;
+        day.cost_usd = tokens as f64 / 100.0;
+        day
+    }
+
+    fn sample_days() -> Vec<DailyStats> {
+        vec![
+            test_day(NaiveDate::from_ymd_opt(2023, 12, 11).unwrap(), 40),
+            test_day(NaiveDate::from_ymd_opt(2023, 12, 12).unwrap(), 20),
+            test_day(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), 100),
+            test_day(NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(), 80),
+            test_day(NaiveDate::from_ymd_opt(2024, 1, 7).unwrap(), 200),
+            test_day(NaiveDate::from_ymd_opt(2024, 1, 8).unwrap(), 300),
+            test_day(NaiveDate::from_ymd_opt(2024, 1, 9).unwrap(), 400),
+            test_day(NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(), 500),
+        ]
+    }
+
+    fn row<'a>(rows: &'a [RangeOverviewRow], label: &str) -> &'a RangeOverviewRow {
+        rows.iter()
+            .find(|row| row.label == label)
+            .unwrap_or_else(|| panic!("missing row {label}"))
+    }
+
+    #[test]
+    fn natural_week_and_rolling_windows() {
+        let rows = range_overview_rows(&sample_days(), fixed_today());
+
+        // Monday 2024-01-08 through today; the previous Sunday stays out.
+        assert_eq!(row(&rows, "Week").tokens, 1200.0);
+        assert_eq!(row(&rows, "Week").cost_usd, 12.0);
+        // today-6 .. today; 2024-01-03 stays out.
+        assert_eq!(row(&rows, "Last 7 days").tokens, 1400.0);
+        // today-29 .. today; 2023-12-11 stays out.
+        assert_eq!(row(&rows, "Last 30 days").tokens, 1600.0);
+        // Month stays month-to-date.
+        assert_eq!(row(&rows, "Month").tokens, 1580.0);
+
+        // On a Monday the natural week is just today.
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 8).unwrap();
+        let rows = range_overview_rows(&sample_days(), monday);
+        assert_eq!(row(&rows, "Week").tokens, 300.0);
+    }
+
+    #[test]
+    fn rows_keep_contract_order() {
+        let rows = range_overview_rows(&sample_days(), fixed_today());
+        let labels: Vec<&str> = rows.iter().map(|row| row.label).collect();
+
+        assert_eq!(labels, ROW_LABELS);
+        // The label column must fit the longest label without shifting values.
+        assert!(labels.iter().all(|label| label.chars().count() <= 12));
+    }
+
+    #[test]
+    fn range_overview_card_renders_rows_and_keeps_totals_when_short() {
+        let mut days = sample_days();
+        // A seven-figure cost must not wrap and push the last rows out.
+        let mut big = test_day(NaiveDate::from_ymd_opt(2023, 6, 1).unwrap(), 1);
+        big.cost_usd = 1_000_000.0;
+        days.insert(0, big);
+        let days: Vec<DailyStats> = days
+            .into_iter()
+            .map(|mut day| {
+                let breakdown = DayBreakdown {
+                    tokens: day.total_tokens,
+                    cost_usd: day.cost_usd,
+                    ..DayBreakdown::default()
+                };
+                day.providers.insert("claude".to_string(), breakdown);
+                day
+            })
+            .collect();
+        let dashboard = UsageDashboard { daily: days };
+        let state = UsageState::new(&dashboard, Vec::new());
+        let theme = Theme::default();
+        let header = format!("{:12} {:10} Cost", "Period", "Tokens");
+        let week = format!("{:12} {:10} {}", "Week", "1.20 K", "$12.00");
+        let max = format!("{:12} {:10} {}", "Max", "500.00  ", "$1,000,000.00");
+
+        // (width, height, rolling rows expected to fit)
+        for (width, height, rolling) in [
+            (120u16, 40u16, ["Last 7 days", "Last 30 days"].as_slice()),
+            (120, 35, ["Last 7 days"].as_slice()),
+            (80, 45, ["Last 7 days", "Last 30 days"].as_slice()),
+            (80, 40, [].as_slice()),
+        ] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_heatmap_page_on(
+                        frame,
+                        super::super::dashboard_body_area(frame.area()),
+                        &dashboard,
+                        &state,
+                        &theme,
+                        fixed_today(),
+                    );
+                })
+                .unwrap();
+            let text = buffer_text(terminal.backend(), width, height);
+
+            for expected in [header.as_str(), week.as_str(), max.as_str()] {
+                assert!(
+                    text.contains(expected),
+                    "missing {expected:?} at {width}x{height}:\n{text}"
+                );
+            }
+            for label in ROW_LABELS {
+                let is_rolling = label.starts_with("Last ");
+                assert_eq!(
+                    text.contains(label),
+                    !is_rolling || rolling.contains(&label),
+                    "row {label} at {width}x{height}:\n{text}"
+                );
+            }
+        }
+    }
+
+    fn buffer_text(backend: &TestBackend, width: u16, height: u16) -> String {
+        let buffer = backend.buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

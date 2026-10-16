@@ -230,9 +230,14 @@ where
     groups.into_values().collect()
 }
 
+/// First day (Monday) of the week containing `date`.
+pub fn week_start(date: NaiveDate) -> Option<NaiveDate> {
+    let days_from_monday = date.weekday().num_days_from_monday();
+    date.checked_sub_days(Days::new(u64::from(days_from_monday)))
+}
+
 fn weekly_group(date: NaiveDate) -> Option<(String, NaiveDate, NaiveDate)> {
-    let days_from_monday = i64::from(date.weekday().num_days_from_monday());
-    let start = date.checked_sub_days(Days::new(days_from_monday as u64))?;
+    let start = week_start(date)?;
     let end = start.checked_add_days(Days::new(6))?;
     Some((
         format!("{}..{}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d")),
