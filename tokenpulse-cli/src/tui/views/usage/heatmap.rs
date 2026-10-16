@@ -817,9 +817,11 @@ mod tests {
         let days: Vec<DailyStats> = sample_days()
             .into_iter()
             .map(|mut day| {
-                let mut breakdown = DayBreakdown::default();
-                breakdown.tokens = day.total_tokens;
-                breakdown.cost_usd = day.cost_usd;
+                let breakdown = DayBreakdown {
+                    tokens: day.total_tokens,
+                    cost_usd: day.cost_usd,
+                    ..DayBreakdown::default()
+                };
                 day.providers.insert("claude".to_string(), breakdown);
                 day
             })
