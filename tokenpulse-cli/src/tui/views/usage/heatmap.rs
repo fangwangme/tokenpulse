@@ -12,6 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use std::collections::BTreeSet;
+use tokenpulse_core::usage::week_start;
 
 const HEATMAP_LEGEND_BUCKETS: usize = 5;
 const LEGEND_COLOR_BLOCKS_OFFSET: u16 = 43;
@@ -22,6 +23,17 @@ pub fn render_heatmap_page(
     dashboard: &UsageDashboard,
     state: &UsageState,
     theme: &Theme,
+) {
+    render_heatmap_page_on(f, area, dashboard, state, theme, Local::now().date_naive());
+}
+
+fn render_heatmap_page_on(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    dashboard: &UsageDashboard,
+    state: &UsageState,
+    theme: &Theme,
+    today: NaiveDate,
 ) {
     let selected_day =
         dashboard.selected_day_in_fixed_window(state.selected_heatmap_date, &state.enabled_sources);
@@ -64,7 +76,7 @@ pub fn render_heatmap_page(
     // Bottom panels: range summary and selected day detail
     let info = heatmap_info_sections(sections[1]);
 
-    render_heatmap_summary_card(f, info[0], dashboard, &state.enabled_sources, theme);
+    render_heatmap_summary_card(f, info[0], dashboard, &state.enabled_sources, theme, today);
     render_heatmap_day_detail(
         f,
         info[1],
@@ -168,6 +180,7 @@ fn render_heatmap_summary_card(
     dashboard: &UsageDashboard,
     enabled: &BTreeSet<String>,
     theme: &Theme,
+    today: NaiveDate,
 ) {
     let block = Block::default()
         .title(Span::styled(
@@ -180,7 +193,6 @@ fn render_heatmap_summary_card(
     f.render_widget(block, area);
 
     let days = dashboard.filtered_daily(enabled);
-    let today = Local::now().date_naive();
 
     let active_days = dashboard.active_days_in_fixed_window(HeatmapMetric::TotalTokens, enabled);
     let current_streak =
@@ -188,7 +200,7 @@ fn render_heatmap_summary_card(
     let longest_streak =
         dashboard.longest_streak_in_fixed_window(HeatmapMetric::TotalTokens, enabled);
 
-    let overview_rows = range_overview_rows(&days, today);
+    let mut overview_rows = range_overview_rows(&days, today);
 
     let mut lines = vec![
         Line::from(vec![
@@ -208,10 +220,10 @@ fn render_heatmap_summary_card(
         ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("Period       ", Style::default().fg(theme.dim).underlined()),
+            Span::styled("Period      ", Style::default().fg(theme.dim).underlined()),
             Span::raw(" "),
             Span::styled(
-                "Tokens      ",
+                "Tokens    ",
                 Style::default()
                     .fg(Color::Rgb(52, 211, 153))
                     .bold()
@@ -228,35 +240,41 @@ fn render_heatmap_summary_card(
         ]),
     ];
 
-    let mut add_row = |label: &str, tokens: f64, cost: f64, is_avg: bool| {
-        let tokens_str = if is_avg {
-            format_compact(tokens.round() as i64)
-        } else {
-            format_compact(tokens as i64)
+    // When the card is short, drop the spacer and then the rolling rows so the
+    // calendar rows and Total/Average/Max stay visible before trailing rows go.
+    let max_lines = inner.height as usize;
+    if lines.len() + overview_rows.len() > max_lines {
+        lines.remove(2);
+    }
+    while lines.len() + overview_rows.len() > max_lines {
+        let Some(index) = overview_rows.iter().rposition(|row| row.rolling) else {
+            break;
         };
-        let cost_str = format_cost_compact(cost);
+        overview_rows.remove(index);
+    }
 
+    for row in &overview_rows {
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{:width$}", label, width = 12),
+                format!("{:width$}", row.label, width = 12),
                 Style::default().fg(theme.dim),
             ),
             Span::raw(" "),
             Span::styled(
-                format!("{:width$}", tokens_str, width = 12),
+                format!(
+                    "{:width$}",
+                    format_compact(row.tokens.round() as i64),
+                    width = 10
+                ),
                 Style::default().fg(Color::Rgb(52, 211, 153)),
             ),
             Span::raw(" "),
-            Span::styled(cost_str, Style::default().fg(Color::Rgb(250, 204, 21))),
+            Span::styled(
+                format_cost_compact(row.cost_usd),
+                Style::default().fg(Color::Rgb(250, 204, 21)),
+            ),
         ]));
-    };
-
-    for row in &overview_rows {
-        add_row(row.label, row.tokens, row.cost_usd, row.is_average);
     }
-
-    // Trim trailing lines that don't fit
-    let max_lines = inner.height as usize;
     lines.truncate(max_lines);
 
     f.render_widget(
@@ -269,105 +287,74 @@ struct RangeOverviewRow {
     label: &'static str,
     tokens: f64,
     cost_usd: f64,
-    is_average: bool,
+    rolling: bool,
 }
 
-fn totals<'a>(days: impl Iterator<Item = &'a DailyStats>) -> (i64, f64) {
-    days.fold((0, 0.0), |(tokens, cost), day| {
-        (tokens + day.total_tokens, cost + day.cost_usd)
-    })
-}
+/// Window rows in display order, with whether each is a rolling window.
+const RANGE_WINDOWS: [(&str, bool); 7] = [
+    ("Today", false),
+    ("Week", false),
+    ("Last 7 days", true),
+    ("Month", false),
+    ("Last 30 days", true),
+    ("Year", false),
+    ("Total", false),
+];
 
 fn range_overview_rows(days: &[DailyStats], today: NaiveDate) -> Vec<RangeOverviewRow> {
-    let week_start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+    let week_start = week_start(today).unwrap_or(today);
     let last7_start = today - Duration::days(6);
     let last30_start = today - Duration::days(29);
-    let in_window = |start: NaiveDate| {
-        days.iter()
-            .filter(move |day| day.date >= start && day.date <= today)
-    };
 
-    let (today_tokens, today_cost) = totals(days.iter().filter(|day| day.date == today));
-    let (week_tokens, week_cost) = totals(in_window(week_start));
-    let (last7_tokens, last7_cost) = totals(in_window(last7_start));
-    let (month_tokens, month_cost) = totals(
-        days.iter()
-            .filter(|day| day.date.year() == today.year() && day.date.month() == today.month()),
-    );
-    let (last30_tokens, last30_cost) = totals(in_window(last30_start));
-    let (year_tokens, year_cost) =
-        totals(days.iter().filter(|day| day.date.year() == today.year()));
-    let (total_tokens, total_cost) = totals(days.iter());
-    let (max_tokens, max_cost) = days
+    let mut sums = [(0i64, 0.0f64); RANGE_WINDOWS.len()];
+    let (mut max_tokens, mut max_cost) = (0i64, 0.0f64);
+    for day in days {
+        let date = day.date;
+        let since = |start: NaiveDate| date >= start && date <= today;
+        let in_window = [
+            date == today,
+            since(week_start),
+            since(last7_start),
+            date.year() == today.year() && date.month() == today.month(),
+            since(last30_start),
+            date.year() == today.year(),
+            true,
+        ];
+        for (sum, hit) in sums.iter_mut().zip(in_window) {
+            if hit {
+                sum.0 += day.total_tokens;
+                sum.1 += day.cost_usd;
+            }
+        }
+        max_tokens = max_tokens.max(day.total_tokens);
+        max_cost = max_cost.max(day.cost_usd);
+    }
+
+    let (total_tokens, total_cost) = sums[RANGE_WINDOWS.len() - 1];
+    let day_count = days.len().max(1) as f64;
+    let mut rows: Vec<RangeOverviewRow> = RANGE_WINDOWS
         .iter()
-        .fold((0i64, 0.0f64), |(max_tokens, max_cost), day| {
-            (max_tokens.max(day.total_tokens), max_cost.max(day.cost_usd))
-        });
-    let (avg_tokens, avg_cost) = if days.is_empty() {
-        (0.0, 0.0)
-    } else {
-        (
-            total_tokens as f64 / days.len() as f64,
-            total_cost / days.len() as f64,
-        )
-    };
-
-    vec![
-        RangeOverviewRow {
-            label: "Today",
-            tokens: today_tokens as f64,
-            cost_usd: today_cost,
-            is_average: false,
-        },
-        RangeOverviewRow {
-            label: "Week",
-            tokens: week_tokens as f64,
-            cost_usd: week_cost,
-            is_average: false,
-        },
-        RangeOverviewRow {
-            label: "Last 7 days",
-            tokens: last7_tokens as f64,
-            cost_usd: last7_cost,
-            is_average: false,
-        },
-        RangeOverviewRow {
-            label: "Month",
-            tokens: month_tokens as f64,
-            cost_usd: month_cost,
-            is_average: false,
-        },
-        RangeOverviewRow {
-            label: "Last 30 days",
-            tokens: last30_tokens as f64,
-            cost_usd: last30_cost,
-            is_average: false,
-        },
-        RangeOverviewRow {
-            label: "Year",
-            tokens: year_tokens as f64,
-            cost_usd: year_cost,
-            is_average: false,
-        },
-        RangeOverviewRow {
-            label: "Total",
-            tokens: total_tokens as f64,
-            cost_usd: total_cost,
-            is_average: false,
-        },
-        RangeOverviewRow {
-            label: "Average",
-            tokens: avg_tokens,
-            cost_usd: avg_cost,
-            is_average: true,
-        },
-        RangeOverviewRow {
-            label: "Max",
-            tokens: max_tokens as f64,
-            cost_usd: max_cost,
-            is_average: false,
-        },
-    ]
+        .zip(sums)
+        .map(|(&(label, rolling), (tokens, cost_usd))| RangeOverviewRow {
+            label,
+            tokens: tokens as f64,
+            cost_usd,
+            rolling,
+        })
+        .collect();
+    rows.push(RangeOverviewRow {
+        label: "Average",
+        tokens: total_tokens as f64 / day_count,
+        cost_usd: total_cost / day_count,
+        rolling: false,
+    });
+    rows.push(RangeOverviewRow {
+        label: "Max",
+        tokens: max_tokens as f64,
+        cost_usd: max_cost,
+        rolling: false,
+    });
+    rows
 }
 
 fn render_heatmap_day_detail(
@@ -788,8 +775,13 @@ mod tests {
     }
 
     #[test]
-    fn range_overview_card_shows_all_rows_in_wide_and_narrow_layouts() {
-        let days: Vec<DailyStats> = sample_days()
+    fn range_overview_card_renders_rows_and_keeps_totals_when_short() {
+        let mut days = sample_days();
+        // A seven-figure cost must not wrap and push the last rows out.
+        let mut big = test_day(NaiveDate::from_ymd_opt(2023, 6, 1).unwrap(), 1);
+        big.cost_usd = 1_000_000.0;
+        days.insert(0, big);
+        let days: Vec<DailyStats> = days
             .into_iter()
             .map(|mut day| {
                 let breakdown = DayBreakdown {
@@ -804,21 +796,45 @@ mod tests {
         let dashboard = UsageDashboard { daily: days };
         let state = UsageState::new(&dashboard, Vec::new());
         let theme = Theme::default();
+        let header = format!("{:12} {:10} Cost", "Period", "Tokens");
+        let week = format!("{:12} {:10} {}", "Week", "1.20 K", "$12.00");
+        let max = format!("{:12} {:10} {}", "Max", "500.00  ", "$1,000,000.00");
 
-        for (width, height) in [(120u16, 40u16), (80, 45)] {
+        // (width, height, rolling rows expected to fit)
+        for (width, height, rolling) in [
+            (120u16, 40u16, ["Last 7 days", "Last 30 days"].as_slice()),
+            (120, 35, ["Last 7 days"].as_slice()),
+            (80, 45, ["Last 7 days", "Last 30 days"].as_slice()),
+            (80, 40, [].as_slice()),
+        ] {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal
                 .draw(|frame| {
-                    render_heatmap_page(frame, frame.area(), &dashboard, &state, &theme);
+                    render_heatmap_page_on(
+                        frame,
+                        super::super::dashboard_body_area(frame.area()),
+                        &dashboard,
+                        &state,
+                        &theme,
+                        fixed_today(),
+                    );
                 })
                 .unwrap();
             let text = buffer_text(terminal.backend(), width, height);
 
-            for label in ROW_LABELS {
+            for expected in [header.as_str(), week.as_str(), max.as_str()] {
                 assert!(
+                    text.contains(expected),
+                    "missing {expected:?} at {width}x{height}:\n{text}"
+                );
+            }
+            for label in ROW_LABELS {
+                let is_rolling = label.starts_with("Last ");
+                assert_eq!(
                     text.contains(label),
-                    "missing {label} at {width}x{height}:\n{text}"
+                    !is_rolling || rolling.contains(&label),
+                    "row {label} at {width}x{height}:\n{text}"
                 );
             }
         }
