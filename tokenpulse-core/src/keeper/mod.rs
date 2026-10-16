@@ -259,47 +259,64 @@ fn local_datetime_at(date: NaiveDate, time: NaiveTime) -> Option<DateTime<Local>
     }
 }
 
-/// Evaluates whether the Weekly auto-sync trigger should fire.
-/// Fires when current time >= `resets_at + 1 minute` (buffer) and has not triggered for this cycle.
-pub fn should_trigger_weekly(
-    quota_resets_at: Option<DateTime<Utc>>,
-    last_triggered_time: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+/// Returns true if a RateWindow represents a long-term cycle (e.g. weekly or monthly),
+/// and not a short session window (e.g. 5h).
+pub fn is_cycle_window(window: &crate::provider::RateWindow) -> bool {
+    if let Some(ms) = window.period_duration_ms {
+        // At least 24 hours (86,400,000 ms)
+        return ms >= 24 * 60 * 60 * 1000;
+    }
+    let lower = window.label.to_lowercase();
+    let looks_short = lower.contains("5h")
+        || lower.contains("5-hour")
+        || lower.contains("5 hour")
+        || lower.contains("session");
+    !looks_short
+}
+
+/// Detects if an agent's major cycle quota window transitioned from partially/fully
+/// consumed (`used_percent > 0.0`) back to fully reset (`used_percent <= 0.0`).
+pub fn did_agent_cycle_reset_to_full(
+    prev_snapshot: Option<&crate::provider::QuotaSnapshot>,
+    new_snapshot: &crate::provider::QuotaSnapshot,
 ) -> bool {
-    let Some(resets_at) = quota_resets_at else {
+    let Some(prev) = prev_snapshot else {
         return false;
     };
 
-    // Add 1 minute buffer after reset
-    let trigger_threshold = resets_at + chrono::Duration::minutes(1);
-
-    if now < trigger_threshold {
-        return false;
+    for new_window in &new_snapshot.windows {
+        if !is_cycle_window(new_window) {
+            continue;
+        }
+        if new_window.used_percent <= 0.0 {
+            if let Some(prev_window) = prev.windows.iter().find(|w| w.label == new_window.label) {
+                if prev_window.used_percent > 0.0 {
+                    return true;
+                }
+            }
+        }
     }
 
-    match last_triggered_time {
-        Some(last_time) => last_time < resets_at,
-        None => true,
-    }
+    false
 }
 
 /// Calculates next weekly trigger time.
+/// Displays expected `resets_at` timestamp if available and not yet triggered for this cycle.
 pub fn compute_next_weekly_trigger(
     quota_resets_at: Option<DateTime<Utc>>,
     last_triggered_time: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
     let resets_at = quota_resets_at?;
-    let trigger_threshold = resets_at + chrono::Duration::minutes(1);
 
     if let Some(last_time) = last_triggered_time {
-        if last_time >= resets_at && now >= trigger_threshold {
+        if last_time >= resets_at && now >= resets_at {
             // Already triggered for this reset cycle
             return None;
         }
     }
 
-    Some(trigger_threshold)
+    Some(resets_at)
 }
 
 /// Matches a QuotaSnapshot provider name to a Keeper agent ID.
@@ -832,32 +849,78 @@ mod tests {
     }
 
     #[test]
-    fn test_should_trigger_weekly_logic() {
+    fn test_did_agent_cycle_reset_to_full() {
+        use crate::provider::{QuotaSnapshot, RateWindow};
+
+        let make_snap = |gemini_5h_used: f64, gemini_7d_used: f64| QuotaSnapshot {
+            provider: "antigravity".to_string(),
+            plan: None,
+            account: None,
+            windows: vec![
+                RateWindow {
+                    label: "Gemini (5h)".to_string(),
+                    model_family: Some("Gemini".to_string()),
+                    used_percent: gemini_5h_used,
+                    resets_at: None,
+                    period_duration_ms: Some(5 * 60 * 60 * 1000),
+                },
+                RateWindow {
+                    label: "Gemini (7d)".to_string(),
+                    model_family: Some("Gemini".to_string()),
+                    used_percent: gemini_7d_used,
+                    resets_at: None,
+                    period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
+                },
+            ],
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: Utc::now(),
+        };
+
+        // None previous snapshot -> should NOT trigger
+        let snap_full = make_snap(0.0, 0.0);
+        assert!(!did_agent_cycle_reset_to_full(None, &snap_full));
+
+        // 7d window was 25% used, now reset to 0% -> SHOULD trigger
+        let prev_used = make_snap(50.0, 25.0);
+        let curr_reset = make_snap(10.0, 0.0);
+        assert!(did_agent_cycle_reset_to_full(Some(&prev_used), &curr_reset));
+
+        // 7d window was already 0%, still 0% -> should NOT trigger (avoid repeat)
+        let prev_already_zero = make_snap(20.0, 0.0);
+        let curr_still_zero = make_snap(0.0, 0.0);
+        assert!(!did_agent_cycle_reset_to_full(
+            Some(&prev_already_zero),
+            &curr_still_zero
+        ));
+
+        // Only 5h session window reset, but 7d cycle was NOT reset -> should NOT trigger weekly keeper
+        let prev_5h_used = make_snap(40.0, 30.0);
+        let curr_5h_reset = make_snap(0.0, 30.0);
+        assert!(!did_agent_cycle_reset_to_full(
+            Some(&prev_5h_used),
+            &curr_5h_reset
+        ));
+    }
+
+    #[test]
+    fn test_compute_next_weekly_trigger() {
         let reset_time = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 8, 15, 10, 0, 0).unwrap();
 
-        // 30 seconds after reset -> not reached threshold (1 min) yet
-        let before_threshold = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 30).unwrap();
-        assert!(!should_trigger_weekly(
-            Some(reset_time),
-            None,
-            before_threshold
-        ));
+        // Not triggered yet -> returns expected reset_time directly
+        assert_eq!(
+            compute_next_weekly_trigger(Some(reset_time), None, now),
+            Some(reset_time)
+        );
 
-        // 2 minutes after reset -> should trigger
-        let after_threshold = Utc.with_ymd_and_hms(2026, 8, 15, 12, 2, 0).unwrap();
-        assert!(should_trigger_weekly(
-            Some(reset_time),
-            None,
-            after_threshold
-        ));
-
-        // Already triggered after reset_time -> should NOT trigger again
-        let triggered_after = Utc.with_ymd_and_hms(2026, 8, 15, 12, 2, 30).unwrap();
-        assert!(!should_trigger_weekly(
-            Some(reset_time),
-            Some(triggered_after),
-            after_threshold
-        ));
+        // Already triggered after reset_time -> returns None
+        let triggered_after = Utc.with_ymd_and_hms(2026, 8, 15, 12, 5, 0).unwrap();
+        let now_after = Utc.with_ymd_and_hms(2026, 8, 15, 13, 0, 0).unwrap();
+        assert_eq!(
+            compute_next_weekly_trigger(Some(reset_time), Some(triggered_after), now_after),
+            None
+        );
     }
 
     #[test]
