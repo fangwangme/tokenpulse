@@ -1649,6 +1649,7 @@ where
         {
             state.last_keeper_check = Instant::now();
             let now_local = Local::now();
+            let now_utc = chrono::Utc::now();
             let default_agents = tokenpulse_core::config::default_keeper_agents();
 
             for &agent_id in keeper::KEEPER_AGENTS {
@@ -1682,6 +1683,37 @@ where
                             agent_cfg.clone(),
                             state.keeper_model(agent_id),
                             tokenpulse_core::keeper::KeeperTriggerType::Daily,
+                        );
+                    }
+                }
+
+                // Check Weekly expected cycle reset fallback
+                if agent_cfg.weekly_keeper_enabled
+                    && !state.keeper_pings_in_progress.contains(agent_id)
+                {
+                    let resets_at = tokenpulse_core::keeper::find_snapshot_for_agent(
+                        &state.quota_snapshots,
+                        agent_id,
+                    )
+                    .and_then(tokenpulse_core::keeper::extract_weekly_reset_time);
+
+                    let last_triggered = state.keeper_weekly_triggered.get(agent_id).copied();
+                    if tokenpulse_core::keeper::should_trigger_weekly(
+                        resets_at,
+                        last_triggered,
+                        now_utc,
+                    ) {
+                        state
+                            .keeper_weekly_triggered
+                            .insert(agent_id.to_string(), now_utc);
+                        state.persist_keeper_triggers(&keeper_state_path);
+                        state.keeper_pings_in_progress.insert(agent_id.to_string());
+                        spawn_keeper_ping(
+                            msg_tx.clone(),
+                            agent_id.to_string(),
+                            agent_cfg.clone(),
+                            state.keeper_model(agent_id),
+                            tokenpulse_core::keeper::KeeperTriggerType::Weekly,
                         );
                     }
                 }

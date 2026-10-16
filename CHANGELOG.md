@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Linux system theme auto-following**: integrated FreeDesktop XDG Desktop Portal theme detection via `busctl` (`org.freedesktop.portal.Settings` `color-scheme` with `--timeout=1`), with `gsettings` fallback, enabling runtime light/dark theme tracking on Linux while respecting explicit `TOKENPULSE_THEME` environment overrides (#80).
-- **Keeper quota reset auto-trigger**: automated Keeper cycle ping upon detecting that an agent's primary quota cycle (e.g. 7-day or monthly window) has reset from `< 100%` remaining back to `100%` full during quota reloads, immediately anchoring the newly available cycle for providers like Google Antigravity and OpenAI Codex without waiting for arbitrary wall-clock timers; removed obsolete time-based weekly polling.
+- **Keeper quota reset auto-trigger & direct rollover alignment**: automated Keeper cycle ping upon detecting that an agent's primary quota cycle (e.g. 7-day or monthly window) has reset from `< 100%` remaining back to `100%` full during quota reloads, immediately anchoring the newly available cycle for providers like Google Antigravity and OpenAI Codex; aligned expected cycle trigger timing and UI display directly to `resets_at` without the artificial `+ 1 minute` delay.
 - **Antigravity language server discovery priority tests**: added regression test suite ensuring Desktop Language Server connections are strictly ordered ahead of CLI Language Server and remote Cloud Code API fallbacks (#80).
 
 ### Changed

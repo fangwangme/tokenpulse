@@ -300,6 +300,27 @@ pub fn did_agent_cycle_reset_to_full(
     false
 }
 
+/// Evaluates whether the Weekly auto-sync trigger should fire based on expected reset time.
+/// Fires when current time >= `resets_at` and has not already triggered for this cycle.
+pub fn should_trigger_weekly(
+    quota_resets_at: Option<DateTime<Utc>>,
+    last_triggered_time: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(resets_at) = quota_resets_at else {
+        return false;
+    };
+
+    if now < resets_at {
+        return false;
+    }
+
+    match last_triggered_time {
+        Some(last_time) => last_time < resets_at,
+        None => true,
+    }
+}
+
 /// Calculates next weekly trigger time.
 /// Displays expected `resets_at` timestamp if available and not yet triggered for this cycle.
 pub fn compute_next_weekly_trigger(
@@ -921,6 +942,30 @@ mod tests {
             compute_next_weekly_trigger(Some(reset_time), Some(triggered_after), now_after),
             None
         );
+    }
+
+    #[test]
+    fn test_should_trigger_weekly_logic() {
+        let reset_time = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+
+        // Before reset -> should NOT trigger
+        let before_reset = Utc.with_ymd_and_hms(2026, 8, 15, 11, 59, 59).unwrap();
+        assert!(!should_trigger_weekly(Some(reset_time), None, before_reset));
+
+        // Exact reset time -> should trigger
+        assert!(should_trigger_weekly(Some(reset_time), None, reset_time));
+
+        // After reset -> should trigger if not triggered yet
+        let after_reset = Utc.with_ymd_and_hms(2026, 8, 15, 12, 5, 0).unwrap();
+        assert!(should_trigger_weekly(Some(reset_time), None, after_reset));
+
+        // Already triggered after reset_time -> should NOT trigger again
+        let triggered_after = Utc.with_ymd_and_hms(2026, 8, 15, 12, 2, 0).unwrap();
+        assert!(!should_trigger_weekly(
+            Some(reset_time),
+            Some(triggered_after),
+            after_reset
+        ));
     }
 
     #[test]
