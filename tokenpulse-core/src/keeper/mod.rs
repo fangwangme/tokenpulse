@@ -259,18 +259,34 @@ fn local_datetime_at(date: NaiveDate, time: NaiveTime) -> Option<DateTime<Local>
     }
 }
 
-/// Returns true if a RateWindow represents a long-term cycle (e.g. weekly or monthly),
-/// and not a short session window (e.g. 5h).
-pub fn is_cycle_window(window: &crate::provider::RateWindow) -> bool {
+/// Returns true if a RateWindow represents a major quota cycle (e.g. weekly or monthly)
+/// and not a short session window (e.g. 5h) or daily window.
+pub fn is_weekly_cycle_window(window: &crate::provider::RateWindow) -> bool {
+    // 1. Explicit 6+ days duration (e.g. 7d = 604_800_000ms, 30d = 2_592_000_000ms)
     if let Some(ms) = window.period_duration_ms {
-        // At least 24 hours (86,400,000 ms)
-        return ms >= 24 * 60 * 60 * 1000;
+        return ms >= 6 * 24 * 60 * 60 * 1000;
     }
+
+    // 2. Explicit label indicators
     let lower = window.label.to_lowercase();
+    if lower.contains("7d")
+        || lower.contains("7 d")
+        || lower.contains("7-day")
+        || lower.contains("week")
+        || lower.contains("month")
+        || lower.contains("30d")
+    {
+        return true;
+    }
+
+    // 3. Exclude short/daily windows ("5h", "session", "daily", "day")
     let looks_short = lower.contains("5h")
         || lower.contains("5-hour")
         || lower.contains("5 hour")
-        || lower.contains("session");
+        || lower.contains("session")
+        || lower.contains("daily")
+        || lower.contains("day");
+
     !looks_short
 }
 
@@ -285,7 +301,7 @@ pub fn did_agent_cycle_reset_to_full(
     };
 
     for new_window in &new_snapshot.windows {
-        if !is_cycle_window(new_window) {
+        if !is_weekly_cycle_window(new_window) {
             continue;
         }
         if new_window.used_percent <= 0.0 {
@@ -301,7 +317,8 @@ pub fn did_agent_cycle_reset_to_full(
 }
 
 /// Evaluates whether the Weekly auto-sync trigger should fire based on expected reset time.
-/// Fires when current time >= `resets_at` and has not already triggered for this cycle.
+/// Fires when current time >= `resets_at + 1 minute` (buffer to avoid provider/client clock skew)
+/// and has not already triggered for this cycle.
 pub fn should_trigger_weekly(
     quota_resets_at: Option<DateTime<Utc>>,
     last_triggered_time: Option<DateTime<Utc>>,
@@ -311,7 +328,9 @@ pub fn should_trigger_weekly(
         return false;
     };
 
-    if now < resets_at {
+    let trigger_threshold = resets_at + chrono::Duration::minutes(1);
+
+    if now < trigger_threshold {
         return false;
     }
 
@@ -355,46 +374,15 @@ fn matches_keeper_agent(provider: &str, agent_id: &str) -> bool {
     }
 }
 
-/// Extracts the weekly window reset time from a QuotaSnapshot.
-/// Accurately recognizes "7d", "7-day", "week", "weekly", period_duration_ms >= 6 days,
-/// and Antigravity's "Gemini (7d)" / "Claude (7d)" windows.
+/// Extracts the weekly/cycle window reset time from a QuotaSnapshot.
 pub fn extract_weekly_reset_time(
     snapshot: &crate::provider::QuotaSnapshot,
 ) -> Option<DateTime<Utc>> {
-    // 1. Check explicit 7d/weekly windows first
-    for window in &snapshot.windows {
-        let label_lower = window.label.to_lowercase();
-        let is_weekly = label_lower.contains("7d")
-            || label_lower.contains("7 d")
-            || label_lower.contains("7-day")
-            || label_lower.contains("week")
-            || window
-                .period_duration_ms
-                .is_some_and(|ms| ms >= 6 * 24 * 60 * 60 * 1000);
-
-        if is_weekly {
-            if let Some(resets_at) = window.resets_at {
-                return Some(resets_at);
-            }
-        }
-    }
-
-    // 2. Fallback to any window with reset_time that is not a short session window.
-    //    A window that declares a sub-day period is never the weekly one, even if
-    //    its label does not say "5h".
-    snapshot.windows.iter().find_map(|w| {
-        let label_lower = w.label.to_lowercase();
-        let looks_short = label_lower.contains("5h")
-            || label_lower.contains("5-hour")
-            || label_lower.contains("5 hour")
-            || w.period_duration_ms
-                .is_some_and(|ms| ms < 24 * 60 * 60 * 1000);
-        if looks_short {
-            None
-        } else {
-            w.resets_at
-        }
-    })
+    snapshot
+        .windows
+        .iter()
+        .find(|w| is_weekly_cycle_window(w) && w.resets_at.is_some())
+        .and_then(|w| w.resets_at)
 }
 
 /// Finds the quota snapshot backing a Keeper agent, preferring an exact
@@ -948,23 +936,28 @@ mod tests {
     fn test_should_trigger_weekly_logic() {
         let reset_time = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
 
-        // Before reset -> should NOT trigger
-        let before_reset = Utc.with_ymd_and_hms(2026, 8, 15, 11, 59, 59).unwrap();
-        assert!(!should_trigger_weekly(Some(reset_time), None, before_reset));
+        // 30 seconds after reset -> not reached threshold (1 min buffer) yet
+        let before_threshold = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 30).unwrap();
+        assert!(!should_trigger_weekly(
+            Some(reset_time),
+            None,
+            before_threshold
+        ));
 
-        // Exact reset time -> should trigger
-        assert!(should_trigger_weekly(Some(reset_time), None, reset_time));
-
-        // After reset -> should trigger if not triggered yet
-        let after_reset = Utc.with_ymd_and_hms(2026, 8, 15, 12, 5, 0).unwrap();
-        assert!(should_trigger_weekly(Some(reset_time), None, after_reset));
+        // 2 minutes after reset -> reached threshold -> should trigger
+        let after_threshold = Utc.with_ymd_and_hms(2026, 8, 15, 12, 2, 0).unwrap();
+        assert!(should_trigger_weekly(
+            Some(reset_time),
+            None,
+            after_threshold
+        ));
 
         // Already triggered after reset_time -> should NOT trigger again
         let triggered_after = Utc.with_ymd_and_hms(2026, 8, 15, 12, 2, 0).unwrap();
         assert!(!should_trigger_weekly(
             Some(reset_time),
             Some(triggered_after),
-            after_reset
+            after_threshold
         ));
     }
 

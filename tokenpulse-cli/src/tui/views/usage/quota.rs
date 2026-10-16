@@ -390,14 +390,10 @@ fn render_window_block(
     } else {
         calculate_pace(window)
     };
-    let gauge_color = if is_fully_reset {
-        theme.gauge_low
-    } else {
-        pace_result
-            .as_ref()
-            .map(|(status, _, _)| theme.pace_color(status))
-            .unwrap_or_else(|| theme.gauge_color(window.used_percent))
-    };
+    let gauge_color = pace_result
+        .as_ref()
+        .map(|(status, _, _)| theme.pace_color(status))
+        .unwrap_or_else(|| theme.gauge_color(window.used_percent));
 
     let expected_pct = pace_result.as_ref().map(|(_, _, ep)| match display_mode {
         QuotaDisplayMode::Used => *ep,
@@ -447,11 +443,7 @@ fn render_window_block(
     // amount (same green/yellow/red rule as the gauge), then the pacer (which
     // carries its own at-current-rate ETA) in its pace color. When the window
     // is exhausted there is no pace to project, so the pacer is omitted.
-    let balance_color = if is_fully_reset {
-        theme.gauge_low
-    } else {
-        theme.gauge_color(window.used_percent)
-    };
+    let balance_color = theme.gauge_color(window.used_percent);
     let remaining_percent = (100.0 - window.used_percent).max(0.0);
 
     // The tag is padded to the card's longest so every window's figures start

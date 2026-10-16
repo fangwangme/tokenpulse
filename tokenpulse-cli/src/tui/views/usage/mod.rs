@@ -1302,6 +1302,11 @@ fn follow_system_theme(theme: &mut Theme, preference: ThemePreference) {
             return;
         }
     }
+    if let Ok(env_term_bg) = std::env::var("TERM_BACKGROUND") {
+        if matches!(env_term_bg.to_ascii_lowercase().as_str(), "light" | "dark") {
+            return;
+        }
+    }
     if let Some(mode) = ThemeMode::detect_system_appearance() {
         if mode != theme.mode {
             *theme = Theme::new(mode);
@@ -1456,6 +1461,15 @@ where
                                 || state.keeper_pings_in_progress.contains(agent_id)
                             {
                                 continue;
+                            }
+
+                            // Debounce: do not re-trigger if already triggered recently (within 12 hours)
+                            if let Some(last_time) = state.keeper_weekly_triggered.get(agent_id) {
+                                if now_utc.signed_duration_since(*last_time)
+                                    < chrono::Duration::hours(12)
+                                {
+                                    continue;
+                                }
                             }
 
                             let prev_snap = tokenpulse_core::keeper::find_snapshot_for_agent(
