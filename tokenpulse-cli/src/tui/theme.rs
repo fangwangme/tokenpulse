@@ -77,6 +77,7 @@ impl ThemeMode {
         let portal_output = std::process::Command::new("busctl")
             .args([
                 "--user",
+                "--timeout=1",
                 "call",
                 "org.freedesktop.portal.Desktop",
                 "/org/freedesktop/portal/desktop",
@@ -92,9 +93,7 @@ impl ThemeMode {
         if let Some(output) = portal_output {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(mode) = parse_busctl_color_scheme(&stdout) {
-                    return Some(mode);
-                }
+                return parse_busctl_color_scheme(&stdout);
             }
         }
 
@@ -482,6 +481,7 @@ fn parse_osc_color_component(value: &str) -> Option<u8> {
     Some(((raw * 255 + max / 2) / max) as u8)
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_busctl_color_scheme(output: &str) -> Option<ThemeMode> {
     for token in output.split_whitespace().rev() {
         match token.trim_matches(|c: char| !c.is_ascii_digit()) {
@@ -493,6 +493,7 @@ fn parse_busctl_color_scheme(output: &str) -> Option<ThemeMode> {
     None
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_gsettings_color_scheme(output: &str) -> Option<ThemeMode> {
     let lower = output.to_ascii_lowercase();
     if lower.contains("dark") {

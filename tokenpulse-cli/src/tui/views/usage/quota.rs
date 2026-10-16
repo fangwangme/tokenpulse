@@ -377,8 +377,7 @@ fn render_window_block(
         return;
     }
 
-    let is_fully_reset =
-        window.used_percent <= 0.0 || (100.0 - window.used_percent) >= 100.0 - f64::EPSILON;
+    let is_fully_reset = window.used_percent <= 0.0;
     let shown_percent = quota_percent(display_mode, window.used_percent);
     let reset_str = window
         .resets_at
@@ -989,51 +988,75 @@ mod tests {
             provider: "antigravity".to_string(),
             account: None,
             plan: None,
-            windows: vec![window(
-                "Claude (5h)",
-                Some(FIVE_HOURS_MS),
-                Some("Claude"),
-                0.0,
-            )],
+            windows: vec![
+                window("Claude (5h)", Some(FIVE_HOURS_MS), Some("Claude"), 0.0),
+                window("Claude (7d)", Some(SEVEN_DAYS_MS), Some("Claude"), 25.0),
+            ],
             credits: None,
             rate_limit_reset_credits: vec![],
             fetched_at: chrono::Utc::now(),
         };
 
         let normal_rows = render_card(&snapshot, AccountDisplay::None, false);
-        let detail_rows: Vec<&String> = normal_rows
+        let detail_reset: Vec<&String> = normal_rows
             .iter()
             .filter(|row| row.contains("5H · CLAUDE:"))
             .collect();
-        assert_eq!(detail_rows.len(), 1);
-        let detail = detail_rows[0];
+        assert_eq!(detail_reset.len(), 1);
+        let detail_0 = detail_reset[0];
         assert!(
-            !detail.contains("reset"),
-            "detail row should not contain reset countdown: {detail}"
+            !detail_0.contains("reset"),
+            "0% used detail row should not contain reset countdown: {detail_0}"
         );
         assert!(
-            detail.contains("used 0%"),
-            "detail row should contain used 0%: {detail}"
+            detail_0.contains("used 0%"),
+            "detail row should contain used 0%: {detail_0}"
         );
         assert!(
-            detail.contains("remaining 100%"),
-            "detail row should contain remaining 100%: {detail}"
+            detail_0.contains("remaining 100%"),
+            "detail row should contain remaining 100%: {detail_0}"
+        );
+
+        let detail_active: Vec<&String> = normal_rows
+            .iter()
+            .filter(|row| row.contains("WEEKLY · CLAUDE:"))
+            .collect();
+        assert_eq!(detail_active.len(), 1);
+        assert!(
+            detail_active[0].contains("reset"),
+            "active window detail row should contain reset countdown: {}",
+            detail_active[0]
         );
 
         let compact_rows = render_card(&snapshot, AccountDisplay::None, true);
-        let bar_rows: Vec<&String> = compact_rows
+        let bar_reset: Vec<&String> = compact_rows
             .iter()
             .filter(|row| row.contains("5H · CLAUDE"))
             .collect();
-        assert_eq!(bar_rows.len(), 1);
-        let bar = bar_rows[0];
+        assert_eq!(bar_reset.len(), 1);
+        let bar_0 = bar_reset[0];
         assert!(
-            !bar.contains("reset"),
-            "compact bar should not contain reset countdown: {bar}"
+            !bar_0.contains("reset"),
+            "compact bar should not contain reset countdown: {bar_0}"
         );
         assert!(
-            !bar.contains("3h"),
-            "compact bar should not contain duration: {bar}"
+            !bar_0.contains('m') && !bar_0.contains('h') && !bar_0.contains('d'),
+            "0% used compact bar should not contain time duration: {bar_0}"
+        );
+        assert!(
+            bar_0.ends_with("100%"),
+            "0% used compact bar should end with remaining percentage: {bar_0}"
+        );
+
+        let bar_active: Vec<&String> = compact_rows
+            .iter()
+            .filter(|row| row.contains("WEEKLY · CLAUDE"))
+            .collect();
+        assert_eq!(bar_active.len(), 1);
+        assert!(
+            bar_active[0].contains('h') || bar_active[0].contains('m'),
+            "active compact bar should retain duration: {}",
+            bar_active[0]
         );
     }
 }

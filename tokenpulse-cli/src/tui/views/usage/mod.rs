@@ -1297,6 +1297,11 @@ fn follow_system_theme(theme: &mut Theme, preference: ThemePreference) {
     if preference != ThemePreference::Auto {
         return;
     }
+    if let Ok(env_theme) = std::env::var("TOKENPULSE_THEME") {
+        if matches!(env_theme.to_ascii_lowercase().as_str(), "light" | "dark") {
+            return;
+        }
+    }
     if let Some(mode) = ThemeMode::detect_system_appearance() {
         if mode != theme.mode {
             *theme = Theme::new(mode);

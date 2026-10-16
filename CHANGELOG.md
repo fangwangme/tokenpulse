@@ -8,14 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.5] - 2026-10-16
 
 ### Added
-- **Linux system theme auto-following**: integrated FreeDesktop XDG Desktop Portal theme detection via `busctl` (`org.freedesktop.portal.Settings` `color-scheme`), with `gsettings` fallback, enabling runtime light/dark theme tracking on Linux (#80).
+- **Linux system theme auto-following**: integrated FreeDesktop XDG Desktop Portal theme detection via `busctl` (`org.freedesktop.portal.Settings` `color-scheme` with `--timeout=1`), with `gsettings` fallback, enabling runtime light/dark theme tracking on Linux while respecting explicit `TOKENPULSE_THEME` environment overrides (#80).
+- **Antigravity language server discovery priority tests**: added regression test suite ensuring Desktop Language Server connections are strictly ordered ahead of CLI Language Server and remote Cloud Code API fallbacks (#80).
 
 ### Changed
 - **Monday-first Activity Heatmap layout and weekly aggregation**: aligned heatmap start date and weekly rollups (`weekly_group()`) to Monday-first (ISO week) with `num_days_from_monday()`, upgraded weekday labels to 3-letter representations (`Mon`..`Sun`), and adjusted left margin to 5 columns for clean visual spacing (#80).
 
 ### Fixed
-- **Antigravity reset quota display & pace calculation**: suppressed redundant countdown strings (`reset Xh Ym`) and pace warning yellow styling when quota windows are fully reset (used 0% / remaining 100%), forcing healthy gauge coloring and matching official Desktop behavior (#80).
-- **Antigravity language server discovery priority**: strictly prioritized Desktop Language Server connections ahead of CLI Language Server and remote Cloud Code API fallback (#80).
+- **Fully reset quota display & pace calculation**: suppressed redundant countdown strings (`reset Xh Ym`) and pace warning yellow styling across quota windows that are fully reset (used 0% / remaining 100%), forcing healthy gauge coloring and matching official Antigravity Desktop behavior (#80).
 
 ## [0.6.4] - 2026-10-15
 
