@@ -261,33 +261,23 @@ fn local_datetime_at(date: NaiveDate, time: NaiveTime) -> Option<DateTime<Local>
 
 /// Returns true if a RateWindow represents a major quota cycle (e.g. weekly or monthly)
 /// and not a short session window (e.g. 5h) or daily window.
+///
+/// A window with neither a period nor an explicit weekly/monthly label is not a
+/// cycle: Codex reports its 5h bucket as a bare "Primary window" when the
+/// duration is missing, and treating that as weekly would ping on every 5h reset.
 pub fn is_weekly_cycle_window(window: &crate::provider::RateWindow) -> bool {
-    // 1. Explicit 6+ days duration (e.g. 7d = 604_800_000ms, 30d = 2_592_000_000ms)
+    // Explicit 6+ days duration (e.g. 7d = 604_800_000ms, 30d = 2_592_000_000ms)
     if let Some(ms) = window.period_duration_ms {
         return ms >= 6 * 24 * 60 * 60 * 1000;
     }
 
-    // 2. Explicit label indicators
     let lower = window.label.to_lowercase();
-    if lower.contains("7d")
+    lower.contains("7d")
         || lower.contains("7 d")
         || lower.contains("7-day")
         || lower.contains("week")
         || lower.contains("month")
         || lower.contains("30d")
-    {
-        return true;
-    }
-
-    // 3. Exclude short/daily windows ("5h", "session", "daily", "day")
-    let looks_short = lower.contains("5h")
-        || lower.contains("5-hour")
-        || lower.contains("5 hour")
-        || lower.contains("session")
-        || lower.contains("daily")
-        || lower.contains("day");
-
-    !looks_short
 }
 
 /// Detects if an agent's major cycle quota window transitioned from partially/fully
@@ -967,6 +957,33 @@ mod tests {
     }
 
     #[test]
+    fn test_weekly_fallback_fires_next_cycle_after_observed_reset_ping() {
+        // The observed-reset path pings shortly after the cycle rolls over and
+        // stamps that observation time. The next cycle's fallback must still fire.
+        let observed_at = Utc.with_ymd_and_hms(2026, 8, 15, 12, 5, 0).unwrap();
+        let next_reset = Utc.with_ymd_and_hms(2026, 8, 22, 12, 0, 0).unwrap();
+
+        // Same cycle: the 12h guard keeps the fallback from double-pinging.
+        let same_cycle = Utc.with_ymd_and_hms(2026, 8, 15, 12, 6, 0).unwrap();
+        assert!(!should_trigger_weekly(
+            Some(observed_at - chrono::Duration::minutes(5)),
+            Some(observed_at),
+            same_cycle
+        ));
+
+        let after_next_reset = Utc.with_ymd_and_hms(2026, 8, 22, 12, 2, 0).unwrap();
+        assert!(should_trigger_weekly(
+            Some(next_reset),
+            Some(observed_at),
+            after_next_reset
+        ));
+        assert_eq!(
+            compute_next_weekly_trigger(Some(next_reset), Some(observed_at), same_cycle),
+            Some(next_reset)
+        );
+    }
+
+    #[test]
     fn test_compute_next_daily_trigger() {
         let now = Local.with_ymd_and_hms(2026, 8, 15, 9, 0, 0).unwrap();
         let next = compute_next_daily_trigger("10:30", None, now).unwrap();
@@ -1019,6 +1036,33 @@ mod tests {
         assert!(matches_keeper_agent("anthropic", "claude"));
         assert!(matches_keeper_agent("codex", "codex"));
         assert!(matches_keeper_agent("openai", "codex"));
+    }
+
+    #[test]
+    fn test_is_weekly_cycle_window_requires_period_or_explicit_label() {
+        use crate::provider::RateWindow;
+
+        let window = |label: &str, period_duration_ms: Option<i64>| RateWindow {
+            label: label.to_string(),
+            model_family: None,
+            used_percent: 0.0,
+            resets_at: None,
+            period_duration_ms,
+        };
+
+        assert!(is_weekly_cycle_window(&window(
+            "Weekly (7d)",
+            Some(7 * 24 * 60 * 60 * 1000)
+        )));
+        assert!(is_weekly_cycle_window(&window("Gemini (7d)", None)));
+        assert!(!is_weekly_cycle_window(&window(
+            "Window (1d)",
+            Some(24 * 60 * 60 * 1000)
+        )));
+        // Codex buckets without a reported duration are not assumed weekly.
+        assert!(!is_weekly_cycle_window(&window("Primary window", None)));
+        assert!(!is_weekly_cycle_window(&window("Secondary window", None)));
+        assert!(!is_weekly_cycle_window(&window("Gemini (daily)", None)));
     }
 
     fn ping_config(command: &str) -> AgentKeeperConfig {

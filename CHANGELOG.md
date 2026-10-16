@@ -8,16 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.5] - 2026-10-16
 
 ### Added
-- **Linux system theme auto-following**: integrated FreeDesktop XDG Desktop Portal theme detection via `busctl` (`org.freedesktop.portal.Settings` `color-scheme` with `--timeout=1`), with `gsettings` fallback, enabling runtime light/dark theme tracking on Linux while respecting explicit `TOKENPULSE_THEME` environment overrides (#80).
-- **Keeper quota reset auto-trigger & direct rollover alignment**: automated Keeper cycle ping upon detecting that an agent's primary quota cycle (e.g. 7-day or monthly window) has reset from `< 100%` remaining back to `100%` full during quota reloads, immediately anchoring the newly available cycle for providers like Google Antigravity and OpenAI Codex; aligned expected cycle trigger timing and UI display directly to `resets_at` without the artificial `+ 1 minute` delay.
-- **Antigravity language server discovery priority tests**: added regression test suite ensuring Desktop Language Server connections are strictly ordered ahead of CLI Language Server and remote Cloud Code API fallbacks (#80).
+- **Linux system theme auto-following**: with `theme = auto`, the TUI now tracks the
+  desktop light/dark preference on Linux at each refresh, read from the XDG Desktop
+  Portal `color-scheme` setting via `busctl` (1s timeout) with a `gsettings`
+  fallback. An explicit `TOKENPULSE_THEME` or `TERM_BACKGROUND` still wins (#80).
+- **Keeper weekly ping on observed quota reset**: when a quota reload shows an
+  agent's weekly (or longer) window back at 0% used, Keeper pings right away to
+  anchor the new cycle instead of waiting for the scheduled check. The scheduled
+  check still fires 1 minute after `resets_at` as a fallback, and both paths share
+  a 12-hour guard so one cycle is pinged once (#80).
 
 ### Changed
-- **Monday-first Activity Heatmap layout and weekly aggregation**: aligned heatmap start date and weekly rollups (`weekly_group()`) to Monday-first (ISO week) with `num_days_from_monday()`, upgraded weekday labels to 3-letter representations (`Mon`..`Sun`), and adjusted left margin to 5 columns for clean visual spacing (#80).
+- **Monday-first Activity Heatmap and weekly rollups**: the heatmap grid and weekly
+  aggregation now start weeks on Monday, weekday labels read `Mon`..`Sun`, and the
+  grid gets a 5-column left margin (#80).
+- **Weekly cycle detection is stricter**: a quota window counts as a weekly cycle
+  only when it reports a period of 6+ days or is explicitly labelled weekly/7d/
+  monthly, so an unlabelled Codex window without a reported duration no longer
+  drives the weekly Keeper (#80).
 
 ### Fixed
-- **Fully reset quota display & pace calculation**: suppressed redundant countdown strings (`reset Xh Ym`) and pace warning yellow styling across quota windows that are fully reset (used 0% / remaining 100%), forcing healthy gauge coloring and matching official Antigravity Desktop behavior (#80).
-- **Antigravity CLI Language Server discovery & CSRF token resolution**: resolved missing CSRF tokens for embedded CLI Language Server instances (`agy`) by checking environment variables (`ANTIGRAVITY_CSRF_TOKEN`, `ANTIGRAVITY_LS_ADDRESS`) and inspecting candidate and child process environments (`/proc/<pid>/environ` on Linux, `ps eww` on macOS); enabled dual-scheme (`http`/`https`) probing prioritizing declared port and HTTP for CLI, and mapped `userTier` to plan name, preventing unintended fallback to Cloud Code API and restoring accurate Plan (`Google AI Pro`) and Account display (#80).
+- **Fully reset quota windows**: windows at 0% used no longer show a reset countdown
+  or pace warning (#80).
+- **Antigravity plan name**: the plan now comes from the language server's
+  `userTier` (e.g. `Google AI Pro`), falling back to `planStatus` (#80).
+- **Antigravity language server discovery**: probes try both `http` and `https`
+  and stop wasting a timeout on each plain-HTTP port, cutting discovery from
+  seconds to a fraction of a second. The embedded `agy` CLI language server is
+  used when its CSRF token is available (tokenpulse running inside an `agy`
+  session); otherwise quota falls back to the Cloud Code API as before (#80).
+- **Removed a misleading `--no-tui` warning**: "No running Antigravity language
+  servers detected. New sessions will not be synced." was printed even though
+  Antigravity sessions sync from local conversation databases (#80).
 
 ## [0.6.4] - 2026-10-15
 

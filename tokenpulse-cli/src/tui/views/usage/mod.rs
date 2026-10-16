@@ -1485,17 +1485,12 @@ where
                                 if tokenpulse_core::keeper::did_agent_cycle_reset_to_full(
                                     prev_snap, new_snap,
                                 ) {
-                                    let resets_at =
-                                        tokenpulse_core::keeper::extract_weekly_reset_time(
-                                            new_snap,
-                                        );
-                                    let stamp = match resets_at {
-                                        Some(ra) => now_utc.max(ra),
-                                        None => now_utc,
-                                    };
+                                    // Stamp the observation time, matching the fallback path.
+                                    // The new snapshot's `resets_at` already points at the
+                                    // *next* cycle, so stamping it would suppress that cycle.
                                     state
                                         .keeper_weekly_triggered
-                                        .insert(agent_id.to_string(), stamp);
+                                        .insert(agent_id.to_string(), now_utc);
                                     state.persist_keeper_triggers(&keeper_state_path);
                                     state.keeper_pings_in_progress.insert(agent_id.to_string());
                                     spawn_keeper_ping(
