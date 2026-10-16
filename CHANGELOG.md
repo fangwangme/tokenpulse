@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Fully reset quota display & pace calculation**: suppressed redundant countdown strings (`reset Xh Ym`) and pace warning yellow styling across quota windows that are fully reset (used 0% / remaining 100%), forcing healthy gauge coloring and matching official Antigravity Desktop behavior (#80).
+- **Antigravity CLI Language Server discovery & CSRF token resolution**: resolved missing CSRF tokens for embedded CLI Language Server instances (`agy`) by checking environment variables (`ANTIGRAVITY_CSRF_TOKEN`, `ANTIGRAVITY_LS_ADDRESS`) and inspecting candidate and child process environments (`/proc/<pid>/environ` on Linux, `ps eww` on macOS); enabled dual-scheme (`http`/`https`) probing prioritizing declared port and HTTP for CLI, and mapped `userTier` to plan name, preventing unintended fallback to Cloud Code API and restoring accurate Plan (`Google AI Pro`) and Account display (#80).
 
 ## [0.6.4] - 2026-10-15
 
