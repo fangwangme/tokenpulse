@@ -377,6 +377,8 @@ fn render_window_block(
         return;
     }
 
+    let is_fully_reset =
+        window.used_percent <= 0.0 || (100.0 - window.used_percent) >= 100.0 - f64::EPSILON;
     let shown_percent = quota_percent(display_mode, window.used_percent);
     let reset_str = window
         .resets_at
@@ -384,11 +386,19 @@ fn render_window_block(
         .map(|time| format_reset_duration(time.signed_duration_since(chrono::Utc::now())))
         .unwrap_or_else(|| "n/a".to_string());
 
-    let pace_result = calculate_pace(window);
-    let gauge_color = pace_result
-        .as_ref()
-        .map(|(status, _, _)| theme.pace_color(status))
-        .unwrap_or_else(|| theme.gauge_color(window.used_percent));
+    let pace_result = if is_fully_reset {
+        None
+    } else {
+        calculate_pace(window)
+    };
+    let gauge_color = if is_fully_reset {
+        theme.gauge_low
+    } else {
+        pace_result
+            .as_ref()
+            .map(|(status, _, _)| theme.pace_color(status))
+            .unwrap_or_else(|| theme.gauge_color(window.used_percent))
+    };
 
     let expected_pct = pace_result.as_ref().map(|(_, _, ep)| match display_mode {
         QuotaDisplayMode::Used => *ep,
@@ -400,12 +410,14 @@ fn render_window_block(
     // countdown stay on the bar itself.
     if compact {
         let label = super::truncate(tag, area.width.saturating_sub(18) as usize);
-        let gauge = GradientGauge::new(&label, shown_percent)
+        let mut gauge = GradientGauge::new(&label, shown_percent)
             .color(gauge_color)
             .expected_percent(expected_pct)
             .label_width(tag_width.min(area.width.saturating_sub(30) as usize))
-            .width(area.width.saturating_sub(22) as usize)
-            .time(&reset_str);
+            .width(area.width.saturating_sub(22) as usize);
+        if !is_fully_reset {
+            gauge = gauge.time(&reset_str);
+        }
         f.render_widget(gauge, area);
         return;
     }
@@ -436,31 +448,35 @@ fn render_window_block(
     // amount (same green/yellow/red rule as the gauge), then the pacer (which
     // carries its own at-current-rate ETA) in its pace color. When the window
     // is exhausted there is no pace to project, so the pacer is omitted.
-    let balance_color = theme.gauge_color(window.used_percent);
+    let balance_color = if is_fully_reset {
+        theme.gauge_low
+    } else {
+        theme.gauge_color(window.used_percent)
+    };
     let remaining_percent = (100.0 - window.used_percent).max(0.0);
 
     // The tag is padded to the card's longest so every window's figures start
     // in the same column.
-    let mut detail_spans = vec![
-        Span::styled(
-            format!("{:<width$} ", format!("{tag}:"), width = tag_width + 1),
-            tag_style(theme),
-        ),
-        Span::styled(
+    let mut detail_spans = vec![Span::styled(
+        format!("{:<width$} ", format!("{tag}:"), width = tag_width + 1),
+        tag_style(theme),
+    )];
+    if !is_fully_reset {
+        detail_spans.push(Span::styled(
             format!("reset {reset_str}"),
             Style::default().fg(balance_color),
-        ),
-        Span::raw("   "),
-        Span::styled(
-            format!("used {:.0}%", window.used_percent),
-            Style::default().fg(balance_color),
-        ),
-        Span::raw("   "),
-        Span::styled(
-            format!("remaining {:.0}%", remaining_percent),
-            Style::default().fg(balance_color),
-        ),
-    ];
+        ));
+        detail_spans.push(Span::raw("   "));
+    }
+    detail_spans.push(Span::styled(
+        format!("used {:.0}%", window.used_percent),
+        Style::default().fg(balance_color),
+    ));
+    detail_spans.push(Span::raw("   "));
+    detail_spans.push(Span::styled(
+        format!("remaining {:.0}%", remaining_percent),
+        Style::default().fg(balance_color),
+    ));
     if let Some((status, text, _)) = pace_result {
         detail_spans.push(Span::raw("   "));
         detail_spans.push(Span::styled(
@@ -965,5 +981,59 @@ mod tests {
         );
         assert_eq!(tag("Primary window", None, None), "PRIMARY WINDOW");
         assert_eq!(tag("Gemini (monthly)", None, Some("Gemini")), "GEMINI");
+    }
+
+    #[test]
+    fn fully_reset_window_suppresses_countdown_and_pace() {
+        let snapshot = QuotaSnapshot {
+            provider: "antigravity".to_string(),
+            account: None,
+            plan: None,
+            windows: vec![window(
+                "Claude (5h)",
+                Some(FIVE_HOURS_MS),
+                Some("Claude"),
+                0.0,
+            )],
+            credits: None,
+            rate_limit_reset_credits: vec![],
+            fetched_at: chrono::Utc::now(),
+        };
+
+        let normal_rows = render_card(&snapshot, AccountDisplay::None, false);
+        let detail_rows: Vec<&String> = normal_rows
+            .iter()
+            .filter(|row| row.contains("5H · CLAUDE:"))
+            .collect();
+        assert_eq!(detail_rows.len(), 1);
+        let detail = detail_rows[0];
+        assert!(
+            !detail.contains("reset"),
+            "detail row should not contain reset countdown: {detail}"
+        );
+        assert!(
+            detail.contains("used 0%"),
+            "detail row should contain used 0%: {detail}"
+        );
+        assert!(
+            detail.contains("remaining 100%"),
+            "detail row should contain remaining 100%: {detail}"
+        );
+
+        let compact_rows = render_card(&snapshot, AccountDisplay::None, true);
+        let bar_rows: Vec<&String> = compact_rows
+            .iter()
+            .filter(|row| row.contains("5H · CLAUDE"))
+            .collect();
+        assert_eq!(bar_rows.len(), 1);
+        let bar = bar_rows[0];
+        assert!(
+            !bar.contains("reset"),
+            "compact bar should not contain reset countdown: {bar}"
+        );
+        assert!(
+            !bar.contains("3h"),
+            "compact bar should not contain duration: {bar}"
+        );
     }
 }

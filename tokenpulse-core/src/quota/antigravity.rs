@@ -766,4 +766,43 @@ mod tests {
         // Malformed string should be treated as expired
         assert!(is_antigravity_token_expired("not-a-date"));
     }
+
+    #[test]
+    fn test_ordered_connections_prioritizes_desktop_over_cli() {
+        let conn_cli_1 = AntigravityConnection {
+            pid: 100,
+            port: 1001,
+            csrf_token: None,
+            scheme: "http".to_string(),
+            fingerprint: "pid:100:http:1001".to_string(),
+            runtime_kind: AntigravityRuntimeKind::Cli,
+        };
+        let conn_desktop = AntigravityConnection {
+            pid: 200,
+            port: 2001,
+            csrf_token: Some("token".to_string()),
+            scheme: "https".to_string(),
+            fingerprint: "pid:200:https:2001".to_string(),
+            runtime_kind: AntigravityRuntimeKind::Desktop,
+        };
+        let conn_cli_2 = AntigravityConnection {
+            pid: 300,
+            port: 3001,
+            csrf_token: None,
+            scheme: "http".to_string(),
+            fingerprint: "pid:300:http:3001".to_string(),
+            runtime_kind: AntigravityRuntimeKind::Cli,
+        };
+
+        let raw = vec![conn_cli_1, conn_desktop, conn_cli_2];
+        let ordered = ordered_connections(&raw);
+
+        assert_eq!(ordered.len(), 3);
+        assert_eq!(ordered[0].runtime_kind, AntigravityRuntimeKind::Desktop);
+        assert_eq!(ordered[0].pid, 200);
+        assert_eq!(ordered[1].runtime_kind, AntigravityRuntimeKind::Cli);
+        assert_eq!(ordered[1].pid, 100);
+        assert_eq!(ordered[2].runtime_kind, AntigravityRuntimeKind::Cli);
+        assert_eq!(ordered[2].pid, 300);
+    }
 }

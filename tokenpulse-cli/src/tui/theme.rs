@@ -72,8 +72,46 @@ impl ThemeMode {
         Some(Self::Light)
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn detect_from_macos() -> Option<Self> {
+    #[cfg(target_os = "linux")]
+    fn detect_from_linux() -> Option<Self> {
+        let portal_output = std::process::Command::new("busctl")
+            .args([
+                "--user",
+                "call",
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Settings",
+                "Read",
+                "ss",
+                "org.freedesktop.appearance",
+                "color-scheme",
+            ])
+            .output()
+            .ok();
+
+        if let Some(output) = portal_output {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(mode) = parse_busctl_color_scheme(&stdout) {
+                    return Some(mode);
+                }
+            }
+        }
+
+        let gsettings_output = std::process::Command::new("gsettings")
+            .args(["get", "org.gnome.desktop.interface", "color-scheme"])
+            .output()
+            .ok();
+
+        if let Some(output) = gsettings_output {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(mode) = parse_gsettings_color_scheme(&stdout) {
+                    return Some(mode);
+                }
+            }
+        }
+
         None
     }
 
@@ -83,9 +121,20 @@ impl ThemeMode {
     /// and environment variables. It is called from inside the running TUI loop,
     /// where issuing an OSC query would collide with crossterm's stdin reader and
     /// where env vars never change. Returns `None` on platforms without a cheap,
-    /// side-effect-free probe (currently anything other than macOS).
+    /// side-effect-free probe.
     pub fn detect_system_appearance() -> Option<Self> {
-        Self::detect_from_macos()
+        #[cfg(target_os = "macos")]
+        {
+            Self::detect_from_macos()
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Self::detect_from_linux()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            None
+        }
     }
 
     pub fn label(self) -> &'static str {
@@ -310,7 +359,7 @@ fn parse_ansi_color_index(value: &str) -> Option<u8> {
 }
 
 fn detect_system_theme() -> Option<ThemeMode> {
-    ThemeMode::detect_from_macos()
+    ThemeMode::detect_system_appearance()
 }
 
 #[cfg(unix)]
@@ -431,6 +480,28 @@ fn parse_osc_color_component(value: &str) -> Option<u8> {
     let raw = u32::from_str_radix(&digits, 16).ok()?;
     let max = (1_u32 << (digits.len() * 4)) - 1;
     Some(((raw * 255 + max / 2) / max) as u8)
+}
+
+fn parse_busctl_color_scheme(output: &str) -> Option<ThemeMode> {
+    for token in output.split_whitespace().rev() {
+        match token.trim_matches(|c: char| !c.is_ascii_digit()) {
+            "1" => return Some(ThemeMode::Dark),
+            "2" => return Some(ThemeMode::Light),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_gsettings_color_scheme(output: &str) -> Option<ThemeMode> {
+    let lower = output.to_ascii_lowercase();
+    if lower.contains("dark") {
+        Some(ThemeMode::Dark)
+    } else if lower.contains("light") {
+        Some(ThemeMode::Light)
+    } else {
+        None
+    }
 }
 
 fn normalize_company_key(provider: &str) -> &'static str {
@@ -692,5 +763,33 @@ mod tests {
         assert_eq!(parse_osc_color_component("0"), Some(0));
         assert_eq!(parse_osc_color_component("f"), Some(255));
         assert_eq!(parse_osc_color_component("80"), Some(128));
+    }
+
+    #[test]
+    fn parse_busctl_color_scheme_detects_dark_and_light() {
+        assert_eq!(
+            parse_busctl_color_scheme("v v u 1\n"),
+            Some(ThemeMode::Dark)
+        );
+        assert_eq!(
+            parse_busctl_color_scheme("v v u 2\n"),
+            Some(ThemeMode::Light)
+        );
+        assert_eq!(parse_busctl_color_scheme("v v u 0\n"), None);
+        assert_eq!(parse_busctl_color_scheme(""), None);
+    }
+
+    #[test]
+    fn parse_gsettings_color_scheme_detects_dark_and_light() {
+        assert_eq!(
+            parse_gsettings_color_scheme("'prefer-dark'\n"),
+            Some(ThemeMode::Dark)
+        );
+        assert_eq!(
+            parse_gsettings_color_scheme("'prefer-light'\n"),
+            Some(ThemeMode::Light)
+        );
+        assert_eq!(parse_gsettings_color_scheme("'default'\n"), None);
+        assert_eq!(parse_gsettings_color_scheme(""), None);
     }
 }
