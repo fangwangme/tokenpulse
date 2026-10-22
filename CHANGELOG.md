@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.9] - 2026-10-22
+
+### Fixed
+- **npm release platform package availability race condition**: `publish-packages.mjs`
+  now polls the npm registry until all platform prebuilt binary packages are verified
+  ready (status 200 / matching version) before publishing the launcher package. This
+  prevents npm's asynchronous processing queue from returning 404 for platform packages
+  during user installations.
+- **Launcher optional dependency resolution and version mismatch guidance**:
+  `tokenpulse.js` now detects version divergence between launcher and platform binary
+  packages and provides explicit cache-clearing instructions, and clarifies when a
+  supported platform is missing its binary due to optional dependency resolution failure.
+
 ## [0.6.8] - 2026-10-22
 
 ### Changed
