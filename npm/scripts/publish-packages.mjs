@@ -20,7 +20,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 
 const pollIntervalMs =
   Number(process.env.TOKENPULSE_PUBLISH_POLL_INTERVAL_MS) || DEFAULT_POLL_INTERVAL_MS;
