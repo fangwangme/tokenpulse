@@ -177,12 +177,12 @@ pub fn render_models_page(
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:<model_width$}", headers[1]),
+            format!("{:<model_width$}", truncate(headers[1], model_width)),
             Style::default().fg(theme.accent).bold(),
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:<agent_width$}", headers[2]),
+            format!("{:<agent_width$}", truncate(headers[2], agent_width)),
             Style::default().fg(theme.accent_soft).bold(),
         ),
         Span::raw(" "),

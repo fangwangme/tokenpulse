@@ -3088,10 +3088,13 @@ pub fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
 }
 
 pub fn truncate(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
     if text.chars().count() <= width {
         return text.to_string();
     }
-    if width <= 1 {
+    if width == 1 {
         return "…".to_string();
     }
     let mut out = String::new();

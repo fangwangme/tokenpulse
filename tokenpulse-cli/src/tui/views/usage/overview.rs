@@ -229,12 +229,12 @@ fn render_overview_top_models(
     let mut lines = Vec::with_capacity(data_rows_visible + 2);
     lines.push(Line::from(vec![
         Span::styled(
-            format!("{:<model_width$}", "Model"),
+            format!("{:<model_width$}", truncate("Model", model_width)),
             Style::default().fg(theme.accent_soft).bold(),
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:<agent_width$}", "Agent"),
+            format!("{:<agent_width$}", truncate("Agent", agent_width)),
             Style::default().fg(theme.accent).bold(),
         ),
         Span::raw(" "),
