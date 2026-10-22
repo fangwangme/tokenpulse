@@ -28,6 +28,8 @@ pub struct AntigravityCredentials {
     pub token: AntigravityToken,
     #[serde(default)]
     pub auth_method: Option<String>,
+    #[serde(default)]
+    pub id_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,17 +381,98 @@ impl AntigravityQuotaFetcher {
         Ok(new_creds)
     }
 
+    async fn probe_agy_cli(&self) -> Option<QuotaSnapshot> {
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::process::Command::new("agy")
+                .args(["-p", "/usage", "--output-format", "json"])
+                .output(),
+        )
+        .await
+        .ok()?
+        .ok()?;
+
+        if !output.status.success() {
+            debug!(
+                "agy CLI usage command exited with status: {:?}",
+                output.status.code()
+            );
+            return None;
+        }
+
+        let json_str = String::from_utf8(output.stdout).ok()?;
+        let mut snapshot = parse_agy_cli_output(&json_str).ok()?;
+
+        // Best-effort: enrich account email from cached id_token
+        if let Ok(creds) = self.load_antigravity_creds().await {
+            if let Some(ref id_token) = creds.id_token {
+                snapshot.account = extract_email_from_jwt(id_token);
+            }
+        }
+
+        Some(snapshot)
+    }
+
     async fn fetch_quota_via_cloud_code(&self) -> Result<QuotaSnapshot> {
         let mut creds = self.load_antigravity_creds().await?;
+        let user_agent = cloud_code_user_agent();
+
+        // 1. Query loadCodeAssist to resolve project ID and plan
+        let load_url = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+        let load_body = serde_json::json!({
+            "metadata": {
+                "ideType": "ANTIGRAVITY",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI"
+            }
+        });
+
+        let mut project_id = "aicode-consumers".to_string();
+        let mut plan: Option<String> = None;
+
+        let load_res = self
+            .ls_client
+            .post(load_url)
+            .bearer_auth(&creds.token.access_token)
+            .header("User-Agent", &user_agent)
+            .header("Content-Type", "application/json")
+            .json(&load_body)
+            .send()
+            .await;
+
+        if let Ok(resp) = load_res {
+            if resp.status().is_success() {
+                if let Ok(load_data) = resp.json::<LoadCodeAssistResponse>().await {
+                    if let Some(proj) = load_data.cloudaicompanion_project {
+                        let trimmed = proj.trim();
+                        if !trimmed.is_empty() {
+                            project_id = trimmed.to_string();
+                        }
+                    }
+                    plan = load_data
+                        .paid_tier
+                        .and_then(|t| t.name)
+                        .filter(|n| !n.trim().is_empty())
+                        .or_else(|| {
+                            load_data
+                                .current_tier
+                                .and_then(|t| t.name)
+                                .filter(|n| !n.trim().is_empty())
+                        });
+                }
+            }
+        }
 
         let api_url = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+        let req_body = build_cloud_code_quota_body(Some(&project_id));
+
         let mut response = self
             .ls_client
             .post(api_url)
             .bearer_auth(&creds.token.access_token)
-            .header("User-Agent", "antigravity")
+            .header("User-Agent", &user_agent)
             .header("Content-Type", "application/json")
-            .json(&serde_json::json!({}))
+            .json(&req_body)
             .send()
             .await?;
 
@@ -402,9 +485,9 @@ impl AntigravityQuotaFetcher {
                         .ls_client
                         .post(api_url)
                         .bearer_auth(&creds.token.access_token)
-                        .header("User-Agent", "antigravity")
+                        .header("User-Agent", &user_agent)
                         .header("Content-Type", "application/json")
-                        .json(&serde_json::json!({}))
+                        .json(&req_body)
                         .send()
                         .await?;
                 }
@@ -452,12 +535,12 @@ impl AntigravityQuotaFetcher {
             return Err(anyhow!("No active quota windows found in API response"));
         }
 
+        let account = creds.id_token.as_deref().and_then(extract_email_from_jwt);
+
         Ok(QuotaSnapshot {
             provider: "antigravity".to_string(),
-            // The Cloud Code quota API reports no plan or account; the
-            // language-server path is the one that knows them.
-            plan: None,
-            account: None,
+            plan,
+            account,
             windows,
             credits: None,
             rate_limit_reset_credits: vec![],
@@ -623,13 +706,22 @@ impl QuotaFetcher for AntigravityQuotaFetcher {
         }
 
         if connections.is_empty() {
-            debug!("No running Language Server processes detected. Attempting direct Cloud Code API fallback.");
+            debug!("No running Language Server processes detected. Attempting agy CLI fallback.");
         } else {
             debug!(
-                "{} Language Server connection(s) detected, but quota RPC probes failed. Attempting direct Cloud Code API fallback.",
+                "{} Language Server connection(s) detected, but quota RPC probes failed. Attempting agy CLI fallback.",
                 connections.len()
             );
         }
+
+        // 2. Fall back to agy CLI if installed
+        if let Some(snapshot) = self.probe_agy_cli().await {
+            info!("Antigravity quota fetched via agy CLI usage command");
+            return Ok(snapshot);
+        }
+
+        // 3. Fall back to Cloud Code API using cached OAuth credentials
+        debug!("Attempting direct Cloud Code API fallback.");
         match self.fetch_quota_via_cloud_code().await {
             Ok(snapshot) => {
                 info!("Antigravity quota fetched directly via Cloud Code API");
@@ -646,16 +738,158 @@ impl QuotaFetcher for AntigravityQuotaFetcher {
     }
 }
 
-pub fn parse_agy_cli_output(_json: &str) -> Result<QuotaSnapshot> {
-    anyhow::bail!("not implemented yet")
+fn cloud_code_user_agent() -> String {
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unknown"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else if cfg!(target_arch = "x86_64") {
+        "amd64"
+    } else {
+        "unknown"
+    };
+    format!("antigravity/hub/2.9.1 {}/{}", os, arch)
 }
 
-pub fn build_cloud_code_quota_body(_project_id: Option<&str>) -> serde_json::Value {
-    serde_json::json!({})
+#[derive(Debug, Deserialize)]
+struct LoadCodeAssistResponse {
+    #[serde(default, rename = "cloudaicompanionProject")]
+    cloudaicompanion_project: Option<String>,
+    #[serde(default, rename = "paidTier")]
+    paid_tier: Option<CloudCodeTier>,
+    #[serde(default, rename = "currentTier")]
+    current_tier: Option<CloudCodeTier>,
 }
 
-pub fn extract_email_from_jwt(_jwt: &str) -> Option<String> {
-    None
+#[derive(Debug, Deserialize)]
+struct CloudCodeTier {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyCliResponse {
+    #[serde(default)]
+    command: Option<AgyCliCommand>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyCliCommand {
+    #[serde(default)]
+    data: Option<AgyCliData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyCliData {
+    #[serde(default)]
+    groups: Vec<AgyCliGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyCliGroup {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    buckets: Vec<AgyCliBucket>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyCliBucket {
+    #[serde(default)]
+    window: String,
+    #[serde(default)]
+    remaining_fraction: f64,
+    #[serde(default)]
+    reset_time: Option<String>,
+}
+
+pub fn parse_agy_cli_output(json_str: &str) -> Result<QuotaSnapshot> {
+    let resp: AgyCliResponse = serde_json::from_str(json_str)
+        .map_err(|e| anyhow!("Failed to parse agy cli usage json: {}", e))?;
+    let groups = resp
+        .command
+        .and_then(|c| c.data)
+        .map(|d| d.groups)
+        .unwrap_or_default();
+
+    if groups.is_empty() {
+        return Err(anyhow!("No quota groups found in agy usage output"));
+    }
+
+    let mut built: Vec<(u8, u8, RateWindow)> = Vec::new();
+
+    for group in &groups {
+        let group_label = clean_group_label(&group.name);
+        let group_rank = group_rank(&group_label);
+
+        for bucket in &group.buckets {
+            let (window_suffix, window_rank, period_duration_ms) =
+                window_descriptor(&bucket.window);
+            let used = (1.0 - bucket.remaining_fraction.clamp(0.0, 1.0)) * 100.0;
+            let resets_at = bucket.reset_time.as_deref().and_then(|s| {
+                DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            });
+
+            built.push((
+                group_rank,
+                window_rank,
+                RateWindow {
+                    label: format!("{} ({})", group_label, window_suffix),
+                    model_family: model_family_from_group(&group_label),
+                    used_percent: used,
+                    resets_at,
+                    period_duration_ms,
+                },
+            ));
+        }
+    }
+
+    built.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let windows: Vec<RateWindow> = built.into_iter().map(|(_, _, window)| window).collect();
+
+    if windows.is_empty() {
+        return Err(anyhow!("No active quota windows found in agy usage output"));
+    }
+
+    Ok(QuotaSnapshot {
+        provider: "antigravity".to_string(),
+        plan: None,
+        account: None,
+        windows,
+        credits: None,
+        rate_limit_reset_credits: vec![],
+        fetched_at: Utc::now(),
+    })
+}
+
+pub fn build_cloud_code_quota_body(project_id: Option<&str>) -> serde_json::Value {
+    let project = project_id.unwrap_or("aicode-consumers");
+    serde_json::json!({
+        "project": project
+    })
+}
+
+pub fn extract_email_from_jwt(jwt: &str) -> Option<String> {
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    use base64::Engine;
+    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(parts[1]))
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    json.get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 #[cfg(test)]
