@@ -646,6 +646,18 @@ impl QuotaFetcher for AntigravityQuotaFetcher {
     }
 }
 
+pub fn parse_agy_cli_output(_json: &str) -> Result<QuotaSnapshot> {
+    anyhow::bail!("not implemented yet")
+}
+
+pub fn build_cloud_code_quota_body(_project_id: Option<&str>) -> serde_json::Value {
+    serde_json::json!({})
+}
+
+pub fn extract_email_from_jwt(_jwt: &str) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,5 +851,87 @@ mod tests {
         assert_eq!(ordered[1].pid, 100);
         assert_eq!(ordered[2].runtime_kind, AntigravityRuntimeKind::Cli);
         assert_eq!(ordered[2].pid, 300);
+    }
+
+    #[test]
+    fn test_parse_agy_cli_usage() {
+        let json = r#"{
+            "conversation_id": "",
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.137,
+                                    "reset_time": "2026-10-24T04:16:10Z"
+                                },
+                                {
+                                    "id": "gemini-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.79,
+                                    "reset_time": "2026-10-22T11:07:56Z"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {
+                                    "id": "3p-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.358,
+                                    "reset_time": "2026-10-28T17:53:10Z"
+                                },
+                                {
+                                    "id": "3p-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.736,
+                                    "reset_time": "2026-10-22T13:39:31Z"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }"#;
+
+        let snapshot = parse_agy_cli_output(json).expect("should parse agy usage json");
+        assert_eq!(snapshot.provider, "antigravity");
+        assert_eq!(snapshot.windows.len(), 4);
+        assert_eq!(snapshot.windows[0].label, "Gemini (5h)");
+        assert!((snapshot.windows[0].used_percent - 21.0).abs() < 0.1);
+        assert_eq!(snapshot.windows[1].label, "Gemini (7d)");
+        assert!((snapshot.windows[1].used_percent - 86.3).abs() < 0.1);
+        assert_eq!(snapshot.windows[2].label, "Claude (5h)");
+        assert_eq!(snapshot.windows[3].label, "Claude (7d)");
+    }
+
+    #[test]
+    fn test_cloud_code_quota_payload_with_project() {
+        let project_id = "aicode-consumers";
+        let body = build_cloud_code_quota_body(Some(project_id));
+        assert_eq!(body["project"], "aicode-consumers");
+
+        let default_body = build_cloud_code_quota_body(None);
+        assert_eq!(default_body["project"], "aicode-consumers");
+
+        // Test email extraction from dummy JWT id_token (constructed at runtime)
+        use base64::Engine;
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"email":"user@example.com"}"#);
+        let dummy_jwt = format!("{}.{}.", header, payload);
+        let email = extract_email_from_jwt(&dummy_jwt);
+        assert_eq!(email.as_deref(), Some("user@example.com"));
     }
 }

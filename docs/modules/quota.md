@@ -132,7 +132,8 @@ The Cloud Code fallback reads the OAuth token cached at `~/.gemini/antigravity-c
 1. Discover running Antigravity CLI/Desktop language server processes
 2. Prefer Desktop LS, then CLI LS, then unknown Antigravity LS processes
 3. Send a Connect-RPC `RetrieveUserQuotaSummary` request to the local language server; on success, make a best-effort `GetUserStatus` call for account email + plan name (`userTier.name`, falling back to `planStatus.planInfo.planName`)
-4. If no language server responds, fall back to the Cloud Code quota API. That response has no plan or account, so the snapshot leaves both empty rather than guessing one. With only `agy` running, this is the expected path.
+4. If no language server responds, probe `agy -p /usage --output-format json` if the `agy` CLI binary is available on PATH.
+5. If `agy` CLI is not available or fails, fall back to the Cloud Code quota API. The request must include the companion `project` ID (retrieved from `loadCodeAssist` or defaulted to `aicode-consumers`), use standard client `User-Agent`, and decode account email from `id_token` and plan tier from `loadCodeAssist`.
 
 ### Response Mapping
 `RetrieveUserQuotaSummary` returns one group per model family, each with a `5h` and a `weekly` bucket. Each bucket maps to a `RateWindow`:
