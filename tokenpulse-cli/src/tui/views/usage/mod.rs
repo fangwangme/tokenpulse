@@ -295,6 +295,14 @@ pub fn format_source_list(source_csv: &str) -> String {
     }
 }
 
+pub fn calculate_model_agent_widths<'a, I>(_models: I, _available_for_both: usize) -> (usize, usize)
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    // Stub for planning commit; implemented by executor
+    (0, 0)
+}
+
 #[derive(Default)]
 pub struct AggregatedModelSummary {
     pub providers: BTreeSet<String>,
@@ -3521,5 +3529,33 @@ mod tests {
 
         let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
         assert!(!is_ctrl_c(&ctrl_r));
+    }
+
+    #[test]
+    fn test_model_agent_widths_wide_screen_capped() {
+        let models = [("claude-3-5-sonnet-20241022", "claude,codex")];
+        let (model_w, agent_w) =
+            calculate_model_agent_widths(models.iter().map(|&(m, s)| (m, s)), 100);
+        assert_eq!(agent_w, 18);
+        assert_eq!(model_w, 26);
+    }
+
+    #[test]
+    fn test_model_agent_widths_compresses_agent_first() {
+        let models = [("claude-3-5-sonnet-20241022", "claude,codex")];
+        let (model_w, agent_w) =
+            calculate_model_agent_widths(models.iter().map(|&(m, s)| (m, s)), 38);
+        assert_eq!(model_w, 26);
+        assert_eq!(agent_w, 12);
+    }
+
+    #[test]
+    fn test_model_agent_widths_narrow_screen_floor() {
+        let models = [("claude-3-5-sonnet-20241022", "claude,codex")];
+        let (model_w, agent_w) =
+            calculate_model_agent_widths(models.iter().map(|&(m, s)| (m, s)), 24);
+        assert!(model_w >= 18);
+        assert!(agent_w >= 5);
+        assert_eq!(model_w + agent_w, 24);
     }
 }
