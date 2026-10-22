@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.8] - 2026-10-22
+
+### Changed
+- **TUI terminal background passthrough**: `Theme.bg` now uses `Color::Reset` instead
+  of hardcoded solid RGB values, allowing the host terminal's native background color,
+  transparency, and blur to pass through cleanly while preserving custom foreground
+  colors, borders, badges, and selected row highlights (#86).
+
 ## [0.6.7] - 2026-10-22
 
 ### Added
