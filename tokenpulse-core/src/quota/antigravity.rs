@@ -22,7 +22,6 @@ const LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
 
 const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1000;
 const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-const DEFAULT_AICODE_COMPANION_PROJECT: &str = "aicode-consumers";
 const AGY_CLI_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +68,7 @@ struct LsQuotaSummary {
 
 #[derive(Debug, Deserialize)]
 struct LsQuotaGroup {
-    #[serde(default, rename = "displayName", alias = "name")]
+    #[serde(default, rename = "displayName")]
     display_name: String,
     #[serde(default)]
     buckets: Vec<LsQuotaBucket>,
@@ -79,9 +78,9 @@ struct LsQuotaGroup {
 struct LsQuotaBucket {
     #[serde(default)]
     window: String,
-    #[serde(default, rename = "remainingFraction", alias = "remaining_fraction")]
+    #[serde(default, rename = "remainingFraction")]
     remaining_fraction: f64,
-    #[serde(default, rename = "resetTime", alias = "reset_time")]
+    #[serde(default, rename = "resetTime")]
     reset_time: Option<String>,
 }
 
@@ -221,15 +220,7 @@ impl AntigravityQuotaFetcher {
 
     async fn load_antigravity_creds(&self) -> Result<AntigravityCredentials> {
         // 1. Try to read from cache
-        let cache_path =
-            if let Ok(override_path) = std::env::var("TOKENPULSE_ANTIGRAVITY_AUTH_PATH") {
-                std::path::PathBuf::from(override_path)
-            } else {
-                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
-                home.join(".gemini")
-                    .join("antigravity-cli")
-                    .join("antigravity-oauth-token")
-            };
+        let cache_path = antigravity_token_cache_path();
         let mut cached_creds: Option<AntigravityCredentials> = None;
         if cache_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&cache_path) {
@@ -364,15 +355,7 @@ impl AntigravityQuotaFetcher {
         }
 
         // Save to cache
-        let cache_path =
-            if let Ok(override_path) = std::env::var("TOKENPULSE_ANTIGRAVITY_AUTH_PATH") {
-                std::path::PathBuf::from(override_path)
-            } else {
-                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
-                home.join(".gemini")
-                    .join("antigravity-cli")
-                    .join("antigravity-oauth-token")
-            };
+        let cache_path = antigravity_token_cache_path();
         if let Some(parent) = cache_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -383,7 +366,41 @@ impl AntigravityQuotaFetcher {
         Ok(new_creds)
     }
 
+    async fn check_agy_version(&self) -> bool {
+        let mut ver_cmd = tokio::process::Command::new("agy");
+        ver_cmd
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+
+        let Ok(child) = ver_cmd.spawn() else {
+            return false;
+        };
+
+        let Ok(Ok(output)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), child.wait_with_output()).await
+        else {
+            return false;
+        };
+
+        if !output.status.success() {
+            return false;
+        }
+
+        let ver_str = String::from_utf8_lossy(&output.stdout);
+        is_supported_agy_version(&ver_str)
+    }
+
     async fn probe_agy_cli(&self) -> Option<QuotaSnapshot> {
+        if !self.check_agy_version().await {
+            debug!(
+                "agy CLI not found or version does not support /usage (< 1.4); skipping CLI probe"
+            );
+            return None;
+        }
+
         let mut command = tokio::process::Command::new("agy");
         command
             .args(["-p", "/usage", "--output-format", "json"])
@@ -458,7 +475,7 @@ impl AntigravityQuotaFetcher {
         &self,
         access_token: &str,
         user_agent: &str,
-    ) -> (String, Option<String>) {
+    ) -> (Option<String>, Option<String>) {
         let load_url = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
         let load_body = serde_json::json!({
             "metadata": {
@@ -468,7 +485,7 @@ impl AntigravityQuotaFetcher {
             }
         });
 
-        let mut project_id = DEFAULT_AICODE_COMPANION_PROJECT.to_string();
+        let mut project_id: Option<String> = None;
         let mut plan: Option<String> = None;
 
         let load_res = self
@@ -481,29 +498,34 @@ impl AntigravityQuotaFetcher {
             .send()
             .await;
 
-        if let Ok(resp) = load_res {
-            if resp.status().is_success() {
-                if let Ok(load_data) = resp.json::<LoadCodeAssistResponse>().await {
-                    if let Some(proj) = load_data
-                        .cloudaicompanion_project
-                        .as_ref()
-                        .and_then(parse_project_id)
-                    {
-                        project_id = proj;
+        match load_res {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    if let Ok(load_data) = resp.json::<LoadCodeAssistResponse>().await {
+                        if let Some(proj) = load_data
+                            .cloudaicompanion_project
+                            .as_ref()
+                            .and_then(parse_project_id)
+                        {
+                            project_id = Some(proj);
+                        }
+                        plan = load_data
+                            .paid_tier
+                            .and_then(|t| t.name)
+                            .filter(|n| !n.trim().is_empty())
+                            .or_else(|| {
+                                load_data
+                                    .current_tier
+                                    .and_then(|t| t.name)
+                                    .filter(|n| !n.trim().is_empty())
+                            });
                     }
-                    plan = load_data
-                        .paid_tier
-                        .and_then(|t| t.name)
-                        .filter(|n| !n.trim().is_empty())
-                        .or_else(|| {
-                            load_data
-                                .current_tier
-                                .and_then(|t| t.name)
-                                .filter(|n| !n.trim().is_empty())
-                        });
+                } else {
+                    debug!("loadCodeAssist returned status: {}", resp.status());
                 }
-            } else {
-                debug!("loadCodeAssist returned status: {}", resp.status());
+            }
+            Err(e) => {
+                debug!("loadCodeAssist network/transport error: {}", e);
             }
         }
         (project_id, plan)
@@ -519,7 +541,7 @@ impl AntigravityQuotaFetcher {
             .await;
 
         let api_url = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
-        let mut req_body = build_cloud_code_quota_body(Some(&project_id));
+        let mut req_body = build_cloud_code_quota_body(project_id.as_deref());
 
         let mut response = self
             .ls_client
@@ -544,7 +566,7 @@ impl AntigravityQuotaFetcher {
                     if refreshed_plan.is_some() {
                         plan = refreshed_plan;
                     }
-                    req_body = build_cloud_code_quota_body(Some(&project_id));
+                    req_body = build_cloud_code_quota_body(project_id.as_deref());
 
                     response = self
                         .ls_client
@@ -824,15 +846,19 @@ fn cloud_code_user_agent() -> String {
     format!("antigravity/hub/2.9.1 {}/{}", os, arch)
 }
 
-fn read_cached_id_token() -> Option<String> {
-    let cache_path = if let Ok(override_path) = std::env::var("TOKENPULSE_ANTIGRAVITY_AUTH_PATH") {
+pub(crate) fn antigravity_token_cache_path() -> std::path::PathBuf {
+    if let Ok(override_path) = std::env::var("TOKENPULSE_ANTIGRAVITY_AUTH_PATH") {
         std::path::PathBuf::from(override_path)
     } else {
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
         home.join(".gemini")
             .join("antigravity-cli")
             .join("antigravity-oauth-token")
-    };
+    }
+}
+
+fn read_cached_id_token() -> Option<String> {
+    let cache_path = antigravity_token_cache_path();
     let content = std::fs::read_to_string(cache_path).ok()?;
     let val: serde_json::Value = serde_json::from_str(&content).ok()?;
     val.get("id_token")
@@ -882,17 +908,65 @@ struct AgyCliResponse {
 #[derive(Debug, Deserialize)]
 struct AgyCliCommand {
     #[serde(default)]
-    data: Option<LsQuotaSummary>,
+    data: Option<AgyCliData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyCliData {
+    #[serde(default)]
+    groups: Vec<AgyCliGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyCliGroup {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    buckets: Vec<AgyCliBucket>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyCliBucket {
+    #[serde(default)]
+    window: String,
+    #[serde(default, rename = "remaining_fraction")]
+    remaining_fraction: f64,
+    #[serde(default, rename = "reset_time")]
+    reset_time: Option<String>,
+}
+
+impl From<AgyCliData> for LsQuotaSummary {
+    fn from(data: AgyCliData) -> Self {
+        LsQuotaSummary {
+            groups: data
+                .groups
+                .into_iter()
+                .map(|g| LsQuotaGroup {
+                    display_name: g.name,
+                    buckets: g
+                        .buckets
+                        .into_iter()
+                        .map(|b| LsQuotaBucket {
+                            window: b.window,
+                            remaining_fraction: b.remaining_fraction,
+                            reset_time: b.reset_time,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
 }
 
 pub fn parse_agy_cli_output(json_str: &str) -> Result<QuotaSnapshot> {
     let resp: AgyCliResponse = serde_json::from_str(json_str)
         .map_err(|e| anyhow!("Failed to parse agy cli usage json: {}", e))?;
-    let summary = resp
+    let cli_data = resp
         .command
         .and_then(|c| c.data)
         .ok_or_else(|| anyhow!("No quota data found in agy usage output"))?;
 
+    let summary = LsQuotaSummary::from(cli_data);
     let windows = windows_from_summary(&summary);
     if windows.is_empty() {
         return Err(anyhow!("No active quota windows found in agy usage output"));
@@ -910,10 +984,24 @@ pub fn parse_agy_cli_output(json_str: &str) -> Result<QuotaSnapshot> {
 }
 
 pub fn build_cloud_code_quota_body(project_id: Option<&str>) -> serde_json::Value {
-    let project = project_id.unwrap_or(DEFAULT_AICODE_COMPANION_PROJECT);
-    serde_json::json!({
-        "project": project
-    })
+    if let Some(project) = project_id {
+        serde_json::json!({
+            "project": project
+        })
+    } else {
+        serde_json::json!({})
+    }
+}
+
+pub fn is_supported_agy_version(version_str: &str) -> bool {
+    let trimmed = version_str.trim();
+    let parts: Vec<&str> = trimmed.split('.').collect();
+    if parts.len() >= 2 {
+        if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+            return major > 1 || (major == 1 && minor >= 4);
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -1181,7 +1269,7 @@ mod tests {
         assert_eq!(body["project"], "aicode-consumers");
 
         let default_body = build_cloud_code_quota_body(None);
-        assert_eq!(default_body["project"], "aicode-consumers");
+        assert_eq!(default_body, serde_json::json!({}));
 
         // Test email extraction from dummy JWT id_token using crate::auth::decode_jwt_email
         use base64::Engine;
@@ -1202,5 +1290,32 @@ mod tests {
             Some("project-456")
         );
         assert_eq!(parse_project_id(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn test_is_supported_agy_version() {
+        assert!(is_supported_agy_version("1.4.5"));
+        assert!(is_supported_agy_version("1.4.0\n"));
+        assert!(is_supported_agy_version("1.5.0"));
+        assert!(is_supported_agy_version("2.0.0"));
+        assert!(!is_supported_agy_version("1.3.9"));
+        assert!(!is_supported_agy_version("0.9.1"));
+        assert!(!is_supported_agy_version("invalid"));
+    }
+
+    #[test]
+    fn test_read_cached_id_token() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token_path = temp_dir.path().join("antigravity-oauth-token");
+        std::fs::write(&token_path, r#"{"id_token": "mock-token-xyz"}"#).unwrap();
+
+        std::env::set_var(
+            "TOKENPULSE_ANTIGRAVITY_AUTH_PATH",
+            token_path.to_str().unwrap(),
+        );
+        let token = read_cached_id_token();
+        std::env::remove_var("TOKENPULSE_ANTIGRAVITY_AUTH_PATH");
+
+        assert_eq!(token.as_deref(), Some("mock-token-xyz"));
     }
 }
