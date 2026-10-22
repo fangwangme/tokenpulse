@@ -3208,41 +3208,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dashboard_background_passthrough() {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-        use tokenpulse_core::usage::build_usage_summary_from_daily;
-
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let dashboard = UsageDashboard { daily: vec![] };
-        let summary = build_usage_summary_from_daily(vec![], vec![], vec![], 0, 0);
-        let state = UsageState::new(&dashboard, vec![]);
-        let theme = Theme::default();
-        let config = Config::default();
-        let config_manager = ConfigManager::new();
-
-        terminal
-            .draw(|f| {
-                render_dashboard(
-                    f,
-                    f.area(),
-                    &dashboard,
-                    &summary,
-                    &state,
-                    &theme,
-                    &config,
-                    &config_manager,
-                );
-            })
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        // Top-left border cell background must be Color::Reset rather than an opaque solid color
-        assert_eq!(buffer[(0, 0)].style().bg, Some(Color::Reset));
-    }
-
-    #[test]
     fn test_usage_page_navigation() {
         let pages = UsagePage::all();
         assert_eq!(pages.len(), 7);

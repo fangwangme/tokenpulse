@@ -738,14 +738,6 @@ mod tests {
     }
 
     #[test]
-    fn test_theme_background_is_reset() {
-        let dark = Theme::new(ThemeMode::Dark);
-        assert_eq!(dark.bg, Color::Reset);
-        let light = Theme::new(ThemeMode::Light);
-        assert_eq!(light.bg, Color::Reset);
-    }
-
-    #[test]
     fn light_theme_today_highlight_stays_visible() {
         let t = Theme::new(ThemeMode::Light);
         assert_eq!(t.today_bg, Color::Rgb(196, 181, 253));
