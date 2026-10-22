@@ -22,6 +22,8 @@ const LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
 
 const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1000;
 const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_AICODE_COMPANION_PROJECT: &str = "aicode-consumers";
+const AGY_CLI_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AntigravityCredentials {
@@ -67,7 +69,7 @@ struct LsQuotaSummary {
 
 #[derive(Debug, Deserialize)]
 struct LsQuotaGroup {
-    #[serde(default, rename = "displayName")]
+    #[serde(default, rename = "displayName", alias = "name")]
     display_name: String,
     #[serde(default)]
     buckets: Vec<LsQuotaBucket>,
@@ -77,9 +79,9 @@ struct LsQuotaGroup {
 struct LsQuotaBucket {
     #[serde(default)]
     window: String,
-    #[serde(default, rename = "remainingFraction")]
+    #[serde(default, rename = "remainingFraction", alias = "remaining_fraction")]
     remaining_fraction: f64,
-    #[serde(default, rename = "resetTime")]
+    #[serde(default, rename = "resetTime", alias = "reset_time")]
     reset_time: Option<String>,
 }
 
@@ -382,42 +384,81 @@ impl AntigravityQuotaFetcher {
     }
 
     async fn probe_agy_cli(&self) -> Option<QuotaSnapshot> {
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::process::Command::new("agy")
-                .args(["-p", "/usage", "--output-format", "json"])
-                .output(),
+        let mut command = tokio::process::Command::new("agy");
+        command
+            .args(["-p", "/usage", "--output-format", "json"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                debug!("Failed to spawn agy CLI process: {}", e);
+                return None;
+            }
+        };
+
+        let output = match tokio::time::timeout(
+            std::time::Duration::from_secs(AGY_CLI_TIMEOUT_SECS),
+            child.wait_with_output(),
         )
         .await
-        .ok()?
-        .ok()?;
+        {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                debug!("Error waiting for agy CLI output: {}", e);
+                return None;
+            }
+            Err(_) => {
+                debug!(
+                    "agy CLI usage command timed out after {}s; process killed via kill_on_drop",
+                    AGY_CLI_TIMEOUT_SECS
+                );
+                return None;
+            }
+        };
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             debug!(
-                "agy CLI usage command exited with status: {:?}",
-                output.status.code()
+                "agy CLI usage command exited with status: {:?}, stderr: {}",
+                output.status.code(),
+                stderr.trim()
             );
             return None;
         }
 
-        let json_str = String::from_utf8(output.stdout).ok()?;
-        let mut snapshot = parse_agy_cli_output(&json_str).ok()?;
-
-        // Best-effort: enrich account email from cached id_token
-        if let Ok(creds) = self.load_antigravity_creds().await {
-            if let Some(ref id_token) = creds.id_token {
-                snapshot.account = extract_email_from_jwt(id_token);
+        let json_str = match String::from_utf8(output.stdout) {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("agy CLI output is not valid UTF-8: {}", e);
+                return None;
             }
+        };
+
+        let mut snapshot = match parse_agy_cli_output(&json_str) {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("Failed to parse agy CLI output: {}", e);
+                return None;
+            }
+        };
+
+        // Best effort: enrich account email from cached id_token without triggering OAuth refresh
+        if let Some(id_token) = read_cached_id_token() {
+            snapshot.account = crate::auth::decode_jwt_email(&id_token);
         }
 
         Some(snapshot)
     }
 
-    async fn fetch_quota_via_cloud_code(&self) -> Result<QuotaSnapshot> {
-        let mut creds = self.load_antigravity_creds().await?;
-        let user_agent = cloud_code_user_agent();
-
-        // 1. Query loadCodeAssist to resolve project ID and plan
+    async fn query_load_code_assist(
+        &self,
+        access_token: &str,
+        user_agent: &str,
+    ) -> (String, Option<String>) {
         let load_url = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
         let load_body = serde_json::json!({
             "metadata": {
@@ -427,14 +468,14 @@ impl AntigravityQuotaFetcher {
             }
         });
 
-        let mut project_id = "aicode-consumers".to_string();
+        let mut project_id = DEFAULT_AICODE_COMPANION_PROJECT.to_string();
         let mut plan: Option<String> = None;
 
         let load_res = self
             .ls_client
             .post(load_url)
-            .bearer_auth(&creds.token.access_token)
-            .header("User-Agent", &user_agent)
+            .bearer_auth(access_token)
+            .header("User-Agent", user_agent)
             .header("Content-Type", "application/json")
             .json(&load_body)
             .send()
@@ -443,11 +484,12 @@ impl AntigravityQuotaFetcher {
         if let Ok(resp) = load_res {
             if resp.status().is_success() {
                 if let Ok(load_data) = resp.json::<LoadCodeAssistResponse>().await {
-                    if let Some(proj) = load_data.cloudaicompanion_project {
-                        let trimmed = proj.trim();
-                        if !trimmed.is_empty() {
-                            project_id = trimmed.to_string();
-                        }
+                    if let Some(proj) = load_data
+                        .cloudaicompanion_project
+                        .as_ref()
+                        .and_then(parse_project_id)
+                    {
+                        project_id = proj;
                     }
                     plan = load_data
                         .paid_tier
@@ -460,11 +502,24 @@ impl AntigravityQuotaFetcher {
                                 .filter(|n| !n.trim().is_empty())
                         });
                 }
+            } else {
+                debug!("loadCodeAssist returned status: {}", resp.status());
             }
         }
+        (project_id, plan)
+    }
+
+    async fn fetch_quota_via_cloud_code(&self) -> Result<QuotaSnapshot> {
+        let mut creds = self.load_antigravity_creds().await?;
+        let user_agent = cloud_code_user_agent();
+
+        // 1. Query loadCodeAssist to resolve project ID and plan
+        let (mut project_id, mut plan) = self
+            .query_load_code_assist(&creds.token.access_token, &user_agent)
+            .await;
 
         let api_url = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
-        let req_body = build_cloud_code_quota_body(Some(&project_id));
+        let mut req_body = build_cloud_code_quota_body(Some(&project_id));
 
         let mut response = self
             .ls_client
@@ -481,6 +536,16 @@ impl AntigravityQuotaFetcher {
                 debug!("Antigravity returned 401 Unauthorized; attempting token refresh");
                 if let Ok(refreshed) = self.refresh_antigravity_token(&creds, refresh).await {
                     creds = refreshed;
+                    // Re-query loadCodeAssist after token refresh to resolve project ID and plan
+                    let (refreshed_project_id, refreshed_plan) = self
+                        .query_load_code_assist(&creds.token.access_token, &user_agent)
+                        .await;
+                    project_id = refreshed_project_id;
+                    if refreshed_plan.is_some() {
+                        plan = refreshed_plan;
+                    }
+                    req_body = build_cloud_code_quota_body(Some(&project_id));
+
                     response = self
                         .ls_client
                         .post(api_url)
@@ -535,7 +600,10 @@ impl AntigravityQuotaFetcher {
             return Err(anyhow!("No active quota windows found in API response"));
         }
 
-        let account = creds.id_token.as_deref().and_then(extract_email_from_jwt);
+        let account = creds
+            .id_token
+            .as_deref()
+            .and_then(crate::auth::decode_jwt_email);
 
         Ok(QuotaSnapshot {
             provider: "antigravity".to_string(),
@@ -756,10 +824,43 @@ fn cloud_code_user_agent() -> String {
     format!("antigravity/hub/2.9.1 {}/{}", os, arch)
 }
 
+fn read_cached_id_token() -> Option<String> {
+    let cache_path = if let Ok(override_path) = std::env::var("TOKENPULSE_ANTIGRAVITY_AUTH_PATH") {
+        std::path::PathBuf::from(override_path)
+    } else {
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
+        home.join(".gemini")
+            .join("antigravity-cli")
+            .join("antigravity-oauth-token")
+    };
+    let content = std::fs::read_to_string(cache_path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+    val.get("id_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn parse_project_id(val: &serde_json::Value) -> Option<String> {
+    if let Some(s) = val.as_str() {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    } else if let Some(obj) = val.as_object() {
+        if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
+            let trimmed = id.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Deserialize)]
 struct LoadCodeAssistResponse {
     #[serde(default, rename = "cloudaicompanionProject")]
-    cloudaicompanion_project: Option<String>,
+    cloudaicompanion_project: Option<serde_json::Value>,
     #[serde(default, rename = "paidTier")]
     paid_tier: Option<CloudCodeTier>,
     #[serde(default, rename = "currentTier")]
@@ -781,79 +882,18 @@ struct AgyCliResponse {
 #[derive(Debug, Deserialize)]
 struct AgyCliCommand {
     #[serde(default)]
-    data: Option<AgyCliData>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AgyCliData {
-    #[serde(default)]
-    groups: Vec<AgyCliGroup>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AgyCliGroup {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    buckets: Vec<AgyCliBucket>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AgyCliBucket {
-    #[serde(default)]
-    window: String,
-    #[serde(default)]
-    remaining_fraction: f64,
-    #[serde(default)]
-    reset_time: Option<String>,
+    data: Option<LsQuotaSummary>,
 }
 
 pub fn parse_agy_cli_output(json_str: &str) -> Result<QuotaSnapshot> {
     let resp: AgyCliResponse = serde_json::from_str(json_str)
         .map_err(|e| anyhow!("Failed to parse agy cli usage json: {}", e))?;
-    let groups = resp
+    let summary = resp
         .command
         .and_then(|c| c.data)
-        .map(|d| d.groups)
-        .unwrap_or_default();
+        .ok_or_else(|| anyhow!("No quota data found in agy usage output"))?;
 
-    if groups.is_empty() {
-        return Err(anyhow!("No quota groups found in agy usage output"));
-    }
-
-    let mut built: Vec<(u8, u8, RateWindow)> = Vec::new();
-
-    for group in &groups {
-        let group_label = clean_group_label(&group.name);
-        let group_rank = group_rank(&group_label);
-
-        for bucket in &group.buckets {
-            let (window_suffix, window_rank, period_duration_ms) =
-                window_descriptor(&bucket.window);
-            let used = (1.0 - bucket.remaining_fraction.clamp(0.0, 1.0)) * 100.0;
-            let resets_at = bucket.reset_time.as_deref().and_then(|s| {
-                DateTime::parse_from_rfc3339(s)
-                    .ok()
-                    .map(|d| d.with_timezone(&Utc))
-            });
-
-            built.push((
-                group_rank,
-                window_rank,
-                RateWindow {
-                    label: format!("{} ({})", group_label, window_suffix),
-                    model_family: model_family_from_group(&group_label),
-                    used_percent: used,
-                    resets_at,
-                    period_duration_ms,
-                },
-            ));
-        }
-    }
-
-    built.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    let windows: Vec<RateWindow> = built.into_iter().map(|(_, _, window)| window).collect();
-
+    let windows = windows_from_summary(&summary);
     if windows.is_empty() {
         return Err(anyhow!("No active quota windows found in agy usage output"));
     }
@@ -870,26 +910,10 @@ pub fn parse_agy_cli_output(json_str: &str) -> Result<QuotaSnapshot> {
 }
 
 pub fn build_cloud_code_quota_body(project_id: Option<&str>) -> serde_json::Value {
-    let project = project_id.unwrap_or("aicode-consumers");
+    let project = project_id.unwrap_or(DEFAULT_AICODE_COMPANION_PROJECT);
     serde_json::json!({
         "project": project
     })
-}
-
-pub fn extract_email_from_jwt(jwt: &str) -> Option<String> {
-    let parts: Vec<&str> = jwt.split('.').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    use base64::Engine;
-    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(parts[1]))
-        .ok()?;
-    let json: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
-    json.get("email")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
 }
 
 #[cfg(test)]
@@ -1159,13 +1183,24 @@ mod tests {
         let default_body = build_cloud_code_quota_body(None);
         assert_eq!(default_body["project"], "aicode-consumers");
 
-        // Test email extraction from dummy JWT id_token (constructed at runtime)
+        // Test email extraction from dummy JWT id_token using crate::auth::decode_jwt_email
         use base64::Engine;
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"email":"user@example.com"}"#);
         let dummy_jwt = format!("{}.{}.", header, payload);
-        let email = extract_email_from_jwt(&dummy_jwt);
+        let email = crate::auth::decode_jwt_email(&dummy_jwt);
         assert_eq!(email.as_deref(), Some("user@example.com"));
+
+        // Test project ID parsing (both string and object shapes)
+        assert_eq!(
+            parse_project_id(&serde_json::json!("project-123")).as_deref(),
+            Some("project-123")
+        );
+        assert_eq!(
+            parse_project_id(&serde_json::json!({"id": "project-456"})).as_deref(),
+            Some("project-456")
+        );
+        assert_eq!(parse_project_id(&serde_json::json!({})), None);
     }
 }
