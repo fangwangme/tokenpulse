@@ -205,7 +205,7 @@ impl Theme {
     fn dark() -> Self {
         Self {
             mode: ThemeMode::Dark,
-            bg: Color::Rgb(9, 12, 18),
+            bg: Color::Reset,
             fg: Color::Rgb(232, 238, 247),
             dim: Color::Rgb(144, 158, 181),
             border: Color::Rgb(58, 76, 99),
@@ -249,7 +249,7 @@ impl Theme {
     fn light() -> Self {
         Self {
             mode: ThemeMode::Light,
-            bg: Color::Rgb(248, 250, 252),
+            bg: Color::Reset,
             fg: Color::Rgb(15, 23, 42),
             dim: Color::Rgb(71, 85, 105),
             border: Color::Rgb(148, 163, 184),
