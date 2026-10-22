@@ -1,7 +1,7 @@
 use super::{
-    empty_data_message, format_compact, format_cost_compact, format_source_list, model_id_from_key,
-    model_source, normalized_scroll_offset, selected_row_style, share_percent, truncate,
-    OverviewMetric, UsageDashboard, UsageState,
+    calculate_model_agent_widths, empty_data_message, format_compact, format_cost_compact,
+    format_source_list, model_id_from_key, model_source, normalized_scroll_offset,
+    selected_row_style, share_percent, truncate, OverviewMetric, UsageDashboard, UsageState,
 };
 use crate::tui::theme::Theme;
 use crate::tui::widgets::StackedBarChart;
@@ -219,31 +219,22 @@ fn render_overview_top_models(
     let tokens_width = 9usize;
     let fixed_width = tokens_width + cost_width + pct_width + 4;
     let available_for_both = total_width.saturating_sub(fixed_width);
-    let (model_width, agent_width) = if available_for_both < 32 {
-        let m_w = 22usize.min(available_for_both);
-        let a_w = available_for_both.saturating_sub(m_w);
-        (m_w, a_w)
-    } else {
-        let a_w = (available_for_both * 3 / 5).clamp(10, 40);
-        let m_w = available_for_both.saturating_sub(a_w);
-        if m_w < 22 {
-            (22usize, available_for_both.saturating_sub(22))
-        } else if m_w > 35 {
-            (35usize, available_for_both.saturating_sub(35))
-        } else {
-            (m_w, a_w)
-        }
-    };
+    let (model_width, agent_width) = calculate_model_agent_widths(
+        filtered
+            .iter()
+            .map(|m| (m.model.as_str(), m.source.as_str())),
+        available_for_both,
+    );
 
     let mut lines = Vec::with_capacity(data_rows_visible + 2);
     lines.push(Line::from(vec![
         Span::styled(
-            format!("{:<model_width$}", "Model"),
+            format!("{:<model_width$}", truncate("Model", model_width)),
             Style::default().fg(theme.accent_soft).bold(),
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:<agent_width$}", "Agent"),
+            format!("{:<agent_width$}", truncate("Agent", agent_width)),
             Style::default().fg(theme.accent).bold(),
         ),
         Span::raw(" "),

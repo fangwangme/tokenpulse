@@ -295,6 +295,42 @@ pub fn format_source_list(source_csv: &str) -> String {
     }
 }
 
+pub fn calculate_model_agent_widths<'a, I>(models: I, available_for_both: usize) -> (usize, usize)
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let mut max_agent_content = 5usize;
+    let mut max_model_content = 22usize;
+
+    for (model, source) in models {
+        let agent_len = format_source_list(source).chars().count();
+        max_agent_content = max_agent_content.max(agent_len);
+        max_model_content = max_model_content.max(model.chars().count());
+    }
+
+    let ideal_agent = max_agent_content.clamp(5, 40);
+    let ideal_model = max_model_content.clamp(22, 45);
+
+    if available_for_both >= ideal_model + ideal_agent {
+        (ideal_model, ideal_agent)
+    } else {
+        let single_agent = ideal_agent.min(11);
+        if available_for_both >= ideal_model + single_agent {
+            (ideal_model, available_for_both - ideal_model)
+        } else if available_for_both >= 22 + single_agent {
+            (available_for_both - single_agent, single_agent)
+        } else if available_for_both >= 22 + 5 {
+            (22, available_for_both - 22)
+        } else if available_for_both >= 18 + 5 {
+            (available_for_both - 5, 5)
+        } else {
+            let model = 18.min(available_for_both);
+            let agent = available_for_both.saturating_sub(model);
+            (model, agent)
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct AggregatedModelSummary {
     pub providers: BTreeSet<String>,
@@ -3052,10 +3088,13 @@ pub fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
 }
 
 pub fn truncate(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
     if text.chars().count() <= width {
         return text.to_string();
     }
-    if width <= 1 {
+    if width == 1 {
         return "…".to_string();
     }
     let mut out = String::new();
@@ -3521,5 +3560,33 @@ mod tests {
 
         let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
         assert!(!is_ctrl_c(&ctrl_r));
+    }
+
+    #[test]
+    fn test_model_agent_widths_wide_screen_capped() {
+        let models = [("claude-3-5-sonnet-20241022", "claude,codex")];
+        let (model_w, agent_w) =
+            calculate_model_agent_widths(models.iter().map(|&(m, s)| (m, s)), 100);
+        assert_eq!(agent_w, 18);
+        assert_eq!(model_w, 26);
+    }
+
+    #[test]
+    fn test_model_agent_widths_compresses_agent_first() {
+        let models = [("claude-3-5-sonnet-20241022", "claude,codex")];
+        let (model_w, agent_w) =
+            calculate_model_agent_widths(models.iter().map(|&(m, s)| (m, s)), 38);
+        assert_eq!(model_w, 26);
+        assert_eq!(agent_w, 12);
+    }
+
+    #[test]
+    fn test_model_agent_widths_narrow_screen_floor() {
+        let models = [("claude-3-5-sonnet-20241022", "claude,codex")];
+        let (model_w, agent_w) =
+            calculate_model_agent_widths(models.iter().map(|&(m, s)| (m, s)), 24);
+        assert!(model_w >= 18);
+        assert!(agent_w >= 5);
+        assert_eq!(model_w + agent_w, 24);
     }
 }
