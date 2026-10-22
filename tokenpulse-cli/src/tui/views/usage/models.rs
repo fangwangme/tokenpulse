@@ -1,7 +1,8 @@
 use super::{
-    empty_data_message, format_compact, format_cost_compact, format_source_list, model_id_from_key,
-    model_source, normalized_scroll_offset, selected_row_style, share_percent, sparkline_text,
-    truncate, ModelTableRow, SortField, UsageDashboard, UsageState,
+    calculate_model_agent_widths, empty_data_message, format_compact, format_cost_compact,
+    format_source_list, model_id_from_key, model_source, normalized_scroll_offset,
+    selected_row_style, share_percent, sparkline_text, truncate, ModelTableRow, SortField,
+    UsageDashboard, UsageState,
 };
 use crate::tui::theme::Theme;
 use chrono::{Duration, Local, NaiveDate};
@@ -121,21 +122,12 @@ pub fn render_models_page(
             + sparkline_width
             + total_spacers,
     );
-    let (model_width, agent_width) = if available_for_both < 32 {
-        let m_w = 22usize.min(available_for_both);
-        let a_w = available_for_both.saturating_sub(m_w);
-        (m_w, a_w)
-    } else {
-        let a_w = (available_for_both * 3 / 5).clamp(10, 40);
-        let m_w = available_for_both.saturating_sub(a_w);
-        if m_w < 22 {
-            (22usize, available_for_both.saturating_sub(22))
-        } else if m_w > 35 {
-            (35usize, available_for_both.saturating_sub(35))
-        } else {
-            (m_w, a_w)
-        }
-    };
+    let (model_width, agent_width) = calculate_model_agent_widths(
+        models
+            .iter()
+            .map(|row| (row.summary.model.as_str(), row.summary.source.as_str())),
+        available_for_both,
+    );
     let share_total = model_table_share_total(models.iter().copied(), state.sort_field);
 
     // Build per-model 7-day token sparkline data

@@ -295,12 +295,40 @@ pub fn format_source_list(source_csv: &str) -> String {
     }
 }
 
-pub fn calculate_model_agent_widths<'a, I>(_models: I, _available_for_both: usize) -> (usize, usize)
+pub fn calculate_model_agent_widths<'a, I>(models: I, available_for_both: usize) -> (usize, usize)
 where
     I: IntoIterator<Item = (&'a str, &'a str)>,
 {
-    // Stub for planning commit; implemented by executor
-    (0, 0)
+    let mut max_agent_content = 5usize;
+    let mut max_model_content = 22usize;
+
+    for (model, source) in models {
+        let agent_len = format_source_list(source).chars().count();
+        max_agent_content = max_agent_content.max(agent_len);
+        max_model_content = max_model_content.max(model.chars().count());
+    }
+
+    let ideal_agent = max_agent_content.clamp(5, 44);
+    let ideal_model = max_model_content.clamp(22, 45);
+
+    if available_for_both >= ideal_model + ideal_agent {
+        (ideal_model, ideal_agent)
+    } else {
+        let single_agent = ideal_agent.min(11);
+        if available_for_both >= ideal_model + single_agent {
+            (ideal_model, available_for_both - ideal_model)
+        } else if available_for_both >= 22 + single_agent {
+            (available_for_both - single_agent, single_agent)
+        } else if available_for_both >= 22 + 5 {
+            (22, available_for_both - 22)
+        } else if available_for_both >= 18 + 5 {
+            (available_for_both - 5, 5)
+        } else {
+            let model = 18.min(available_for_both);
+            let agent = available_for_both.saturating_sub(model);
+            (model, agent)
+        }
+    }
 }
 
 #[derive(Default)]
