@@ -1,6 +1,6 @@
 use super::{
-    build_agent_model_groups, empty_data_message, format_compact, format_cost_compact, truncate,
-    DailyStats, UsageDashboard, UsageState,
+    build_agent_model_groups, empty_data_message, format_compact, format_cost_compact,
+    format_int_commas, truncate, DailyStats, UsageDashboard, UsageState,
 };
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{date_at_position, HeatmapMetric, YearHeatmap};
@@ -389,7 +389,7 @@ fn render_heatmap_day_detail(
 }
 
 fn selected_day_sections(area: Rect) -> std::rc::Rc<[Rect]> {
-    if area.width >= 76 && area.height >= 6 {
+    if area.width >= 76 && area.height >= 5 {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(34), Constraint::Min(32)])
@@ -413,7 +413,7 @@ fn render_selected_day_overview(
         return;
     }
 
-    let lines = if area.width >= 34 && area.height >= 6 {
+    let lines = if area.width >= 34 && area.height >= 5 {
         vec![
             Line::from(vec![
                 Span::styled(
@@ -429,58 +429,54 @@ fn render_selected_day_overview(
             Line::from(vec![
                 Span::styled("Cost ", Style::default().fg(theme.dim)),
                 Span::styled(
-                    format_cost_compact(day.cost_usd),
+                    format!("{:>8}", format_cost_compact(day.cost_usd)),
                     Style::default().fg(Color::Rgb(250, 204, 21)),
                 ),
                 Span::raw("  "),
                 Span::styled("Tokens ", Style::default().fg(theme.dim)),
                 Span::styled(
-                    format_compact(day.total_tokens),
+                    format!("{:>8}", format_compact(day.total_tokens)),
                     Style::default().fg(Color::Rgb(52, 211, 153)),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("I ", Style::default().fg(theme.dim)),
+                Span::styled("In   ", Style::default().fg(theme.dim)),
                 Span::styled(
-                    format_compact(day.input_tokens),
+                    format!("{:>8}", format_compact(day.input_tokens)),
                     Style::default().fg(Color::Rgb(96, 165, 250)),
                 ),
                 Span::raw("  "),
-                Span::styled("O ", Style::default().fg(theme.dim)),
+                Span::styled("Out    ", Style::default().fg(theme.dim)),
                 Span::styled(
-                    format_compact(day.output_tokens),
+                    format!("{:>8}", format_compact(day.output_tokens)),
                     Style::default().fg(Color::Rgb(167, 139, 250)),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("CR ", Style::default().fg(theme.dim)),
+                Span::styled("CR   ", Style::default().fg(theme.dim)),
                 Span::styled(
-                    format_compact(day.cache_read_tokens),
+                    format!("{:>8}", format_compact(day.cache_read_tokens)),
                     Style::default().fg(Color::Rgb(251, 146, 60)),
                 ),
                 Span::raw("  "),
-                Span::styled("CW ", Style::default().fg(theme.dim)),
+                Span::styled("CW     ", Style::default().fg(theme.dim)),
                 Span::styled(
-                    format_compact(day.cache_write_tokens),
+                    format!("{:>8}", format_compact(day.cache_write_tokens)),
                     Style::default().fg(Color::Rgb(251, 146, 60)),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Reason ", Style::default().fg(theme.dim)),
-                Span::styled(
-                    format_compact(day.reasoning_tokens),
-                    Style::default().fg(theme.opencode),
-                ),
-                Span::raw("  "),
                 Span::styled("Msgs ", Style::default().fg(theme.dim)),
                 Span::styled(
-                    format_compact(day.messages),
+                    format!("{:>8}", format_int_commas(day.messages)),
                     Style::default().fg(Color::Rgb(96, 165, 250)),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("Sess ", Style::default().fg(theme.dim)),
-                Span::styled(format_compact(day.sessions), Style::default().fg(theme.fg)),
+                Span::raw("  "),
+                Span::styled("Sess   ", Style::default().fg(theme.dim)),
+                Span::styled(
+                    format!("{:>8}", format_int_commas(day.sessions)),
+                    Style::default().fg(theme.fg),
+                ),
             ]),
         ]
     } else {
@@ -509,13 +505,13 @@ fn render_selected_day_overview(
                     Style::default().fg(Color::Rgb(52, 211, 153)),
                 ),
                 Span::raw("  "),
-                Span::styled("I ", Style::default().fg(theme.dim)),
+                Span::styled("In ", Style::default().fg(theme.dim)),
                 Span::styled(
                     format_compact(day.input_tokens),
                     Style::default().fg(Color::Rgb(96, 165, 250)),
                 ),
                 Span::raw("  "),
-                Span::styled("O ", Style::default().fg(theme.dim)),
+                Span::styled("Out ", Style::default().fg(theme.dim)),
                 Span::styled(
                     format_compact(day.output_tokens),
                     Style::default().fg(Color::Rgb(167, 139, 250)),

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.7] - 2026-10-22
+
+### Added
+- **Antigravity CLI usage probe fallback**: when the Desktop Language Server is closed,
+  tokenpulse probes `agy -p /usage --output-format json` if `agy` (>= 1.4) is installed, accurately
+  retrieving both Gemini Models and Claude/GPT quota windows without invoking model turns (#84).
+- **TUI Ctrl+C quit support**: the dashboard now exits cleanly on `Ctrl+C` in addition
+  to `q` and `Esc` across all views, modals, and refresh states.
+
+### Changed
+- **Activity Selected Day layout alignment and polish**: formatted Selected Day metrics into a
+  dual-column grid with right-aligned numeric values (accommodating up to $9999.99 and 999.99 M),
+  renamed `I` / `O` labels to `In` / `Out`, formatted message and session counts as comma-separated
+  integers without decimals, and removed the unused `Reason` token metric.
+
+### Fixed
+- **Antigravity Cloud Code API fallback accuracy**: passing companion project ID
+  (`cloudaicompanionProject` resolved from `loadCodeAssist`) in `retrieveUserQuotaSummary`
+  request body prevents Google from omitting the Gemini quota group, falling back to an empty
+  project payload if resolution fails to avoid 403 errors. Uses standard client `User-Agent`
+  and enriches account email from cached OAuth identity token (#84).
+
 ## [0.6.6] - 2026-10-16
 
 ### Changed
