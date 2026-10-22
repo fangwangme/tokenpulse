@@ -11,7 +11,7 @@ Metric columns have fixed or breakpoint-controlled minimum widths. After subtrac
 ### 1. Max Content Bounding (Upper Limit)
 
 The `Agent` column displays comma-separated agent names formatted via `format_source_list`.
-- `max_agent_content`: the maximum character length of the formatted agent string among the rows to be displayed, with a minimum of 5 (`"Agent"`.len()) and a maximum ceiling of 44.
+- `max_agent_content`: the maximum character length of the formatted agent string among the rows to be displayed, with a minimum of 5 (`"Agent"`.len()) and a maximum ceiling of 40.
 - `max_model_content`: the maximum character length of model names among the rows to be displayed, clamped between 22 and 45.
 
 When screen width is generous (`available_for_both >= max_model_content + max_agent_content`):

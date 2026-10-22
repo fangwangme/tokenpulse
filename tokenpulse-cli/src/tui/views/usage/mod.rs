@@ -308,7 +308,7 @@ where
         max_model_content = max_model_content.max(model.chars().count());
     }
 
-    let ideal_agent = max_agent_content.clamp(5, 44);
+    let ideal_agent = max_agent_content.clamp(5, 40);
     let ideal_model = max_model_content.clamp(22, 45);
 
     if available_for_both >= ideal_model + ideal_agent {
