@@ -440,13 +440,13 @@ fn render_selected_day_overview(
                 ),
             ]),
             Line::from(vec![
-                Span::styled("I    ", Style::default().fg(theme.dim)),
+                Span::styled("In   ", Style::default().fg(theme.dim)),
                 Span::styled(
                     format!("{:>8}", format_compact(day.input_tokens)),
                     Style::default().fg(Color::Rgb(96, 165, 250)),
                 ),
                 Span::raw("  "),
-                Span::styled("O      ", Style::default().fg(theme.dim)),
+                Span::styled("Out    ", Style::default().fg(theme.dim)),
                 Span::styled(
                     format!("{:>8}", format_compact(day.output_tokens)),
                     Style::default().fg(Color::Rgb(167, 139, 250)),
@@ -505,13 +505,13 @@ fn render_selected_day_overview(
                     Style::default().fg(Color::Rgb(52, 211, 153)),
                 ),
                 Span::raw("  "),
-                Span::styled("I ", Style::default().fg(theme.dim)),
+                Span::styled("In ", Style::default().fg(theme.dim)),
                 Span::styled(
                     format_compact(day.input_tokens),
                     Style::default().fg(Color::Rgb(96, 165, 250)),
                 ),
                 Span::raw("  "),
-                Span::styled("O ", Style::default().fg(theme.dim)),
+                Span::styled("Out ", Style::default().fg(theme.dim)),
                 Span::styled(
                     format_compact(day.output_tokens),
                     Style::default().fg(Color::Rgb(167, 139, 250)),
