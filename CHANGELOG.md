@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.10] - 2026-10-23
+
+### Fixed
+- **TUI agent column width**: Cap Agent column width in Overview and Models tables to the actual maximum content length to eliminate runaway blank padding on wide displays, and prioritize compressing the Agent column down towards single-agent width under space constraints before compressing the Model column (#89).
+
 ## [0.6.9] - 2026-10-22
 
 ### Fixed
