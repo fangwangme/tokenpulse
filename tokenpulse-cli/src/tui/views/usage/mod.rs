@@ -12,8 +12,8 @@ use anyhow::Result;
 use chrono::{Duration, Local, NaiveDate};
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
-        MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+        MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -1748,7 +1748,8 @@ where
             let ev = event::read()?;
             if state.is_refreshing() {
                 if let Event::Key(key) = &ev {
-                    if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
+                    if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc || is_ctrl_c(key)
+                    {
                         break;
                     }
                 }
@@ -1756,6 +1757,10 @@ where
             }
             match ev {
                 Event::Key(key) => {
+                    if is_ctrl_c(&key) {
+                        break;
+                    }
+
                     if state.show_source_filter {
                         match key.code {
                             KeyCode::Esc | KeyCode::Char('s') => {
@@ -2297,6 +2302,11 @@ where
         DisableMouseCapture
     )?;
     Ok(())
+}
+
+fn is_ctrl_c(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 // ---------------------------------------------------------------------------
@@ -2849,7 +2859,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
         ("s", "toggle source filter"),
         ("r", "refresh raw project sessions"),
         ("?", "toggle this help overlay"),
-        ("q / Esc", "quit dashboard"),
+        ("q / Esc / Ctrl+C", "quit dashboard"),
     ];
 
     match state.page {
@@ -3487,5 +3497,29 @@ mod tests {
         // Date sort switches comparison metric back to Tokens
         state.toggle_sort(SortField::Date);
         assert_eq!(state.daily_metric, OverviewMetric::Tokens);
+    }
+
+    #[test]
+    fn test_is_ctrl_c() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(is_ctrl_c(&ctrl_c));
+
+        let ctrl_c_upper = KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL);
+        assert!(is_ctrl_c(&ctrl_c_upper));
+
+        let ctrl_shift_c = KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert!(is_ctrl_c(&ctrl_shift_c));
+
+        let plain_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(!is_ctrl_c(&plain_c));
+
+        let plain_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!is_ctrl_c(&plain_q));
+
+        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(!is_ctrl_c(&ctrl_r));
     }
 }

@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Antigravity CLI usage probe fallback**: when the Desktop Language Server is closed,
   tokenpulse probes `agy -p /usage --output-format json` if `agy` is installed, accurately
   retrieving both Gemini Models and Claude/GPT quota windows (#84).
+- **TUI Ctrl+C quit support**: the dashboard now exits cleanly on `Ctrl+C` in addition
+  to `q` and `Esc` across all views, modals, and refresh states.
 
 ### Fixed
 - **Antigravity Cloud Code API fallback accuracy**: passing companion project ID
