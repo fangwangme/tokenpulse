@@ -1107,6 +1107,218 @@ fn print_models_csv(summary: &tokenpulse_core::usage::UsageSummary) {
     }
 }
 
+pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
+    let target_date = match date_str {
+        Some(s) => NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+            .map_err(|e| anyhow!("Invalid date format '{}', expected YYYY-MM-DD: {}", s, e))?,
+        None => Local::now().date_naive(),
+    };
+
+    let store = UsageStore::new();
+    let mut rows = store.load_raw_models_for_date(target_date)?;
+
+    let mut source_totals: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    let mut canonical_totals: std::collections::HashMap<(String, String), i64> =
+        std::collections::HashMap::new();
+
+    for r in &rows {
+        *source_totals.entry(r.source.clone()).or_default() += r.total_tokens;
+        *canonical_totals
+            .entry((r.source.clone(), r.canonical_model_id.clone()))
+            .or_default() += r.total_tokens;
+    }
+
+    rows.sort_by(|a, b| {
+        let a_source_total = source_totals.get(&a.source).copied().unwrap_or(0);
+        let b_source_total = source_totals.get(&b.source).copied().unwrap_or(0);
+
+        b_source_total
+            .cmp(&a_source_total)
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| {
+                let a_canon_total = canonical_totals
+                    .get(&(a.source.clone(), a.canonical_model_id.clone()))
+                    .copied()
+                    .unwrap_or(0);
+                let b_canon_total = canonical_totals
+                    .get(&(b.source.clone(), b.canonical_model_id.clone()))
+                    .copied()
+                    .unwrap_or(0);
+                b_canon_total
+                    .cmp(&a_canon_total)
+                    .then_with(|| a.canonical_model_id.cmp(&b.canonical_model_id))
+            })
+            .then_with(|| b.total_tokens.cmp(&a.total_tokens))
+    });
+
+    let total_tokens: i64 = rows.iter().map(|r| r.total_tokens).sum();
+    let total_cost: f64 = rows.iter().map(|r| r.cost_usd).sum();
+    let total_messages: i64 = rows.iter().map(|r| r.message_count).sum();
+    let total_sessions: i64 = store
+        .count_distinct_sessions_for_date(target_date)
+        .unwrap_or(0);
+
+    if json {
+        let json_report = serde_json::json!({
+            "date": target_date.format("%Y-%m-%d").to_string(),
+            "total_tokens": total_tokens,
+            "total_cost_usd": (total_cost * 1_000_000.0).round() / 1_000_000.0,
+            "message_count": total_messages,
+            "session_count": total_sessions,
+            "models": rows.iter().map(|r| {
+                serde_json::json!({
+                    "source": r.source,
+                    "served_model": r.raw_model_id,
+                    "tier_model": r.tier_model_id,
+                    "canonical_model": r.canonical_model_id,
+                    "input_tokens": r.input_tokens,
+                    "output_tokens": r.output_tokens,
+                    "cache_read_tokens": r.cache_read_tokens,
+                    "cache_write_tokens": r.cache_write_tokens,
+                    "reasoning_tokens": r.reasoning_tokens,
+                    "total_tokens": r.total_tokens,
+                    "cost_usd": (r.cost_usd * 1_000_000.0).round() / 1_000_000.0,
+                    "message_count": r.message_count,
+                    "session_count": r.session_count,
+                })
+            }).collect::<Vec<_>>()
+        });
+        println!("{}", serde_json::to_string_pretty(&json_report)?);
+        return Ok(());
+    }
+
+    println!(
+        "\n=== Raw Model Usage (Date: {}) ===",
+        target_date.format("%Y-%m-%d")
+    );
+    if rows.is_empty() {
+        println!(
+            "No usage records found for {}.\n",
+            target_date.format("%Y-%m-%d")
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Summary: {} models | {} tokens | ${:.2} | {} msgs | {} sessions\n",
+        rows.len(),
+        format_int(total_tokens),
+        total_cost,
+        format_int(total_messages),
+        format_int(total_sessions)
+    );
+
+    // Compute dynamic column widths
+    let mut source_w = "Source".len();
+    let mut raw_model_w = "Raw / Served Model".len();
+    let mut tier_w = "Tier / Alias".len();
+    let mut canonical_w = "Canonical".len();
+    let mut tokens_w = "Total Tkns".len();
+    let mut cost_w = "Cost USD".len();
+    let mut calls_w = "Calls".len();
+    let mut breakdown_w = "Breakdown (In / Out / CR / R)".len();
+
+    let mut formatted_rows = Vec::new();
+
+    for r in &rows {
+        let source = r.source.clone();
+        let raw_model = r.raw_model_id.clone();
+        let tier = if r.tier_model_id != r.raw_model_id {
+            r.tier_model_id.clone()
+        } else {
+            "-".to_string()
+        };
+        let canonical = r.canonical_model_id.clone();
+        let tokens_str = format_int(r.total_tokens);
+        let cost_str = format!("${:.2}", r.cost_usd);
+        let calls_str = format_int(r.message_count);
+        let breakdown_str = format!(
+            "{} / {} / {} / {}",
+            format_compact_tokens(r.input_tokens),
+            format_compact_tokens(r.output_tokens),
+            format_compact_tokens(r.cache_read_tokens),
+            format_compact_tokens(r.reasoning_tokens)
+        );
+
+        source_w = source_w.max(source.len());
+        raw_model_w = raw_model_w.max(raw_model.len());
+        tier_w = tier_w.max(tier.len());
+        canonical_w = canonical_w.max(canonical.len());
+        tokens_w = tokens_w.max(tokens_str.len());
+        cost_w = cost_w.max(cost_str.len());
+        calls_w = calls_w.max(calls_str.len());
+        breakdown_w = breakdown_w.max(breakdown_str.len());
+
+        formatted_rows.push((
+            source,
+            raw_model,
+            tier,
+            canonical,
+            tokens_str,
+            cost_str,
+            calls_str,
+            breakdown_str,
+        ));
+    }
+
+    let border = |left: char, mid: char, right: char| {
+        format!(
+            "{left}─{}─{mid}─{}─{mid}─{}─{mid}─{}─{mid}─{}─{mid}─{}─{mid}─{}─{mid}─{}─{right}",
+            "─".repeat(source_w),
+            "─".repeat(raw_model_w),
+            "─".repeat(tier_w),
+            "─".repeat(canonical_w),
+            "─".repeat(tokens_w),
+            "─".repeat(cost_w),
+            "─".repeat(calls_w),
+            "─".repeat(breakdown_w)
+        )
+    };
+    let top_border = border('┌', '┬', '┐');
+    let mid_border = border('├', '┼', '┤');
+    let bot_border = border('└', '┴', '┘');
+
+    println!("{}", top_border);
+    println!(
+        "│ {:<source_w$} │ {:<raw_model_w$} │ {:<tier_w$} │ {:<canonical_w$} │ {:>tokens_w$} │ {:>cost_w$} │ {:>calls_w$} │ {:<breakdown_w$} │",
+        "Source", "Raw / Served Model", "Tier / Alias", "Canonical", "Total Tkns", "Cost USD", "Calls", "Breakdown (In / Out / CR / R)"
+    );
+    println!("{}", mid_border);
+
+    let mut last_source: Option<String> = None;
+    for (source, raw_model, tier, canonical, tokens_str, cost_str, calls_str, breakdown_str) in
+        formatted_rows
+    {
+        if let Some(prev) = &last_source {
+            if prev != &source {
+                println!("{}", mid_border);
+            }
+        }
+        last_source = Some(source.clone());
+
+        println!(
+            "│ {:<source_w$} │ {:<raw_model_w$} │ {:<tier_w$} │ {:<canonical_w$} │ {:>tokens_w$} │ {:>cost_w$} │ {:>calls_w$} │ {:<breakdown_w$} │",
+            source, raw_model, tier, canonical, tokens_str, cost_str, calls_str, breakdown_str
+        );
+    }
+    println!("{}", bot_border);
+
+    Ok(())
+}
+
+fn format_compact_tokens(val: i64) -> String {
+    if val >= 1_000_000_000 {
+        format!("{:.1}B", val as f64 / 1_000_000_000.0)
+    } else if val >= 1_000_000 {
+        format!("{:.1}M", val as f64 / 1_000_000.0)
+    } else if val >= 1_000 {
+        format!("{:.1}K", val as f64 / 1_000.0)
+    } else {
+        val.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

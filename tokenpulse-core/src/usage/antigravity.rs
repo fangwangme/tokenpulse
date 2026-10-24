@@ -12,10 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-/// Bumped from `antigravity-v5` when model ids started resolving enum-first
-/// with the raw identity stored alongside; the bump re-derives every row the
-/// local conversation databases still hold.
-const PARSER_VERSION: &str = "antigravity-v6";
+/// Bumped from `antigravity-v6` to persist `served_model` directly onto the usage ledger.
+const PARSER_VERSION: &str = "antigravity-v7";
 const MODEL_ALIAS_HISTORY_VERSION: u32 = 1;
 const MODEL_ALIAS_HISTORY_FILE_NAME: &str = "model-aliases.json";
 const ANTIGRAVITY_LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
@@ -119,7 +117,7 @@ impl SessionParser for AntigravitySessionParser {
             let mut query = String::from(
                 "SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
                         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                        pricing_day
+                        pricing_day, served_model
                  FROM session_usage"
             );
 
@@ -160,6 +158,7 @@ impl SessionParser for AntigravitySessionParser {
                     row.get::<_, i64>(9)?,
                     row.get::<_, i64>(10)?,
                     row.get::<_, String>(11)?,
+                    row.get::<_, Option<String>>(12)?,
                 ))
             };
 
@@ -179,6 +178,7 @@ impl SessionParser for AntigravitySessionParser {
                     cache_write,
                     reasoning,
                     pricing_day,
+                    served_model,
                 ) = row?;
 
                 let tokens = TokenBreakdown {
@@ -200,6 +200,7 @@ impl SessionParser for AntigravitySessionParser {
                 )
                 .with_client_detail(client)
                 .with_pricing_day(pricing_day)
+                .with_served_model(served_model)
                 // Stamp the parser that produced this ledger row, like every
                 // other provider. Forwarding the cache row's own version instead
                 // left sessions that predate a bump permanently "stale", so the

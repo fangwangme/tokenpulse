@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.11] - 2026-10-24
+
+### Added
+- **CLI raw model usage inspection**: Added `--raw` flag and `tokenpulse usage --raw` command with optional `--date <YYYY-MM-DD>` and `--json` output. Displays un-normalized model usage (including tier suffixes and model routing variants) without altering canonical model grouping in the TUI or daily aggregations (#91).
+
 ## [0.6.10] - 2026-10-23
 
 ### Fixed
