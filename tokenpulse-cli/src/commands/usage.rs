@@ -1115,7 +1115,42 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
     };
 
     let store = UsageStore::new();
-    let rows = store.load_raw_models_for_date(target_date)?;
+    let mut rows = store.load_raw_models_for_date(target_date)?;
+
+    let mut source_totals: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    let mut canonical_totals: std::collections::HashMap<(String, String), i64> =
+        std::collections::HashMap::new();
+
+    for r in &rows {
+        *source_totals.entry(r.source.clone()).or_default() += r.total_tokens;
+        *canonical_totals
+            .entry((r.source.clone(), r.canonical_model_id.clone()))
+            .or_default() += r.total_tokens;
+    }
+
+    rows.sort_by(|a, b| {
+        let a_source_total = source_totals.get(&a.source).copied().unwrap_or(0);
+        let b_source_total = source_totals.get(&b.source).copied().unwrap_or(0);
+
+        b_source_total
+            .cmp(&a_source_total)
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| {
+                let a_canon_total = canonical_totals
+                    .get(&(a.source.clone(), a.canonical_model_id.clone()))
+                    .copied()
+                    .unwrap_or(0);
+                let b_canon_total = canonical_totals
+                    .get(&(b.source.clone(), b.canonical_model_id.clone()))
+                    .copied()
+                    .unwrap_or(0);
+                b_canon_total
+                    .cmp(&a_canon_total)
+                    .then_with(|| a.canonical_model_id.cmp(&b.canonical_model_id))
+            })
+            .then_with(|| b.total_tokens.cmp(&a.total_tokens))
+    });
 
     let total_tokens: i64 = rows.iter().map(|r| r.total_tokens).sum();
     let total_cost: f64 = rows.iter().map(|r| r.cost_usd).sum();
@@ -1266,9 +1301,17 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
     );
     println!("{}", mid_border);
 
+    let mut last_source: Option<String> = None;
     for (source, raw_model, tier, canonical, tokens_str, cost_str, calls_str, breakdown_str) in
         formatted_rows
     {
+        if let Some(prev) = &last_source {
+            if prev != &source {
+                println!("{}", mid_border);
+            }
+        }
+        last_source = Some(source.clone());
+
         println!(
             "│ {:<source_w$} │ {:<raw_model_w$} │ {:<tier_w$} │ {:<canonical_w$} │ {:>tokens_w$} │ {:>cost_w$} │ {:>calls_w$} │ {:<breakdown_w$} │",
             source, raw_model, tier, canonical, tokens_str, cost_str, calls_str, breakdown_str
