@@ -1132,7 +1132,8 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
             "models": rows.iter().map(|r| {
                 serde_json::json!({
                     "source": r.source,
-                    "raw_model": r.model_id,
+                    "served_model": r.raw_model_id,
+                    "tier_model": r.tier_model_id,
                     "canonical_model": r.canonical_model_id,
                     "input_tokens": r.input_tokens,
                     "output_tokens": r.output_tokens,
@@ -1163,7 +1164,7 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
     }
 
     println!(
-        "Summary: {} raw models | {} tokens | ${:.4} | {} msgs | {} sessions\n",
+        "Summary: {} models | {} tokens | ${:.4} | {} msgs | {} sessions\n",
         rows.len(),
         format_int(total_tokens),
         total_cost,
@@ -1173,7 +1174,8 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
 
     // Compute dynamic column widths
     let mut source_w = "Source".len();
-    let mut raw_model_w = "Raw Model".len();
+    let mut raw_model_w = "Raw / Served Model".len();
+    let mut tier_w = "Tier / Alias".len();
     let mut canonical_w = "Canonical".len();
     let mut tokens_w = "Total Tkns".len();
     let mut cost_w = "Cost USD".len();
@@ -1184,7 +1186,12 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
 
     for r in &rows {
         let source = r.source.clone();
-        let raw_model = r.model_id.clone();
+        let raw_model = r.raw_model_id.clone();
+        let tier = if r.tier_model_id != r.raw_model_id {
+            r.tier_model_id.clone()
+        } else {
+            "-".to_string()
+        };
         let canonical = r.canonical_model_id.clone();
         let tokens_str = format_int(r.total_tokens);
         let cost_str = format!("${:.4}", r.cost_usd);
@@ -1199,6 +1206,7 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
 
         source_w = source_w.max(source.len());
         raw_model_w = raw_model_w.max(raw_model.len());
+        tier_w = tier_w.max(tier.len());
         canonical_w = canonical_w.max(canonical.len());
         tokens_w = tokens_w.max(tokens_str.len());
         cost_w = cost_w.max(cost_str.len());
@@ -1208,6 +1216,7 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
         formatted_rows.push((
             source,
             raw_model,
+            tier,
             canonical,
             tokens_str,
             cost_str,
@@ -1217,9 +1226,10 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
     }
 
     let top_border = format!(
-        "┌─{}─┬─{}─┬─{}─┬─{}─┬─{}─┬─{}─┬─{}─┐",
+        "┌─{}─┬─{}─┬─{}─┬─{}─┬─{}─┬─{}─┬─{}─┬─{}─┐",
         "─".repeat(source_w),
         "─".repeat(raw_model_w),
+        "─".repeat(tier_w),
         "─".repeat(canonical_w),
         "─".repeat(tokens_w),
         "─".repeat(cost_w),
@@ -1227,9 +1237,10 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
         "─".repeat(breakdown_w)
     );
     let mid_border = format!(
-        "├─{}─┼─{}─┼─{}─┼─{}─┼─{}─┼─{}─┼─{}─┤",
+        "├─{}─┼─{}─┼─{}─┼─{}─┼─{}─┼─{}─┼─{}─┼─{}─┤",
         "─".repeat(source_w),
         "─".repeat(raw_model_w),
+        "─".repeat(tier_w),
         "─".repeat(canonical_w),
         "─".repeat(tokens_w),
         "─".repeat(cost_w),
@@ -1237,9 +1248,10 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
         "─".repeat(breakdown_w)
     );
     let bot_border = format!(
-        "└─{}─┴─{}─┴─{}─┴─{}─┴─{}─┴─{}─┴─{}─┘",
+        "└─{}─┴─{}─┴─{}─┴─{}─┴─{}─┴─{}─┴─{}─┴─{}─┘",
         "─".repeat(source_w),
         "─".repeat(raw_model_w),
+        "─".repeat(tier_w),
         "─".repeat(canonical_w),
         "─".repeat(tokens_w),
         "─".repeat(cost_w),
@@ -1249,21 +1261,21 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
 
     println!("{}", top_border);
     println!(
-        "│ {:<source_w$} │ {:<raw_model_w$} │ {:<canonical_w$} │ {:>tokens_w$} │ {:>cost_w$} │ {:>calls_w$} │ {:<breakdown_w$} │",
-        "Source", "Raw Model", "Canonical", "Total Tkns", "Cost USD", "Calls", "Breakdown (In / Out / CR / R)"
+        "│ {:<source_w$} │ {:<raw_model_w$} │ {:<tier_w$} │ {:<canonical_w$} │ {:>tokens_w$} │ {:>cost_w$} │ {:>calls_w$} │ {:<breakdown_w$} │",
+        "Source", "Raw / Served Model", "Tier / Alias", "Canonical", "Total Tkns", "Cost USD", "Calls", "Breakdown (In / Out / CR / R)"
     );
     println!("{}", mid_border);
 
-    for (source, raw_model, canonical, tokens_str, cost_str, calls_str, breakdown_str) in
+    for (source, raw_model, tier, canonical, tokens_str, cost_str, calls_str, breakdown_str) in
         formatted_rows
     {
         println!(
-            "│ {:<source_w$} │ {:<raw_model_w$} │ {:<canonical_w$} │ {:>tokens_w$} │ {:>cost_w$} │ {:>calls_w$} │ {:<breakdown_w$} │",
-            source, raw_model, canonical, tokens_str, cost_str, calls_str, breakdown_str
+            "│ {:<source_w$} │ {:<raw_model_w$} │ {:<tier_w$} │ {:<canonical_w$} │ {:>tokens_w$} │ {:>cost_w$} │ {:>calls_w$} │ {:<breakdown_w$} │",
+            source, raw_model, tier, canonical, tokens_str, cost_str, calls_str, breakdown_str
         );
     }
     println!("{}", bot_border);
-    println!("* 注: Raw Model = 未归一化原始名, Canonical = 计价归一名, CR = Cache Read, R = Reasoning\n");
+    println!("* 注: Raw / Served Model = 底层物理服务名, Tier / Alias = 产品档位/别名, Canonical = 计价归一名\n");
 
     Ok(())
 }

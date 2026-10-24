@@ -99,6 +99,8 @@ pub struct UnifiedMessage {
     pub cost: f64,
     pub pricing_day: String,
     pub parser_version: String,
+    #[serde(default)]
+    pub served_model: Option<String>,
 }
 
 impl UnifiedMessage {
@@ -126,7 +128,15 @@ impl UnifiedMessage {
             cost: 0.0,
             pricing_day: date,
             parser_version: "v1".to_string(),
+            served_model: None,
         }
+    }
+
+    pub fn with_served_model(mut self, served_model: Option<String>) -> Self {
+        self.served_model = served_model
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        self
     }
 
     pub fn with_client_detail(mut self, client_detail: impl Into<String>) -> Self {

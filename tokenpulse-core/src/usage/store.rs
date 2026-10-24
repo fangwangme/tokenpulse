@@ -55,7 +55,8 @@ pub struct DailyUsageRow {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawModelUsageRow {
     pub source: String,
-    pub model_id: String,
+    pub raw_model_id: String,
+    pub tier_model_id: String,
     pub canonical_model_id: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -269,12 +270,12 @@ impl UsageStore {
                     source, client, provider_id, model_id, canonical_model_id, session_id, message_key,
                     timestamp_ms, date, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                    total_tokens, cost_usd, pricing_day, parser_version
+                    total_tokens, cost_usd, pricing_day, parser_version, served_model
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11,
                     ?12, ?13, ?14,
-                    ?15, ?16, ?17, ?18
+                    ?15, ?16, ?17, ?18, ?19
                 )
                 ON CONFLICT(source, client, message_key) DO UPDATE SET
                     provider_id = excluded.provider_id,
@@ -291,7 +292,8 @@ impl UsageStore {
                     total_tokens = excluded.total_tokens,
                     cost_usd = excluded.cost_usd,
                     pricing_day = excluded.pricing_day,
-                    parser_version = excluded.parser_version
+                    parser_version = excluded.parser_version,
+                    served_model = excluded.served_model
                 "#,
                 params![
                     message.client,
@@ -312,6 +314,7 @@ impl UsageStore {
                     cost,
                     message.pricing_day,
                     message.parser_version,
+                    message.served_model.as_deref(),
                 ],
             )?;
 
@@ -428,12 +431,12 @@ impl UsageStore {
                     source, client, provider_id, model_id, canonical_model_id, session_id, message_key,
                     timestamp_ms, date, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                    total_tokens, cost_usd, pricing_day, parser_version
+                    total_tokens, cost_usd, pricing_day, parser_version, served_model
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11,
                     ?12, ?13, ?14,
-                    ?15, ?16, ?17, ?18
+                    ?15, ?16, ?17, ?18, ?19
                 )
                 ON CONFLICT(source, client, message_key) DO UPDATE SET
                     provider_id = excluded.provider_id,
@@ -450,7 +453,8 @@ impl UsageStore {
                     total_tokens = excluded.total_tokens,
                     cost_usd = excluded.cost_usd,
                     pricing_day = excluded.pricing_day,
-                    parser_version = excluded.parser_version
+                    parser_version = excluded.parser_version,
+                    served_model = excluded.served_model
                 "#,
                 params![
                     message.client,
@@ -471,6 +475,7 @@ impl UsageStore {
                     cost,
                     message.pricing_day,
                     message.parser_version,
+                    message.served_model.as_deref(),
                 ],
             )?;
 
@@ -555,12 +560,12 @@ impl UsageStore {
                     source, client, provider_id, model_id, canonical_model_id, session_id, message_key,
                     timestamp_ms, date, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                    total_tokens, cost_usd, pricing_day, parser_version
+                    total_tokens, cost_usd, pricing_day, parser_version, served_model
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11,
                     ?12, ?13, ?14,
-                    ?15, ?16, ?17, ?18
+                    ?15, ?16, ?17, ?18, ?19
                 )
                 ON CONFLICT(source, client, message_key) DO UPDATE SET
                     provider_id = excluded.provider_id,
@@ -577,7 +582,8 @@ impl UsageStore {
                     total_tokens = excluded.total_tokens,
                     cost_usd = excluded.cost_usd,
                     pricing_day = excluded.pricing_day,
-                    parser_version = excluded.parser_version
+                    parser_version = excluded.parser_version,
+                    served_model = excluded.served_model
                 "#,
                 params![
                     message.client,
@@ -598,6 +604,7 @@ impl UsageStore {
                     cost,
                     message.pricing_day,
                     message.parser_version,
+                    message.served_model.as_deref(),
                 ],
             )?;
 
@@ -775,7 +782,8 @@ impl UsageStore {
                    reasoning_tokens,
                    cost_usd,
                    pricing_day,
-                   parser_version
+                   parser_version,
+                   served_model
             FROM usage_messages
             WHERE 1=1
             "#,
@@ -880,7 +888,8 @@ impl UsageStore {
             r#"
             SELECT
                 {CANONICAL_SOURCE_SQL} AS source,
-                model_id,
+                COALESCE(NULLIF(served_model, ''), model_id) AS raw_model_id,
+                model_id AS tier_model_id,
                 MAX(canonical_model_id) AS canonical_model_id,
                 SUM(input_tokens) AS input_tokens,
                 SUM(output_tokens) AS output_tokens,
@@ -893,7 +902,7 @@ impl UsageStore {
                 COUNT(DISTINCT session_id) AS session_count
             FROM usage_messages
             WHERE date = ?1
-            GROUP BY {CANONICAL_SOURCE_SQL}, model_id
+            GROUP BY {CANONICAL_SOURCE_SQL}, COALESCE(NULLIF(served_model, ''), model_id), model_id
             ORDER BY total_tokens DESC, cost_usd DESC
             "#
         );
@@ -902,17 +911,18 @@ impl UsageStore {
         let rows = stmt.query_map(params![date_str], |row| {
             Ok(RawModelUsageRow {
                 source: row.get(0)?,
-                model_id: row.get(1)?,
-                canonical_model_id: row.get(2)?,
-                input_tokens: row.get(3)?,
-                output_tokens: row.get(4)?,
-                cache_read_tokens: row.get(5)?,
-                cache_write_tokens: row.get(6)?,
-                reasoning_tokens: row.get(7)?,
-                total_tokens: row.get(8)?,
-                cost_usd: row.get(9)?,
-                message_count: row.get(10)?,
-                session_count: row.get(11)?,
+                raw_model_id: row.get(1)?,
+                tier_model_id: row.get(2)?,
+                canonical_model_id: row.get(3)?,
+                input_tokens: row.get(4)?,
+                output_tokens: row.get(5)?,
+                cache_read_tokens: row.get(6)?,
+                cache_write_tokens: row.get(7)?,
+                reasoning_tokens: row.get(8)?,
+                total_tokens: row.get(9)?,
+                cost_usd: row.get(10)?,
+                message_count: row.get(11)?,
+                session_count: row.get(12)?,
             })
         })?;
 
@@ -1332,6 +1342,7 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnifiedMessage> {
         cost: row.get(13)?,
         pricing_day: row.get(14)?,
         parser_version: row.get(15)?,
+        served_model: row.get(16).ok(),
     })
 }
 
@@ -1665,6 +1676,44 @@ fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()
     }
 
     conn.execute_batch(USAGE_SCHEMA_SQL)?;
+
+    let has_served_model: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('usage_messages') WHERE name = 'served_model'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        )
+        .unwrap_or(false);
+    if !has_served_model {
+        let _ = conn.execute(
+            "ALTER TABLE usage_messages ADD COLUMN served_model TEXT;",
+            [],
+        );
+    }
+
+    let cache_db_path = dirs::home_dir()
+        .map(|h| h.join(".local/share/tokenpulse/antigravity-cache/cache.db"))
+        .filter(|p| p.exists());
+    if let Some(cache_path) = cache_db_path {
+        let escaped = cache_path.to_string_lossy().replace('\'', "''");
+        let _ = conn.execute_batch(&format!(
+            r#"
+            ATTACH DATABASE '{escaped}' AS ag_cache;
+            UPDATE usage_messages
+            SET served_model = (
+                SELECT su.served_model
+                FROM ag_cache.session_usage su
+                WHERE su.session_id = usage_messages.session_id
+                  AND su.timestamp = usage_messages.timestamp_ms
+                LIMIT 1
+            )
+            WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop', 'antigravity-ide')
+              AND (served_model IS NULL OR served_model = '');
+            DETACH DATABASE ag_cache;
+            "#
+        ));
+    }
+
     refresh_canonical_model_ids(conn)?;
 
     initialized_paths()
@@ -1774,6 +1823,7 @@ CREATE TABLE IF NOT EXISTS usage_messages (
     cost_usd REAL NOT NULL,
     pricing_day TEXT NOT NULL,
     parser_version TEXT NOT NULL,
+    served_model TEXT,
     PRIMARY KEY (source, client, message_key)
 );
 CREATE INDEX IF NOT EXISTS idx_usage_messages_date ON usage_messages(date);
@@ -2532,9 +2582,11 @@ mod tests {
         let date = "2026-10-24";
         let mut msg1 = sample_message(date, "msg-1");
         msg1.model_id = "gemini-3-8-flash-medium".to_string();
+        msg1.served_model = Some("gemini-3.8-flash-n".to_string());
         msg1.tokens.input = 1000;
         let mut msg2 = sample_message(date, "msg-2");
         msg2.model_id = "gemini-3-8-flash-high".to_string();
+        msg2.served_model = Some("gemini-3.8-flash-n".to_string());
         msg2.tokens.input = 2000;
         store
             .replace_source_messages("antigravity", None, &[msg1, msg2], false)
@@ -2543,9 +2595,11 @@ mod tests {
         let target_date = NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap();
         let raw_models = store.load_raw_models_for_date(target_date).unwrap();
         assert_eq!(raw_models.len(), 2);
-        assert_eq!(raw_models[0].model_id, "gemini-3-8-flash-high");
+        assert_eq!(raw_models[0].raw_model_id, "gemini-3.8-flash-n");
+        assert_eq!(raw_models[0].tier_model_id, "gemini-3-8-flash-high");
         assert_eq!(raw_models[0].canonical_model_id, "gemini-3-8-flash");
-        assert_eq!(raw_models[1].model_id, "gemini-3-8-flash-medium");
+        assert_eq!(raw_models[1].raw_model_id, "gemini-3.8-flash-n");
+        assert_eq!(raw_models[1].tier_model_id, "gemini-3-8-flash-medium");
         assert_eq!(raw_models[1].canonical_model_id, "gemini-3-8-flash");
     }
 }
