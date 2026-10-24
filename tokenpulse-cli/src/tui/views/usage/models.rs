@@ -442,3 +442,25 @@ pub fn model_share_percent(model: &ModelSummary, total: f64, sort_field: SortFie
     };
     share_percent(value, total)
 }
+
+pub fn format_cache_hit_pct(cache_read_tokens: i64, total_tokens: i64) -> String {
+    if total_tokens <= 0 {
+        return "0.00%".to_string();
+    }
+    let hit_rate = (cache_read_tokens.max(0) as f64 / total_tokens as f64) * 100.0;
+    format!("{:.2}%", hit_rate.clamp(0.0, 100.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_cache_hit_pct() {
+        assert_eq!(format_cache_hit_pct(0, 0), "0.00%");
+        assert_eq!(format_cache_hit_pct(0, 1000), "0.00%");
+        assert_eq!(format_cache_hit_pct(9999, 10000), "99.99%");
+        assert_eq!(format_cache_hit_pct(10000, 10000), "100.00%");
+        assert_eq!(format_cache_hit_pct(500, 1000), "50.00%");
+    }
+}
