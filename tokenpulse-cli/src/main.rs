@@ -38,6 +38,14 @@ struct Cli {
     #[clap(long)]
     log: bool,
 
+    /// Show un-normalized raw model usage for a given date (defaults to today)
+    #[clap(long)]
+    raw: bool,
+
+    /// Specific date to query with --raw (YYYY-MM-DD, defaults to today)
+    #[clap(long)]
+    date: Option<String>,
+
     #[clap(subcommand)]
     command: Option<Commands>,
 }
@@ -59,6 +67,20 @@ enum Commands {
     Config {
         #[clap(subcommand)]
         action: ConfigAction,
+    },
+    /// Inspect un-normalized raw model usage or run usage reports
+    Usage {
+        /// Show un-normalized raw model usage for a given date (defaults to today)
+        #[clap(long)]
+        raw: bool,
+
+        /// Specific date to query with --raw (YYYY-MM-DD, defaults to today)
+        #[clap(long)]
+        date: Option<String>,
+
+        /// Emit JSON output instead of text
+        #[clap(long)]
+        json: bool,
     },
 }
 
@@ -137,7 +159,29 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Config { action }) => {
             commands::config::run(action)?;
         }
+        Some(Commands::Usage { raw, date, json }) => {
+            if raw {
+                commands::usage::run_raw(date, json)?;
+            } else {
+                check_config_exists();
+                commands::usage::run(
+                    None,
+                    None,
+                    false,
+                    false,
+                    resolve_tui_mode(false)?,
+                    json,
+                    None,
+                    false,
+                )
+                .await?;
+            }
+        }
         None => {
+            if cli.raw {
+                commands::usage::run_raw(cli.date, cli.json)?;
+                return Ok(());
+            }
             check_config_exists();
             commands::usage::run(
                 cli.since,

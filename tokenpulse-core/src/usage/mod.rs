@@ -16,7 +16,7 @@ pub use copilot::CopilotSessionParser;
 pub use gemini::GeminiSessionParser;
 pub use opencode::OpenCodeSessionParser;
 pub use pi::PiSessionParser;
-pub use store::{DailyUsageRow, DateRange, UsageStore};
+pub use store::{DailyUsageRow, DateRange, RawModelUsageRow, UsageStore};
 pub use utils::{detect_provider_from_model, normalize_model_name};
 
 use chrono::{Datelike, Days, NaiveDate};

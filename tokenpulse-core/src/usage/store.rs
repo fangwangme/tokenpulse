@@ -52,6 +52,22 @@ pub struct DailyUsageRow {
     pub session_count: i64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RawModelUsageRow {
+    pub source: String,
+    pub model_id: String,
+    pub canonical_model_id: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub reasoning_tokens: i64,
+    pub total_tokens: i64,
+    pub cost_usd: f64,
+    pub message_count: i64,
+    pub session_count: i64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DateRange {
     pub start: NaiveDate,
@@ -853,6 +869,52 @@ impl UsageStore {
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params), row_to_daily)?;
+
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn load_raw_models_for_date(&self, date: NaiveDate) -> Result<Vec<RawModelUsageRow>> {
+        let conn = self.open()?;
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let sql = format!(
+            r#"
+            SELECT
+                {CANONICAL_SOURCE_SQL} AS source,
+                model_id,
+                MAX(canonical_model_id) AS canonical_model_id,
+                SUM(input_tokens) AS input_tokens,
+                SUM(output_tokens) AS output_tokens,
+                SUM(cache_read_tokens) AS cache_read_tokens,
+                SUM(cache_write_tokens) AS cache_write_tokens,
+                SUM(reasoning_tokens) AS reasoning_tokens,
+                SUM(total_tokens) AS total_tokens,
+                SUM(cost_usd) AS cost_usd,
+                COUNT(*) AS message_count,
+                COUNT(DISTINCT session_id) AS session_count
+            FROM usage_messages
+            WHERE date = ?1
+            GROUP BY {CANONICAL_SOURCE_SQL}, model_id
+            ORDER BY total_tokens DESC, cost_usd DESC
+            "#
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![date_str], |row| {
+            Ok(RawModelUsageRow {
+                source: row.get(0)?,
+                model_id: row.get(1)?,
+                canonical_model_id: row.get(2)?,
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                cache_read_tokens: row.get(5)?,
+                cache_write_tokens: row.get(6)?,
+                reasoning_tokens: row.get(7)?,
+                total_tokens: row.get(8)?,
+                cost_usd: row.get(9)?,
+                message_count: row.get(10)?,
+                session_count: row.get(11)?,
+            })
+        })?;
 
         Ok(rows.flatten().collect())
     }
