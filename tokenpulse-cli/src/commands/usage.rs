@@ -1318,7 +1318,6 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
         );
     }
     println!("{}", bot_border);
-    println!("* 注: Raw / Served Model = 底层物理服务名, Tier / Alias = 产品档位/别名, Canonical = 计价归一名\n");
 
     Ok(())
 }
