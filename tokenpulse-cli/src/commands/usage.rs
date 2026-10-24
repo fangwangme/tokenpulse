@@ -1161,7 +1161,7 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
         let json_report = serde_json::json!({
             "date": target_date.format("%Y-%m-%d").to_string(),
             "total_tokens": total_tokens,
-            "total_cost_usd": (total_cost * 10000.0).round() / 10000.0,
+            "total_cost_usd": (total_cost * 100.0).round() / 100.0,
             "message_count": total_messages,
             "session_count": total_sessions,
             "models": rows.iter().map(|r| {
@@ -1176,7 +1176,7 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
                     "cache_write_tokens": r.cache_write_tokens,
                     "reasoning_tokens": r.reasoning_tokens,
                     "total_tokens": r.total_tokens,
-                    "cost_usd": (r.cost_usd * 10000.0).round() / 10000.0,
+                    "cost_usd": (r.cost_usd * 100.0).round() / 100.0,
                     "message_count": r.message_count,
                     "session_count": r.session_count,
                 })
@@ -1199,7 +1199,7 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
     }
 
     println!(
-        "Summary: {} models | {} tokens | ${:.4} | {} msgs | {} sessions\n",
+        "Summary: {} models | {} tokens | ${:.2} | {} msgs | {} sessions\n",
         rows.len(),
         format_int(total_tokens),
         total_cost,
@@ -1229,7 +1229,7 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
         };
         let canonical = r.canonical_model_id.clone();
         let tokens_str = format_int(r.total_tokens);
-        let cost_str = format!("${:.4}", r.cost_usd);
+        let cost_str = format!("${:.2}", r.cost_usd);
         let calls_str = format_int(r.message_count);
         let breakdown_str = format!(
             "{} / {} / {} / {}",
