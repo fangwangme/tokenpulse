@@ -2462,4 +2462,28 @@ mod tests {
             .unwrap();
         assert!(stale_after.is_empty());
     }
+
+    #[test]
+    fn test_load_raw_models_for_date() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
+        let date = "2026-10-24";
+        let mut msg1 = sample_message(date, "msg-1");
+        msg1.model_id = "gemini-3-8-flash-medium".to_string();
+        msg1.tokens.input = 1000;
+        let mut msg2 = sample_message(date, "msg-2");
+        msg2.model_id = "gemini-3-8-flash-high".to_string();
+        msg2.tokens.input = 2000;
+        store
+            .replace_source_messages("antigravity", None, &[msg1, msg2], false)
+            .unwrap();
+
+        let target_date = NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap();
+        let raw_models = store.load_raw_models_for_date(target_date).unwrap();
+        assert_eq!(raw_models.len(), 2);
+        assert_eq!(raw_models[0].model_id, "gemini-3-8-flash-high");
+        assert_eq!(raw_models[0].canonical_model_id, "gemini-3-8-flash");
+        assert_eq!(raw_models[1].model_id, "gemini-3-8-flash-medium");
+        assert_eq!(raw_models[1].canonical_model_id, "gemini-3-8-flash");
+    }
 }
