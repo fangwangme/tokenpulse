@@ -93,10 +93,11 @@ pub fn render_models_page(
     let cache_split_wide = total_width >= 100;
     let cache_read_width = if cache_split_wide { 9usize } else { 7usize };
     let cache_write_width = if cache_split_wide { 9usize } else { 7usize };
-    let (cache_r_header, cache_w_header) = if cache_split_wide {
-        ("Cache R", "Cache W")
+    let hit_width = 7usize;
+    let (cache_r_header, cache_w_header, hit_header) = if cache_split_wide {
+        ("Cache R", "Cache W", "Hit %")
     } else {
-        ("CR", "CW")
+        ("CR", "CW", "H%")
     };
     let pct_width = 7usize;
     let msg_width = 8usize;
@@ -107,7 +108,7 @@ pub fn render_models_page(
     let sparkline_width = if show_sparkline { 15usize } else { 0usize };
     let last_spacer_width = if show_last { 1usize } else { 0usize };
     let trend_spacer_width = if show_sparkline { 2usize } else { 0usize };
-    let total_spacers = 10usize + last_spacer_width + trend_spacer_width;
+    let total_spacers = 11usize + last_spacer_width + trend_spacer_width;
     let available_for_both = total_width.saturating_sub(
         rank_width
             + tokens_width
@@ -116,6 +117,7 @@ pub fn render_models_page(
             + output_width
             + cache_read_width
             + cache_write_width
+            + hit_width
             + pct_width
             + msg_width
             + last_width
@@ -155,8 +157,8 @@ pub fn render_models_page(
     };
 
     let headers = [
-        "#", "Model", "Agent", "Tokens", "Cost", "Input", "Output", "Cache", "%", "Msgs", "Last",
-        "Trend",
+        "#", "Model", "Agent", "Tokens", "Cost", "Input", "Output", "Cache", "Hit %", "%", "Msgs",
+        "Last", "Trend",
     ];
     let sort_indicator = |field: SortField| -> &str {
         if state.sort_field == field {
@@ -223,12 +225,17 @@ pub fn render_models_page(
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:>pct_width$}", headers[8]),
+            format!("{:>hit_width$}", hit_header),
+            Style::default().fg(Color::Rgb(251, 146, 60)).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>pct_width$}", headers[9]),
             Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:>msg_width$}", headers[9]),
+            format!("{:>msg_width$}", headers[10]),
             Style::default().fg(Color::Rgb(96, 165, 250)).bold(),
         ),
     ];
@@ -237,7 +244,7 @@ pub fn render_models_page(
         header_spans.push(Span::styled(
             format!(
                 "{:>last_width$}",
-                format!("{}{}", headers[10], sort_indicator(SortField::Date))
+                format!("{}{}", headers[11], sort_indicator(SortField::Date))
             ),
             Style::default().fg(theme.dim).bold(),
         ));
@@ -245,7 +252,7 @@ pub fn render_models_page(
     if show_sparkline {
         header_spans.push(Span::raw("  "));
         header_spans.push(Span::styled(
-            format!("{:<sparkline_width$}", headers[11]),
+            format!("{:<sparkline_width$}", headers[12]),
             Style::default().fg(Color::Rgb(52, 211, 153)).bold(),
         ));
     }
@@ -356,6 +363,18 @@ pub fn render_models_page(
             ),
             Span::raw(" "),
             Span::styled(
+                format!(
+                    "{:>hit_width$}",
+                    format_cache_hit_pct(model.cache_read_tokens, model.tokens)
+                ),
+                selected_row_style(
+                    Style::default().fg(Color::Rgb(251, 146, 60)),
+                    selected,
+                    theme,
+                ),
+            ),
+            Span::raw(" "),
+            Span::styled(
                 format!("{:>pct_width$}", format!("{:.1}%", pct)),
                 selected_row_style(
                     Style::default().fg(Color::Rgb(96, 165, 250)),
@@ -441,4 +460,26 @@ pub fn model_share_percent(model: &ModelSummary, total: f64, sort_field: SortFie
         SortField::Cost | SortField::Date => model.cost,
     };
     share_percent(value, total)
+}
+
+pub fn format_cache_hit_pct(cache_read_tokens: i64, total_tokens: i64) -> String {
+    if total_tokens <= 0 {
+        return "0.00%".to_string();
+    }
+    let hit_rate = (cache_read_tokens.max(0) as f64 / total_tokens as f64) * 100.0;
+    format!("{:.2}%", hit_rate.clamp(0.0, 100.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_cache_hit_pct() {
+        assert_eq!(format_cache_hit_pct(0, 0), "0.00%");
+        assert_eq!(format_cache_hit_pct(0, 1000), "0.00%");
+        assert_eq!(format_cache_hit_pct(9999, 10000), "99.99%");
+        assert_eq!(format_cache_hit_pct(10000, 10000), "100.00%");
+        assert_eq!(format_cache_hit_pct(500, 1000), "50.00%");
+    }
 }

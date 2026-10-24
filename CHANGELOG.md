@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.12] - 2026-10-24
+
+### Added
+- **TUI models cache hit ratio**: Added `Hit %` column in the Models view table placed directly after `Cache W` (`CW`) and before `%` (share percentage). Computes `cache_read_tokens / total_tokens * 100%` to 2 decimal places (e.g. `99.99%`), styled with the cache color palette (`Color::Rgb(251, 146, 60)`) (#93).
+
 ## [0.6.11] - 2026-10-24
 
 ### Added

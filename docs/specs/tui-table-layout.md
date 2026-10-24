@@ -4,7 +4,8 @@ This specification defines column width sizing and space allocation rules for ta
 
 ## Model and Agent Column Width Allocation
 
-The table row contains `#`, `Model`, `Agent`, followed by metric columns (`Tokens`, `Cost`, `Input`, `Output`, `Cache R`, `Cache W`, `%`, `Msgs`, `Last`, `Trend`) in the Models view (Overview displays `Model`, `Agent`, `Tokens`, `Cost`, `%`).
+The table row contains `#`, `Model`, `Agent`, followed by metric columns (`Tokens`, `Cost`, `Input`, `Output`, `Cache R`, `Cache W`, `Hit %`, `%`, `Msgs`, `Last`, `Trend`) in the Models view (Overview displays `Model`, `Agent`, `Tokens`, `Cost`, `%`).
+- `Hit %` (Cache Hit ratio): displays `cache_read_tokens / total_tokens * 100%` with two decimal places (e.g. `99.99%`, `100.00%`, `0.00%`). Header is `Hit %` in wide mode (>= 100 cols) and `H%` in compact mode. Styled with the cache color palette (`Color::Rgb(251, 146, 60)`). Fixed width is 7 characters.
 
 Metric columns have fixed or breakpoint-controlled minimum widths. After subtracting fixed column widths and spacers from the available row width, the remainder is `available_for_both` (allocated between `Model` and `Agent`).
 
