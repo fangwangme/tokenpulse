@@ -1262,39 +1262,22 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
         ));
     }
 
-    let top_border = format!(
-        "┌─{}─┬─{}─┬─{}─┬─{}─┬─{}─┬─{}─┬─{}─┬─{}─┐",
-        "─".repeat(source_w),
-        "─".repeat(raw_model_w),
-        "─".repeat(tier_w),
-        "─".repeat(canonical_w),
-        "─".repeat(tokens_w),
-        "─".repeat(cost_w),
-        "─".repeat(calls_w),
-        "─".repeat(breakdown_w)
-    );
-    let mid_border = format!(
-        "├─{}─┼─{}─┼─{}─┼─{}─┼─{}─┼─{}─┼─{}─┼─{}─┤",
-        "─".repeat(source_w),
-        "─".repeat(raw_model_w),
-        "─".repeat(tier_w),
-        "─".repeat(canonical_w),
-        "─".repeat(tokens_w),
-        "─".repeat(cost_w),
-        "─".repeat(calls_w),
-        "─".repeat(breakdown_w)
-    );
-    let bot_border = format!(
-        "└─{}─┴─{}─┴─{}─┴─{}─┴─{}─┴─{}─┴─{}─┴─{}─┘",
-        "─".repeat(source_w),
-        "─".repeat(raw_model_w),
-        "─".repeat(tier_w),
-        "─".repeat(canonical_w),
-        "─".repeat(tokens_w),
-        "─".repeat(cost_w),
-        "─".repeat(calls_w),
-        "─".repeat(breakdown_w)
-    );
+    let border = |left: char, mid: char, right: char| {
+        format!(
+            "{left}─{}─{mid}─{}─{mid}─{}─{mid}─{}─{mid}─{}─{mid}─{}─{mid}─{}─{mid}─{}─{right}",
+            "─".repeat(source_w),
+            "─".repeat(raw_model_w),
+            "─".repeat(tier_w),
+            "─".repeat(canonical_w),
+            "─".repeat(tokens_w),
+            "─".repeat(cost_w),
+            "─".repeat(calls_w),
+            "─".repeat(breakdown_w)
+        )
+    };
+    let top_border = border('┌', '┬', '┐');
+    let mid_border = border('├', '┼', '┤');
+    let bot_border = border('└', '┴', '┘');
 
     println!("{}", top_border);
     println!(

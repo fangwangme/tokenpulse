@@ -1693,19 +1693,10 @@ fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()
 
     conn.execute_batch(USAGE_SCHEMA_SQL)?;
 
-    let has_served_model: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('usage_messages') WHERE name = 'served_model'",
-            [],
-            |row| Ok(row.get::<_, i64>(0)? > 0),
-        )
-        .unwrap_or(false);
-    if !has_served_model {
-        let _ = conn.execute(
-            "ALTER TABLE usage_messages ADD COLUMN served_model TEXT;",
-            [],
-        );
-    }
+    let _ = conn.execute(
+        "ALTER TABLE usage_messages ADD COLUMN served_model TEXT;",
+        [],
+    );
 
     let cache_db_path = dirs::home_dir()
         .map(|h| h.join(".local/share/tokenpulse/antigravity-cache/cache.db"))
