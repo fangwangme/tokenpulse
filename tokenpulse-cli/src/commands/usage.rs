@@ -1155,13 +1155,15 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
     let total_tokens: i64 = rows.iter().map(|r| r.total_tokens).sum();
     let total_cost: f64 = rows.iter().map(|r| r.cost_usd).sum();
     let total_messages: i64 = rows.iter().map(|r| r.message_count).sum();
-    let total_sessions: i64 = rows.iter().map(|r| r.session_count).sum();
+    let total_sessions: i64 = store
+        .count_distinct_sessions_for_date(target_date)
+        .unwrap_or(0);
 
     if json {
         let json_report = serde_json::json!({
             "date": target_date.format("%Y-%m-%d").to_string(),
             "total_tokens": total_tokens,
-            "total_cost_usd": (total_cost * 100.0).round() / 100.0,
+            "total_cost_usd": (total_cost * 1_000_000.0).round() / 1_000_000.0,
             "message_count": total_messages,
             "session_count": total_sessions,
             "models": rows.iter().map(|r| {
@@ -1176,7 +1178,7 @@ pub fn run_raw(date_str: Option<String>, json: bool) -> Result<()> {
                     "cache_write_tokens": r.cache_write_tokens,
                     "reasoning_tokens": r.reasoning_tokens,
                     "total_tokens": r.total_tokens,
-                    "cost_usd": (r.cost_usd * 100.0).round() / 100.0,
+                    "cost_usd": (r.cost_usd * 1_000_000.0).round() / 1_000_000.0,
                     "message_count": r.message_count,
                     "session_count": r.session_count,
                 })

@@ -929,6 +929,22 @@ impl UsageStore {
         Ok(rows.flatten().collect())
     }
 
+    pub fn count_distinct_sessions_for_date(&self, date: NaiveDate) -> Result<i64> {
+        let conn = self.open()?;
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let sql = format!(
+            r#"
+            SELECT COUNT(DISTINCT {CANONICAL_SOURCE_SQL} || '::' || session_id)
+            FROM usage_messages
+            WHERE date = ?1
+            "#
+        );
+        let count: i64 = conn
+            .query_row(&sql, params![date_str], |row| row.get(0))
+            .unwrap_or(0);
+        Ok(count)
+    }
+
     pub fn load_provider_summaries(
         &self,
         since: Option<NaiveDate>,
@@ -1695,23 +1711,38 @@ fn ensure_schema_initialized(path: &PathBuf, conn: &mut Connection) -> Result<()
         .map(|h| h.join(".local/share/tokenpulse/antigravity-cache/cache.db"))
         .filter(|p| p.exists());
     if let Some(cache_path) = cache_db_path {
-        let escaped = cache_path.to_string_lossy().replace('\'', "''");
-        let _ = conn.execute_batch(&format!(
-            r#"
-            ATTACH DATABASE '{escaped}' AS ag_cache;
-            UPDATE usage_messages
-            SET served_model = (
-                SELECT su.served_model
-                FROM ag_cache.session_usage su
-                WHERE su.session_id = usage_messages.session_id
-                  AND su.timestamp = usage_messages.timestamp_ms
-                LIMIT 1
+        let needs_backfill: bool = conn
+            .query_row(
+                "SELECT 1 FROM usage_messages WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop', 'antigravity-ide') AND (served_model IS NULL OR served_model = '') LIMIT 1",
+                [],
+                |_| Ok(true),
             )
-            WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop', 'antigravity-ide')
-              AND (served_model IS NULL OR served_model = '');
-            DETACH DATABASE ag_cache;
-            "#
-        ));
+            .unwrap_or(false);
+
+        if needs_backfill {
+            let escaped = cache_path.to_string_lossy().replace('\'', "''");
+            if conn
+                .execute(&format!("ATTACH DATABASE '{escaped}' AS ag_cache;"), [])
+                .is_ok()
+            {
+                let _ = conn.execute(
+                    r#"
+                    UPDATE usage_messages
+                    SET served_model = (
+                        SELECT su.served_model
+                        FROM ag_cache.session_usage su
+                        WHERE su.session_id = usage_messages.session_id
+                          AND su.timestamp = usage_messages.timestamp_ms
+                        LIMIT 1
+                    )
+                    WHERE source IN ('antigravity', 'antigravity-cli', 'antigravity-desktop', 'antigravity-ide')
+                      AND (served_model IS NULL OR served_model = '');
+                    "#,
+                    [],
+                );
+                let _ = conn.execute("DETACH DATABASE ag_cache;", []);
+            }
+        }
     }
 
     refresh_canonical_model_ids(conn)?;
@@ -2601,5 +2632,9 @@ mod tests {
         assert_eq!(raw_models[1].raw_model_id, "gemini-3.8-flash-n");
         assert_eq!(raw_models[1].tier_model_id, "gemini-3-8-flash-medium");
         assert_eq!(raw_models[1].canonical_model_id, "gemini-3-8-flash");
+
+        // Verify distinct sessions across the whole day are de-duplicated
+        let distinct_sessions = store.count_distinct_sessions_for_date(target_date).unwrap();
+        assert_eq!(distinct_sessions, 1);
     }
 }

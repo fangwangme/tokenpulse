@@ -43,7 +43,7 @@ struct Cli {
     raw: bool,
 
     /// Specific date to query with --raw (YYYY-MM-DD, defaults to today)
-    #[clap(long)]
+    #[clap(long, requires = "raw")]
     date: Option<String>,
 
     #[clap(subcommand)]
@@ -75,7 +75,7 @@ enum Commands {
         raw: bool,
 
         /// Specific date to query with --raw (YYYY-MM-DD, defaults to today)
-        #[clap(long)]
+        #[clap(long, requires = "raw")]
         date: Option<String>,
 
         /// Emit JSON output instead of text
