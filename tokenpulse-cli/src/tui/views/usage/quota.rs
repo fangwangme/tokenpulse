@@ -225,7 +225,7 @@ fn render_snapshot_card(
         base_windows
     };
 
-    let tags: Vec<String> = windows.iter().map(|w| window_tag(w)).collect();
+    let tags = window_tags(&windows);
     let tag_width = tags.iter().map(|t| t.chars().count()).max().unwrap_or(0);
 
     // Build vertical constraints with balanced spacing between sections and windows
@@ -361,24 +361,49 @@ fn render_snapshot_card(
     }
 }
 
-/// The tag a quota card shows for a window: `5H`, `WEEKLY`, `WEEKLY · SONNET`.
+/// The tags a quota card shows for its windows: `5H`, `WEEKLY`, `WEEKLY · SONNET`.
 ///
 /// Derived from the period and model family, so every provider's windows read
 /// the same whatever its own `label` says (`Session (5h)`, `Gemini (5h)`, ...).
-/// That label is only the fallback when the period is unknown, and stays as-is
-/// for the plain-text and JSON outputs.
+/// When windows carry a model family, periods before `·` are padded to the card's
+/// maximum period width so the `·` separators align vertically.
+fn window_tags(windows: &[&RateWindow]) -> Vec<String> {
+    let raw_parts: Vec<(String, Option<String>)> = windows
+        .iter()
+        .map(|w| {
+            let period = match w.period_duration_ms {
+                Some(FIVE_HOURS_MS) => "5H".to_string(),
+                Some(SEVEN_DAYS_MS) => "WEEKLY".to_string(),
+                Some(ms) if ms > 0 => compact_duration(ms),
+                _ => label_without_parenthetical(&w.label).to_uppercase(),
+            };
+            let family = match w.model_family.as_deref().map(str::to_uppercase) {
+                Some(family) if family != period => Some(family),
+                _ => None,
+            };
+            (period, family)
+        })
+        .collect();
+
+    let max_period_width = raw_parts
+        .iter()
+        .filter(|(_, f)| f.is_some())
+        .map(|(p, _)| p.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    raw_parts
+        .into_iter()
+        .map(|(period, family)| match family {
+            Some(family) => format!("{period:<max_period_width$} · {family}"),
+            None => period,
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn window_tag(window: &RateWindow) -> String {
-    let period = match window.period_duration_ms {
-        Some(FIVE_HOURS_MS) => "5H".to_string(),
-        Some(SEVEN_DAYS_MS) => "WEEKLY".to_string(),
-        Some(ms) if ms > 0 => compact_duration(ms),
-        _ => label_without_parenthetical(&window.label).to_uppercase(),
-    };
-    match window.model_family.as_deref().map(str::to_uppercase) {
-        // An unknown-period label is often the family itself (`Gemini (monthly)`).
-        Some(family) if family != period => format!("{period} · {family}"),
-        _ => period,
-    }
+    window_tags(&[window]).pop().unwrap_or_default()
 }
 
 /// `3D`, `1H`, `30M`: the largest unit that divides the period evenly.
@@ -935,9 +960,9 @@ mod tests {
             .collect();
 
         let expected = [
-            "5H · GEMINI:",
+            "5H     · GEMINI:",
             "WEEKLY · GEMINI:",
-            "5H · CLAUDE:",
+            "5H     · CLAUDE:",
             "WEEKLY · CLAUDE:",
             "WEEKLY · GEMINI 4 ARGON:",
         ];
@@ -1044,7 +1069,7 @@ mod tests {
         let normal_rows = render_card(&snapshot, AccountDisplay::None, false);
         let detail_reset: Vec<&String> = normal_rows
             .iter()
-            .filter(|row| row.contains("5H · CLAUDE:"))
+            .filter(|row| row.contains("5H     · CLAUDE:"))
             .collect();
         assert_eq!(detail_reset.len(), 1);
         let detail_0 = detail_reset[0];
@@ -1075,7 +1100,7 @@ mod tests {
         let compact_rows = render_card(&snapshot, AccountDisplay::None, true);
         let bar_reset: Vec<&String> = compact_rows
             .iter()
-            .filter(|row| row.contains("5H · CLAUDE"))
+            .filter(|row| row.contains("5H     · CLAUDE"))
             .collect();
         assert_eq!(bar_reset.len(), 1);
         let bar_0 = bar_reset[0];
