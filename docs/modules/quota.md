@@ -140,12 +140,12 @@ The Cloud Code fallback reads the OAuth token cached at `~/.gemini/antigravity-c
 
 | Bucket field                 | → RateWindow                                                    |
 | ---------------------------- | --------------------------------------------------------------- |
-| group `displayName`          | Label prefix and `model_family` (`Gemini Models` → `Gemini`, `Claude and GPT models` → `Claude`). An unnamed group falls back to the label `Usage` with an empty `model_family`. |
+| group `displayName`          | Label prefix and `model_family`: exact `Gemini Models` or `Gemini` → `Gemini`, `Claude and GPT models` → `Claude`. Non-core or temporary groups (e.g. `Gemini 4 Argon`, future special models) dynamically retain their cleaned display name with `" Models"` stripped. An unnamed group falls back to the label `Usage` with an empty `model_family`. |
 | `window` (`5h` / `weekly`)   | Label suffix `(5h)` / `(7d)` and period duration (5h / 7d)      |
 | `remainingFraction`          | `used_percent = round((1 - remainingFraction) * 100)`           |
 | `resetTime`                  | `resets_at`                                                     |
 
-Windows are sorted Gemini before Claude, and within each group the 5-hour limit before the weekly limit.
+Windows are sorted core Gemini first, then core Claude, then any non-core or temporary groups at the bottom (preserving API group order), and within each group the 5-hour limit before the weekly limit.
 
 ---
 

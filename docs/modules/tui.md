@@ -72,6 +72,12 @@ The `model_color()` method detects provider from model name and assigns a fixed 
 
 ## Quota View Layout
 
+Cards are partitioned into two sections by window count:
+- Standard cards (`<= 4` windows): rendered at the top with standard card height (~11-12 lines).
+- Tall cards (`> 4` windows): rendered below with height designed for up to 6 windows (~15-16 lines), falling back to compact mode when terminal height is constrained.
+- Column grid widths remain uniform across sections (2 columns when width >= 110, 1 column otherwise).
+- Quota overview preserves natural provider window ordering without sorting by `used_percent` or artificial 4-window caps.
+
 Each window is two lines: the progress bar alone across the full card width,
 then a detail line `<TAG>: reset … used … remaining … <pace>` directly below
 it, with a blank row between consecutive windows.
