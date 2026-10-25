@@ -1052,6 +1052,18 @@ mod tests {
                             "resetTime": "2026-06-12T11:10:43Z"
                         }
                     ]
+                },
+                {
+                    "displayName": "Gemini 4 Argon",
+                    "buckets": [
+                        {
+                            "bucketId": "gemini-argon-wtu-weekly",
+                            "displayName": "Gemini 4 Argon Weekly Limit",
+                            "window": "weekly",
+                            "remainingFraction": 0.9099331,
+                            "resetTime": "2026-06-19T05:07:40Z"
+                        }
+                    ]
                 }
             ]
         }
@@ -1066,7 +1078,13 @@ mod tests {
         let labels: Vec<&str> = windows.iter().map(|w| w.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec!["Gemini (5h)", "Gemini (7d)", "Claude (5h)", "Claude (7d)",]
+            vec![
+                "Gemini (5h)",
+                "Gemini (7d)",
+                "Claude (5h)",
+                "Claude (7d)",
+                "Gemini 4 Argon (7d)",
+            ]
         );
     }
 
@@ -1104,52 +1122,6 @@ mod tests {
         assert_eq!(
             clean_group_label("gemini-3 argon-pro"),
             "gemini-3 argon-pro"
-        );
-    }
-
-    #[test]
-    fn parses_quota_summary_with_argon_and_preserves_group_ordering() {
-        const SUMMARY_WITH_ARGON: &str = r#"{
-            "response": {
-                "groups": [
-                    {
-                        "displayName": "Gemini Models",
-                        "buckets": [
-                            {"window": "weekly", "remainingFraction": 0.99},
-                            {"window": "5h", "remainingFraction": 0.99}
-                        ]
-                    },
-                    {
-                        "displayName": "Claude and GPT models",
-                        "buckets": [
-                            {"window": "weekly", "remainingFraction": 0.50},
-                            {"window": "5h", "remainingFraction": 0.80}
-                        ]
-                    },
-                    {
-                        "displayName": "Gemini 4 Argon",
-                        "buckets": [
-                            {"window": "weekly", "remainingFraction": 0.90}
-                        ]
-                    }
-                ]
-            }
-        }"#;
-
-        let parsed: LsQuotaSummaryResponse = serde_json::from_str(SUMMARY_WITH_ARGON).unwrap();
-        let summary = parsed.response.expect("response present");
-        let windows = windows_from_summary(&summary);
-
-        let labels: Vec<&str> = windows.iter().map(|w| w.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            vec![
-                "Gemini (5h)",
-                "Gemini (7d)",
-                "Claude (5h)",
-                "Claude (7d)",
-                "Gemini 4 Argon (7d)",
-            ]
         );
     }
 

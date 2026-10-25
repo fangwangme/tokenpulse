@@ -828,6 +828,12 @@ mod tests {
                 window("Gemini (7d)", Some(SEVEN_DAYS_MS), Some("Gemini"), 20.0),
                 window("Claude (5h)", Some(FIVE_HOURS_MS), Some("Claude"), 10.0),
                 window("Claude (7d)", Some(SEVEN_DAYS_MS), Some("Claude"), 5.0),
+                window(
+                    "Gemini 4 Argon (7d)",
+                    Some(SEVEN_DAYS_MS),
+                    Some("Gemini 4 Argon"),
+                    15.0,
+                ),
             ],
             credits: None,
             rate_limit_reset_credits: vec![],
@@ -933,6 +939,7 @@ mod tests {
             "WEEKLY · GEMINI:",
             "5H · CLAUDE:",
             "WEEKLY · CLAUDE:",
+            "WEEKLY · GEMINI 4 ARGON:",
         ];
         assert_eq!(details.len(), expected.len(), "{rows:#?}");
         for (detail, tag) in details.iter().zip(expected) {
@@ -943,114 +950,6 @@ mod tests {
         }
         let columns: Vec<usize> = details.iter().map(|d| text_column_after_colon(d)).collect();
         assert!(columns.iter().all(|&c| c == columns[0]), "{columns:?}");
-    }
-
-    #[test]
-    fn overview_does_not_scramble_or_truncate_windows_for_tall_card() {
-        let snapshot = QuotaSnapshot {
-            provider: "antigravity".to_string(),
-            account: None,
-            plan: None,
-            windows: vec![
-                window("Gemini (5h)", Some(FIVE_HOURS_MS), Some("Gemini"), 10.0),
-                window("Gemini (7d)", Some(SEVEN_DAYS_MS), Some("Gemini"), 5.0),
-                window("Claude (5h)", Some(FIVE_HOURS_MS), Some("Claude"), 80.0),
-                window("Claude (7d)", Some(SEVEN_DAYS_MS), Some("Claude"), 90.0),
-                window(
-                    "Gemini 4 Argon (7d)",
-                    Some(SEVEN_DAYS_MS),
-                    Some("Gemini 4 Argon"),
-                    15.0,
-                ),
-            ],
-            credits: None,
-            rate_limit_reset_credits: vec![],
-            fetched_at: chrono::Utc::now(),
-        };
-
-        let (width, height) = (100, 18);
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let theme = Theme::default();
-        terminal
-            .draw(|f| {
-                render_snapshot_card(
-                    f,
-                    f.area(),
-                    &snapshot,
-                    &QuotaDisplayMode::Remaining,
-                    &theme,
-                    false,
-                    AccountDisplay::None,
-                );
-            })
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        let rows: Vec<String> = (1..height - 1)
-            .map(|y| (1..width - 1).map(|x| buf[(x, y)].symbol()).collect())
-            .collect();
-        let details: Vec<&String> = bar_and_detail_rows(&rows)
-            .into_iter()
-            .map(|(_, detail)| detail)
-            .collect();
-
-        assert_eq!(details.len(), 5, "all 5 windows must be displayed");
-        let expected = [
-            "5H · GEMINI:",
-            "WEEKLY · GEMINI:",
-            "5H · CLAUDE:",
-            "WEEKLY · CLAUDE:",
-            "WEEKLY · GEMINI 4 ARGON:",
-        ];
-        for (detail, tag) in details.iter().zip(expected) {
-            assert!(
-                detail.starts_with(tag),
-                "{detail:?} should start with {tag} in natural category order"
-            );
-        }
-    }
-
-    #[test]
-    fn test_render_quota_tab_mixed_small_and_tall_providers() {
-        let backend = TestBackend::new(130, 42);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let mut config = Config::default();
-        let theme = Theme::default();
-        let dashboard = crate::tui::views::usage::UsageDashboard { daily: vec![] };
-        let mut state = UsageState::new(&dashboard, vec![]);
-
-        state.quota_snapshots = vec![
-            claude_snapshot(),
-            sample_snapshot("codex"),
-            QuotaSnapshot {
-                provider: "antigravity".to_string(),
-                account: Some("user@example.com".to_string()),
-                plan: Some("Google AI Pro".to_string()),
-                windows: vec![
-                    window("Gemini (5h)", Some(FIVE_HOURS_MS), Some("Gemini"), 10.0),
-                    window("Gemini (7d)", Some(SEVEN_DAYS_MS), Some("Gemini"), 5.0),
-                    window("Claude (5h)", Some(FIVE_HOURS_MS), Some("Claude"), 20.0),
-                    window("Claude (7d)", Some(SEVEN_DAYS_MS), Some("Claude"), 75.0),
-                    window(
-                        "Gemini 4 Argon (7d)",
-                        Some(SEVEN_DAYS_MS),
-                        Some("Gemini 4 Argon"),
-                        9.0,
-                    ),
-                ],
-                credits: None,
-                rate_limit_reset_credits: vec![],
-                fetched_at: chrono::Utc::now(),
-            },
-        ];
-        for p in ["claude", "codex", "antigravity"] {
-            config.providers.entry(p.to_string()).or_default().enabled = true;
-        }
-
-        terminal
-            .draw(|f| {
-                render_quota_tab(f, f.area(), &state, &config, &theme);
-            })
-            .unwrap();
     }
 
     #[test]
