@@ -639,12 +639,13 @@ impl AntigravityQuotaFetcher {
     }
 }
 
-/// Map a quota summary into sorted `RateWindow`s: Gemini before Claude, and
-/// within each group the 5-hour limit before the weekly limit.
+/// Map a quota summary into sorted `RateWindow`s: Gemini before Claude, followed
+/// by any specialized/temporary model categories in API order, and within each
+/// group the 5-hour limit before the weekly limit.
 fn windows_from_summary(summary: &LsQuotaSummary) -> Vec<RateWindow> {
-    let mut built: Vec<(u8, u8, RateWindow)> = Vec::new();
+    let mut built: Vec<(u8, usize, u8, RateWindow)> = Vec::new();
 
-    for group in &summary.groups {
+    for (group_idx, group) in summary.groups.iter().enumerate() {
         let group_label = clean_group_label(&group.display_name);
         let group_rank = group_rank(&group_label);
 
@@ -661,6 +662,7 @@ fn windows_from_summary(summary: &LsQuotaSummary) -> Vec<RateWindow> {
 
             built.push((
                 group_rank,
+                group_idx,
                 window_rank,
                 RateWindow {
                     label: format!("{} ({})", group_label, window_suffix),
@@ -675,8 +677,8 @@ fn windows_from_summary(summary: &LsQuotaSummary) -> Vec<RateWindow> {
         }
     }
 
-    built.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    built.into_iter().map(|(_, _, window)| window).collect()
+    built.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    built.into_iter().map(|(_, _, _, window)| window).collect()
 }
 
 /// Turn a server group display name into a short, clean label.
@@ -691,18 +693,18 @@ fn model_family_from_group(group_label: &str) -> Option<String> {
 }
 
 fn clean_group_label(display_name: &str) -> String {
-    let lower = display_name.to_lowercase();
-    if lower.contains("gemini") {
+    let trimmed = display_name.trim();
+    let lower = trimmed.to_lowercase();
+    if lower == "gemini models" || lower == "gemini" {
         "Gemini".to_string()
     } else if lower.contains("claude") || lower.contains("gpt") {
         "Claude".to_string()
     } else {
-        let trimmed = display_name.trim();
-        let cleaned = trimmed
-            .strip_suffix(" Models")
-            .or_else(|| trimmed.strip_suffix(" models"))
-            .unwrap_or(trimmed)
-            .trim();
+        let cleaned = if lower.ends_with(" models") {
+            trimmed[..trimmed.len() - " models".len()].trim()
+        } else {
+            trimmed
+        };
         if cleaned.is_empty() {
             "Usage".to_string()
         } else {
@@ -1050,6 +1052,18 @@ mod tests {
                             "resetTime": "2026-06-12T11:10:43Z"
                         }
                     ]
+                },
+                {
+                    "displayName": "Gemini 4 Argon",
+                    "buckets": [
+                        {
+                            "bucketId": "gemini-argon-wtu-weekly",
+                            "displayName": "Gemini 4 Argon Weekly Limit",
+                            "window": "weekly",
+                            "remainingFraction": 0.9099331,
+                            "resetTime": "2026-06-19T05:07:40Z"
+                        }
+                    ]
                 }
             ]
         }
@@ -1064,7 +1078,13 @@ mod tests {
         let labels: Vec<&str> = windows.iter().map(|w| w.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec!["Gemini (5h)", "Gemini (7d)", "Claude (5h)", "Claude (7d)",]
+            vec![
+                "Gemini (5h)",
+                "Gemini (7d)",
+                "Claude (5h)",
+                "Claude (7d)",
+                "Gemini 4 Argon (7d)",
+            ]
         );
     }
 
@@ -1089,10 +1109,21 @@ mod tests {
     }
 
     #[test]
-    fn clean_group_label_maps_known_groups() {
+    fn clean_group_label_distinguishes_core_gemini_from_specialized_models() {
         assert_eq!(clean_group_label("Gemini Models"), "Gemini");
+        assert_eq!(clean_group_label("Gemini"), "Gemini");
         assert_eq!(clean_group_label("Claude and GPT models"), "Claude");
         assert_eq!(clean_group_label("Experimental Models"), "Experimental");
+        assert_eq!(clean_group_label("Gemini 4 Argon"), "Gemini 4 Argon");
+        assert_eq!(clean_group_label("GEMINI 4 ARGON MODELS"), "GEMINI 4 ARGON");
+        assert_eq!(
+            clean_group_label("gemini-4-carbon Models"),
+            "gemini-4-carbon"
+        );
+        assert_eq!(
+            clean_group_label("gemini-3 argon-pro"),
+            "gemini-3 argon-pro"
+        );
     }
 
     #[test]

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.13] - 2026-10-25
+
+### Added
+- **Dynamic Antigravity group categorization & multi-window overview layout**:
+  - Differentiate core Gemini (`Gemini Models`) from non-core or temporary model categories (such as `Gemini 4 Argon` and future additions) dynamically without hardcoded keywords, preserving clean display names and group order (#95).
+  - TUI Quota Overview partitions cards into standard (<= 4 windows) and tall (> 4 windows) sections with uniform column widths and dedicated height for up to 6 windows without usage-based re-sorting or truncation (#95).
+
 ## [0.6.12] - 2026-10-24
 
 ### Added
