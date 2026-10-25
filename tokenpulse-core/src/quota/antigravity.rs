@@ -639,12 +639,13 @@ impl AntigravityQuotaFetcher {
     }
 }
 
-/// Map a quota summary into sorted `RateWindow`s: Gemini before Claude, and
-/// within each group the 5-hour limit before the weekly limit.
+/// Map a quota summary into sorted `RateWindow`s: Gemini before Claude, followed
+/// by any specialized/temporary model categories in API order, and within each
+/// group the 5-hour limit before the weekly limit.
 fn windows_from_summary(summary: &LsQuotaSummary) -> Vec<RateWindow> {
-    let mut built: Vec<(u8, u8, RateWindow)> = Vec::new();
+    let mut built: Vec<(u8, usize, u8, RateWindow)> = Vec::new();
 
-    for group in &summary.groups {
+    for (group_idx, group) in summary.groups.iter().enumerate() {
         let group_label = clean_group_label(&group.display_name);
         let group_rank = group_rank(&group_label);
 
@@ -661,6 +662,7 @@ fn windows_from_summary(summary: &LsQuotaSummary) -> Vec<RateWindow> {
 
             built.push((
                 group_rank,
+                group_idx,
                 window_rank,
                 RateWindow {
                     label: format!("{} ({})", group_label, window_suffix),
@@ -675,8 +677,8 @@ fn windows_from_summary(summary: &LsQuotaSummary) -> Vec<RateWindow> {
         }
     }
 
-    built.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    built.into_iter().map(|(_, _, window)| window).collect()
+    built.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    built.into_iter().map(|(_, _, _, window)| window).collect()
 }
 
 /// Turn a server group display name into a short, clean label.
@@ -691,13 +693,13 @@ fn model_family_from_group(group_label: &str) -> Option<String> {
 }
 
 fn clean_group_label(display_name: &str) -> String {
-    let lower = display_name.to_lowercase();
-    if lower.contains("gemini") {
+    let trimmed = display_name.trim();
+    let lower = trimmed.to_lowercase();
+    if lower == "gemini models" || lower == "gemini" {
         "Gemini".to_string()
     } else if lower.contains("claude") || lower.contains("gpt") {
         "Claude".to_string()
     } else {
-        let trimmed = display_name.trim();
         let cleaned = trimmed
             .strip_suffix(" Models")
             .or_else(|| trimmed.strip_suffix(" models"))
