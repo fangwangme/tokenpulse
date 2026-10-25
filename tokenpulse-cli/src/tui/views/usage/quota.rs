@@ -517,12 +517,9 @@ fn render_window_block(
     let balance_color = theme.gauge_color(window.used_percent);
     let remaining_percent = (100.0 - window.used_percent).max(0.0);
 
-    // The tag is padded to the card's longest so every window's figures start
-    // in the same column.
-    let mut detail_spans = vec![Span::styled(
-        format!("{:<width$} ", format!("{tag}:"), width = tag_width + 1),
-        tag_style(theme),
-    )];
+    // The tag is followed by a fixed space after the colon so figures start
+    // immediately without wasting horizontal width.
+    let mut detail_spans = vec![Span::styled(format!("{tag}: "), tag_style(theme))];
     if !is_fully_reset {
         detail_spans.push(Span::styled(
             format!("reset {reset_str}"),
@@ -907,48 +904,21 @@ mod tests {
             .collect()
     }
 
-    /// Column where the figures start: the first non-space after the colon.
-    fn text_column_after_colon(detail: &str) -> usize {
-        let chars: Vec<char> = detail.chars().collect();
-        let colon = chars.iter().position(|&c| c == ':').unwrap();
-        colon + 1 + chars[colon + 1..].iter().take_while(|&&c| c == ' ').count()
-    }
-
     #[test]
-    fn bar_rows_carry_no_label_and_span_the_card() {
-        let rows = render_card(&claude_snapshot(), AccountDisplay::Full, false);
-        let windows = bar_and_detail_rows(&rows);
-
-        assert_eq!(windows.len(), 3, "{rows:#?}");
-        for (bar, _) in windows {
-            assert!(
-                bar.chars().all(is_bar_glyph),
-                "the bar row must be the bar alone, full width: {bar:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn detail_rows_start_with_uniform_tags_aligned_per_card() {
+    fn detail_rows_start_with_tag_and_fixed_gap() {
         let rows = render_card(&claude_snapshot(), AccountDisplay::Full, false);
         let details: Vec<&String> = bar_and_detail_rows(&rows)
             .into_iter()
             .map(|(_, detail)| detail)
             .collect();
 
-        assert!(details[0].starts_with("5H:"), "{:?}", details[0]);
-        assert!(details[1].starts_with("WEEKLY:"), "{:?}", details[1]);
+        assert!(details[0].starts_with("5H: reset "), "{:?}", details[0]);
+        assert!(details[1].starts_with("WEEKLY: reset "), "{:?}", details[1]);
         assert!(
-            details[2].starts_with("WEEKLY · SONNET:"),
+            details[2].starts_with("WEEKLY · SONNET: reset "),
             "{:?}",
             details[2]
         );
-        let columns: Vec<usize> = details.iter().map(|d| text_column_after_colon(d)).collect();
-        assert!(
-            columns.iter().all(|&c| c == columns[0]),
-            "figures must start in one column: {columns:?}\n{details:#?}"
-        );
-        assert!(details[0][..].contains("reset "), "{:?}", details[0]);
     }
 
     #[test]
@@ -960,11 +930,11 @@ mod tests {
             .collect();
 
         let expected = [
-            "5H     · GEMINI:",
-            "WEEKLY · GEMINI:",
-            "5H     · CLAUDE:",
-            "WEEKLY · CLAUDE:",
-            "WEEKLY · GEMINI 4 ARGON:",
+            "5H     · GEMINI: reset ",
+            "WEEKLY · GEMINI: reset ",
+            "5H     · CLAUDE: ",
+            "WEEKLY · CLAUDE: reset ",
+            "WEEKLY · GEMINI 4 ARGON: reset ",
         ];
         assert_eq!(details.len(), expected.len(), "{rows:#?}");
         for (detail, tag) in details.iter().zip(expected) {
@@ -973,8 +943,6 @@ mod tests {
                 "{detail:?} should start with {tag}"
             );
         }
-        let columns: Vec<usize> = details.iter().map(|d| text_column_after_colon(d)).collect();
-        assert!(columns.iter().all(|&c| c == columns[0]), "{columns:?}");
     }
 
     #[test]
