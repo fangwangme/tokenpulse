@@ -700,11 +700,11 @@ fn clean_group_label(display_name: &str) -> String {
     } else if lower.contains("claude") || lower.contains("gpt") {
         "Claude".to_string()
     } else {
-        let cleaned = trimmed
-            .strip_suffix(" Models")
-            .or_else(|| trimmed.strip_suffix(" models"))
-            .unwrap_or(trimmed)
-            .trim();
+        let cleaned = if lower.ends_with(" models") {
+            trimmed[..trimmed.len() - " models".len()].trim()
+        } else {
+            trimmed
+        };
         if cleaned.is_empty() {
             "Usage".to_string()
         } else {
@@ -1115,6 +1115,7 @@ mod tests {
         assert_eq!(clean_group_label("Claude and GPT models"), "Claude");
         assert_eq!(clean_group_label("Experimental Models"), "Experimental");
         assert_eq!(clean_group_label("Gemini 4 Argon"), "Gemini 4 Argon");
+        assert_eq!(clean_group_label("GEMINI 4 ARGON MODELS"), "GEMINI 4 ARGON");
         assert_eq!(
             clean_group_label("gemini-4-carbon Models"),
             "gemini-4-carbon"

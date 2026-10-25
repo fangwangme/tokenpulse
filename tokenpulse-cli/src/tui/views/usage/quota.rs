@@ -121,7 +121,7 @@ fn render_overview(
         display_mode,
         theme,
         account_display,
-        12,
+        11,
     );
     render_snapshot_grid(
         f,
@@ -149,7 +149,7 @@ fn render_snapshot_grid(
 
     let columns = if area.width >= 110 { 2 } else { 1 };
     let rows = snapshots.len().div_ceil(columns);
-    let row_height = (area.height / rows as u16).min(max_row_height).max(8);
+    let row_height = (area.height / rows as u16).min(max_row_height);
 
     let mut row_constraints = vec![Constraint::Length(row_height); rows];
     row_constraints.push(Constraint::Min(0));
@@ -755,7 +755,7 @@ mod tests {
         state.quota_snapshots = vec![
             sample_snapshot("claude"),
             sample_snapshot("codex"),
-            sample_snapshot("antigravity"),
+            antigravity_snapshot(),
         ];
         for p in ["claude", "codex", "antigravity"] {
             config.providers.entry(p.to_string()).or_default().enabled = true;
@@ -780,7 +780,7 @@ mod tests {
         state.quota_snapshots = vec![
             sample_snapshot("claude"),
             sample_snapshot("codex"),
-            sample_snapshot("antigravity"),
+            antigravity_snapshot(),
         ];
         for p in ["claude", "codex", "antigravity"] {
             config.providers.entry(p.to_string()).or_default().enabled = true;
