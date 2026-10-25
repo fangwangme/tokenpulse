@@ -66,15 +66,13 @@ fn render_overview(
         return;
     }
 
-    let columns = if area.width >= 110 { 2 } else { 1 };
-
     if snapshots.len() == 1 {
-        let card_height = if snapshots[0].windows.len() > 4 {
-            area.height.min(16).max(8)
+        let max_h = if snapshots[0].windows.len() > 4 {
+            16
         } else {
-            area.height.min(14).max(8)
+            14
         };
-        let card_area = Rect::new(area.x, area.y, area.width, card_height);
+        let card_area = Rect::new(area.x, area.y, area.width, area.height.min(max_h).max(8));
         render_snapshot_card(
             f,
             card_area,
@@ -82,95 +80,57 @@ fn render_overview(
             display_mode,
             theme,
             false,
-            true,
             account_display,
         );
         return;
     }
 
-    let (small_snapshots, tall_snapshots): (Vec<&QuotaSnapshot>, Vec<&QuotaSnapshot>) =
+    let (small, tall): (Vec<&QuotaSnapshot>, Vec<&QuotaSnapshot>) =
         snapshots.iter().partition(|s| s.windows.len() <= 4);
 
-    if tall_snapshots.is_empty() {
+    if small.is_empty() || tall.is_empty() {
+        let max_h = if tall.is_empty() { 13 } else { 16 };
         render_snapshot_grid(
             f,
             area,
-            &small_snapshots,
+            snapshots,
             display_mode,
             theme,
             account_display,
-            columns,
-            None,
+            max_h,
         );
         return;
     }
 
-    if small_snapshots.is_empty() {
-        render_snapshot_grid(
-            f,
-            area,
-            &tall_snapshots,
-            display_mode,
-            theme,
-            account_display,
-            columns,
-            Some(16),
-        );
-        return;
-    }
+    let cols = if area.width >= 110 { 2 } else { 1 };
+    let small_rows = small.len().div_ceil(cols) as u16;
+    let tall_rows = tall.len().div_ceil(cols) as u16;
 
-    let small_rows = small_snapshots.len().div_ceil(columns) as u16;
-    let tall_rows = tall_snapshots.len().div_ceil(columns) as u16;
+    let small_h = (small_rows * 11).min(area.height.saturating_sub(tall_rows * 9));
+    let tall_h = area.height.saturating_sub(small_h);
 
-    let ideal_small_h = small_rows * 11;
-    let ideal_tall_h = tall_rows * 16;
-
-    let (small_h, tall_h) = if area.height >= ideal_small_h + ideal_tall_h {
-        (
-            ideal_small_h,
-            ideal_tall_h.min(area.height.saturating_sub(ideal_small_h)),
-        )
-    } else {
-        let min_small = small_rows * 8;
-        let min_tall = tall_rows * 9;
-        if area.height <= min_small + min_tall {
-            let total_ideal = ideal_small_h + ideal_tall_h;
-            let sh = (area.height as u32 * ideal_small_h as u32 / total_ideal.max(1) as u32) as u16;
-            (sh, area.height.saturating_sub(sh))
-        } else {
-            let th = ideal_tall_h.min(area.height.saturating_sub(min_small));
-            (area.height.saturating_sub(th), th)
-        }
-    };
-
-    let row_areas = Layout::default()
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(small_h),
-            Constraint::Length(tall_h),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(small_h), Constraint::Length(tall_h)])
         .split(area);
 
     render_snapshot_grid(
         f,
-        row_areas[0],
-        &small_snapshots,
+        chunks[0],
+        &small,
         display_mode,
         theme,
         account_display,
-        columns,
-        Some(12),
+        12,
     );
     render_snapshot_grid(
         f,
-        row_areas[1],
-        &tall_snapshots,
+        chunks[1],
+        &tall,
         display_mode,
         theme,
         account_display,
-        columns,
-        Some(16),
+        16,
     );
 }
 
@@ -181,53 +141,40 @@ fn render_snapshot_grid(
     display_mode: &QuotaDisplayMode,
     theme: &Theme,
     account_display: AccountDisplay,
-    columns: usize,
-    target_row_height: Option<u16>,
+    max_row_height: u16,
 ) {
     if snapshots.is_empty() || area.height == 0 || area.width == 0 {
         return;
     }
 
+    let columns = if area.width >= 110 { 2 } else { 1 };
     let rows = snapshots.len().div_ceil(columns);
-    let row_height = match target_row_height {
-        Some(target) => (area.height / rows as u16).min(target).max(8),
-        None => {
-            if area.height >= rows as u16 * 10 {
-                (area.height / rows as u16).min(13)
-            } else {
-                area.height / rows as u16
-            }
-        }
-    };
+    let row_height = (area.height / rows as u16).min(max_row_height).max(8);
 
-    let mut row_constraints: Vec<Constraint> = vec![Constraint::Length(row_height); rows];
+    let mut row_constraints = vec![Constraint::Length(row_height); rows];
     row_constraints.push(Constraint::Min(0));
     let row_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(row_constraints)
         .split(area);
 
-    for (row_idx, row_area) in row_areas.iter().enumerate() {
-        if row_idx >= rows {
-            break;
-        }
+    for (row_idx, row_area) in row_areas.iter().enumerate().take(rows) {
         let col_constraints = vec![Constraint::Ratio(1, columns as u32); columns];
         let col_areas = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(col_constraints)
             .split(*row_area);
 
-        for col_idx in 0..columns {
+        for (col_idx, col_area) in col_areas.iter().enumerate().take(columns) {
             let index = row_idx * columns + col_idx;
             if let Some(snapshot) = snapshots.get(index) {
                 render_snapshot_card(
                     f,
-                    col_areas[col_idx],
+                    *col_area,
                     snapshot,
                     display_mode,
                     theme,
                     false,
-                    true,
                     account_display,
                 );
             }
@@ -242,7 +189,6 @@ fn render_snapshot_card(
     display_mode: &QuotaDisplayMode,
     theme: &Theme,
     compact: bool,
-    overview: bool,
     account_display: AccountDisplay,
 ) {
     let provider_color = theme.provider_color(&snapshot.provider);
@@ -260,11 +206,7 @@ fn render_snapshot_card(
     let has_plan_display = snapshot.plan.is_some() && account_display.shows_plan();
     let show_account_row = has_account_display || has_plan_display;
 
-    let base_windows: Vec<&RateWindow> = if overview && snapshot.windows.len() > 6 {
-        snapshot.windows.iter().take(6).collect()
-    } else {
-        snapshot.windows.iter().collect()
-    };
+    let base_windows: Vec<&RateWindow> = snapshot.windows.iter().collect();
 
     let fixed_rows =
         if show_account_row { 1 } else { 0 } + if snapshot.credits.is_some() { 1 } else { 0 };
@@ -911,7 +853,6 @@ mod tests {
                     &QuotaDisplayMode::Remaining,
                     &theme,
                     compact,
-                    true,
                     account_display,
                 );
             })
@@ -1039,7 +980,6 @@ mod tests {
                     &QuotaDisplayMode::Remaining,
                     &theme,
                     false,
-                    true,
                     AccountDisplay::None,
                 );
             })

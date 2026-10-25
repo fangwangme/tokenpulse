@@ -1091,17 +1091,11 @@ mod tests {
     }
 
     #[test]
-    fn clean_group_label_maps_known_groups() {
-        assert_eq!(clean_group_label("Gemini Models"), "Gemini");
-        assert_eq!(clean_group_label("Claude and GPT models"), "Claude");
-        assert_eq!(clean_group_label("Experimental Models"), "Experimental");
-    }
-
-    #[test]
     fn clean_group_label_distinguishes_core_gemini_from_specialized_models() {
         assert_eq!(clean_group_label("Gemini Models"), "Gemini");
         assert_eq!(clean_group_label("Gemini"), "Gemini");
         assert_eq!(clean_group_label("Claude and GPT models"), "Claude");
+        assert_eq!(clean_group_label("Experimental Models"), "Experimental");
         assert_eq!(clean_group_label("Gemini 4 Argon"), "Gemini 4 Argon");
         assert_eq!(
             clean_group_label("gemini-4-carbon Models"),
