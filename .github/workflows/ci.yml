@@ -2,7 +2,7 @@ name: CI
 
 # Development happens on Linux, so this runs only on macOS: it is the one place
 # the `cfg(target_os = "macos")` code paths get compiled and tested before a
-# release. Pushes that change only docs or notes skip CI with `[skip ci]`.
+# release. Doc-only changes are skipped by `paths-ignore`, not commit markers.
 on:
   pull_request:
     branches:
