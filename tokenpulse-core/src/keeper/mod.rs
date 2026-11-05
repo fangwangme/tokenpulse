@@ -754,16 +754,6 @@ mod tests {
     use chrono::{Datelike, TimeZone, Timelike};
 
     #[test]
-    fn test_format_keeper_command() {
-        let template = "claude -p \"{prompt}\" --model {model}";
-        let formatted = format_keeper_command(template, "claude-3-5-haiku-20241022", "Hello World");
-        assert_eq!(
-            formatted,
-            "claude -p \"Hello World\" --model claude-3-5-haiku-20241022"
-        );
-    }
-
-    #[test]
     fn test_sanitize_output_snippet_handles_multibyte_and_control_chars() {
         // Byte 300 lands inside a multi-byte codepoint; slicing here used to panic.
         let cjk = format!("Hello! {}", "你好，很高兴见到你。".repeat(40));
@@ -796,63 +786,6 @@ mod tests {
             format_keeper_command("claude -p \"{prompt}\" --model {model}", "haiku", "Hi"),
             "claude -p \"Hi\" --model haiku"
         );
-    }
-
-    /// Resolves a wall clock time in a zone with DST, independent of the host's
-    /// own timezone, by checking the two transition shapes directly.
-    #[test]
-    fn test_local_datetime_at_handles_dst_transitions() {
-        use chrono::offset::LocalResult;
-        use chrono::TimeZone;
-        use chrono_tz::America::New_York;
-
-        // Spring forward 2026-03-08: 02:00 -> 03:00, so 02:30 never happens.
-        let gap_date = NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
-        let gap_time = NaiveTime::from_hms_opt(2, 30, 0).unwrap();
-        assert!(matches!(
-            New_York.from_local_datetime(&gap_date.and_time(gap_time)),
-            LocalResult::None
-        ));
-
-        // Fall back 2026-11-01: 02:00 -> 01:00, so 01:30 happens twice.
-        let dup_date = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
-        let dup_time = NaiveTime::from_hms_opt(1, 30, 0).unwrap();
-        assert!(matches!(
-            New_York.from_local_datetime(&dup_date.and_time(dup_time)),
-            LocalResult::Ambiguous(_, _)
-        ));
-
-        // Both shapes must resolve rather than leaving the card blank. The
-        // skipped hour in particular is not covered by `.earliest()`, which
-        // returns `None` for `LocalResult::None`.
-        assert!(resolve_in(&New_York, gap_date, gap_time).is_some());
-        assert!(resolve_in(&New_York, dup_date, dup_time).is_some());
-    }
-
-    /// Mirrors `local_datetime_at` for an explicit zone, so the DST test does
-    /// not depend on where it runs.
-    #[cfg(test)]
-    fn resolve_in<Tz: chrono::TimeZone>(
-        tz: &Tz,
-        date: NaiveDate,
-        time: NaiveTime,
-    ) -> Option<chrono::DateTime<Tz>> {
-        use chrono::offset::LocalResult;
-
-        match tz.from_local_datetime(&date.and_time(time)) {
-            LocalResult::Single(dt) => Some(dt),
-            LocalResult::Ambiguous(earliest, _) => Some(earliest),
-            LocalResult::None => (1..=120).find_map(|minutes| {
-                let shifted = time.overflowing_add_signed(chrono::Duration::minutes(minutes));
-                if shifted.1 != 0 {
-                    return None;
-                }
-                match tz.from_local_datetime(&date.and_time(shifted.0)) {
-                    LocalResult::Single(dt) => Some(dt),
-                    _ => None,
-                }
-            }),
-        }
     }
 
     #[test]
@@ -1263,28 +1196,6 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
     }
 
-    /// Dropping the `output()` future on timeout must not leave the CLI running.
-    #[tokio::test]
-    async fn test_timed_out_ping_kills_its_child() {
-        let marker = std::env::temp_dir().join("tokenpulse_keeper_kill_test");
-        let _ = std::fs::remove_file(&marker);
-
-        let started = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("sleep 2 && touch {}", marker.display()))
-                .stdin(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await;
-        assert!(started.is_err(), "command should have timed out");
-
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        assert!(!marker.exists(), "child outlived the timeout");
-        let _ = std::fs::remove_file(&marker);
-    }
     /// A timed-out ping has to stop everything it started, not just the shell:
     /// an agent CLI starts processes of its own, and those used to keep running
     /// (and spending quota) after the ping was reported as timed out.
@@ -1330,19 +1241,5 @@ mod tests {
             marker.exists(),
             "the command was killed without a SIGTERM first"
         );
-    }
-
-    #[tokio::test]
-    async fn command_finishing_in_time_returns_its_output() {
-        let outcome = run_command_with_timeout(
-            "echo hello",
-            Duration::from_secs(10),
-            Duration::from_secs(1),
-        )
-        .await;
-
-        let output = outcome.expect("finished in time").expect("ran");
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
     }
 }

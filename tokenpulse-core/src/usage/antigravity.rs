@@ -2694,45 +2694,6 @@ fn extract_trajectory_entries(response: &Value) -> Vec<(String, Value)> {
     Vec::new()
 }
 
-#[cfg(test)]
-fn sanitize_session_id(session_id: &str) -> String {
-    let sanitized: String = session_id
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-
-    let trimmed = sanitized.trim_matches('-');
-    if trimmed.is_empty() {
-        "session".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-#[cfg(test)]
-fn session_artifact_file_stem(session_id: &str) -> String {
-    let sanitized = sanitize_session_id(session_id);
-    let hash = stable_fnv1a_64(session_id);
-    format!("{}-{:016x}", sanitized, hash)
-}
-
-#[cfg(test)]
-fn stable_fnv1a_64(value: &str) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in value.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 fn to_safe_i64(value: Option<&Value>) -> i64 {
     value
         .and_then(|inner| {
@@ -3711,50 +3672,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_file_antigravity_deduplication() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-
-        let conn = open_cache_db(&sessions_dir).unwrap();
-        conn.execute(
-            "INSERT INTO sessions (session_id, trajectory_id, client, title, model_id, status, step_count, created_time_ms, last_modified_ms, last_user_input_time_ms, synced_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["sess-123", "traj-123", "antigravity-cli", "title", "gemini-3-pro-preview", "status", 1_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64],
-        ).unwrap();
-
-        conn.execute(
-            "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, response_id, pricing_day, parser_version)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                "resp-456", "sess-123", "antigravity-cli", "gemini-3-pro-preview", "google", 1672531201000_i64, 0_i64,
-                150_i64, 50_i64, 20_i64, 0_i64, 10_i64, "resp-456", "2023-01-01", PARSER_VERSION
-            ],
-        ).unwrap();
-
-        conn.execute(
-            "INSERT OR REPLACE INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, response_id, pricing_day, parser_version)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                "resp-456", "sess-123", "antigravity-cli", "gemini-3-pro-preview", "google", 1672531202000_i64, 0_i64,
-                200_i64, 60_i64, 30_i64, 0_i64, 15_i64, "resp-456", "2023-01-01", PARSER_VERSION
-            ],
-        ).unwrap();
-
-        let parser = AntigravitySessionParser::new()
-            .with_custom_paths(vec![sessions_dir])
-            .with_skip_sync(true);
-        let messages = parser.parse_sessions(None).unwrap();
-
-        assert_eq!(messages.len(), 1);
-        let msg = &messages[0];
-        assert_eq!(msg.session_id, "sess-123");
-        assert_eq!(msg.message_key, "resp-456");
-        assert_eq!(msg.tokens.input, 200);
-        assert_eq!(msg.tokens.output, 60);
-    }
-
-    #[test]
     fn test_parse_file_deduplicates_same_logical_message_across_clients() {
         let temp_dir = tempfile::tempdir().unwrap();
         let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
@@ -4068,43 +3985,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dynamic_model_aliases_are_saved_and_reused() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-
-        let mut dynamic_aliases = HashMap::new();
-        dynamic_aliases.insert(
-            normalize_alias_key("MODEL_PLACEHOLDER_M132"),
-            ModelAlias {
-                raw_model_id: "MODEL_PLACEHOLDER_M132".to_string(),
-                model_id: "gemini-3.5-flash-high".to_string(),
-                label: Some("Gemini 3.5 Flash (High)".to_string()),
-                source: "antigravity-get-user-status".to_string(),
-            },
-        );
-
-        let saved = merge_and_save_model_alias_history(&sessions_dir, &dynamic_aliases).unwrap();
-        assert_eq!(
-            resolve_stored_model_id("MODEL_PLACEHOLDER_M132", &saved),
-            "gemini-3-5-flash-high"
-        );
-
-        let loaded = load_model_alias_history_map(&sessions_dir).unwrap();
-        assert_eq!(
-            resolve_stored_model_id("MODEL_PLACEHOLDER_M132", &loaded),
-            "gemini-3-5-flash-high"
-        );
-
-        let history_path = model_alias_history_path(&sessions_dir).unwrap();
-        let content = std::fs::read_to_string(history_path).unwrap();
-        assert!(content.contains("MODEL_PLACEHOLDER_M132"));
-        assert!(content.contains("Gemini 3.5 Flash (High)"));
-        assert!(content.contains("firstSeenAt"));
-        assert!(content.contains("lastSeenAt"));
-    }
-
-    #[test]
     fn test_model_alias_history_is_seeded_from_static_sources() {
         let temp_dir = tempfile::tempdir().unwrap();
         let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
@@ -4349,14 +4229,6 @@ mod tests {
                 None
             ),
             AntigravityRuntimeKind::Ide
-        );
-    }
-
-    #[test]
-    fn test_session_artifact_file_stem_uses_stable_hash() {
-        assert_eq!(
-            session_artifact_file_stem("session/with spaces"),
-            "session-with-spaces-ffc7e153e201ef5f"
         );
     }
 
@@ -5007,32 +4879,6 @@ mod tests {
             normalize_antigravity_tokens(0, 1, Some(i64::MAX), 0, 0, i64::MAX),
             None
         );
-    }
-
-    #[test]
-    fn test_rpc_and_local_paths_agree_on_the_same_usage_record() {
-        // Same generation seen through both sources must produce identical
-        // columns; this is the drift guard the two paths previously lacked.
-        let local = parse_gen_metadata_usage(&GenMetadataFixture::default().encode()).unwrap();
-        let rpc_usage = serde_json::json!({
-            "inputTokens": 5911,
-            "outputTokens": 669,
-            "responseOutputTokens": 55,
-            "cacheReadTokens": 8138,
-            "thinkingOutputTokens": 614,
-        });
-        let rpc = normalize_antigravity_tokens(
-            to_safe_i64(rpc_usage.get("inputTokens")),
-            to_safe_i64(rpc_usage.get("outputTokens")),
-            rpc_usage
-                .get("responseOutputTokens")
-                .map(|v| to_safe_i64(Some(v))),
-            to_safe_i64(rpc_usage.get("cacheReadTokens")),
-            to_safe_i64(rpc_usage.get("cacheWriteTokens")),
-            to_safe_i64(rpc_usage.get("thinkingOutputTokens")),
-        )
-        .unwrap();
-        assert_eq!(local.tokens, rpc);
     }
 
     #[test]

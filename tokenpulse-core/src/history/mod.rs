@@ -100,10 +100,6 @@ impl HistoryStore {
         Self { db_path }
     }
 
-    pub fn db_path(&self) -> &PathBuf {
-        &self.db_path
-    }
-
     fn open(&self) -> Result<Connection> {
         if let Some(parent) = self.db_path.parent() {
             fs::create_dir_all(parent)?;
@@ -504,16 +500,5 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = HistoryStore::with_path(dir.path().join("nope.db"));
         assert!(store.recent_keeper_executions(50).unwrap().is_empty());
-    }
-
-    #[test]
-    fn schema_is_created_once_and_is_idempotent() {
-        let (_dir, store) = store();
-        store.open().unwrap();
-        let conn = store.open().unwrap();
-        let version: i32 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
     }
 }

@@ -705,48 +705,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_opencode_structure() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Db::create(dir.path(), "opencode.db", &[V1_SCHEMA]);
-        db.v1(
-            "msg_123",
-            "ses_456",
-            T0,
-            json!({
-                "id": "msg_123",
-                "sessionID": "ses_456",
-                "role": "assistant",
-                "modelID": "claude-sonnet-4",
-                "providerID": "anthropic",
-                "cost": 0.05,
-                "tokens": {
-                    "input": 1000,
-                    "output": 500,
-                    "reasoning": 100,
-                    "cache": { "read": 200, "write": 50 }
-                },
-                "time": { "created": 1700000000000.0 }
-            }),
-        );
-
-        let messages = parse(&[&db]);
-
-        assert_eq!(messages.len(), 1);
-        let msg = &messages[0];
-        assert_eq!(msg.model_id, "claude-sonnet-4");
-        assert_eq!(msg.provider_id, "anthropic");
-        assert_eq!(msg.session_id, "ses_456");
-        assert_eq!(msg.message_key, "msg_123");
-        assert_eq!(msg.timestamp, T0);
-        assert_eq!(msg.tokens.input, 1000);
-        assert_eq!(msg.tokens.output, 500);
-        assert_eq!(msg.tokens.reasoning, 100);
-        assert_eq!(msg.tokens.cache_read, 200);
-        assert_eq!(msg.tokens.cache_write, 50);
-        assert_eq!(msg.parser_version, PARSER_VERSION);
-    }
-
-    #[test]
     fn test_negative_values_clamped_to_zero() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::create(dir.path(), "opencode.db", &[V1_SCHEMA]);
@@ -787,53 +745,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_row_ignores_source_cost_for_centralized_pricing() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Db::create(dir.path(), "opencode.db", &[V1_SCHEMA]);
-        db.v1(
-            "msg_source_cost",
-            "ses_source_cost",
-            T0,
-            v1_assistant("claude-sonnet-4", 1000),
-        );
-
-        let messages = parse(&[&db]);
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].cost, 0.0);
-    }
-
-    #[test]
-    fn parse_row_leaves_missing_source_cost_for_store_level_pricing() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Db::create(dir.path(), "opencode.db", &[V1_SCHEMA]);
-        db.v1(
-            "msg_missing_cost",
-            "ses_missing_cost",
-            T0,
-            json!({
-                "role": "assistant",
-                "modelID": "deepseek-ai/deepseek-v4-flash",
-                "providerID": "nvidia",
-                "tokens": {
-                    "input": 1000,
-                    "output": 500,
-                    "reasoning": 0,
-                    "cache": { "read": 0, "write": 0 }
-                },
-                "time": { "created": 1700000000000.0 }
-            }),
-        );
-
-        let messages = parse(&[&db]);
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].cost, 0.0);
-        assert_eq!(messages[0].model_id, "deepseek-ai/deepseek-v4-flash");
-        assert_eq!(messages[0].provider_id, "nvidia");
-    }
-
-    #[test]
     fn v1_only_database_parses_assistant_rows() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::create(dir.path(), "opencode.db", &[V1_SCHEMA]);
@@ -858,6 +769,10 @@ mod tests {
         assert_eq!(keys(&messages), ["msg_a"]);
         let msg = &messages[0];
         assert_eq!(msg.client, "opencode");
+        assert_eq!(msg.timestamp, T0);
+        assert_eq!(msg.parser_version, PARSER_VERSION);
+        // Source cost is ignored; pricing is applied centrally by the store.
+        assert_eq!(msg.cost, 0.0);
         assert_eq!(msg.model_id, "claude-sonnet-4");
         assert_eq!(msg.provider_id, "anthropic");
         assert_eq!(msg.session_id, "ses_1");

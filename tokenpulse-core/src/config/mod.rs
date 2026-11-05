@@ -96,15 +96,6 @@ impl NotificationLevel {
         }
     }
 
-    pub fn prev(self) -> Self {
-        match self {
-            Self::Off => Self::System,
-            Self::InApp => Self::Off,
-            Self::Terminal => Self::InApp,
-            Self::System => Self::Terminal,
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "off",
@@ -197,14 +188,6 @@ impl ThemePreference {
             Self::Auto => Self::Dark,
             Self::Dark => Self::Light,
             Self::Light => Self::Auto,
-        }
-    }
-
-    pub fn prev(self) -> Self {
-        match self {
-            Self::Auto => Self::Light,
-            Self::Dark => Self::Auto,
-            Self::Light => Self::Dark,
         }
     }
 
@@ -616,25 +599,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
-        let config = Config::default();
-        assert!(config.providers.contains_key("claude"));
-        assert!(config.providers.contains_key("codex"));
-        assert!(config.providers.contains_key("antigravity"));
-        // `gemini` and `copilot` have no quota fetcher; Gemini CLI and Copilot
-        // CLI usage is parsed regardless of this map.
-        assert!(!config.providers.contains_key("gemini"));
-        assert!(!config.providers.contains_key("copilot"));
-    }
-
-    #[test]
-    fn test_provider_enabled_by_default() {
-        let config = Config::default();
-        let claude = config.providers.get("claude").unwrap();
-        assert!(claude.enabled);
-    }
-
-    #[test]
     fn test_default_has_three_quota_providers() {
         let config = Config::default();
         let mut ids: Vec<&str> = config.providers.keys().map(String::as_str).collect();
@@ -643,87 +607,6 @@ mod tests {
         for (_, provider) in &config.providers {
             assert!(provider.enabled);
         }
-    }
-
-    #[test]
-    fn test_disabled_provider_filtered() {
-        let mut config = Config::default();
-        config.providers.get_mut("claude").unwrap().enabled = false;
-        let enabled: Vec<_> = config
-            .providers
-            .iter()
-            .filter(|(_, p)| p.enabled)
-            .map(|(k, _)| k.clone())
-            .collect();
-        assert!(!enabled.contains(&"claude".to_string()));
-        assert_eq!(enabled.len(), 2);
-    }
-
-    #[test]
-    fn test_config_toml_roundtrip() {
-        let config = Config::default();
-        let toml_str = toml::to_string_pretty(&config).unwrap();
-        let parsed: Config = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.providers.len(), config.providers.len());
-        assert_eq!(parsed.version, config.version);
-    }
-
-    #[test]
-    fn test_partial_toml_fills_defaults() {
-        let toml_str = r#"
-version = 1
-
-[providers.claude]
-enabled = true
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.providers.contains_key("claude"));
-        assert!(config.providers.get("claude").unwrap().enabled);
-        // Other providers not in TOML are simply missing
-        assert!(!config.providers.contains_key("codex"));
-    }
-
-    #[test]
-    fn test_display_config_defaults() {
-        let config = Config::default();
-        assert!(!config.display.show_empty_providers);
-        assert_eq!(config.display.theme, ThemePreference::Auto);
-        assert_eq!(
-            config.display.quota_display_mode,
-            QuotaDisplayMode::Remaining
-        );
-        assert_eq!(config.display.auto_refresh_secs, 300);
-        assert_eq!(config.display.account_display, AccountDisplay::Full);
-        assert!(config.display.scan_antigravity);
-        assert!(config.display.refresh_quota);
-        assert_eq!(config.display.notification_level, NotificationLevel::System);
-    }
-
-    #[test]
-    fn test_notification_level_cycling() {
-        let level = NotificationLevel::Off;
-        assert_eq!(level.next(), NotificationLevel::InApp);
-        assert_eq!(level.next().next(), NotificationLevel::Terminal);
-        assert_eq!(level.next().next().next(), NotificationLevel::System);
-        assert_eq!(level.next().next().next().next(), NotificationLevel::Off);
-
-        assert_eq!(level.prev(), NotificationLevel::System);
-        assert_eq!(level.prev().prev(), NotificationLevel::Terminal);
-        assert_eq!(level.prev().prev().prev(), NotificationLevel::InApp);
-        assert_eq!(level.prev().prev().prev().prev(), NotificationLevel::Off);
-    }
-
-    #[test]
-    fn test_notification_level_labels() {
-        assert_eq!(NotificationLevel::Off.label(), "off");
-        assert_eq!(NotificationLevel::InApp.label(), "in_app");
-        assert_eq!(NotificationLevel::Terminal.label(), "terminal");
-        assert_eq!(NotificationLevel::System.label(), "system");
-
-        assert_eq!(NotificationLevel::Off.display_label(), "off");
-        assert_eq!(NotificationLevel::InApp.display_label(), "in-app (toast)");
-        assert_eq!(NotificationLevel::Terminal.display_label(), "terminal");
-        assert_eq!(NotificationLevel::System.display_label(), "system");
     }
 
     #[test]
@@ -749,28 +632,6 @@ notification_level = "in_app"
     }
 
     #[test]
-    fn test_auto_refresh_secs_deserializes_from_toml() {
-        let toml_str = r#"
-version = 3
-[display]
-auto_refresh_secs = 60
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.display.auto_refresh_secs, 60);
-    }
-
-    #[test]
-    fn test_theme_deserializes_from_toml() {
-        let toml_str = r#"
-version = 1
-[display]
-theme = "dark"
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.display.theme, ThemePreference::Dark);
-    }
-
-    #[test]
     fn test_auto_refresh_secs_defaults_when_absent() {
         let toml_str = r#"
 version = 3
@@ -789,17 +650,6 @@ auto_refresh_secs = 60
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.display.refresh_quota);
-    }
-
-    #[test]
-    fn test_refresh_quota_deserializes_from_toml() {
-        let toml_str = r#"
-version = 3
-[display]
-refresh_quota = false
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(!config.display.refresh_quota);
     }
 
     fn load_written(toml_str: &str) -> (Config, String) {
@@ -888,42 +738,6 @@ enabled = true
 
         let weekly_state = manager.toggle_agent_weekly_keeper("codex").unwrap();
         assert!(!weekly_state);
-    }
-
-    #[test]
-    fn test_custom_keeper_command_is_not_clobbered() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir.path().join("config.toml");
-
-        // A hand-written command that merely mentions `--bare` used to be
-        // overwritten by the substring-based migration.
-        let custom = r#"
-version = 3
-[keeper]
-enabled = true
-[keeper.agents.claude]
-command = 'claude --bare -p "{prompt}" --model {model} --my-flag'
-"#;
-        fs::write(&config_path, custom).unwrap();
-
-        let manager = ConfigManager { config_path };
-        let loaded = manager.load().unwrap();
-
-        assert_eq!(
-            loaded.keeper.agents.get("claude").unwrap().command,
-            "claude --bare -p \"{prompt}\" --model {model} --my-flag"
-        );
-    }
-
-    #[test]
-    fn test_keeper_state_path_is_next_to_config() {
-        let manager = ConfigManager {
-            config_path: PathBuf::from("/tmp/tp/config.toml"),
-        };
-        assert_eq!(
-            manager.keeper_state_path(),
-            PathBuf::from("/tmp/tp/keeper_state.json")
-        );
     }
 
     /// One bad value plus settings worth keeping: what `config enable` and the

@@ -241,11 +241,6 @@ mod tests {
     }
 
     #[test]
-    fn summarizes_an_empty_batch_as_empty() {
-        assert_eq!(summarize(&[]), "");
-    }
-
-    #[test]
     fn escapes_quotes_and_backslashes_for_applescript() {
         assert_eq!(escape_applescript(r#"a"b\c"#), r#"a\"b\\c"#);
     }

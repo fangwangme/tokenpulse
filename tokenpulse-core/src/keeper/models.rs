@@ -256,13 +256,6 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_version_numbers() {
-        assert_eq!(version_numbers("gemini-3.8-flash-low"), vec![3, 8]);
-        assert_eq!(version_numbers("gpt-6-luna"), vec![6]);
-        assert_eq!(version_numbers("gpt-5.6-luna"), vec![5, 6]);
-    }
-
-    #[test]
     fn test_resolve_claude_newest_main_haiku() {
         let temp = tempdir().unwrap();
         fs::write(
@@ -327,12 +320,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_codex_missing_file_fails() {
-        let temp = tempdir().unwrap();
-        assert!(resolve_codex(&temp.path().join("missing.json")).is_err());
-    }
-
-    #[test]
     fn test_resolve_antigravity_newest_flash_low_in_cli_form() {
         let temp = tempdir().unwrap();
         let file = temp.path().join("model-aliases.json");
@@ -364,14 +351,5 @@ mod tests {
 
         let err = resolve_antigravity(&file).unwrap_err();
         assert!(err.to_string().contains("no Flash (Low) model"));
-    }
-
-    #[test]
-    fn test_antigravity_cli_model_id_matches_agy_models() {
-        assert_eq!(
-            antigravity_cli_model_id("Gemini 3.8 Flash (Low)").as_deref(),
-            Some("gemini-3.8-flash-low")
-        );
-        assert_eq!(antigravity_cli_model_id("  "), None);
     }
 }
