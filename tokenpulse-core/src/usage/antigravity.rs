@@ -429,36 +429,7 @@ fn open_cache_db(sessions_dir: &Path) -> Result<rusqlite::Connection> {
         [],
     )?;
 
-    migrate_legacy_usage_rows(&conn)?;
-
     Ok(conn)
-}
-
-/// Rewrites `antigravity-v2` usage rows in place.
-///
-/// v2 rows all came from the language-server RPC, which stored `outputTokens`
-/// — thinking tokens included — in `output_tokens`, double-counting reasoning
-/// in cost. Splitting them here fixes those rows and, just as importantly,
-/// leaves no row behind at an old `parser_version`: a single one that the local
-/// parser can never re-read (an encrypted `.pb` session) would otherwise mark
-/// the source stale on every launch, forcing a full ledger re-read forever.
-/// `antigravity-v2` is the only version that ever shipped, so this closes the
-/// set.
-fn migrate_legacy_usage_rows(conn: &rusqlite::Connection) -> Result<()> {
-    let migrated = conn.execute(
-        "UPDATE session_usage
-            SET output_tokens = MAX(output_tokens - reasoning_tokens, 0),
-                parser_version = ?1
-          WHERE parser_version = 'antigravity-v2';",
-        [PARSER_VERSION],
-    )?;
-    if migrated > 0 {
-        info!(
-            "Antigravity cache: migrated {} usage rows from antigravity-v2 to {}",
-            migrated, PARSER_VERSION
-        );
-    }
-    Ok(())
 }
 
 fn count_antigravity_session_cache_rows(conn: &rusqlite::Connection) -> usize {
@@ -3378,15 +3349,6 @@ fn parse_port_from_line(line: &str) -> Option<u16> {
     None
 }
 
-#[allow(dead_code)]
-async fn probe_heartbeat(
-    client: &reqwest::Client,
-    port: u16,
-    csrf_token: Option<&str>,
-) -> Option<&'static str> {
-    probe_heartbeat_with_preferred_scheme(client, port, csrf_token, None).await
-}
-
 async fn probe_heartbeat_with_preferred_scheme(
     client: &reqwest::Client,
     port: u16,
@@ -5196,57 +5158,6 @@ mod tests {
             .unwrap();
         assert_eq!(trajectory_id.as_deref(), Some("traj-123"));
         assert_eq!(usage_rows, 1);
-    }
-
-    #[test]
-    fn test_legacy_v2_usage_rows_are_migrated_on_cache_open() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let cache_dir = temp_dir.path().join("cache");
-        let conn = open_cache_db(&cache_dir).unwrap();
-        conn.execute(
-            "INSERT INTO sessions (session_id, client, model_id, synced_at)
-             VALUES ('sess-legacy', 'antigravity-cli', 'gemini-3-7-flash', 1)",
-            [],
-        )
-        .unwrap();
-        // A v2 row as the RPC wrote it: output_tokens is the total, thinking
-        // included.
-        conn.execute(
-            "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp,
-                                        step_index, input_tokens, output_tokens, cache_read_tokens,
-                                        cache_write_tokens, reasoning_tokens, response_id,
-                                        pricing_day, parser_version)
-             VALUES ('legacy', 'sess-legacy', 'antigravity-cli', 'gemini-3-7-flash', 'google',
-                     1672531201000, 0, 5911, 669, 8138, 0, 614, 'resp', '2023-01-01',
-                     'antigravity-v2')",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-
-        let conn = open_cache_db(&cache_dir).unwrap();
-        let (output, reasoning, version): (i64, i64, String) = conn
-            .query_row(
-                "SELECT output_tokens, reasoning_tokens, parser_version FROM session_usage",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(output, 55);
-        assert_eq!(reasoning, 614);
-        // No row may linger at an old version: one that the local parser can
-        // never re-read would mark the source stale on every launch.
-        assert_eq!(version, PARSER_VERSION);
-
-        // Idempotent — reopening must not subtract twice.
-        drop(conn);
-        let conn = open_cache_db(&cache_dir).unwrap();
-        let output_again: i64 = conn
-            .query_row("SELECT output_tokens FROM session_usage", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(output_again, 55);
     }
 
     #[test]

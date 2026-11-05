@@ -1194,7 +1194,6 @@ pub fn move_table_selection_for_frame(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum TuiMessage {
     UsageReloadSuccess(UsageSummary, Vec<DailyUsageRow>),
     UsageReloadFailed(String),

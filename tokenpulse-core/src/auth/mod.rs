@@ -4,13 +4,6 @@ pub mod codex;
 pub use claude::ClaudeAuth;
 pub use codex::CodexAuth;
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum CredentialStatus {
-    Valid,
-    Expired,
-    NotFound,
-}
-
 #[derive(Debug, Clone)]
 pub struct DetectedProvider {
     pub name: String,

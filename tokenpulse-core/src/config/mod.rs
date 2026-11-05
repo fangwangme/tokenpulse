@@ -16,9 +16,8 @@ pub struct Config {
     pub keeper: KeeperConfig,
 }
 
-/// Current config schema version. `ConfigManager::load` migrates anything older
-/// and rewrites the file. v5 dropped the Keeper agents' `model` key: the rewrite
-/// removes it, since the model is now resolved from local catalogs.
+/// Current config schema version. `ConfigManager::load` rewrites an older file
+/// in the current shape.
 pub const CONFIG_VERSION: u32 = 5;
 
 fn default_version() -> u32 {
@@ -43,15 +42,9 @@ pub struct DisplayConfig {
     pub quota_display_mode: QuotaDisplayMode,
     /// Unified auto-refresh interval (seconds) for both quota and usage in the
     /// TUI. 0 = disabled. Supported values: 0, 60, 120, 300, 600, 900.
-    /// `quota_auto_refresh_secs` is accepted as an alias for migration from
-    /// older configs that stored separate quota/usage intervals.
-    #[serde(
-        default = "default_auto_refresh_secs",
-        alias = "quota_auto_refresh_secs"
-    )]
+    #[serde(default = "default_auto_refresh_secs")]
     pub auto_refresh_secs: u32,
-    /// How much of the signed-in account the quota views show. Replaces the
-    /// pre-v4 `show_account` switch, which `ConfigManager::load` migrates.
+    /// How much of the signed-in account the quota views show.
     #[serde(default)]
     pub account_display: AccountDisplay,
     #[serde(default = "default_true")]
@@ -425,26 +418,6 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
     map
 }
 
-/// Commands that shipped as defaults in earlier builds and should be replaced.
-///
-/// These are matched exactly rather than by substring: an earlier `contains("--bare")`
-/// check also clobbered any hand-written command that happened to use that flag.
-const LEGACY_KEEPER_COMMANDS: &[(&str, &str)] = &[
-    ("claude", "claude -p \"{prompt}\" --model {model}"),
-    (
-        "claude",
-        "claude --bare -p \"{prompt}\" --model {model} --no-session-persistence",
-    ),
-    ("codex", "codex exec \"{prompt}\" -m {model}"),
-    ("antigravity", "agy query \"{prompt}\" --model {model}"),
-];
-
-fn is_legacy_keeper_command(agent: &str, command: &str) -> bool {
-    LEGACY_KEEPER_COMMANDS
-        .iter()
-        .any(|(name, legacy)| *name == agent && *legacy == command.trim())
-}
-
 impl Default for KeeperConfig {
     fn default() -> Self {
         Self {
@@ -516,27 +489,15 @@ impl ConfigManager {
         }
 
         let content = fs::read_to_string(&self.config_path)?;
-        let (mut config, legacy_show_account) = parse_config(&content)
+        let mut config = parse_config(&content)
             .with_context(|| format!("invalid config file {}", self.config_path.display()))?;
 
         let default_agents = default_keeper_agents();
         let mut modified = false;
 
-        // v4 replaced `show_account = true | false` with `account_display`.
-        if let Some(show_account) = legacy_show_account {
-            config.display.account_display = if show_account {
-                AccountDisplay::Full
-            } else {
-                AccountDisplay::None
-            };
-            modified = true;
-        }
-
         for (name, default_cfg) in &default_agents {
             if let Some(agent_cfg) = config.keeper.agents.get_mut(name) {
-                if agent_cfg.command.is_empty()
-                    || is_legacy_keeper_command(name, &agent_cfg.command)
-                {
+                if agent_cfg.command.is_empty() {
                     agent_cfg.command = default_cfg.command.clone();
                     modified = true;
                 }
@@ -640,21 +601,8 @@ impl ConfigManager {
     }
 }
 
-/// Parses a config file, with the pre-v4 `show_account` switch if it has one.
-fn parse_config(content: &str) -> Result<(Config, Option<bool>)> {
-    let raw: toml::Table = toml::from_str(content)?;
-    let legacy_show_account = legacy_show_account(&raw);
-    Ok((raw.try_into()?, legacy_show_account))
-}
-
-/// The pre-v4 `display.show_account` switch, when the file still has it and has
-/// not also been given an `account_display` by hand.
-fn legacy_show_account(raw: &toml::Table) -> Option<bool> {
-    let display = raw.get("display")?.as_table()?;
-    if display.contains_key("account_display") {
-        return None;
-    }
-    display.get("show_account")?.as_bool()
+fn parse_config(content: &str) -> Result<Config> {
+    Ok(toml::from_str(content)?)
 }
 
 impl Default for ConfigManager {
@@ -812,19 +760,6 @@ auto_refresh_secs = 60
     }
 
     #[test]
-    fn test_auto_refresh_secs_migrates_from_quota_alias() {
-        let toml_str = r#"
-version = 2
-[display]
-quota_auto_refresh_secs = 120
-usage_auto_refresh_secs = 900
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        // Legacy quota interval is carried over; usage key is ignored.
-        assert_eq!(config.display.auto_refresh_secs, 120);
-    }
-
-    #[test]
     fn test_theme_deserializes_from_toml() {
         let toml_str = r#"
 version = 1
@@ -867,36 +802,6 @@ refresh_quota = false
         assert!(!config.display.refresh_quota);
     }
 
-    #[test]
-    fn test_config_version_migration() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir.path().join("config.toml");
-
-        // Write a legacy v2 config with separate quota/usage intervals.
-        let legacy_toml = r#"
-version = 2
-[display]
-quota_auto_refresh_secs = 120
-usage_auto_refresh_secs = 900
-"#;
-        fs::write(&config_path, legacy_toml).unwrap();
-
-        let manager = ConfigManager { config_path };
-        let loaded = manager.load().unwrap();
-
-        // Migrated to the current version with a single interval carried
-        // from the quota value.
-        assert_eq!(loaded.version, CONFIG_VERSION);
-        assert_eq!(loaded.display.auto_refresh_secs, 120);
-
-        // The rewritten file drops the legacy keys in favor of the unified one.
-        let written_content = fs::read_to_string(&manager.config_path).unwrap();
-        assert!(written_content.contains(&format!("version = {CONFIG_VERSION}")));
-        assert!(written_content.contains("auto_refresh_secs = 120"));
-        assert!(!written_content.contains("quota_auto_refresh_secs"));
-        assert!(!written_content.contains("usage_auto_refresh_secs"));
-    }
-
     fn load_written(toml_str: &str) -> (Config, String) {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("config.toml");
@@ -905,57 +810,6 @@ usage_auto_refresh_secs = 900
         let loaded = manager.load().unwrap();
         let written = fs::read_to_string(&manager.config_path).unwrap();
         (loaded, written)
-    }
-
-    #[test]
-    fn legacy_show_account_true_migrates_to_full() {
-        let (loaded, written) = load_written(
-            r#"
-version = 3
-[display]
-show_account = true
-"#,
-        );
-
-        assert_eq!(loaded.display.account_display, AccountDisplay::Full);
-        assert_eq!(loaded.version, CONFIG_VERSION);
-        assert!(written.contains(&format!("version = {CONFIG_VERSION}")));
-        assert!(written.contains(r#"account_display = "full""#));
-        assert!(!written.contains("show_account"));
-    }
-
-    #[test]
-    fn legacy_show_account_false_migrates_to_none() {
-        let (loaded, written) = load_written(
-            r#"
-version = 3
-[display]
-show_account = false
-"#,
-        );
-
-        assert_eq!(loaded.display.account_display, AccountDisplay::None);
-        assert_eq!(loaded.version, CONFIG_VERSION);
-        assert!(written.contains(&format!("version = {CONFIG_VERSION}")));
-        assert!(written.contains(r#"account_display = "none""#));
-        assert!(!written.contains("show_account"));
-    }
-
-    #[test]
-    fn account_display_round_trips_and_wins_over_a_stale_show_account() {
-        let (loaded, written) = load_written(
-            r#"
-version = 4
-[display]
-account_display = "plan"
-show_account = false
-"#,
-        );
-
-        assert_eq!(loaded.display.account_display, AccountDisplay::Plan);
-        assert!(written.contains(r#"account_display = "plan""#));
-        let parsed: Config = toml::from_str(&written).unwrap();
-        assert_eq!(parsed.display.account_display, AccountDisplay::Plan);
     }
 
     #[test]
@@ -1070,67 +924,6 @@ command = 'claude --bare -p "{prompt}" --model {model} --my-flag'
             manager.keeper_state_path(),
             PathBuf::from("/tmp/tp/keeper_state.json")
         );
-    }
-
-    #[test]
-    fn test_legacy_keeper_command_migration() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir.path().join("config.toml");
-
-        let legacy_toml = r#"
-version = 3
-[keeper]
-enabled = true
-[keeper.agents.antigravity]
-command = 'agy query "{prompt}" --model {model}'
-[keeper.agents.claude]
-command = 'claude -p "{prompt}" --model {model}'
-[keeper.agents.codex]
-command = 'codex exec "{prompt}" -m {model}'
-"#;
-        fs::write(&config_path, legacy_toml).unwrap();
-
-        let manager = ConfigManager { config_path };
-        let loaded = manager.load().unwrap();
-
-        let agy = loaded.keeper.agents.get("antigravity").unwrap();
-        assert_eq!(agy.command, "agy --model {model} --prompt \"{prompt}\"");
-
-        let claude = loaded.keeper.agents.get("claude").unwrap();
-        assert_eq!(
-            claude.command,
-            "claude -p \"{prompt}\" --model {model} --no-session-persistence"
-        );
-
-        let codex = loaded.keeper.agents.get("codex").unwrap();
-        assert_eq!(
-            codex.command,
-            "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
-        );
-    }
-
-    #[test]
-    fn test_v4_keeper_model_key_is_dropped() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir.path().join("config.toml");
-        fs::write(
-            &config_path,
-            r#"
-version = 4
-[keeper.agents.claude]
-command = 'claude -p "{prompt}" --model {model} --no-session-persistence'
-model = "haiku"
-"#,
-        )
-        .unwrap();
-
-        let manager = ConfigManager {
-            config_path: config_path.clone(),
-        };
-        assert_eq!(manager.load().unwrap().version, CONFIG_VERSION);
-        assert!(!fs::read_to_string(&config_path)
-            .unwrap()
-            .contains("model = "));
     }
 
     /// One bad value plus settings worth keeping: what `config enable` and the
