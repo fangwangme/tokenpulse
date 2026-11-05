@@ -172,9 +172,10 @@ plan capitalized for display.
 - One card per agent with two independent switches, the next trigger time, the dynamically resolved cheapest model (e.g. Haiku / Luna / Flash-Low), and the status of the last (or in-flight) run:
   - **5h daily wakeup** — fires at `daily_wakeup_time` (default `10:30`). A missed run is only caught up within 2 hours of that time, so launching the TUI late in the day does not fire a stale ping at the wrong hour.
   - **Weekly auto-sync** — fires 1 minute after the provider's weekly quota reset, read from the live quota snapshot.
+  - **Antigravity quota groups** — Antigravity meters `Gemini`, `Claude`, `Gemini 4 Argon` (and any group the API adds later) on separate weekly windows. By default only the primary Gemini group triggers and is pinged with Gemini Flash Low; with `keeper_antigravity_groups = all` every group is triggered by its own weekly reset and pinged with its cheapest model at its lowest thinking level (resolved from `agy models` when the ping fires), and the manual ping hits every group too. The card shows the earliest pending group. See `docs/specs/keeper.md`.
 - Last-fired dates persist to `keeper_state.json` beside the config, so restarting the TUI does not re-fire a trigger that already ran.
 - Bottom panel is a scrollable execution stream: timestamp, agent, trigger, status, model, prompt, command, and reply. It is seeded from the `keeper_executions` table on launch and holds the newest 50 runs; the database keeps every run.
-- Only one ping per agent runs at a time; a second trigger is skipped while one is in flight.
+- Only one ping per agent (per quota group for Antigravity) runs at a time; a second trigger is skipped while one is in flight.
 
 ### Tab 7: Settings
 - Live settings configuration panel for the application.
@@ -190,6 +191,7 @@ plan capitalized for display.
   - `notification_level` (how far a quota recovery alert reaches: `off` / `in_app` / `terminal` / `system`, default `system`)
   - `notification_sound` (cycle `chime` / `Hero` / `Glass` / `Submarine` / `none`; the selected sound plays immediately so it can be judged by ear)
   - `keeper_engine` (master switch for the Keeper tab's scheduled pings: true / false, default false)
+  - `keeper_antigravity_groups` (`gemini_flash` / `all`, default `gemini_flash`: whether the Antigravity weekly and manual Keeper pings cover only the Gemini Flash group or every quota group)
   - Individual quota provider enabled/disabled switches (`claude`, `codex`, `antigravity`)
 - Controls: use Up/Down (`j`/`k`) to navigate settings, and Space or Enter to cycle/toggle the selected setting.
 - The same values are readable and writable outside the TUI with `tokenpulse config show` and `tokenpulse config set KEY=VALUE`.

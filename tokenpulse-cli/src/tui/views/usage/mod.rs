@@ -1053,6 +1053,15 @@ impl UsageState {
         }
     }
 
+    /// Whether any of the agent's pings holds its lock: the agent key itself
+    /// or one of its `<agent>:<group>` weekly target keys.
+    pub fn keeper_agent_busy(&self, agent: &str) -> bool {
+        self.keeper_pings_in_progress.iter().any(|key| {
+            key.strip_prefix(agent)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+        })
+    }
+
     fn keeper_model(&self, agent: &str) -> Result<String, String> {
         self.keeper_models
             .get(agent)
@@ -1191,11 +1200,53 @@ pub enum TuiMessage {
     UsageReloadFailed(String),
     QuotaReloadSuccess(Vec<tokenpulse_core::QuotaSnapshot>, Vec<String>),
     QuotaReloadFailed(String),
-    KeeperPingCompleted(tokenpulse_core::keeper::KeeperExecutionRecord),
+    /// `key` is the in-flight lock the ping held (`WeeklyTarget::key`).
+    KeeperPingCompleted {
+        key: String,
+        record: tokenpulse_core::keeper::KeeperExecutionRecord,
+    },
 }
 
 fn resolve_keeper_model(agent: &str) -> Result<String, String> {
     tokenpulse_core::keeper::resolve_cheapest_model(agent).map_err(|e| format!("{e:#}"))
+}
+
+/// Where a ping's model comes from.
+enum KeeperPingModel {
+    /// The agent's cached daily resolution.
+    Resolved(Result<String, String>),
+    /// A non-primary Antigravity quota group, resolved from `agy models` when
+    /// the ping runs, so the event loop never waits on it.
+    AntigravityGroup { group: String, groups: Vec<String> },
+}
+
+/// Locks `target` and starts its ping: the primary target uses the agent's
+/// cached model, every other group resolves its own.
+fn start_keeper_target_ping(
+    state: &mut UsageState,
+    msg_tx: &tokio::sync::mpsc::Sender<TuiMessage>,
+    agent: &str,
+    agent_cfg: &tokenpulse_core::config::AgentKeeperConfig,
+    target: &tokenpulse_core::keeper::WeeklyTarget,
+    groups: &[String],
+    trigger_type: tokenpulse_core::keeper::KeeperTriggerType,
+) {
+    let model = match &target.group {
+        Some(group) if !target.is_primary(agent) => KeeperPingModel::AntigravityGroup {
+            group: group.clone(),
+            groups: groups.to_vec(),
+        },
+        _ => KeeperPingModel::Resolved(state.keeper_model(agent)),
+    };
+    state.keeper_pings_in_progress.insert(target.key.clone());
+    spawn_keeper_ping(
+        msg_tx.clone(),
+        target.key.clone(),
+        agent.to_string(),
+        agent_cfg.clone(),
+        model,
+        trigger_type,
+    );
 }
 
 /// Runs one Keeper ping and always reports back.
@@ -1207,15 +1258,24 @@ fn resolve_keeper_model(agent: &str) -> Result<String, String> {
 /// still produces a record.
 fn spawn_keeper_ping(
     msg_tx: tokio::sync::mpsc::Sender<TuiMessage>,
+    key: String,
     agent: String,
     agent_cfg: tokenpulse_core::config::AgentKeeperConfig,
-    model: Result<String, String>,
+    model: KeeperPingModel,
     trigger_type: tokenpulse_core::keeper::KeeperTriggerType,
 ) {
     tokio::spawn(async move {
         let ping_agent = agent.clone();
         let ping_cfg = agent_cfg.clone();
         let handle = tokio::spawn(async move {
+            let model = match model {
+                KeeperPingModel::Resolved(model) => model,
+                KeeperPingModel::AntigravityGroup { group, groups } => {
+                    tokenpulse_core::keeper::resolve_antigravity_group_model(&group, &groups)
+                        .await
+                        .map_err(|e| format!("{e:#}"))
+                }
+            };
             tokenpulse_core::keeper::execute_agent_ping(&ping_agent, &ping_cfg, model, trigger_type)
                 .await
         });
@@ -1247,7 +1307,9 @@ fn spawn_keeper_ping(
         })
         .await;
 
-        let _ = msg_tx.send(TuiMessage::KeeperPingCompleted(record)).await;
+        let _ = msg_tx
+            .send(TuiMessage::KeeperPingCompleted { key, record })
+            .await;
     });
 }
 
@@ -1493,47 +1555,62 @@ where
                                 continue;
                             };
 
-                            if !agent_cfg.weekly_keeper_enabled
-                                || state.keeper_pings_in_progress.contains(agent_id)
-                            {
+                            if !agent_cfg.weekly_keeper_enabled {
                                 continue;
-                            }
-
-                            // Debounce: do not re-trigger if already triggered recently (within 12 hours)
-                            if let Some(last_time) = state.keeper_weekly_triggered.get(agent_id) {
-                                if now_utc.signed_duration_since(*last_time)
-                                    < chrono::Duration::hours(12)
-                                {
-                                    continue;
-                                }
                             }
 
                             let prev_snap = tokenpulse_core::keeper::find_snapshot_for_agent(
                                 &state.quota_snapshots,
                                 agent_id,
-                            );
-                            let new_snap = tokenpulse_core::keeper::find_snapshot_for_agent(
+                            )
+                            .cloned();
+                            let Some(new_snap) = tokenpulse_core::keeper::find_snapshot_for_agent(
                                 &new_snapshots,
                                 agent_id,
-                            );
+                            ) else {
+                                continue;
+                            };
+                            let groups = tokenpulse_core::keeper::weekly_groups(new_snap);
 
-                            if let Some(new_snap) = new_snap {
+                            for target in tokenpulse_core::keeper::weekly_targets(
+                                agent_id,
+                                Some(new_snap),
+                                agent_cfg.weekly_all_groups,
+                            ) {
+                                if state.keeper_pings_in_progress.contains(&target.key) {
+                                    continue;
+                                }
+
+                                // Debounce: do not re-trigger if already triggered recently (within 12 hours)
+                                if let Some(last_time) =
+                                    state.keeper_weekly_triggered.get(&target.key)
+                                {
+                                    if now_utc.signed_duration_since(*last_time)
+                                        < chrono::Duration::hours(12)
+                                    {
+                                        continue;
+                                    }
+                                }
+
                                 if tokenpulse_core::keeper::did_agent_cycle_reset_to_full(
-                                    prev_snap, new_snap,
+                                    prev_snap.as_ref(),
+                                    new_snap,
+                                    target.group.as_deref(),
                                 ) {
                                     // Stamp the observation time, matching the fallback path.
                                     // The new snapshot's `resets_at` already points at the
                                     // *next* cycle, so stamping it would suppress that cycle.
                                     state
                                         .keeper_weekly_triggered
-                                        .insert(agent_id.to_string(), now_utc);
+                                        .insert(target.key.clone(), now_utc);
                                     state.persist_keeper_triggers(&keeper_state_path);
-                                    state.keeper_pings_in_progress.insert(agent_id.to_string());
-                                    spawn_keeper_ping(
-                                        msg_tx.clone(),
-                                        agent_id.to_string(),
-                                        agent_cfg.clone(),
-                                        state.keeper_model(agent_id),
+                                    start_keeper_target_ping(
+                                        &mut state,
+                                        &msg_tx,
+                                        agent_id,
+                                        agent_cfg,
+                                        &target,
+                                        &groups,
                                         tokenpulse_core::keeper::KeeperTriggerType::Weekly,
                                     );
                                 }
@@ -1601,7 +1678,7 @@ where
                         RefreshStatusLevel::Error,
                     );
                 }
-                TuiMessage::KeeperPingCompleted(record) => {
+                TuiMessage::KeeperPingCompleted { key, record } => {
                     // The scheduler stamps the trigger maps before spawning, so nothing
                     // is recorded here: re-stamping on completion would push a ping that
                     // started at 23:59 into the next day and skip tomorrow's run.
@@ -1620,7 +1697,7 @@ where
                         ),
                         level,
                     );
-                    state.keeper_pings_in_progress.remove(&agent);
+                    state.keeper_pings_in_progress.remove(&key);
                     state.push_keeper_log(record);
                 }
             }
@@ -1733,41 +1810,61 @@ where
                         spawn_keeper_ping(
                             msg_tx.clone(),
                             agent_id.to_string(),
+                            agent_id.to_string(),
                             agent_cfg.clone(),
-                            state.keeper_model(agent_id),
+                            KeeperPingModel::Resolved(state.keeper_model(agent_id)),
                             tokenpulse_core::keeper::KeeperTriggerType::Daily,
                         );
                     }
                 }
 
                 // Check Weekly expected cycle reset fallback
-                if agent_cfg.weekly_keeper_enabled
-                    && !state.keeper_pings_in_progress.contains(agent_id)
-                {
-                    let resets_at = tokenpulse_core::keeper::find_snapshot_for_agent(
+                if agent_cfg.weekly_keeper_enabled {
+                    let snapshot = tokenpulse_core::keeper::find_snapshot_for_agent(
                         &state.quota_snapshots,
                         agent_id,
                     )
-                    .and_then(tokenpulse_core::keeper::extract_weekly_reset_time);
+                    .cloned();
+                    let groups = snapshot
+                        .as_ref()
+                        .map(tokenpulse_core::keeper::weekly_groups)
+                        .unwrap_or_default();
 
-                    let last_triggered = state.keeper_weekly_triggered.get(agent_id).copied();
-                    if tokenpulse_core::keeper::should_trigger_weekly(
-                        resets_at,
-                        last_triggered,
-                        now_utc,
+                    for target in tokenpulse_core::keeper::weekly_targets(
+                        agent_id,
+                        snapshot.as_ref(),
+                        agent_cfg.weekly_all_groups,
                     ) {
-                        state
-                            .keeper_weekly_triggered
-                            .insert(agent_id.to_string(), now_utc);
-                        state.persist_keeper_triggers(&keeper_state_path);
-                        state.keeper_pings_in_progress.insert(agent_id.to_string());
-                        spawn_keeper_ping(
-                            msg_tx.clone(),
-                            agent_id.to_string(),
-                            agent_cfg.clone(),
-                            state.keeper_model(agent_id),
-                            tokenpulse_core::keeper::KeeperTriggerType::Weekly,
-                        );
+                        if state.keeper_pings_in_progress.contains(&target.key) {
+                            continue;
+                        }
+                        let resets_at = snapshot.as_ref().and_then(|s| {
+                            tokenpulse_core::keeper::extract_weekly_reset_time(
+                                s,
+                                target.group.as_deref(),
+                            )
+                        });
+                        let last_triggered =
+                            state.keeper_weekly_triggered.get(&target.key).copied();
+                        if tokenpulse_core::keeper::should_trigger_weekly(
+                            resets_at,
+                            last_triggered,
+                            now_utc,
+                        ) {
+                            state
+                                .keeper_weekly_triggered
+                                .insert(target.key.clone(), now_utc);
+                            state.persist_keeper_triggers(&keeper_state_path);
+                            start_keeper_target_ping(
+                                &mut state,
+                                &msg_tx,
+                                agent_id,
+                                agent_cfg,
+                                &target,
+                                &groups,
+                                tokenpulse_core::keeper::KeeperTriggerType::Weekly,
+                            );
+                        }
                     }
                 }
             }
@@ -2102,7 +2199,7 @@ where
                             }
                             KeyCode::Char('p') => {
                                 let agent = keeper::KEEPER_AGENTS[state.selected_keeper_index];
-                                if state.keeper_pings_in_progress.contains(agent) {
+                                if state.keeper_agent_busy(agent) {
                                     state.set_refresh_status(
                                         format!(
                                             "Ping for {} is already in progress...",
@@ -2119,7 +2216,6 @@ where
                                         .get(agent)
                                         .or_else(|| default_agents.get(agent))
                                     {
-                                        state.keeper_pings_in_progress.insert(agent.to_string());
                                         state.set_refresh_status(
                                             format!(
                                                 "Executing ping for {}...",
@@ -2127,13 +2223,33 @@ where
                                             ),
                                             RefreshStatusLevel::Info,
                                         );
-                                        spawn_keeper_ping(
-                                            msg_tx.clone(),
-                                            agent.to_string(),
-                                            agent_cfg.clone(),
-                                            state.keeper_model(agent),
-                                            tokenpulse_core::keeper::KeeperTriggerType::Manual,
-                                        );
+                                        // The manual ping follows the same
+                                        // group setting as the weekly one.
+                                        let snapshot =
+                                            tokenpulse_core::keeper::find_snapshot_for_agent(
+                                                &state.quota_snapshots,
+                                                agent,
+                                            )
+                                            .cloned();
+                                        let groups = snapshot
+                                            .as_ref()
+                                            .map(tokenpulse_core::keeper::weekly_groups)
+                                            .unwrap_or_default();
+                                        for target in tokenpulse_core::keeper::weekly_targets(
+                                            agent,
+                                            snapshot.as_ref(),
+                                            agent_cfg.weekly_all_groups,
+                                        ) {
+                                            start_keeper_target_ping(
+                                                &mut state,
+                                                &msg_tx,
+                                                agent,
+                                                agent_cfg,
+                                                &target,
+                                                &groups,
+                                                tokenpulse_core::keeper::KeeperTriggerType::Manual,
+                                            );
+                                        }
                                     }
                                 }
                             }

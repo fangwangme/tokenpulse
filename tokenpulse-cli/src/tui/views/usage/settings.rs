@@ -23,6 +23,7 @@ const FIXED_SETTING_KEYS: &[&str] = &[
     "notification_level",
     "notification_sound",
     "keeper_engine",
+    "keeper_antigravity_groups",
 ];
 
 /// Sounds offered by the Settings row, in cycle order.
@@ -143,6 +144,15 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
                 theme.dim
             },
         },
+        SettingItem {
+            key: "keeper_antigravity_groups",
+            label: config.keeper.antigravity_groups_label().to_string(),
+            value_color: if config.keeper.antigravity_all_groups() {
+                theme.antigravity
+            } else {
+                theme.dim
+            },
+        },
     ];
 
     // Quota provider checkboxes. The rows come from the quota registry so they
@@ -248,6 +258,10 @@ pub fn handle_settings_action(
             tokenpulse_core::notification::play_alert_sound(&config.display.notification_sound);
         }
         Some("keeper_engine") => config.keeper.enabled = !config.keeper.enabled,
+        Some("keeper_antigravity_groups") => {
+            let all_groups = !config.keeper.antigravity_all_groups();
+            config.keeper.set_antigravity_all_groups(all_groups);
+        }
         _ => {
             // Quota configuration only. The usage view's source filter is
             // session state with its own key (`s`), so one keypress here must

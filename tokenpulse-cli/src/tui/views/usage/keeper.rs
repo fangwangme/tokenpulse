@@ -251,20 +251,35 @@ fn render_agent_cards(
                 None => "--:--".to_string(),
             };
 
-            // Find quota snapshot for weekly reset
-            let resets_at =
-                tokenpulse_core::keeper::find_snapshot_for_agent(&state.quota_snapshots, agent_id)
-                    .and_then(tokenpulse_core::keeper::extract_weekly_reset_time);
-
-            let next_weekly = compute_next_weekly_trigger(
-                resets_at,
-                state.keeper_weekly_triggered.get(agent_id).copied(),
-                now_utc,
-            );
+            // The earliest pending weekly trigger across the agent's targets.
+            let snapshot =
+                tokenpulse_core::keeper::find_snapshot_for_agent(&state.quota_snapshots, agent_id);
+            let next_weekly = tokenpulse_core::keeper::weekly_targets(
+                agent_id,
+                snapshot,
+                agent_cfg.weekly_all_groups,
+            )
+            .into_iter()
+            .filter_map(|target| {
+                let resets_at = snapshot.and_then(|s| {
+                    tokenpulse_core::keeper::extract_weekly_reset_time(s, target.group.as_deref())
+                });
+                compute_next_weekly_trigger(
+                    resets_at,
+                    state.keeper_weekly_triggered.get(&target.key).copied(),
+                    now_utc,
+                )
+                .map(|dt| (dt, target.group))
+            })
+            .min_by_key(|(dt, _)| *dt);
             let next_weekly_str = match next_weekly {
-                Some(dt) => {
+                Some((dt, group)) => {
                     let local_dt: DateTime<Local> = dt.into();
-                    local_dt.format("%m-%d %H:%M").to_string()
+                    let time = local_dt.format("%m-%d %H:%M").to_string();
+                    match group {
+                        Some(group) if agent_cfg.weekly_all_groups => format!("{time} ({group})"),
+                        _ => time,
+                    }
                 }
                 None => "Waiting Quota".to_string(),
             };
@@ -327,16 +342,15 @@ fn render_agent_cards(
                 Span::styled(dynamic_model, Style::default().fg(theme.fg).bold()),
             ]));
 
-            let (status_label, status_str, status_style) =
-                if state.keeper_pings_in_progress.contains(agent_id) {
-                    (
-                        "Status: ",
-                        "⟳ Ping running...",
-                        Style::default().fg(theme.accent_soft).bold(),
-                    )
-                } else {
-                    ("Last: ", last_status_str.as_str(), last_status_style)
-                };
+            let (status_label, status_str, status_style) = if state.keeper_agent_busy(agent_id) {
+                (
+                    "Status: ",
+                    "⟳ Ping running...",
+                    Style::default().fg(theme.accent_soft).bold(),
+                )
+            } else {
+                ("Last: ", last_status_str.as_str(), last_status_style)
+            };
 
             lines.push(Line::from(vec![
                 Span::styled(status_label, Style::default().fg(theme.dim)),

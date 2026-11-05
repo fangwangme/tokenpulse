@@ -299,6 +299,43 @@ pub struct KeeperConfig {
     pub agents: HashMap<String, AgentKeeperConfig>,
 }
 
+/// Values of the `keeper_antigravity_groups` setting, for
+/// `weekly_all_groups` false and true.
+pub const ANTIGRAVITY_GROUPS_PRIMARY: &str = "gemini_flash";
+pub const ANTIGRAVITY_GROUPS_ALL: &str = "all";
+
+impl KeeperConfig {
+    /// `[keeper.agents.antigravity] weekly_all_groups`, false when the agent
+    /// is not configured.
+    pub fn antigravity_all_groups(&self) -> bool {
+        self.agents
+            .get("antigravity")
+            .is_some_and(|agent| agent.weekly_all_groups)
+    }
+
+    /// Sets `weekly_all_groups`, adding the default Antigravity agent first
+    /// when the config does not have one yet.
+    pub fn set_antigravity_all_groups(&mut self, all_groups: bool) {
+        self.agents
+            .entry("antigravity".to_string())
+            .or_insert_with(|| {
+                default_keeper_agents()
+                    .remove("antigravity")
+                    .unwrap_or_default()
+            })
+            .weekly_all_groups = all_groups;
+    }
+
+    /// The `keeper_antigravity_groups` value shown for the current setting.
+    pub fn antigravity_groups_label(&self) -> &'static str {
+        if self.antigravity_all_groups() {
+            ANTIGRAVITY_GROUPS_ALL
+        } else {
+            ANTIGRAVITY_GROUPS_PRIMARY
+        }
+    }
+}
+
 fn default_keeper_check_interval_secs() -> u32 {
     60
 }
@@ -315,6 +352,11 @@ pub struct AgentKeeperConfig {
     pub command: String,
     #[serde(default = "default_prompt")]
     pub prompt: String,
+    /// Antigravity only: ping every quota group on its weekly reset and on a
+    /// manual ping, not just the primary (Gemini Flash) group. See
+    /// `docs/specs/keeper.md` "Antigravity quota groups".
+    #[serde(default)]
+    pub weekly_all_groups: bool,
 }
 
 fn default_daily_wakeup_time() -> String {
@@ -339,6 +381,7 @@ impl Default for AgentKeeperConfig {
             weekly_keeper_enabled: default_true(),
             command: default_command(),
             prompt: default_prompt(),
+            weekly_all_groups: false,
         }
     }
 }
@@ -353,6 +396,7 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             weekly_keeper_enabled: true,
             command: "claude -p \"{prompt}\" --model {model} --no-session-persistence".to_string(),
             prompt: "Hi".to_string(),
+            weekly_all_groups: false,
         },
     );
     map.insert(
@@ -364,6 +408,7 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             command: "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
                 .to_string(),
             prompt: "Hi".to_string(),
+            weekly_all_groups: false,
         },
     );
     map.insert(
@@ -374,6 +419,7 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             weekly_keeper_enabled: true,
             command: "agy --model {model} --prompt \"{prompt}\"".to_string(),
             prompt: "Hi".to_string(),
+            weekly_all_groups: false,
         },
     );
     map
