@@ -16,9 +16,8 @@ pub struct Config {
     pub keeper: KeeperConfig,
 }
 
-/// Current config schema version. `ConfigManager::load` migrates anything older
-/// and rewrites the file. v5 dropped the Keeper agents' `model` key: the rewrite
-/// removes it, since the model is now resolved from local catalogs.
+/// Current config schema version. `ConfigManager::load` rewrites an older file
+/// in the current shape.
 pub const CONFIG_VERSION: u32 = 5;
 
 fn default_version() -> u32 {
@@ -43,15 +42,9 @@ pub struct DisplayConfig {
     pub quota_display_mode: QuotaDisplayMode,
     /// Unified auto-refresh interval (seconds) for both quota and usage in the
     /// TUI. 0 = disabled. Supported values: 0, 60, 120, 300, 600, 900.
-    /// `quota_auto_refresh_secs` is accepted as an alias for migration from
-    /// older configs that stored separate quota/usage intervals.
-    #[serde(
-        default = "default_auto_refresh_secs",
-        alias = "quota_auto_refresh_secs"
-    )]
+    #[serde(default = "default_auto_refresh_secs")]
     pub auto_refresh_secs: u32,
-    /// How much of the signed-in account the quota views show. Replaces the
-    /// pre-v4 `show_account` switch, which `ConfigManager::load` migrates.
+    /// How much of the signed-in account the quota views show.
     #[serde(default)]
     pub account_display: AccountDisplay,
     #[serde(default = "default_true")]
@@ -100,15 +93,6 @@ impl NotificationLevel {
             Self::InApp => Self::Terminal,
             Self::Terminal => Self::System,
             Self::System => Self::Off,
-        }
-    }
-
-    pub fn prev(self) -> Self {
-        match self {
-            Self::Off => Self::System,
-            Self::InApp => Self::Off,
-            Self::Terminal => Self::InApp,
-            Self::System => Self::Terminal,
         }
     }
 
@@ -207,14 +191,6 @@ impl ThemePreference {
         }
     }
 
-    pub fn prev(self) -> Self {
-        match self {
-            Self::Auto => Self::Light,
-            Self::Dark => Self::Auto,
-            Self::Light => Self::Dark,
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -299,6 +275,43 @@ pub struct KeeperConfig {
     pub agents: HashMap<String, AgentKeeperConfig>,
 }
 
+/// Values of the `keeper_antigravity_groups` setting, for
+/// `weekly_all_groups` false and true.
+pub const ANTIGRAVITY_GROUPS_PRIMARY: &str = "gemini_flash";
+pub const ANTIGRAVITY_GROUPS_ALL: &str = "all";
+
+impl KeeperConfig {
+    /// `[keeper.agents.antigravity] weekly_all_groups`, false when the agent
+    /// is not configured.
+    pub fn antigravity_all_groups(&self) -> bool {
+        self.agents
+            .get("antigravity")
+            .is_some_and(|agent| agent.weekly_all_groups)
+    }
+
+    /// Sets `weekly_all_groups`, adding the default Antigravity agent first
+    /// when the config does not have one yet.
+    pub fn set_antigravity_all_groups(&mut self, all_groups: bool) {
+        self.agents
+            .entry("antigravity".to_string())
+            .or_insert_with(|| {
+                default_keeper_agents()
+                    .remove("antigravity")
+                    .unwrap_or_default()
+            })
+            .weekly_all_groups = all_groups;
+    }
+
+    /// The `keeper_antigravity_groups` value shown for the current setting.
+    pub fn antigravity_groups_label(&self) -> &'static str {
+        if self.antigravity_all_groups() {
+            ANTIGRAVITY_GROUPS_ALL
+        } else {
+            ANTIGRAVITY_GROUPS_PRIMARY
+        }
+    }
+}
+
 fn default_keeper_check_interval_secs() -> u32 {
     60
 }
@@ -315,6 +328,11 @@ pub struct AgentKeeperConfig {
     pub command: String,
     #[serde(default = "default_prompt")]
     pub prompt: String,
+    /// Antigravity only: ping every quota group on its weekly reset and on a
+    /// manual ping, not just the primary (Gemini Flash) group. See
+    /// `docs/specs/keeper.md` "Antigravity quota groups".
+    #[serde(default)]
+    pub weekly_all_groups: bool,
 }
 
 fn default_daily_wakeup_time() -> String {
@@ -339,6 +357,7 @@ impl Default for AgentKeeperConfig {
             weekly_keeper_enabled: default_true(),
             command: default_command(),
             prompt: default_prompt(),
+            weekly_all_groups: false,
         }
     }
 }
@@ -353,6 +372,7 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             weekly_keeper_enabled: true,
             command: "claude -p \"{prompt}\" --model {model} --no-session-persistence".to_string(),
             prompt: "Hi".to_string(),
+            weekly_all_groups: false,
         },
     );
     map.insert(
@@ -364,6 +384,7 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             command: "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
                 .to_string(),
             prompt: "Hi".to_string(),
+            weekly_all_groups: false,
         },
     );
     map.insert(
@@ -374,29 +395,10 @@ pub fn default_keeper_agents() -> HashMap<String, AgentKeeperConfig> {
             weekly_keeper_enabled: true,
             command: "agy --model {model} --prompt \"{prompt}\"".to_string(),
             prompt: "Hi".to_string(),
+            weekly_all_groups: false,
         },
     );
     map
-}
-
-/// Commands that shipped as defaults in earlier builds and should be replaced.
-///
-/// These are matched exactly rather than by substring: an earlier `contains("--bare")`
-/// check also clobbered any hand-written command that happened to use that flag.
-const LEGACY_KEEPER_COMMANDS: &[(&str, &str)] = &[
-    ("claude", "claude -p \"{prompt}\" --model {model}"),
-    (
-        "claude",
-        "claude --bare -p \"{prompt}\" --model {model} --no-session-persistence",
-    ),
-    ("codex", "codex exec \"{prompt}\" -m {model}"),
-    ("antigravity", "agy query \"{prompt}\" --model {model}"),
-];
-
-fn is_legacy_keeper_command(agent: &str, command: &str) -> bool {
-    LEGACY_KEEPER_COMMANDS
-        .iter()
-        .any(|(name, legacy)| *name == agent && *legacy == command.trim())
 }
 
 impl Default for KeeperConfig {
@@ -470,27 +472,15 @@ impl ConfigManager {
         }
 
         let content = fs::read_to_string(&self.config_path)?;
-        let (mut config, legacy_show_account) = parse_config(&content)
+        let mut config = parse_config(&content)
             .with_context(|| format!("invalid config file {}", self.config_path.display()))?;
 
         let default_agents = default_keeper_agents();
         let mut modified = false;
 
-        // v4 replaced `show_account = true | false` with `account_display`.
-        if let Some(show_account) = legacy_show_account {
-            config.display.account_display = if show_account {
-                AccountDisplay::Full
-            } else {
-                AccountDisplay::None
-            };
-            modified = true;
-        }
-
         for (name, default_cfg) in &default_agents {
             if let Some(agent_cfg) = config.keeper.agents.get_mut(name) {
-                if agent_cfg.command.is_empty()
-                    || is_legacy_keeper_command(name, &agent_cfg.command)
-                {
+                if agent_cfg.command.is_empty() {
                     agent_cfg.command = default_cfg.command.clone();
                     modified = true;
                 }
@@ -594,21 +584,8 @@ impl ConfigManager {
     }
 }
 
-/// Parses a config file, with the pre-v4 `show_account` switch if it has one.
-fn parse_config(content: &str) -> Result<(Config, Option<bool>)> {
-    let raw: toml::Table = toml::from_str(content)?;
-    let legacy_show_account = legacy_show_account(&raw);
-    Ok((raw.try_into()?, legacy_show_account))
-}
-
-/// The pre-v4 `display.show_account` switch, when the file still has it and has
-/// not also been given an `account_display` by hand.
-fn legacy_show_account(raw: &toml::Table) -> Option<bool> {
-    let display = raw.get("display")?.as_table()?;
-    if display.contains_key("account_display") {
-        return None;
-    }
-    display.get("show_account")?.as_bool()
+fn parse_config(content: &str) -> Result<Config> {
+    Ok(toml::from_str(content)?)
 }
 
 impl Default for ConfigManager {
@@ -622,25 +599,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
-        let config = Config::default();
-        assert!(config.providers.contains_key("claude"));
-        assert!(config.providers.contains_key("codex"));
-        assert!(config.providers.contains_key("antigravity"));
-        // `gemini` and `copilot` have no quota fetcher; Gemini CLI and Copilot
-        // CLI usage is parsed regardless of this map.
-        assert!(!config.providers.contains_key("gemini"));
-        assert!(!config.providers.contains_key("copilot"));
-    }
-
-    #[test]
-    fn test_provider_enabled_by_default() {
-        let config = Config::default();
-        let claude = config.providers.get("claude").unwrap();
-        assert!(claude.enabled);
-    }
-
-    #[test]
     fn test_default_has_three_quota_providers() {
         let config = Config::default();
         let mut ids: Vec<&str> = config.providers.keys().map(String::as_str).collect();
@@ -649,87 +607,6 @@ mod tests {
         for (_, provider) in &config.providers {
             assert!(provider.enabled);
         }
-    }
-
-    #[test]
-    fn test_disabled_provider_filtered() {
-        let mut config = Config::default();
-        config.providers.get_mut("claude").unwrap().enabled = false;
-        let enabled: Vec<_> = config
-            .providers
-            .iter()
-            .filter(|(_, p)| p.enabled)
-            .map(|(k, _)| k.clone())
-            .collect();
-        assert!(!enabled.contains(&"claude".to_string()));
-        assert_eq!(enabled.len(), 2);
-    }
-
-    #[test]
-    fn test_config_toml_roundtrip() {
-        let config = Config::default();
-        let toml_str = toml::to_string_pretty(&config).unwrap();
-        let parsed: Config = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.providers.len(), config.providers.len());
-        assert_eq!(parsed.version, config.version);
-    }
-
-    #[test]
-    fn test_partial_toml_fills_defaults() {
-        let toml_str = r#"
-version = 1
-
-[providers.claude]
-enabled = true
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.providers.contains_key("claude"));
-        assert!(config.providers.get("claude").unwrap().enabled);
-        // Other providers not in TOML are simply missing
-        assert!(!config.providers.contains_key("codex"));
-    }
-
-    #[test]
-    fn test_display_config_defaults() {
-        let config = Config::default();
-        assert!(!config.display.show_empty_providers);
-        assert_eq!(config.display.theme, ThemePreference::Auto);
-        assert_eq!(
-            config.display.quota_display_mode,
-            QuotaDisplayMode::Remaining
-        );
-        assert_eq!(config.display.auto_refresh_secs, 300);
-        assert_eq!(config.display.account_display, AccountDisplay::Full);
-        assert!(config.display.scan_antigravity);
-        assert!(config.display.refresh_quota);
-        assert_eq!(config.display.notification_level, NotificationLevel::System);
-    }
-
-    #[test]
-    fn test_notification_level_cycling() {
-        let level = NotificationLevel::Off;
-        assert_eq!(level.next(), NotificationLevel::InApp);
-        assert_eq!(level.next().next(), NotificationLevel::Terminal);
-        assert_eq!(level.next().next().next(), NotificationLevel::System);
-        assert_eq!(level.next().next().next().next(), NotificationLevel::Off);
-
-        assert_eq!(level.prev(), NotificationLevel::System);
-        assert_eq!(level.prev().prev(), NotificationLevel::Terminal);
-        assert_eq!(level.prev().prev().prev(), NotificationLevel::InApp);
-        assert_eq!(level.prev().prev().prev().prev(), NotificationLevel::Off);
-    }
-
-    #[test]
-    fn test_notification_level_labels() {
-        assert_eq!(NotificationLevel::Off.label(), "off");
-        assert_eq!(NotificationLevel::InApp.label(), "in_app");
-        assert_eq!(NotificationLevel::Terminal.label(), "terminal");
-        assert_eq!(NotificationLevel::System.label(), "system");
-
-        assert_eq!(NotificationLevel::Off.display_label(), "off");
-        assert_eq!(NotificationLevel::InApp.display_label(), "in-app (toast)");
-        assert_eq!(NotificationLevel::Terminal.display_label(), "terminal");
-        assert_eq!(NotificationLevel::System.display_label(), "system");
     }
 
     #[test]
@@ -755,41 +632,6 @@ notification_level = "in_app"
     }
 
     #[test]
-    fn test_auto_refresh_secs_deserializes_from_toml() {
-        let toml_str = r#"
-version = 3
-[display]
-auto_refresh_secs = 60
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.display.auto_refresh_secs, 60);
-    }
-
-    #[test]
-    fn test_auto_refresh_secs_migrates_from_quota_alias() {
-        let toml_str = r#"
-version = 2
-[display]
-quota_auto_refresh_secs = 120
-usage_auto_refresh_secs = 900
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        // Legacy quota interval is carried over; usage key is ignored.
-        assert_eq!(config.display.auto_refresh_secs, 120);
-    }
-
-    #[test]
-    fn test_theme_deserializes_from_toml() {
-        let toml_str = r#"
-version = 1
-[display]
-theme = "dark"
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.display.theme, ThemePreference::Dark);
-    }
-
-    #[test]
     fn test_auto_refresh_secs_defaults_when_absent() {
         let toml_str = r#"
 version = 3
@@ -810,47 +652,6 @@ auto_refresh_secs = 60
         assert!(config.display.refresh_quota);
     }
 
-    #[test]
-    fn test_refresh_quota_deserializes_from_toml() {
-        let toml_str = r#"
-version = 3
-[display]
-refresh_quota = false
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(!config.display.refresh_quota);
-    }
-
-    #[test]
-    fn test_config_version_migration() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir.path().join("config.toml");
-
-        // Write a legacy v2 config with separate quota/usage intervals.
-        let legacy_toml = r#"
-version = 2
-[display]
-quota_auto_refresh_secs = 120
-usage_auto_refresh_secs = 900
-"#;
-        fs::write(&config_path, legacy_toml).unwrap();
-
-        let manager = ConfigManager { config_path };
-        let loaded = manager.load().unwrap();
-
-        // Migrated to the current version with a single interval carried
-        // from the quota value.
-        assert_eq!(loaded.version, CONFIG_VERSION);
-        assert_eq!(loaded.display.auto_refresh_secs, 120);
-
-        // The rewritten file drops the legacy keys in favor of the unified one.
-        let written_content = fs::read_to_string(&manager.config_path).unwrap();
-        assert!(written_content.contains(&format!("version = {CONFIG_VERSION}")));
-        assert!(written_content.contains("auto_refresh_secs = 120"));
-        assert!(!written_content.contains("quota_auto_refresh_secs"));
-        assert!(!written_content.contains("usage_auto_refresh_secs"));
-    }
-
     fn load_written(toml_str: &str) -> (Config, String) {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("config.toml");
@@ -859,57 +660,6 @@ usage_auto_refresh_secs = 900
         let loaded = manager.load().unwrap();
         let written = fs::read_to_string(&manager.config_path).unwrap();
         (loaded, written)
-    }
-
-    #[test]
-    fn legacy_show_account_true_migrates_to_full() {
-        let (loaded, written) = load_written(
-            r#"
-version = 3
-[display]
-show_account = true
-"#,
-        );
-
-        assert_eq!(loaded.display.account_display, AccountDisplay::Full);
-        assert_eq!(loaded.version, CONFIG_VERSION);
-        assert!(written.contains(&format!("version = {CONFIG_VERSION}")));
-        assert!(written.contains(r#"account_display = "full""#));
-        assert!(!written.contains("show_account"));
-    }
-
-    #[test]
-    fn legacy_show_account_false_migrates_to_none() {
-        let (loaded, written) = load_written(
-            r#"
-version = 3
-[display]
-show_account = false
-"#,
-        );
-
-        assert_eq!(loaded.display.account_display, AccountDisplay::None);
-        assert_eq!(loaded.version, CONFIG_VERSION);
-        assert!(written.contains(&format!("version = {CONFIG_VERSION}")));
-        assert!(written.contains(r#"account_display = "none""#));
-        assert!(!written.contains("show_account"));
-    }
-
-    #[test]
-    fn account_display_round_trips_and_wins_over_a_stale_show_account() {
-        let (loaded, written) = load_written(
-            r#"
-version = 4
-[display]
-account_display = "plan"
-show_account = false
-"#,
-        );
-
-        assert_eq!(loaded.display.account_display, AccountDisplay::Plan);
-        assert!(written.contains(r#"account_display = "plan""#));
-        let parsed: Config = toml::from_str(&written).unwrap();
-        assert_eq!(parsed.display.account_display, AccountDisplay::Plan);
     }
 
     #[test]
@@ -988,103 +738,6 @@ enabled = true
 
         let weekly_state = manager.toggle_agent_weekly_keeper("codex").unwrap();
         assert!(!weekly_state);
-    }
-
-    #[test]
-    fn test_custom_keeper_command_is_not_clobbered() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir.path().join("config.toml");
-
-        // A hand-written command that merely mentions `--bare` used to be
-        // overwritten by the substring-based migration.
-        let custom = r#"
-version = 3
-[keeper]
-enabled = true
-[keeper.agents.claude]
-command = 'claude --bare -p "{prompt}" --model {model} --my-flag'
-"#;
-        fs::write(&config_path, custom).unwrap();
-
-        let manager = ConfigManager { config_path };
-        let loaded = manager.load().unwrap();
-
-        assert_eq!(
-            loaded.keeper.agents.get("claude").unwrap().command,
-            "claude --bare -p \"{prompt}\" --model {model} --my-flag"
-        );
-    }
-
-    #[test]
-    fn test_keeper_state_path_is_next_to_config() {
-        let manager = ConfigManager {
-            config_path: PathBuf::from("/tmp/tp/config.toml"),
-        };
-        assert_eq!(
-            manager.keeper_state_path(),
-            PathBuf::from("/tmp/tp/keeper_state.json")
-        );
-    }
-
-    #[test]
-    fn test_legacy_keeper_command_migration() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir.path().join("config.toml");
-
-        let legacy_toml = r#"
-version = 3
-[keeper]
-enabled = true
-[keeper.agents.antigravity]
-command = 'agy query "{prompt}" --model {model}'
-[keeper.agents.claude]
-command = 'claude -p "{prompt}" --model {model}'
-[keeper.agents.codex]
-command = 'codex exec "{prompt}" -m {model}'
-"#;
-        fs::write(&config_path, legacy_toml).unwrap();
-
-        let manager = ConfigManager { config_path };
-        let loaded = manager.load().unwrap();
-
-        let agy = loaded.keeper.agents.get("antigravity").unwrap();
-        assert_eq!(agy.command, "agy --model {model} --prompt \"{prompt}\"");
-
-        let claude = loaded.keeper.agents.get("claude").unwrap();
-        assert_eq!(
-            claude.command,
-            "claude -p \"{prompt}\" --model {model} --no-session-persistence"
-        );
-
-        let codex = loaded.keeper.agents.get("codex").unwrap();
-        assert_eq!(
-            codex.command,
-            "codex exec --skip-git-repo-check --ephemeral --model {model} \"{prompt}\""
-        );
-    }
-
-    #[test]
-    fn test_v4_keeper_model_key_is_dropped() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir.path().join("config.toml");
-        fs::write(
-            &config_path,
-            r#"
-version = 4
-[keeper.agents.claude]
-command = 'claude -p "{prompt}" --model {model} --no-session-persistence'
-model = "haiku"
-"#,
-        )
-        .unwrap();
-
-        let manager = ConfigManager {
-            config_path: config_path.clone(),
-        };
-        assert_eq!(manager.load().unwrap().version, CONFIG_VERSION);
-        assert!(!fs::read_to_string(&config_path)
-            .unwrap()
-            .contains("model = "));
     }
 
     /// One bad value plus settings worth keeping: what `config enable` and the

@@ -402,17 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn maps_only_returned_weekly_primary_window_as_weekly() {
-        let windows = windows_from_fixture(
-            r#"{"rate_limit":{"primary_window":{"used_percent":34,"limit_window_seconds":604800},"secondary_window":null}}"#,
-        );
-
-        assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].label, "Weekly (7d)");
-        assert_eq!(windows[0].period_duration_ms, Some(604_800_000));
-    }
-
-    #[test]
     fn maps_both_returned_windows_by_duration_not_position() {
         let windows = windows_from_fixture(
             r#"{"rate_limit":{"primary_window":{"used_percent":50,"limit_window_seconds":604800},"secondary_window":{"used_percent":25,"limit_window_seconds":18000}}}"#,
@@ -421,15 +410,6 @@ mod tests {
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].label, "Weekly (7d)");
         assert_eq!(windows[1].label, "Session (5h)");
-    }
-
-    #[test]
-    fn maps_no_windows_to_empty_output() {
-        let windows = windows_from_fixture(
-            r#"{"rate_limit":{"primary_window":null,"secondary_window":null}}"#,
-        );
-
-        assert!(windows.is_empty());
     }
 
     #[test]

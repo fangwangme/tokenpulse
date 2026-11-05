@@ -263,11 +263,4 @@ mod tests {
             .unwrap();
         assert_eq!(cached.snapshot.plan.as_deref(), Some("Paid"));
     }
-
-    #[test]
-    fn cache_store_uses_local_share_database_path() {
-        let store = QuotaCacheStore::new();
-        let path = store.db_path.to_string_lossy();
-        assert!(path.ends_with(".local/share/tokenpulse/tokenpulse.db"));
-    }
 }

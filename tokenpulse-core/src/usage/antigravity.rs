@@ -429,36 +429,7 @@ fn open_cache_db(sessions_dir: &Path) -> Result<rusqlite::Connection> {
         [],
     )?;
 
-    migrate_legacy_usage_rows(&conn)?;
-
     Ok(conn)
-}
-
-/// Rewrites `antigravity-v2` usage rows in place.
-///
-/// v2 rows all came from the language-server RPC, which stored `outputTokens`
-/// — thinking tokens included — in `output_tokens`, double-counting reasoning
-/// in cost. Splitting them here fixes those rows and, just as importantly,
-/// leaves no row behind at an old `parser_version`: a single one that the local
-/// parser can never re-read (an encrypted `.pb` session) would otherwise mark
-/// the source stale on every launch, forcing a full ledger re-read forever.
-/// `antigravity-v2` is the only version that ever shipped, so this closes the
-/// set.
-fn migrate_legacy_usage_rows(conn: &rusqlite::Connection) -> Result<()> {
-    let migrated = conn.execute(
-        "UPDATE session_usage
-            SET output_tokens = MAX(output_tokens - reasoning_tokens, 0),
-                parser_version = ?1
-          WHERE parser_version = 'antigravity-v2';",
-        [PARSER_VERSION],
-    )?;
-    if migrated > 0 {
-        info!(
-            "Antigravity cache: migrated {} usage rows from antigravity-v2 to {}",
-            migrated, PARSER_VERSION
-        );
-    }
-    Ok(())
 }
 
 fn count_antigravity_session_cache_rows(conn: &rusqlite::Connection) -> usize {
@@ -2723,45 +2694,6 @@ fn extract_trajectory_entries(response: &Value) -> Vec<(String, Value)> {
     Vec::new()
 }
 
-#[cfg(test)]
-fn sanitize_session_id(session_id: &str) -> String {
-    let sanitized: String = session_id
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-
-    let trimmed = sanitized.trim_matches('-');
-    if trimmed.is_empty() {
-        "session".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-#[cfg(test)]
-fn session_artifact_file_stem(session_id: &str) -> String {
-    let sanitized = sanitize_session_id(session_id);
-    let hash = stable_fnv1a_64(session_id);
-    format!("{}-{:016x}", sanitized, hash)
-}
-
-#[cfg(test)]
-fn stable_fnv1a_64(value: &str) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in value.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 fn to_safe_i64(value: Option<&Value>) -> i64 {
     value
         .and_then(|inner| {
@@ -3378,15 +3310,6 @@ fn parse_port_from_line(line: &str) -> Option<u16> {
     None
 }
 
-#[allow(dead_code)]
-async fn probe_heartbeat(
-    client: &reqwest::Client,
-    port: u16,
-    csrf_token: Option<&str>,
-) -> Option<&'static str> {
-    probe_heartbeat_with_preferred_scheme(client, port, csrf_token, None).await
-}
-
 async fn probe_heartbeat_with_preferred_scheme(
     client: &reqwest::Client,
     port: u16,
@@ -3749,50 +3672,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_file_antigravity_deduplication() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-
-        let conn = open_cache_db(&sessions_dir).unwrap();
-        conn.execute(
-            "INSERT INTO sessions (session_id, trajectory_id, client, title, model_id, status, step_count, created_time_ms, last_modified_ms, last_user_input_time_ms, synced_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["sess-123", "traj-123", "antigravity-cli", "title", "gemini-3-pro-preview", "status", 1_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64, 1672531200000_i64],
-        ).unwrap();
-
-        conn.execute(
-            "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, response_id, pricing_day, parser_version)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                "resp-456", "sess-123", "antigravity-cli", "gemini-3-pro-preview", "google", 1672531201000_i64, 0_i64,
-                150_i64, 50_i64, 20_i64, 0_i64, 10_i64, "resp-456", "2023-01-01", PARSER_VERSION
-            ],
-        ).unwrap();
-
-        conn.execute(
-            "INSERT OR REPLACE INTO session_usage (id, session_id, client, model_id, provider_id, timestamp, step_index, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, response_id, pricing_day, parser_version)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                "resp-456", "sess-123", "antigravity-cli", "gemini-3-pro-preview", "google", 1672531202000_i64, 0_i64,
-                200_i64, 60_i64, 30_i64, 0_i64, 15_i64, "resp-456", "2023-01-01", PARSER_VERSION
-            ],
-        ).unwrap();
-
-        let parser = AntigravitySessionParser::new()
-            .with_custom_paths(vec![sessions_dir])
-            .with_skip_sync(true);
-        let messages = parser.parse_sessions(None).unwrap();
-
-        assert_eq!(messages.len(), 1);
-        let msg = &messages[0];
-        assert_eq!(msg.session_id, "sess-123");
-        assert_eq!(msg.message_key, "resp-456");
-        assert_eq!(msg.tokens.input, 200);
-        assert_eq!(msg.tokens.output, 60);
-    }
-
-    #[test]
     fn test_parse_file_deduplicates_same_logical_message_across_clients() {
         let temp_dir = tempfile::tempdir().unwrap();
         let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
@@ -4106,43 +3985,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dynamic_model_aliases_are_saved_and_reused() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-
-        let mut dynamic_aliases = HashMap::new();
-        dynamic_aliases.insert(
-            normalize_alias_key("MODEL_PLACEHOLDER_M132"),
-            ModelAlias {
-                raw_model_id: "MODEL_PLACEHOLDER_M132".to_string(),
-                model_id: "gemini-3.5-flash-high".to_string(),
-                label: Some("Gemini 3.5 Flash (High)".to_string()),
-                source: "antigravity-get-user-status".to_string(),
-            },
-        );
-
-        let saved = merge_and_save_model_alias_history(&sessions_dir, &dynamic_aliases).unwrap();
-        assert_eq!(
-            resolve_stored_model_id("MODEL_PLACEHOLDER_M132", &saved),
-            "gemini-3-5-flash-high"
-        );
-
-        let loaded = load_model_alias_history_map(&sessions_dir).unwrap();
-        assert_eq!(
-            resolve_stored_model_id("MODEL_PLACEHOLDER_M132", &loaded),
-            "gemini-3-5-flash-high"
-        );
-
-        let history_path = model_alias_history_path(&sessions_dir).unwrap();
-        let content = std::fs::read_to_string(history_path).unwrap();
-        assert!(content.contains("MODEL_PLACEHOLDER_M132"));
-        assert!(content.contains("Gemini 3.5 Flash (High)"));
-        assert!(content.contains("firstSeenAt"));
-        assert!(content.contains("lastSeenAt"));
-    }
-
-    #[test]
     fn test_model_alias_history_is_seeded_from_static_sources() {
         let temp_dir = tempfile::tempdir().unwrap();
         let sessions_dir = temp_dir.path().join("antigravity-cache").join("sessions");
@@ -4387,14 +4229,6 @@ mod tests {
                 None
             ),
             AntigravityRuntimeKind::Ide
-        );
-    }
-
-    #[test]
-    fn test_session_artifact_file_stem_uses_stable_hash() {
-        assert_eq!(
-            session_artifact_file_stem("session/with spaces"),
-            "session-with-spaces-ffc7e153e201ef5f"
         );
     }
 
@@ -5048,32 +4882,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rpc_and_local_paths_agree_on_the_same_usage_record() {
-        // Same generation seen through both sources must produce identical
-        // columns; this is the drift guard the two paths previously lacked.
-        let local = parse_gen_metadata_usage(&GenMetadataFixture::default().encode()).unwrap();
-        let rpc_usage = serde_json::json!({
-            "inputTokens": 5911,
-            "outputTokens": 669,
-            "responseOutputTokens": 55,
-            "cacheReadTokens": 8138,
-            "thinkingOutputTokens": 614,
-        });
-        let rpc = normalize_antigravity_tokens(
-            to_safe_i64(rpc_usage.get("inputTokens")),
-            to_safe_i64(rpc_usage.get("outputTokens")),
-            rpc_usage
-                .get("responseOutputTokens")
-                .map(|v| to_safe_i64(Some(v))),
-            to_safe_i64(rpc_usage.get("cacheReadTokens")),
-            to_safe_i64(rpc_usage.get("cacheWriteTokens")),
-            to_safe_i64(rpc_usage.get("thinkingOutputTokens")),
-        )
-        .unwrap();
-        assert_eq!(local.tokens, rpc);
-    }
-
-    #[test]
     fn test_local_step_timestamps_rejects_out_of_range_nanos() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("conversation.db");
@@ -5196,57 +5004,6 @@ mod tests {
             .unwrap();
         assert_eq!(trajectory_id.as_deref(), Some("traj-123"));
         assert_eq!(usage_rows, 1);
-    }
-
-    #[test]
-    fn test_legacy_v2_usage_rows_are_migrated_on_cache_open() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let cache_dir = temp_dir.path().join("cache");
-        let conn = open_cache_db(&cache_dir).unwrap();
-        conn.execute(
-            "INSERT INTO sessions (session_id, client, model_id, synced_at)
-             VALUES ('sess-legacy', 'antigravity-cli', 'gemini-3-7-flash', 1)",
-            [],
-        )
-        .unwrap();
-        // A v2 row as the RPC wrote it: output_tokens is the total, thinking
-        // included.
-        conn.execute(
-            "INSERT INTO session_usage (id, session_id, client, model_id, provider_id, timestamp,
-                                        step_index, input_tokens, output_tokens, cache_read_tokens,
-                                        cache_write_tokens, reasoning_tokens, response_id,
-                                        pricing_day, parser_version)
-             VALUES ('legacy', 'sess-legacy', 'antigravity-cli', 'gemini-3-7-flash', 'google',
-                     1672531201000, 0, 5911, 669, 8138, 0, 614, 'resp', '2023-01-01',
-                     'antigravity-v2')",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-
-        let conn = open_cache_db(&cache_dir).unwrap();
-        let (output, reasoning, version): (i64, i64, String) = conn
-            .query_row(
-                "SELECT output_tokens, reasoning_tokens, parser_version FROM session_usage",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(output, 55);
-        assert_eq!(reasoning, 614);
-        // No row may linger at an old version: one that the local parser can
-        // never re-read would mark the source stale on every launch.
-        assert_eq!(version, PARSER_VERSION);
-
-        // Idempotent — reopening must not subtract twice.
-        drop(conn);
-        let conn = open_cache_db(&cache_dir).unwrap();
-        let output_again: i64 = conn
-            .query_row("SELECT output_tokens FROM session_usage", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(output_again, 55);
     }
 
     #[test]

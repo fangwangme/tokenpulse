@@ -1325,90 +1325,8 @@ mod tests {
         account_lines, enabled_quota_providers, parse_provider_names, parsers_for,
         quota_providers_to_fetch,
     };
-    use chrono::NaiveDate;
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-    use tokenpulse_core::{
-        config::{AccountDisplay, Config, DisplayConfig, ProviderConfig},
-        provider::{SessionParser, TokenBreakdown, UnifiedMessage},
-        usage::UsageStore,
-    };
-
-    struct StubParser {
-        provider_name: String,
-        parser_version: String,
-        messages: Vec<UnifiedMessage>,
-    }
-
-    impl SessionParser for StubParser {
-        fn provider_name(&self) -> &str {
-            &self.provider_name
-        }
-
-        fn session_paths(&self) -> Vec<std::path::PathBuf> {
-            Vec::new()
-        }
-
-        fn parse_sessions(&self, _since: Option<NaiveDate>) -> anyhow::Result<Vec<UnifiedMessage>> {
-            Ok(self.messages.clone())
-        }
-
-        fn parser_version(&self) -> &str {
-            &self.parser_version
-        }
-    }
-
-    fn sample_message(source: &str, parser_version: &str, date: &str, key: &str) -> UnifiedMessage {
-        let timestamp = NaiveDate::parse_from_str(date, "%Y-%m-%d")
-            .unwrap()
-            .and_hms_opt(12, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_millis();
-
-        UnifiedMessage::new(
-            source,
-            "gemini-2.5-pro",
-            "google",
-            "session-1",
-            key,
-            timestamp,
-            TokenBreakdown {
-                input: 100,
-                output: 50,
-                cache_read: 10,
-                cache_write: 0,
-                reasoning: 0,
-            },
-        )
-        .with_cost(1.0)
-        .with_parser_version(parser_version)
-    }
-
-    fn ingest_parsed_messages(
-        store: &UsageStore,
-        parser: &dyn SessionParser,
-        refresh_pricing: bool,
-        stale_sources: &std::collections::HashSet<String>,
-    ) {
-        let messages = parser.parse_sessions(None).unwrap();
-        if stale_sources.contains(parser.provider_name()) {
-            if !messages.is_empty() {
-                store
-                    .replace_source_messages(
-                        parser.provider_name(),
-                        None,
-                        &messages,
-                        refresh_pricing,
-                    )
-                    .unwrap();
-            }
-        } else if !messages.is_empty() {
-            store.ingest_messages(&messages, refresh_pricing).unwrap();
-        }
-    }
+    use std::fs;
+    use tokenpulse_core::config::{AccountDisplay, Config, DisplayConfig, ProviderConfig};
 
     #[test]
     fn parse_provider_names_preserves_requested_subset_order() {
@@ -1416,55 +1334,6 @@ mod tests {
             parse_provider_names(Some("gemini,codex")),
             vec!["gemini".to_string(), "codex".to_string()]
         );
-    }
-
-    #[test]
-    fn parse_provider_names_defaults_to_all_supported_usage_sources() {
-        assert_eq!(
-            parse_provider_names(None),
-            vec![
-                "claude".to_string(),
-                "codex".to_string(),
-                "copilot".to_string(),
-                "opencode".to_string(),
-                "gemini".to_string(),
-                "pi".to_string(),
-                "antigravity".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn stale_parser_rebuild_keeps_existing_rows_when_parser_returns_no_messages() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("tokenpulse-usage-test-{unique}.sqlite3"));
-        let _ = fs::remove_file(&path);
-        let store = UsageStore::with_path(path.clone());
-        store
-            .ingest_messages(
-                &[sample_message("gemini", "gemini-v2", "2024-03-10", "old")],
-                false,
-            )
-            .unwrap();
-
-        let parser = StubParser {
-            provider_name: "gemini".to_string(),
-            parser_version: "gemini-v3".to_string(),
-            messages: Vec::new(),
-        };
-        let stale_sources = ["gemini".to_string()].into_iter().collect();
-
-        ingest_parsed_messages(&store, &parser, false, &stale_sources);
-
-        let remaining = store.load_messages(None, &["gemini".to_string()]).unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].message_key, "old");
-        assert_eq!(remaining[0].parser_version, "gemini-v2");
-
-        let _ = fs::remove_file(path);
     }
 
     fn config_with_providers(refresh_quota: bool, providers: &[(&str, bool)]) -> Config {

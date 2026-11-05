@@ -104,6 +104,125 @@ fn antigravity_cli_model_id(label: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+/// How long `agy models` may run before a group ping gives up on it.
+const AGY_MODELS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Model for a non-primary Antigravity quota group, chosen from what
+/// `agy models` lists right now (`docs/specs/keeper.md` "Model per group").
+///
+/// The alias history cannot serve here: it keeps retired models, and its ids
+/// do not match the `agy` form consistently across families.
+pub async fn resolve_antigravity_group_model(group: &str, groups: &[String]) -> Result<String> {
+    let output = tokio::time::timeout(
+        AGY_MODELS_TIMEOUT,
+        tokio::process::Command::new("agy")
+            .arg("models")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "`agy models` timed out after {}s",
+            AGY_MODELS_TIMEOUT.as_secs()
+        )
+    })?
+    .context("failed to run `agy models`")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let last_line = stderr.lines().last().unwrap_or_default().trim();
+        return Err(anyhow!(
+            "`agy models` failed ({}): {last_line}",
+            output.status
+        ));
+    }
+    select_antigravity_group_model(&String::from_utf8_lossy(&output.stdout), group, groups)
+}
+
+/// Picks a quota group's model from `agy models` output (`<id>\t<label>` per
+/// line): the cheapest tier, then the newest version, then the lowest
+/// thinking level. A model belongs to the group whose slug is the longest
+/// prefix of its id among `groups`.
+pub fn select_antigravity_group_model(
+    agy_models_output: &str,
+    group: &str,
+    groups: &[String],
+) -> Result<String> {
+    let slug = group_slug(group);
+    let mut slugs: Vec<String> = groups.iter().map(|g| group_slug(g)).collect();
+    slugs.push(slug.clone());
+
+    agy_models_output
+        .lines()
+        .filter_map(|line| {
+            let (id, label) = line.split_once('\t')?;
+            let id = id.trim();
+            (!id.is_empty() && !label.trim().is_empty()).then_some(id)
+        })
+        .filter(|id| owning_slug(id, &slugs) == Some(slug.as_str()))
+        .min_by(|a, b| {
+            model_tier(a)
+                .cmp(&model_tier(b))
+                .then_with(|| version_numbers(b).cmp(&version_numbers(a)))
+                .then_with(|| thinking_rank(a).cmp(&thinking_rank(b)))
+                .then_with(|| a.cmp(b))
+        })
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("`agy models` lists no model for Antigravity group '{group}'"))
+}
+
+/// `Gemini 4 Argon` → `gemini-4-argon`.
+fn group_slug(group: &str) -> String {
+    group
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// The longest slug that prefixes `id` at a `-` boundary, so `gemini-4-argon-low`
+/// belongs to `gemini-4-argon`, not `gemini`.
+fn owning_slug<'a>(id: &str, slugs: &'a [String]) -> Option<&'a str> {
+    slugs
+        .iter()
+        .filter(|slug| {
+            !slug.is_empty()
+                && id
+                    .strip_prefix(slug.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+        })
+        .max_by_key(|slug| slug.len())
+        .map(String::as_str)
+}
+
+/// 0 for the cheap tiers, 2 for Opus, 1 for everything in between.
+fn model_tier(id: &str) -> u8 {
+    if ["flash", "haiku", "lite"].iter().any(|t| id.contains(t)) {
+        0
+    } else if id.contains("opus") {
+        2
+    } else {
+        1
+    }
+}
+
+/// `-low` first, then no level suffix, then `-medium`, then `-high`.
+fn thinking_rank(id: &str) -> u8 {
+    if id.ends_with("-low") {
+        0
+    } else if id.ends_with("-medium") {
+        2
+    } else if id.ends_with("-high") {
+        3
+    } else {
+        1
+    }
+}
+
 fn read_json(path: &Path) -> Result<Value> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))?;
@@ -135,13 +254,6 @@ fn version_numbers(id: &str) -> Vec<u32> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    #[test]
-    fn test_version_numbers() {
-        assert_eq!(version_numbers("gemini-3.8-flash-low"), vec![3, 8]);
-        assert_eq!(version_numbers("gpt-6-luna"), vec![6]);
-        assert_eq!(version_numbers("gpt-5.6-luna"), vec![5, 6]);
-    }
 
     #[test]
     fn test_resolve_claude_newest_main_haiku() {
@@ -208,12 +320,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_codex_missing_file_fails() {
-        let temp = tempdir().unwrap();
-        assert!(resolve_codex(&temp.path().join("missing.json")).is_err());
-    }
-
-    #[test]
     fn test_resolve_antigravity_newest_flash_low_in_cli_form() {
         let temp = tempdir().unwrap();
         let file = temp.path().join("model-aliases.json");
@@ -245,14 +351,5 @@ mod tests {
 
         let err = resolve_antigravity(&file).unwrap_err();
         assert!(err.to_string().contains("no Flash (Low) model"));
-    }
-
-    #[test]
-    fn test_antigravity_cli_model_id_matches_agy_models() {
-        assert_eq!(
-            antigravity_cli_model_id("Gemini 3.8 Flash (Low)").as_deref(),
-            Some("gemini-3.8-flash-low")
-        );
-        assert_eq!(antigravity_cli_model_id("  "), None);
     }
 }

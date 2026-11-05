@@ -1,4 +1,3 @@
-use super::CredentialStatus;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -231,13 +230,6 @@ impl CodexAuth {
     pub fn detect() -> bool {
         let auth = Self::new();
         auth.auth_paths().iter().any(|p| p.exists())
-    }
-
-    pub fn credential_status(&self) -> CredentialStatus {
-        match self.load_credentials() {
-            Ok(_) => CredentialStatus::Valid,
-            Err(_) => CredentialStatus::NotFound,
-        }
     }
 }
 

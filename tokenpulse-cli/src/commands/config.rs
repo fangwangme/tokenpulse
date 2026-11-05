@@ -92,6 +92,10 @@ pub fn run(action: ConfigAction) -> Result<()> {
             println!();
             println!("Keeper:");
             println!("  keeper_engine: {}", config.keeper.enabled);
+            println!(
+                "  keeper_antigravity_groups: {}",
+                config.keeper.antigravity_groups_label()
+            );
             for (name, agent) in &config.keeper.agents {
                 let model_display = tokenpulse_core::keeper::resolve_cheapest_model(name)
                     .unwrap_or_else(|e| format!("unresolved: {e}"));
@@ -225,6 +229,26 @@ pub fn run(action: ConfigAction) -> Result<()> {
                     manager.save(&config)?;
                     println!("keeper_engine = {value}");
                 }
+                "keeper_antigravity_groups" => {
+                    use tokenpulse_core::config::{
+                        ANTIGRAVITY_GROUPS_ALL, ANTIGRAVITY_GROUPS_PRIMARY,
+                    };
+                    let all_groups = match value {
+                        ANTIGRAVITY_GROUPS_PRIMARY => false,
+                        ANTIGRAVITY_GROUPS_ALL => true,
+                        _ => {
+                            anyhow::bail!(
+                                "Invalid value '{}' for keeper_antigravity_groups. Expected: {}, {}",
+                                value,
+                                ANTIGRAVITY_GROUPS_PRIMARY,
+                                ANTIGRAVITY_GROUPS_ALL
+                            );
+                        }
+                    };
+                    config.keeper.set_antigravity_all_groups(all_groups);
+                    manager.save(&config)?;
+                    println!("keeper_antigravity_groups = {value}");
+                }
                 "refresh_quota" => {
                     config.display.refresh_quota = match value {
                         "true" | "1" | "yes" => true,
@@ -266,7 +290,7 @@ pub fn run(action: ConfigAction) -> Result<()> {
                 }
                 _ => {
                     anyhow::bail!(
-                        "Unknown setting '{}'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  account_display        (none | plan | full)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)\n  notification_level     (off | in_app | terminal | system)\n  notification_sound     (chime | none | a name under /System/Library/Sounds, e.g. Hero)\n  keeper_engine          (true | false)",
+                        "Unknown setting '{}'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  account_display        (none | plan | full)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)\n  notification_level     (off | in_app | terminal | system)\n  notification_sound     (chime | none | a name under /System/Library/Sounds, e.g. Hero)\n  keeper_engine          (true | false)\n  keeper_antigravity_groups (gemini_flash | all)",
                         key
                     );
                 }

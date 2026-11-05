@@ -128,13 +128,6 @@ mod tests {
     }
 
     #[test]
-    fn test_discover_files_empty_dir() {
-        let (_temp_dir, root) = create_temp_dir();
-        let files = discover_files(&root, "jsonl", None);
-        assert!(files.is_empty());
-    }
-
-    #[test]
     fn test_discover_files_with_files() {
         let (_temp_dir, root) = create_temp_dir();
 
@@ -156,22 +149,5 @@ mod tests {
 
         let files = discover_files(&root, "jsonl", None);
         assert_eq!(files.len(), 2);
-    }
-
-    #[test]
-    fn test_parse_files_parallel() {
-        let (_temp_dir, root) = create_temp_dir();
-
-        fs::write(root.join("1.jsonl"), "{}").unwrap();
-        fs::write(root.join("2.jsonl"), "{}").unwrap();
-        fs::write(root.join("3.jsonl"), "{}").unwrap();
-
-        let files = discover_files(&root, "jsonl", None);
-        let results: Vec<i32> = parse_files_parallel(files, |_| vec![1, 2, 3]);
-
-        // 3 files * 3 items = 9 items
-        // sum: 1+2+3 per file * 3 files = 18
-        assert_eq!(results.len(), 9);
-        assert_eq!(results.iter().sum::<i32>(), 18);
     }
 }

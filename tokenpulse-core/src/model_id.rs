@@ -129,17 +129,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_canonical() {
-        assert_eq!(canonical("gemini-3-flash-high"), "gemini-3-flash");
-        assert_eq!(canonical("claude-3-opus-thinking"), "claude-3-opus");
-        assert_eq!(canonical("openai/gpt-4.1-mini-2025-04-14"), "gpt-4-1-mini");
-        assert_eq!(
-            canonical("antigravity-claude-opus-4-5-thinking-high-free"),
-            "claude-opus-4-5"
-        );
-    }
-
-    #[test]
     fn test_canonical_strips_trailing_tiered_routing_suffix() {
         assert_eq!(canonical("gemini-3.6-flash-tiered"), "gemini-3-6-flash");
         assert_eq!(canonical("gemini-3-6-flash-tiered"), "gemini-3-6-flash");

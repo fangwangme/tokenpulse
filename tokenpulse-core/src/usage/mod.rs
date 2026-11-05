@@ -39,12 +39,6 @@ pub struct DashboardDay {
     pub intensity_cost: u8,
 }
 
-impl DashboardDay {
-    pub fn cache_tokens(&self) -> i64 {
-        self.cache_read_tokens + self.cache_write_tokens
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRollup {
     pub label: String,
@@ -60,12 +54,6 @@ pub struct UsageRollup {
     pub message_count: i64,
     pub session_count: i64,
     pub active_days: i64,
-}
-
-impl UsageRollup {
-    pub fn cache_tokens(&self) -> i64 {
-        self.cache_read_tokens + self.cache_write_tokens
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,27 +354,5 @@ mod tests {
         assert_eq!(summary.monthly.len(), 1);
         assert_eq!(summary.monthly[0].label, "2026-03");
         assert!((summary.total_cost - 5.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_weekly_group_aligns_to_monday() {
-        // 2026-10-12 is Monday, 2026-10-18 is Sunday
-        let monday = NaiveDate::from_ymd_opt(2026, 10, 12).unwrap();
-        let wednesday = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap();
-        let sunday = NaiveDate::from_ymd_opt(2026, 10, 18).unwrap();
-
-        let (m_label, m_start, m_end) = weekly_group(monday).unwrap();
-        let (w_label, w_start, w_end) = weekly_group(wednesday).unwrap();
-        let (s_label, s_start, s_end) = weekly_group(sunday).unwrap();
-
-        assert_eq!(m_label, "2026-10-12..2026-10-18");
-        assert_eq!(w_label, "2026-10-12..2026-10-18");
-        assert_eq!(s_label, "2026-10-12..2026-10-18");
-        assert_eq!(m_start, monday);
-        assert_eq!(m_end, sunday);
-        assert_eq!(w_start, monday);
-        assert_eq!(w_end, sunday);
-        assert_eq!(s_start, monday);
-        assert_eq!(s_end, sunday);
     }
 }

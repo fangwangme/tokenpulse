@@ -31,4 +31,3 @@
   `tokenpulse.db` (quota cache + observation history)
 - **Logging**: tracing to a daily rotating file under
   `~/.local/share/tokenpulse/log/`; never stdout, which would corrupt the TUI
-- **Tests**: 370 passing

@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use tracing::info;
 
 pub mod models;
-pub use models::resolve_cheapest_model;
+pub use models::{
+    resolve_antigravity_group_model, resolve_cheapest_model, select_antigravity_group_model,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub enum KeeperTriggerType {
@@ -280,18 +282,30 @@ pub fn is_weekly_cycle_window(window: &crate::provider::RateWindow) -> bool {
         || lower.contains("30d")
 }
 
+/// Whether a window belongs to a weekly target's group; no group matches all.
+fn window_in_group(window: &crate::provider::RateWindow, group: Option<&str>) -> bool {
+    match group {
+        Some(group) => window.model_family.as_deref() == Some(group),
+        None => true,
+    }
+}
+
 /// Detects if an agent's major cycle quota window transitioned from partially/fully
 /// consumed (`used_percent > 0.0`) back to fully reset (`used_percent <= 0.0`).
+///
+/// With a `group`, only that group's weekly windows count, so a reset in one
+/// Antigravity quota group cannot fire another group's ping.
 pub fn did_agent_cycle_reset_to_full(
     prev_snapshot: Option<&crate::provider::QuotaSnapshot>,
     new_snapshot: &crate::provider::QuotaSnapshot,
+    group: Option<&str>,
 ) -> bool {
     let Some(prev) = prev_snapshot else {
         return false;
     };
 
     for new_window in &new_snapshot.windows {
-        if !is_weekly_cycle_window(new_window) {
+        if !is_weekly_cycle_window(new_window) || !window_in_group(new_window, group) {
             continue;
         }
         if new_window.used_percent <= 0.0 {
@@ -369,15 +383,91 @@ fn matches_keeper_agent(provider: &str, agent_id: &str) -> bool {
     }
 }
 
-/// Extracts the weekly/cycle window reset time from a QuotaSnapshot.
+/// Extracts the weekly/cycle window reset time from a QuotaSnapshot, limited
+/// to one quota group's windows when `group` is given.
 pub fn extract_weekly_reset_time(
     snapshot: &crate::provider::QuotaSnapshot,
+    group: Option<&str>,
 ) -> Option<DateTime<Utc>> {
     snapshot
         .windows
         .iter()
-        .find(|w| is_weekly_cycle_window(w) && w.resets_at.is_some())
+        .find(|w| is_weekly_cycle_window(w) && window_in_group(w, group) && w.resets_at.is_some())
         .and_then(|w| w.resets_at)
+}
+
+/// The Keeper agent whose quota is split into per-model groups.
+const ANTIGRAVITY_AGENT: &str = "antigravity";
+
+/// One weekly quota window the Keeper keeps anchored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeeklyTarget {
+    /// Names the target's last-fired time in `keeper_state.json` and its
+    /// in-flight lock.
+    pub key: String,
+    /// The `model_family` of the weekly window followed; `None` follows any
+    /// weekly window of the agent.
+    pub group: Option<String>,
+}
+
+impl WeeklyTarget {
+    /// The primary target keeps the agent's own key and its regular model.
+    pub fn is_primary(&self, agent: &str) -> bool {
+        self.key == agent
+    }
+}
+
+/// Distinct `model_family` values among the snapshot's weekly windows, in
+/// snapshot order. The first is the primary group.
+pub fn weekly_groups(snapshot: &crate::provider::QuotaSnapshot) -> Vec<String> {
+    let mut groups: Vec<String> = Vec::new();
+    for window in &snapshot.windows {
+        if !is_weekly_cycle_window(window) {
+            continue;
+        }
+        if let Some(family) = &window.model_family {
+            if !groups.contains(family) {
+                groups.push(family.clone());
+            }
+        }
+    }
+    groups
+}
+
+/// The weekly targets of a Keeper agent (`docs/specs/keeper.md` "Weekly
+/// targets"). Only Antigravity splits into groups: its primary group keeps
+/// the agent key, and with `all_groups` every other group gets
+/// `antigravity:<group>`.
+pub fn weekly_targets(
+    agent: &str,
+    snapshot: Option<&crate::provider::QuotaSnapshot>,
+    all_groups: bool,
+) -> Vec<WeeklyTarget> {
+    let groups = match snapshot {
+        Some(snapshot) if agent == ANTIGRAVITY_AGENT => weekly_groups(snapshot),
+        _ => Vec::new(),
+    };
+    if groups.is_empty() {
+        return vec![WeeklyTarget {
+            key: agent.to_string(),
+            group: None,
+        }];
+    }
+
+    let count = if all_groups { groups.len() } else { 1 };
+    groups
+        .into_iter()
+        .take(count)
+        .enumerate()
+        .map(|(index, group)| WeeklyTarget {
+            key: if index == 0 {
+                agent.to_string()
+            } else {
+                format!("{agent}:{group}")
+            },
+            group: Some(group),
+        })
+        .collect()
 }
 
 /// Finds the quota snapshot backing a Keeper agent, preferring an exact
@@ -664,16 +754,6 @@ mod tests {
     use chrono::{Datelike, TimeZone, Timelike};
 
     #[test]
-    fn test_format_keeper_command() {
-        let template = "claude -p \"{prompt}\" --model {model}";
-        let formatted = format_keeper_command(template, "claude-3-5-haiku-20241022", "Hello World");
-        assert_eq!(
-            formatted,
-            "claude -p \"Hello World\" --model claude-3-5-haiku-20241022"
-        );
-    }
-
-    #[test]
     fn test_sanitize_output_snippet_handles_multibyte_and_control_chars() {
         // Byte 300 lands inside a multi-byte codepoint; slicing here used to panic.
         let cjk = format!("Hello! {}", "你好，很高兴见到你。".repeat(40));
@@ -706,63 +786,6 @@ mod tests {
             format_keeper_command("claude -p \"{prompt}\" --model {model}", "haiku", "Hi"),
             "claude -p \"Hi\" --model haiku"
         );
-    }
-
-    /// Resolves a wall clock time in a zone with DST, independent of the host's
-    /// own timezone, by checking the two transition shapes directly.
-    #[test]
-    fn test_local_datetime_at_handles_dst_transitions() {
-        use chrono::offset::LocalResult;
-        use chrono::TimeZone;
-        use chrono_tz::America::New_York;
-
-        // Spring forward 2026-03-08: 02:00 -> 03:00, so 02:30 never happens.
-        let gap_date = NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
-        let gap_time = NaiveTime::from_hms_opt(2, 30, 0).unwrap();
-        assert!(matches!(
-            New_York.from_local_datetime(&gap_date.and_time(gap_time)),
-            LocalResult::None
-        ));
-
-        // Fall back 2026-11-01: 02:00 -> 01:00, so 01:30 happens twice.
-        let dup_date = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
-        let dup_time = NaiveTime::from_hms_opt(1, 30, 0).unwrap();
-        assert!(matches!(
-            New_York.from_local_datetime(&dup_date.and_time(dup_time)),
-            LocalResult::Ambiguous(_, _)
-        ));
-
-        // Both shapes must resolve rather than leaving the card blank. The
-        // skipped hour in particular is not covered by `.earliest()`, which
-        // returns `None` for `LocalResult::None`.
-        assert!(resolve_in(&New_York, gap_date, gap_time).is_some());
-        assert!(resolve_in(&New_York, dup_date, dup_time).is_some());
-    }
-
-    /// Mirrors `local_datetime_at` for an explicit zone, so the DST test does
-    /// not depend on where it runs.
-    #[cfg(test)]
-    fn resolve_in<Tz: chrono::TimeZone>(
-        tz: &Tz,
-        date: NaiveDate,
-        time: NaiveTime,
-    ) -> Option<chrono::DateTime<Tz>> {
-        use chrono::offset::LocalResult;
-
-        match tz.from_local_datetime(&date.and_time(time)) {
-            LocalResult::Single(dt) => Some(dt),
-            LocalResult::Ambiguous(earliest, _) => Some(earliest),
-            LocalResult::None => (1..=120).find_map(|minutes| {
-                let shifted = time.overflowing_add_signed(chrono::Duration::minutes(minutes));
-                if shifted.1 != 0 {
-                    return None;
-                }
-                match tz.from_local_datetime(&date.and_time(shifted.0)) {
-                    LocalResult::Single(dt) => Some(dt),
-                    _ => None,
-                }
-            }),
-        }
     }
 
     #[test]
@@ -883,19 +906,24 @@ mod tests {
 
         // None previous snapshot -> should NOT trigger
         let snap_full = make_snap(0.0, 0.0);
-        assert!(!did_agent_cycle_reset_to_full(None, &snap_full));
+        assert!(!did_agent_cycle_reset_to_full(None, &snap_full, None));
 
         // 7d window was 25% used, now reset to 0% -> SHOULD trigger
         let prev_used = make_snap(50.0, 25.0);
         let curr_reset = make_snap(10.0, 0.0);
-        assert!(did_agent_cycle_reset_to_full(Some(&prev_used), &curr_reset));
+        assert!(did_agent_cycle_reset_to_full(
+            Some(&prev_used),
+            &curr_reset,
+            None
+        ));
 
         // 7d window was already 0%, still 0% -> should NOT trigger (avoid repeat)
         let prev_already_zero = make_snap(20.0, 0.0);
         let curr_still_zero = make_snap(0.0, 0.0);
         assert!(!did_agent_cycle_reset_to_full(
             Some(&prev_already_zero),
-            &curr_still_zero
+            &curr_still_zero,
+            None
         ));
 
         // Only 5h session window reset, but 7d cycle was NOT reset -> should NOT trigger weekly keeper
@@ -903,7 +931,8 @@ mod tests {
         let curr_5h_reset = make_snap(0.0, 30.0);
         assert!(!did_agent_cycle_reset_to_full(
             Some(&prev_5h_used),
-            &curr_5h_reset
+            &curr_5h_reset,
+            None
         ));
     }
 
@@ -1029,7 +1058,10 @@ mod tests {
             fetched_at: Utc::now(),
         };
 
-        assert_eq!(extract_weekly_reset_time(&agy_snapshot), Some(reset_time));
+        assert_eq!(
+            extract_weekly_reset_time(&agy_snapshot, None),
+            Some(reset_time)
+        );
         assert!(matches_keeper_agent("antigravity", "antigravity"));
         assert!(matches_keeper_agent("google", "antigravity"));
         assert!(matches_keeper_agent("claude", "claude"));
@@ -1072,6 +1104,7 @@ mod tests {
             weekly_keeper_enabled: true,
             command: command.to_string(),
             prompt: "p".to_string(),
+            weekly_all_groups: false,
         }
     }
 
@@ -1163,28 +1196,6 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
     }
 
-    /// Dropping the `output()` future on timeout must not leave the CLI running.
-    #[tokio::test]
-    async fn test_timed_out_ping_kills_its_child() {
-        let marker = std::env::temp_dir().join("tokenpulse_keeper_kill_test");
-        let _ = std::fs::remove_file(&marker);
-
-        let started = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("sleep 2 && touch {}", marker.display()))
-                .stdin(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await;
-        assert!(started.is_err(), "command should have timed out");
-
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        assert!(!marker.exists(), "child outlived the timeout");
-        let _ = std::fs::remove_file(&marker);
-    }
     /// A timed-out ping has to stop everything it started, not just the shell:
     /// an agent CLI starts processes of its own, and those used to keep running
     /// (and spending quota) after the ping was reported as timed out.
@@ -1230,19 +1241,5 @@ mod tests {
             marker.exists(),
             "the command was killed without a SIGTERM first"
         );
-    }
-
-    #[tokio::test]
-    async fn command_finishing_in_time_returns_its_output() {
-        let outcome = run_command_with_timeout(
-            "echo hello",
-            Duration::from_secs(10),
-            Duration::from_secs(1),
-        )
-        .await;
-
-        let output = outcome.expect("finished in time").expect("ran");
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
     }
 }

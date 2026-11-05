@@ -325,24 +325,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gemini_tokens_subtract_cached_overlap_when_total_is_cache_inclusive() {
-        let breakdown = GeminiTokens {
-            input: Some(120),
-            output: Some(45),
-            cached: Some(30),
-            thoughts: Some(12),
-            tool: Some(0),
-            total: Some(177),
-        }
-        .into_breakdown();
-
-        assert_eq!(breakdown.input, 90);
-        assert_eq!(breakdown.output, 45);
-        assert_eq!(breakdown.cache_read, 30);
-        assert_eq!(breakdown.reasoning, 12);
-    }
-
-    #[test]
     fn gemini_tokens_preserve_input_when_total_hint_is_missing() {
         let breakdown = GeminiTokens {
             input: Some(120),

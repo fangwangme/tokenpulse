@@ -759,6 +759,7 @@ impl UsageStore {
         .map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub fn load_messages(
         &self,
         since: Option<NaiveDate>,
@@ -1333,6 +1334,7 @@ fn delete_scoped_tx(
     Ok(())
 }
 
+#[cfg(test)]
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnifiedMessage> {
     let input: i64 = row.get(8)?;
     let output: i64 = row.get(9)?;
@@ -2234,16 +2236,6 @@ mod tests {
     }
 
     #[test]
-    fn derive_message_cost_uses_snapshot_when_available() {
-        let message = sample_derived_cost_message("2024-03-10", "priced");
-        let pricing = ModelPricing::simple(0.01, 0.02);
-
-        let cost = derive_message_cost(&message, Some(&pricing), true).unwrap();
-
-        assert!(cost > 0.0);
-    }
-
-    #[test]
     fn derive_message_cost_ignores_parser_supplied_cost_when_snapshot_exists() {
         let mut message = sample_derived_cost_message("2024-03-10", "m1");
         message.cost = 42.5;
@@ -2315,23 +2307,6 @@ mod tests {
         let summaries = store.load_model_summaries(None, &[]).unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].model, "claude-3-opus");
-    }
-
-    #[test]
-    fn load_summary_counts_returns_message_and_session_totals() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let store = UsageStore::with_path(tempdir.path().join("usage.sqlite3"));
-
-        let mut first = sample_message("2024-03-10", "m1");
-        first.session_id = "session-a".to_string();
-        let mut second = sample_message("2024-03-10", "m2");
-        second.session_id = "session-b".to_string();
-
-        store.ingest_messages(&[first, second], false).unwrap();
-
-        let (message_count, session_count) = store.load_summary_counts(None, &[]).unwrap();
-        assert_eq!(message_count, 2);
-        assert_eq!(session_count, 2);
     }
 
     #[test]

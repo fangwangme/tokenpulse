@@ -172,9 +172,7 @@ pub async fn fetch_all(providers: &[Box<dyn QuotaFetcher>]) -> Vec<Result<QuotaS
 
 The default is `full`. Plan names are capitalized at display time (`plus` →
 `Plus`, `max` → `Max`); snapshots, the quota cache, history and `--json` keep the
-provider's raw value. Config v4 replaced the earlier `show_account = true |
-false` with this setting: `true` migrates to `full`, `false` to `none`, and the
-rewritten file no longer contains `show_account`. Set it from Settings (cycles
+provider's raw value. Set it from Settings (cycles
 `none → plan → full`) or with `tokenpulse config set account_display=<value>`.
 
 ## Observation history

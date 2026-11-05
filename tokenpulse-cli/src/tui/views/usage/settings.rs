@@ -23,6 +23,7 @@ const FIXED_SETTING_KEYS: &[&str] = &[
     "notification_level",
     "notification_sound",
     "keeper_engine",
+    "keeper_antigravity_groups",
 ];
 
 /// Sounds offered by the Settings row, in cycle order.
@@ -143,6 +144,15 @@ pub fn get_settings_items(state: &UsageState, config: &Config, theme: &Theme) ->
                 theme.dim
             },
         },
+        SettingItem {
+            key: "keeper_antigravity_groups",
+            label: config.keeper.antigravity_groups_label().to_string(),
+            value_color: if config.keeper.antigravity_all_groups() {
+                theme.antigravity
+            } else {
+                theme.dim
+            },
+        },
     ];
 
     // Quota provider checkboxes. The rows come from the quota registry so they
@@ -248,6 +258,10 @@ pub fn handle_settings_action(
             tokenpulse_core::notification::play_alert_sound(&config.display.notification_sound);
         }
         Some("keeper_engine") => config.keeper.enabled = !config.keeper.enabled,
+        Some("keeper_antigravity_groups") => {
+            let all_groups = !config.keeper.antigravity_all_groups();
+            config.keeper.set_antigravity_all_groups(all_groups);
+        }
         _ => {
             // Quota configuration only. The usage view's source filter is
             // session state with its own key (`s`), so one keypress here must
@@ -695,14 +709,42 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 
+    /// #97 acceptance: `docs/specs/keeper.md` "Antigravity quota groups" > "Setting".
     #[test]
-    fn notification_sound_cycles_through_every_option_and_wraps() {
-        let mut sound = SOUND_CYCLE[0].to_string();
-        for expected in SOUND_CYCLE.iter().skip(1) {
-            sound = next_notification_sound(&sound);
-            assert_eq!(&sound, expected);
+    fn keeper_antigravity_groups_row_toggles_and_saves() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+        let mut config = Config::default();
+        let mut theme = Theme::new(crate::tui::theme::ThemeMode::Dark);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_manager = ConfigManager::with_path(temp_dir.path().join("config.toml"));
+        let row = FIXED_SETTING_KEYS
+            .iter()
+            .position(|key| *key == "keeper_antigravity_groups")
+            .expect("Settings has a keeper_antigravity_groups row");
+        state.selected_row = row;
+
+        assert!(!config.keeper.agents["antigravity"].weekly_all_groups);
+        assert_eq!(
+            get_settings_items(&state, &config, &theme)[row].label,
+            "gemini_flash"
+        );
+
+        for (all_groups, label) in [(true, "all"), (false, "gemini_flash")] {
+            handle_settings_action(&mut state, &mut config, &config_manager, &mut theme).unwrap();
+            assert_eq!(
+                config.keeper.agents["antigravity"].weekly_all_groups,
+                all_groups
+            );
+            assert_eq!(
+                get_settings_items(&state, &config, &theme)[row].label,
+                label
+            );
+            assert_eq!(
+                config_manager.load().unwrap().keeper.agents["antigravity"].weekly_all_groups,
+                all_groups
+            );
         }
-        assert_eq!(next_notification_sound(&sound), SOUND_CYCLE[0]);
     }
 
     #[test]

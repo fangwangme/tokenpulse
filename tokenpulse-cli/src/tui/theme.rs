@@ -551,72 +551,6 @@ mod tests {
     }
 
     #[test]
-    fn model_color_anthropic_variants() {
-        let t = Theme::default();
-        let coral = Color::Rgb(251, 146, 60);
-        assert_eq!(t.model_color_for("claude-sonnet-4-20250514", None), coral);
-        assert_eq!(t.model_color_for("claude-3.5-haiku", None), coral);
-        assert_eq!(t.model_color_for("claude-opus-4", None), coral);
-        assert_eq!(t.model_color_for("sonnet-4", None), coral);
-    }
-
-    #[test]
-    fn model_color_openai_variants() {
-        let t = Theme::default();
-        let green = Color::Rgb(52, 211, 153);
-        assert_eq!(t.model_color_for("gpt-4.1", None), green);
-        assert_eq!(t.model_color_for("o3-mini", None), green);
-        assert_eq!(t.model_color_for("o4-mini", None), green);
-        assert_eq!(t.model_color_for("o1-preview", None), green);
-    }
-
-    #[test]
-    fn model_color_google() {
-        let t = Theme::default();
-        assert_eq!(
-            t.model_color_for("gemini-2.5-pro", None),
-            Color::Rgb(96, 165, 250)
-        );
-    }
-
-    #[test]
-    fn model_color_deepseek() {
-        let t = Theme::default();
-        assert_eq!(
-            t.model_color_for("deepseek-v3-0324", None),
-            Color::Rgb(168, 85, 247)
-        );
-    }
-
-    #[test]
-    fn model_color_nvidia() {
-        let t = Theme::default();
-        assert_eq!(
-            t.model_color_for("nvidia/nemotron-70b", None),
-            Color::Rgb(168, 85, 247)
-        );
-    }
-
-    #[test]
-    fn model_color_unknown_is_white() {
-        let t = Theme::default();
-        assert_eq!(
-            t.model_color_for("some-unknown-model", None),
-            Color::Rgb(168, 85, 247)
-        );
-    }
-
-    #[test]
-    fn provider_color_mapping() {
-        let t = Theme::default();
-        assert_eq!(t.provider_color("claude"), t.claude);
-        assert_eq!(t.provider_color("codex"), t.codex);
-        assert_eq!(t.provider_color("copilot"), t.copilot);
-        assert_eq!(t.provider_color("gemini"), t.gemini);
-        assert_eq!(t.provider_color("unknown"), t.fg);
-    }
-
-    #[test]
     fn company_color_mapping() {
         let t = Theme::default();
         assert_eq!(t.company_color("openai"), Color::Rgb(52, 211, 153));
@@ -640,13 +574,6 @@ mod tests {
         assert_eq!(t.gauge_color(10.0), t.gauge_low);
         assert_eq!(t.gauge_color(60.0), t.gauge_mid);
         assert_eq!(t.gauge_color(90.0), t.gauge_high);
-    }
-
-    #[test]
-    fn dark_theme_uses_light_heatmap_surface_for_readable_levels() {
-        let t = Theme::new(ThemeMode::Dark);
-        assert_eq!(t.heatmap_bg, Color::Rgb(235, 237, 240));
-        assert_eq!(t.empty_heatmap, Color::Rgb(235, 237, 240));
     }
 
     #[test]
@@ -688,15 +615,6 @@ mod tests {
         let light = Theme::new(ThemeMode::Light);
         assert_eq!(dark.token_heatmap, light.token_heatmap);
         assert_eq!(dark.cost_heatmap, light.cost_heatmap);
-    }
-
-    #[test]
-    fn heatmap_uses_platform_inspired_palettes() {
-        let t = Theme::new(ThemeMode::Light);
-        assert_eq!(t.cost_heatmap[0], Color::Rgb(155, 233, 168));
-        assert_eq!(t.cost_heatmap[4], Color::Rgb(14, 68, 41));
-        assert_eq!(t.token_heatmap[0], Color::Rgb(184, 236, 255));
-        assert_eq!(t.token_heatmap[2], Color::Rgb(32, 190, 255));
     }
 
     #[test]

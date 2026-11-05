@@ -1,4 +1,3 @@
-use super::CredentialStatus;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -566,23 +565,6 @@ impl ClaudeAuth {
             .ok()?
             .first()
             .map(|candidate| candidate.source.to_string())
-    }
-
-    pub fn credential_status(&self) -> CredentialStatus {
-        match self.load_credentials_candidates() {
-            Ok(candidates) if candidates.is_empty() => CredentialStatus::NotFound,
-            Ok(candidates) => {
-                if candidates
-                    .iter()
-                    .all(|candidate| self.is_token_expired(&candidate.credentials))
-                {
-                    CredentialStatus::Expired
-                } else {
-                    CredentialStatus::Valid
-                }
-            }
-            Err(_) => CredentialStatus::NotFound,
-        }
     }
 }
 
