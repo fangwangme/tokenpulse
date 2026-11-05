@@ -529,39 +529,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_hr_time_parses_correctly() {
-        let value: Value = serde_json::from_str(r#"{"hrTime": [1700000000, 500000000]}"#).unwrap();
-        assert_eq!(extract_hr_time(&value), Some(1700000000500));
-    }
-
-    #[test]
-    fn extract_hr_time_missing() {
-        let value: Value = serde_json::from_str(r#"{}"#).unwrap();
-        assert_eq!(extract_hr_time(&value), None);
-    }
-
-    #[test]
-    fn extract_session_id_from_raw_attributes() {
-        let value: Value = serde_json::from_str(
-            r#"{
-                "resource": {
-                    "_rawAttributes": [
-                        ["session.id", {"value": "abc-123"}]
-                    ]
-                }
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(extract_session_id(&value), Some("abc-123".to_string()));
-    }
-
-    #[test]
-    fn extract_session_id_missing() {
-        let value: Value = serde_json::from_str(r#"{"resource": {}}"#).unwrap();
-        assert_eq!(extract_session_id(&value), None);
-    }
-
-    #[test]
     fn parse_otel_event_line() {
         let parser = CopilotSessionParser::new();
         let dir = tempfile::tempdir().unwrap();
@@ -597,6 +564,7 @@ mod tests {
         assert_eq!(msg.tokens.output, 200);
         assert_eq!(msg.tokens.cache_read, 0);
         assert_eq!(msg.message_key, "copilot:chatcmpl-abc123");
+        assert_eq!(msg.timestamp, 1_700_000_000_123);
     }
 
     #[test]

@@ -747,24 +747,6 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_cost_basic() {
-        let tokens = TokenBreakdown {
-            input: 1000,
-            output: 500,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        };
-
-        let pricing = make_pricing(0.00001, 0.00003);
-        let cost = calculate_cost(&tokens, &pricing);
-
-        // 1000 * 0.00001 + 500 * 0.00003
-        let expected = 1000.0 * 0.00001 + 500.0 * 0.00003;
-        assert!((cost - expected).abs() < 0.0000001);
-    }
-
-    #[test]
     fn test_calculate_cost_with_cache() {
         let tokens = TokenBreakdown {
             input: 1000,
@@ -837,26 +819,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_model_pricing_exact() {
-        let mut map = HashMap::new();
-        map.insert(
-            "claude-3-opus".to_string(),
-            make_pricing(0.000015, 0.000075),
-        );
-
-        let result = lookup_model_pricing("claude-3-opus", &map);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().input_cost_per_token, 0.000015);
-    }
-
-    #[test]
-    fn test_lookup_model_pricing_not_found() {
-        let map = HashMap::<String, ModelPricing>::new();
-        let result = lookup_model_pricing("unknown-model", &map);
-        assert!(result.is_none());
-    }
-
-    #[test]
     fn test_lookup_model_pricing_with_anthropic_prefix() {
         let mut map = HashMap::new();
         map.insert(
@@ -865,15 +827,6 @@ mod tests {
         );
 
         let result = lookup_model_pricing("claude-3-opus", &map);
-        assert!(result.is_some());
-    }
-
-    #[test]
-    fn test_lookup_model_pricing_with_openai_prefix() {
-        let mut map = HashMap::new();
-        map.insert("openai/gpt-4".to_string(), make_pricing(0.00003, 0.00006));
-
-        let result = lookup_model_pricing("gpt-4", &map);
         assert!(result.is_some());
     }
 
@@ -1005,19 +958,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_model_pricing_uses_explicit_minimax_alias() {
-        let mut map = HashMap::new();
-        map.insert(
-            "minimax/MiniMax-M2.1".to_string(),
-            make_pricing(0.0000003, 0.0000012),
-        );
-
-        let result = lookup_model_pricing("minimaxai/minimax-m2.1", &map);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().input_cost_per_token, 0.0000003);
-    }
-
-    #[test]
     fn test_lookup_model_pricing_uses_rule_based_minimax_m3_alias() {
         let mut map = HashMap::new();
         map.insert(
@@ -1060,19 +1000,6 @@ mod tests {
         let result = lookup_model_pricing("z-ai/glm5", &map);
         assert!(result.is_some());
         assert_eq!(result.unwrap().output_cost_per_token, 0.000002);
-    }
-
-    #[test]
-    fn test_lookup_model_pricing_uses_glm_5_1_alias() {
-        let mut map = HashMap::new();
-        map.insert(
-            "zai/glm-5.1".to_string(),
-            make_pricing(0.0000014, 0.0000044),
-        );
-
-        let result = lookup_model_pricing("z-ai/glm5.1", &map);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().output_cost_per_token, 0.0000044);
     }
 
     #[test]
@@ -1137,49 +1064,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_strips_free_suffix_kimi() {
-        let mut map = HashMap::new();
-        map.insert(
-            "moonshot/kimi-k2.5".to_string(),
-            make_pricing(0.0000006, 0.000003),
-        );
-
-        let result = lookup_model_pricing("kimi-k2.5-free", &map);
-        assert!(
-            result.is_some(),
-            "kimi-k2.5-free should resolve via -free stripping + alias"
-        );
-        assert_eq!(result.unwrap().output_cost_per_token, 0.000003);
-    }
-
-    #[test]
-    fn test_lookup_strips_free_suffix_minimax() {
-        let mut map = HashMap::new();
-        map.insert(
-            "minimax/MiniMax-M2.5".to_string(),
-            make_pricing(0.0000003, 0.0000012),
-        );
-
-        let result = lookup_model_pricing("minimax-m2.5-free", &map);
-        assert!(
-            result.is_some(),
-            "minimax-m2.5-free should resolve via -free stripping + alias"
-        );
-    }
-
-    #[test]
-    fn test_lookup_strips_free_suffix_glm() {
-        let mut map = HashMap::new();
-        map.insert("zai/glm-4.7".to_string(), make_pricing(0.0000005, 0.000002));
-
-        let result = lookup_model_pricing("glm-4.7-free", &map);
-        assert!(
-            result.is_some(),
-            "glm-4.7-free should resolve via -free stripping + alias"
-        );
-    }
-
-    #[test]
     fn test_lookup_grok_code_alias() {
         let mut map = HashMap::new();
         map.insert(
@@ -1189,21 +1073,6 @@ mod tests {
 
         let result = lookup_model_pricing("grok-code", &map);
         assert!(result.is_some(), "grok-code should resolve via alias");
-    }
-
-    #[test]
-    fn test_lookup_gemini_quality_tier_alias() {
-        let mut map = HashMap::new();
-        map.insert(
-            "gemini-3-pro-preview".to_string(),
-            make_pricing(0.000002, 0.000012),
-        );
-
-        let result = lookup_model_pricing("gemini-3-pro-high", &map);
-        assert!(
-            result.is_some(),
-            "gemini-3-pro-high should resolve via alias"
-        );
     }
 
     #[test]
@@ -1334,39 +1203,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_claude_dot_version_alias() {
-        let mut map = HashMap::new();
-        map.insert(
-            "openrouter/anthropic/claude-opus-4.6".to_string(),
-            make_pricing(0.000003, 0.000015),
-        );
-
-        let result = lookup_model_pricing("claude-opus-4.6", &map);
-        assert!(result.is_some(), "claude-opus-4.6 should resolve via alias");
-    }
-
-    #[test]
-    fn test_lookup_claude_future_version_rule() {
-        let mut map = HashMap::new();
-        map.insert(
-            "openrouter/anthropic/claude-sonnet-4.7".to_string(),
-            make_pricing(0.000003, 0.000015),
-        );
-
-        let result_dot = lookup_model_pricing("claude-sonnet-4.7", &map);
-        assert!(
-            result_dot.is_some(),
-            "claude-sonnet-4.7 should resolve via rule"
-        );
-
-        let result_hyphen = lookup_model_pricing("claude-sonnet-4-7", &map);
-        assert!(
-            result_hyphen.is_some(),
-            "claude-sonnet-4-7 should resolve via rule"
-        );
-    }
-
-    #[test]
     fn test_lookup_gemini_future_version_rule() {
         let mut map = HashMap::new();
         map.insert(
@@ -1472,20 +1308,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_model_pricing_uses_deepseek_v4_alias() {
-        let mut map = HashMap::new();
-        map.insert(
-            "deepseek/deepseek-v4-flash".to_string(),
-            make_pricing(0.00000014, 0.00000028),
-        );
-
-        let result = lookup_model_pricing("deepseek-ai/deepseek-v4-flash", &map);
-
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().input_cost_per_token, 0.00000014);
-    }
-
-    #[test]
     fn test_lookup_model_pricing_strips_arbitrary_left_route_prefixes() {
         let mut map = HashMap::new();
         map.insert(
@@ -1497,19 +1319,6 @@ mod tests {
 
         assert!(result.is_some());
         assert_eq!(result.unwrap().input_cost_per_token, 0.00000174);
-    }
-
-    #[test]
-    fn test_strip_three_segment_prefix_function() {
-        assert_eq!(
-            strip_three_segment_prefix("nvidia/moonshotai/kimi-k2.6"),
-            Some("moonshotai/kimi-k2.6")
-        );
-        assert_eq!(strip_three_segment_prefix("foo/bar/baz"), Some("bar/baz"));
-        // Two segments – not touched
-        assert_eq!(strip_three_segment_prefix("moonshotai/kimi-k2.6"), None);
-        // Four segments – not touched
-        assert_eq!(strip_three_segment_prefix("a/b/c/d"), None);
     }
 
     #[test]

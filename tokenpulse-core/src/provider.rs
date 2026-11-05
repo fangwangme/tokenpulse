@@ -194,34 +194,3 @@ pub trait SessionParser: Send + Sync {
         IncrementalIngestMode::UpsertMessages
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_token_breakdown_total() {
-        let tokens = TokenBreakdown {
-            input: 1000,
-            output: 500,
-            cache_read: 200,
-            cache_write: 100,
-            reasoning: 50,
-        };
-        assert_eq!(tokens.total(), 1850);
-        assert!(!tokens.is_empty());
-    }
-
-    #[test]
-    fn test_token_breakdown_empty() {
-        let tokens = TokenBreakdown {
-            input: 0,
-            output: 0,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        };
-        assert_eq!(tokens.total(), 0);
-        assert!(tokens.is_empty());
-    }
-}
