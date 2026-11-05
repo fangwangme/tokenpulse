@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.14] - 2026-11-05
+
+### Added
+- **Keeper: Antigravity per-group weekly pings**: new setting `keeper_antigravity_groups` (`gemini_flash` / `all`; Settings tab or `tokenpulse config set keeper_antigravity_groups=all`). With `all`, every Antigravity quota group the API reports (currently `Gemini`, `Claude`, `Gemini 4 Argon`) is pinged on its own weekly reset, and the manual ping covers every group as well. Each group uses its cheapest model at its lowest thinking level, picked from `agy models` (e.g. `claude-sonnet-5-5-low`, `gemini-4-argon-low`). The Keeper card shows the earliest pending group (#97).
+
+### Fixed
+- **Keeper: Antigravity weekly trigger**: a weekly reset in a non-Gemini quota group (such as `Claude`) no longer fires the Gemini Flash weekly ping. In the default `gemini_flash` mode only the Gemini group's own reset triggers it (#97).
+
 ## [0.6.13] - 2026-10-25
 
 ### Added
