@@ -695,6 +695,44 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 
+    /// #97 acceptance: `docs/specs/keeper.md` "Antigravity quota groups" > "Setting".
+    #[test]
+    fn keeper_antigravity_groups_row_toggles_and_saves() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+        let mut config = Config::default();
+        let mut theme = Theme::new(crate::tui::theme::ThemeMode::Dark);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_manager = ConfigManager::with_path(temp_dir.path().join("config.toml"));
+        let row = FIXED_SETTING_KEYS
+            .iter()
+            .position(|key| *key == "keeper_antigravity_groups")
+            .expect("Settings has a keeper_antigravity_groups row");
+        state.selected_row = row;
+
+        assert!(!config.keeper.agents["antigravity"].weekly_all_groups);
+        assert_eq!(
+            get_settings_items(&state, &config, &theme)[row].label,
+            "gemini_flash"
+        );
+
+        for (all_groups, label) in [(true, "all"), (false, "gemini_flash")] {
+            handle_settings_action(&mut state, &mut config, &config_manager, &mut theme).unwrap();
+            assert_eq!(
+                config.keeper.agents["antigravity"].weekly_all_groups,
+                all_groups
+            );
+            assert_eq!(
+                get_settings_items(&state, &config, &theme)[row].label,
+                label
+            );
+            assert_eq!(
+                config_manager.load().unwrap().keeper.agents["antigravity"].weekly_all_groups,
+                all_groups
+            );
+        }
+    }
+
     #[test]
     fn notification_sound_cycles_through_every_option_and_wraps() {
         let mut sound = SOUND_CYCLE[0].to_string();
