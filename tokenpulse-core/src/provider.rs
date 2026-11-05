@@ -144,6 +144,7 @@ impl UnifiedMessage {
         self
     }
 
+    #[cfg(test)]
     pub fn with_cost(mut self, cost: f64) -> Self {
         self.cost = cost.max(0.0);
         self

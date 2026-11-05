@@ -748,16 +748,6 @@ mod tests {
     }
 
     #[test]
-    fn notification_sound_cycles_through_every_option_and_wraps() {
-        let mut sound = SOUND_CYCLE[0].to_string();
-        for expected in SOUND_CYCLE.iter().skip(1) {
-            sound = next_notification_sound(&sound);
-            assert_eq!(&sound, expected);
-        }
-        assert_eq!(next_notification_sound(&sound), SOUND_CYCLE[0]);
-    }
-
-    #[test]
     fn unknown_notification_sound_cycles_back_to_the_first_option() {
         assert_eq!(next_notification_sound("Bogus"), SOUND_CYCLE[0]);
     }

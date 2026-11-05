@@ -759,6 +759,7 @@ impl UsageStore {
         .map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub fn load_messages(
         &self,
         since: Option<NaiveDate>,
@@ -1333,6 +1334,7 @@ fn delete_scoped_tx(
     Ok(())
 }
 
+#[cfg(test)]
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnifiedMessage> {
     let input: i64 = row.get(8)?;
     let output: i64 = row.get(9)?;

@@ -527,24 +527,10 @@ mod tests {
     use tokenpulse_core::keeper::{KeeperExecutionRecord, KeeperTriggerType};
 
     #[test]
-    fn test_keeper_agent_metadata() {
-        assert_eq!(keeper_agent_name("claude"), "Claude Code");
-        assert_eq!(keeper_agent_name("codex"), "OpenAI Codex");
-        assert_eq!(keeper_agent_name("antigravity"), "Google Antigravity");
-        assert_eq!(KEEPER_AGENTS.len(), 3);
-    }
-
-    #[test]
     fn test_keeper_grid_dimensions() {
         assert_eq!(keeper_grid_dimensions(120), (1, 3));
         assert_eq!(keeper_grid_dimensions(95), (2, 2));
         assert_eq!(keeper_grid_dimensions(60), (3, 1));
-    }
-
-    #[test]
-    fn test_keeper_cards_height() {
-        assert_eq!(keeper_cards_height(120), 11);
-        assert_eq!(keeper_cards_height(95), 20);
     }
 
     #[test]

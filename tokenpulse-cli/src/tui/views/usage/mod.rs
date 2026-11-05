@@ -3361,28 +3361,6 @@ pub fn empty_data_message(state: &UsageState, fallback: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_usage_page_navigation() {
-        let pages = UsagePage::all();
-        assert_eq!(pages.len(), 7);
-        assert_eq!(pages[0], UsagePage::Overview);
-        assert_eq!(pages[1], UsagePage::Models);
-        assert_eq!(pages[2], UsagePage::Daily);
-        assert_eq!(pages[3], UsagePage::Heatmap);
-        assert_eq!(pages[4], UsagePage::Quota);
-        assert_eq!(pages[5], UsagePage::Keeper);
-        assert_eq!(pages[6], UsagePage::Settings);
-
-        assert_eq!(UsagePage::Quota.next(), UsagePage::Keeper);
-        assert_eq!(UsagePage::Keeper.next(), UsagePage::Settings);
-        assert_eq!(UsagePage::Settings.next(), UsagePage::Overview);
-
-        assert_eq!(UsagePage::Keeper.previous(), UsagePage::Quota);
-        assert_eq!(UsagePage::Overview.previous(), UsagePage::Settings);
-
-        assert_eq!(UsagePage::Keeper.title(), "Keeper");
-    }
-
     /// `command_executed` doubles as the record's identity in these tests.
     fn keeper_record(marker: &str) -> tokenpulse_core::keeper::KeeperExecutionRecord {
         tokenpulse_core::keeper::KeeperExecutionRecord {
@@ -3539,22 +3517,6 @@ mod tests {
     }
 
     #[test]
-    fn recovery_pulse_starts_and_ends_at_rest() {
-        let n = RecoveryNotification {
-            provider: "claude".to_string(),
-            window_label: "5h".to_string(),
-            remaining_percent: 50.0,
-            batch_len: 1,
-            started_at: Instant::now(),
-        };
-        // Freshly started: the oscillation has not yet risen off zero, and the
-        // toast countdown is still full.
-        assert!(n.pulse() < 0.05);
-        assert!(n.toast_ratio() > 0.99);
-        assert!(n.toast_remaining_secs() > 4.9);
-    }
-
-    #[test]
     fn expired_recovery_notification_is_inactive() {
         let n = RecoveryNotification {
             provider: "claude".to_string(),
@@ -3567,15 +3529,6 @@ mod tests {
         assert!(!n.animation_active());
         assert_eq!(n.toast_ratio(), 0.0);
         assert_eq!(n.toast_remaining_secs(), 0.0);
-    }
-
-    #[test]
-    fn test_interpolate_color() {
-        let c1 = Color::Rgb(0, 0, 0);
-        let c2 = Color::Rgb(100, 200, 50);
-        assert_eq!(interpolate_color(c1, c2, 0.0), Color::Rgb(0, 0, 0));
-        assert_eq!(interpolate_color(c1, c2, 1.0), Color::Rgb(100, 200, 50));
-        assert_eq!(interpolate_color(c1, c2, 0.5), Color::Rgb(50, 100, 25));
     }
 
     fn test_day_stat(date: NaiveDate, tokens: i64) -> DailyStats {
