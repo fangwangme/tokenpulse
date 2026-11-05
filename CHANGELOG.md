@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Keeper: Antigravity weekly trigger**: a weekly reset in a non-Gemini quota group (such as `Claude`) no longer fires the Gemini Flash weekly ping. In the default `gemini_flash` mode only the Gemini group's own reset triggers it (#97).
 
+### Removed
+- **Legacy migrations for tokenpulse's own old data**: config files from before v4 are no longer migrated. The `quota_auto_refresh_secs` and `show_account` keys are ignored, so those settings fall back to their defaults, and Keeper commands that match old built-in defaults are no longer replaced automatically. The one-time `antigravity-v2` usage-row rewrite in the Antigravity cache is also removed.
+- Dead code and redundant or over-defensive tests across the workspace.
+
 ## [0.6.13] - 2026-10-25
 
 ### Added
