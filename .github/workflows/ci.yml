@@ -26,7 +26,8 @@ concurrency:
 jobs:
   test:
     name: Test & Smoke Check
-    runs-on: macos-14
+    # Unpinned: pinned macOS images get retired (macos-14 went on 2026-11-02).
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
