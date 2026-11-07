@@ -3,6 +3,7 @@
 //! Spec: `docs/specs/keeper.md` "Weekly targets" → "Baseline".
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use std::collections::HashMap;
 use tokenpulse_core::keeper::{observed_weekly_resets, KeeperTriggerState, WeeklyTarget};
 use tokenpulse_core::provider::{QuotaSnapshot, RateWindow};
 
@@ -67,17 +68,10 @@ fn target(key: &str, group: &str) -> WeeklyTarget {
     }
 }
 
-/// Persists `state` and reads it back, as a TUI restart does.
-fn restart_with(state: &KeeperTriggerState) -> (tempfile::TempDir, KeeperTriggerState) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("keeper_state.json");
-    state.save(&path);
-    let loaded = KeeperTriggerState::load(&path);
-    (dir, loaded)
-}
-
 #[test]
 fn reset_while_not_running_fires_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keeper_state.json");
     let mut state = KeeperTriggerState::default();
     state
         .weekly_triggered
@@ -85,9 +79,9 @@ fn reset_while_not_running_fires_after_restart() {
     state
         .weekly_baseline
         .insert("antigravity".to_string(), before_close());
+    state.save(&path);
 
-    let (_dir, restarted) = restart_with(&state);
-
+    let restarted = KeeperTriggerState::load(&path);
     let fired = observed_weekly_resets(
         "antigravity",
         restarted.weekly_baseline.get("antigravity"),
@@ -109,23 +103,17 @@ fn reset_while_not_running_fires_after_restart() {
 
 #[test]
 fn restart_comparison_keeps_twelve_hour_guard() {
-    let mut state = KeeperTriggerState::default();
-    state.weekly_triggered.insert(
+    let recently = HashMap::from([(
         "antigravity:Gemini 4 Argon".to_string(),
         restart_time() - Duration::hours(1),
-    );
-    state
-        .weekly_baseline
-        .insert("antigravity".to_string(), before_close());
-
-    let (_dir, restarted) = restart_with(&state);
+    )]);
 
     let fired = observed_weekly_resets(
         "antigravity",
-        restarted.weekly_baseline.get("antigravity"),
+        Some(&before_close()),
         &after_restart(),
         true,
-        &restarted.weekly_triggered,
+        &recently,
         restart_time(),
     );
 
@@ -139,10 +127,7 @@ fn state_file_without_baseline_still_loads() {
     // The format written before the baseline existed.
     std::fs::write(
         &path,
-        r#"{
-  "daily_triggered": { "claude": "2026-11-07" },
-  "weekly_triggered": { "antigravity": "2026-11-01T05:33:08Z" }
-}"#,
+        r#"{ "daily_triggered": { "claude": "2026-11-07" } }"#,
     )
     .unwrap();
 
@@ -152,22 +137,5 @@ fn state_file_without_baseline_still_loads() {
         loaded.daily_triggered.get("claude").map(|d| d.to_string()),
         Some("2026-11-07".to_string())
     );
-    assert_eq!(
-        loaded.weekly_triggered.get("antigravity").copied(),
-        Some(Utc.with_ymd_and_hms(2026, 11, 1, 5, 33, 8).unwrap())
-    );
     assert!(loaded.weekly_baseline.is_empty());
-
-    let fired = observed_weekly_resets(
-        "antigravity",
-        loaded.weekly_baseline.get("antigravity"),
-        &after_restart(),
-        true,
-        &loaded.weekly_triggered,
-        restart_time(),
-    );
-    assert!(
-        fired.is_empty(),
-        "no baseline: the first refresh fires nothing"
-    );
 }

@@ -267,7 +267,7 @@ at startup and once a day. The tab header shows the exact configuration path.
 - **`←` / `→` (or `h` / `l`)** — Switch between dashboard tabs
 - **`↑` / `↓` (or `k` / `j` / `Tab`)** — Select agent card (Claude Code / Codex / Antigravity)
 - **`1` / `d`** — Toggle 5h daily morning wakeup timer (default `10:30`; a missed run is only caught up within 2 hours of it)
-- **`2` / `w`** — Toggle weekly auto-sync (fires 1 min after quota resets)
+- **`2` / `w`** — Toggle weekly auto-sync (fires when a weekly window resets, including while TokenPulse was closed)
 - **`p`** — Immediately test ping the selected agent
 - **Mouse Wheel** — Scroll the live execution and heartbeat history stream
 
@@ -293,7 +293,7 @@ All local state lives under a single directory:
 ```
 ~/.local/share/tokenpulse/
 ├── config.toml        # user configuration
-├── keeper_state.json  # Keeper last-fired bookkeeping
+├── keeper_state.json  # Keeper last-fired times + weekly reset baseline
 ├── usage.db           # SQLite usage ledger
 ├── tokenpulse.db      # quota cache + quota/Keeper observation history
 ├── pricing.json       # cached model pricing

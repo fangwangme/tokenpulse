@@ -171,9 +171,9 @@ plan capitalized for display.
 - Header bar shows the master switch state and the path to the config file, where wakeup times, prompts, and commands are edited.
 - One card per agent with two independent switches, the next trigger time, the dynamically resolved cheapest model (e.g. Haiku / Luna / Flash-Low), and the status of the last (or in-flight) run:
   - **5h daily wakeup** — fires at `daily_wakeup_time` (default `10:30`). A missed run is only caught up within 2 hours of that time, so launching the TUI late in the day does not fire a stale ping at the wrong hour.
-  - **Weekly auto-sync** — fires 1 minute after the provider's weekly quota reset, read from the live quota snapshot.
+  - **Weekly auto-sync** — fires when a quota refresh sees a weekly window drop from used back to 0%, compared with the last snapshot the Keeper evaluated (kept across restarts, so a reset while TokenPulse was closed, or an early reset, still fires), and as a fallback 1 minute after the window's reported reset time.
   - **Antigravity quota groups** — Antigravity meters `Gemini`, `Claude`, `Gemini 4 Argon` (and any group the API adds later) on separate weekly windows. By default only the primary Gemini group triggers and is pinged with Gemini Flash Low; with `keeper_antigravity_groups = all` every group is triggered by its own weekly reset and pinged with its cheapest model at its lowest thinking level (resolved from `agy models` when the ping fires), and the manual ping hits every group too. The card shows the earliest pending group. See `docs/specs/keeper.md`.
-- Last-fired dates persist to `keeper_state.json` beside the config, so restarting the TUI does not re-fire a trigger that already ran.
+- Last-fired dates and that weekly baseline persist to `keeper_state.json` beside the config, so restarting the TUI neither re-fires a trigger that already ran nor misses a reset that happened while it was closed.
 - Bottom panel is a scrollable execution stream: timestamp, agent, trigger, status, model, prompt, command, and reply. It is seeded from the `keeper_executions` table on launch and holds the newest 50 runs; the database keeps every run.
 - Only one ping per agent (per quota group for Antigravity) runs at a time; a second trigger is skipped while one is in flight.
 

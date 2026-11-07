@@ -25,6 +25,9 @@ from used (> 0%) back to 0% (at most once per 12 hours per key). It also
 fires as a fallback once `resets_at + 1 minute` has passed without a ping
 for that cycle.
 
+Claude and Codex always have exactly one target, keyed by the agent name,
+with no group.
+
 ### Baseline
 
 The "used" side of that check is the **baseline**: the last quota snapshot
@@ -44,9 +47,6 @@ next cycle.
 - With no baseline for the agent (first run, or a `keeper_state.json` from
   an older version), the first refresh fires nothing and becomes the
   baseline. The file's existing trigger times still load.
-
-Claude and Codex always have exactly one target, keyed by the agent name,
-with no group.
 
 ## Antigravity quota groups
 
