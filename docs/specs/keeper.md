@@ -18,35 +18,46 @@ target has:
 - a **key**, which names its last-fired time in `keeper_state.json` and its
   in-flight lock. Only one ping per key runs at a time;
 - a **group**: the `model_family` of the weekly window it follows, or none,
-  meaning any weekly window of the agent.
-
-A weekly ping fires for a target when its weekly window is observed to go
-from used (> 0%) back to 0% (at most once per 12 hours per key). It also
-fires as a fallback once `resets_at + 1 minute` has passed without a ping
-for that cycle.
+  meaning the agent's overall weekly window (the one without a
+  `model_family`). A per-model sub-limit, such as Claude's `Opus (7d)`, is
+  never followed by a target without a group.
 
 Claude and Codex always have exactly one target, keyed by the agent name,
 with no group.
 
-### Baseline
+### When a weekly ping fires
 
-The "used" side of that check is the **baseline**: the last quota snapshot
-the Keeper evaluated for the agent. It is persisted in `keeper_state.json`
-(`weekly_baseline`, keyed by agent) and replaced after every quota refresh
-the TUI receives, so a weekly reset that happens while TokenPulse is not
-running, including an early reset by the provider, is observed on the first
-refresh after it starts. Without it the fallback cannot catch such a reset:
-once a window has reset, the snapshot's `resets_at` already points at the
-next cycle.
+A weekly ping exists to start a weekly window's clock, which only runs once
+the window is used. A missed reset leaves the window idle for a whole cycle,
+while an extra ping costs one tiny prompt, so the rule is chosen to never
+miss a reset: it looks at the window's current state, not at a change
+between two refreshes, and needs no memory of earlier snapshots.
 
-- Only the TUI Keeper writes the baseline. Quota fetched by other commands
-  (plain-text and JSON output) also updates the quota cache, but not the
-  baseline, so it cannot consume a reset the Keeper has not seen.
-- The baseline has no age limit: a used → 0% change after any gap means the
-  window reset. The 12-hour per-key guard still applies.
-- With no baseline for the agent (first run, or a `keeper_state.json` from
-  an older version), the first refresh fires nothing and becomes the
-  baseline. The file's existing trigger times still load.
+On every quota refresh the TUI receives, a weekly ping fires for a target
+when both hold:
+
+- **The window has not started**: it is 0% used and its `resets_at` is more
+  than its period minus 4 hours away (6 days 20 hours for a 7d window). A
+  window without `resets_at` counts as not started. Once a window starts,
+  the provider fixes its `resets_at` even while its usage still reads 0%
+  (a ping uses too little to show), so within 4 hours it no longer counts as
+  not started.
+- **The key is past its cooldown**: 5 hours after the key's last weekly ping
+  if that ping succeeded, 1 hour if it failed. The cooldown runs from when
+  the ping started (its last-fired time in `keeper_state.json`); the keys
+  whose last weekly ping failed are kept there as `weekly_failed`. The
+  success cooldown is longer than the 4-hour margin, so the window a ping
+  just started is never pinged again for the same cycle.
+
+This covers a reset that happened while TokenPulse was not running
+(including an early reset by the provider), a failed ping, a switch turned
+on later, and a window nobody has used yet: each is pinged on the next
+refresh. A target whose ping is still running is skipped and evaluated again
+on the next refresh.
+
+A weekly ping also fires as a fallback once `resets_at + 1 minute` has
+passed without a ping for that cycle (at most once per 12 hours per key), so
+a reset is still pinged while quota refreshes keep failing.
 
 ## Antigravity quota groups
 
@@ -73,7 +84,7 @@ snapshot's weekly windows, in snapshot order. The first is the **primary
 group** (`Gemini`, which the quota fetcher sorts first).
 
 - `gemini_flash` (default): one target, key `antigravity`, the primary
-  group. A weekly reset in any other group fires nothing.
+  group. An idle window in any other group fires nothing.
 - `all`: one target per group. The primary group keeps key `antigravity`,
   and every other group uses `antigravity:<group>` (e.g.
   `antigravity:Gemini 4 Argon`). Each target is evaluated against its own

@@ -219,6 +219,10 @@ pub fn handle_settings_action(
     theme: &mut Theme,
 ) -> anyhow::Result<()> {
     let idx = state.selected_row;
+    // Apply the change to the file as it is on disk, so edits made outside the
+    // TUI while it runs are kept (and adopted) instead of overwritten by the
+    // copy loaded at startup.
+    *config = config_manager.load()?;
 
     // Dispatch by key rather than row number: the fixed rows and the provider
     // rows below them shift every time a setting is added, and an index-based
@@ -639,6 +643,7 @@ mod tests {
 
         let provider = quota_provider_ids()[0];
         config.providers.remove(provider);
+        config_manager.save(&config).unwrap();
 
         let theme_ro = Theme::new(crate::tui::theme::ThemeMode::Dark);
         let shown_before = get_settings_items(&state, &config, &theme_ro)
@@ -705,8 +710,44 @@ mod tests {
         let result = handle_settings_action(&mut state, &mut config, &config_manager, &mut theme);
 
         let error = result.expect_err("the save must be refused");
-        assert!(error.to_string().contains("left unchanged"), "{error:#}");
+        assert!(
+            error.to_string().contains("invalid config file"),
+            "{error:#}"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    /// Settings applies its change to the file on disk, so an edit made in an
+    /// editor while the TUI runs survives the save and is adopted.
+    #[test]
+    fn settings_save_keeps_edits_made_outside_the_tui() {
+        let dashboard = UsageDashboard { daily: vec![] };
+        let mut state = UsageState::new(&dashboard, vec![]);
+        let mut theme = Theme::new(crate::tui::theme::ThemeMode::Dark);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_manager = ConfigManager::with_path(temp_dir.path().join("config.toml"));
+        let mut config = config_manager.load().unwrap();
+
+        let mut edited = config_manager.load().unwrap();
+        edited
+            .keeper
+            .agents
+            .get_mut("claude")
+            .unwrap()
+            .daily_wakeup_time = "07:15".to_string();
+        config_manager.save(&edited).unwrap();
+
+        state.selected_row = FIXED_SETTING_KEYS
+            .iter()
+            .position(|key| *key == "show_empty_providers")
+            .unwrap();
+        let shown_before = config.display.show_empty_providers;
+        handle_settings_action(&mut state, &mut config, &config_manager, &mut theme).unwrap();
+
+        let on_disk = config_manager.load().unwrap();
+        assert_eq!(on_disk.keeper.agents["claude"].daily_wakeup_time, "07:15");
+        assert_eq!(on_disk.display.show_empty_providers, !shown_before);
+        assert_eq!(config.keeper.agents["claude"].daily_wakeup_time, "07:15");
     }
 
     /// #97 acceptance: `docs/specs/keeper.md` "Antigravity quota groups" > "Setting".

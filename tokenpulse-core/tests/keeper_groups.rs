@@ -2,9 +2,10 @@
 //! Spec: `docs/specs/keeper.md` "Weekly targets" and "Antigravity quota groups".
 
 use chrono::{DateTime, TimeZone, Utc};
+use std::collections::{HashMap, HashSet};
 use tokenpulse_core::keeper::{
-    did_agent_cycle_reset_to_full, extract_weekly_reset_time, select_antigravity_group_model,
-    weekly_targets, WeeklyTarget,
+    extract_weekly_reset_time, idle_weekly_targets, select_antigravity_group_model, weekly_targets,
+    WeeklyTarget,
 };
 use tokenpulse_core::provider::{QuotaSnapshot, RateWindow};
 
@@ -90,27 +91,38 @@ fn default_mode_targets_only_primary_group() {
     );
 }
 
+/// A moment one hour into the 7d cycle that ends at `resets_at`, when a window
+/// still at 0% counts as not started.
+fn just_reset(resets_at: DateTime<Utc>) -> DateTime<Utc> {
+    resets_at - chrono::Duration::days(7) + chrono::Duration::hours(1)
+}
+
+fn idle(snapshot: &QuotaSnapshot, all_groups: bool, now: DateTime<Utc>) -> Vec<WeeklyTarget> {
+    idle_weekly_targets(
+        "antigravity",
+        snapshot,
+        all_groups,
+        &HashMap::new(),
+        &HashSet::new(),
+        now,
+    )
+}
+
 #[test]
 fn default_mode_ignores_other_group_reset() {
-    let prev = antigravity_snapshot(5.0, 10.0, 2.0);
     // Only the Claude group's weekly window rolled over.
-    let new = antigravity_snapshot(5.0, 0.0, 2.0);
-
-    let targets = weekly_targets("antigravity", Some(&new), false);
-    assert_eq!(targets.len(), 1);
-    let primary = targets[0].group.as_deref();
+    let claude_reset = antigravity_snapshot(5.0, 0.0, 2.0);
     assert!(
-        !did_agent_cycle_reset_to_full(Some(&prev), &new, primary),
+        idle(&claude_reset, false, just_reset(reset(10))).is_empty(),
         "a Claude-group reset must not fire the Gemini Flash ping"
     );
 
     // The primary group's own reset still fires it.
     let gemini_reset = antigravity_snapshot(0.0, 10.0, 2.0);
-    assert!(did_agent_cycle_reset_to_full(
-        Some(&prev),
-        &gemini_reset,
-        primary
-    ));
+    assert_eq!(
+        idle(&gemini_reset, false, just_reset(reset(8))),
+        vec![target("antigravity", Some("Gemini"))]
+    );
 }
 
 #[test]
@@ -133,7 +145,7 @@ fn all_groups_mode_targets_every_weekly_family() {
 }
 
 #[test]
-fn group_reset_time_and_reset_detection_are_per_group() {
+fn group_reset_time_and_idle_check_are_per_group() {
     let snapshot = antigravity_snapshot(5.0, 10.0, 2.0);
     assert_eq!(
         extract_weekly_reset_time(&snapshot, Some("Gemini")),
@@ -149,23 +161,11 @@ fn group_reset_time_and_reset_detection_are_per_group() {
     );
     assert_eq!(extract_weekly_reset_time(&snapshot, Some("Unknown")), None);
 
-    let prev = antigravity_snapshot(5.0, 10.0, 2.0);
     let argon_reset = antigravity_snapshot(5.0, 10.0, 0.0);
-    assert!(did_agent_cycle_reset_to_full(
-        Some(&prev),
-        &argon_reset,
-        Some("Gemini 4 Argon")
-    ));
-    assert!(!did_agent_cycle_reset_to_full(
-        Some(&prev),
-        &argon_reset,
-        Some("Claude")
-    ));
-    assert!(!did_agent_cycle_reset_to_full(
-        Some(&prev),
-        &argon_reset,
-        Some("Gemini")
-    ));
+    assert_eq!(
+        idle(&argon_reset, true, just_reset(reset(11))),
+        vec![target("antigravity:Gemini 4 Argon", Some("Gemini 4 Argon"))]
+    );
 }
 
 #[test]
