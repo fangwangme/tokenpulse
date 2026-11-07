@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.15] - 2026-11-07
+
+### Changed
+- **Keeper: weekly pings follow the window's state**: on every quota refresh the weekly Keeper pings each weekly window that has not started yet (0% used, reset still more than 6 days 20 hours away), instead of waiting to see a window drop from used to 0%. A target waits 5 hours after a successful weekly ping, and 1 hour after a failed one, before it can fire again. Claude and Codex follow only their overall weekly window, never a per-model sub-limit (#99).
+- **TUI: `Esc` no longer quits**: it only closes overlays, so closing a popup during a refresh can no longer exit the dashboard. Quit with `q` or `Ctrl+C`.
+
+### Fixed
+- **Keeper: missed weekly resets**: a weekly reset that happens while TokenPulse is not running, including an early reset by the provider, is now pinged on the first refresh after it starts, and a failed weekly ping is retried. Before, both left the window idle until the next cycle (#99).
+- **Settings: edits made outside the TUI are kept**: changing a setting in the Settings tab applies the change to `config.toml` as it is on disk, instead of writing back the copy loaded at startup over edits made in an editor meanwhile.
+
 ## [0.6.14] - 2026-11-05
 
 ### Added

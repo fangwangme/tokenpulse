@@ -171,9 +171,9 @@ plan capitalized for display.
 - Header bar shows the master switch state and the path to the config file, where wakeup times, prompts, and commands are edited.
 - One card per agent with two independent switches, the next trigger time, the dynamically resolved cheapest model (e.g. Haiku / Luna / Flash-Low), and the status of the last (or in-flight) run:
   - **5h daily wakeup** — fires at `daily_wakeup_time` (default `10:30`). A missed run is only caught up within 2 hours of that time, so launching the TUI late in the day does not fire a stale ping at the wrong hour.
-  - **Weekly auto-sync** — fires 1 minute after the provider's weekly quota reset, read from the live quota snapshot.
-  - **Antigravity quota groups** — Antigravity meters `Gemini`, `Claude`, `Gemini 4 Argon` (and any group the API adds later) on separate weekly windows. By default only the primary Gemini group triggers and is pinged with Gemini Flash Low; with `keeper_antigravity_groups = all` every group is triggered by its own weekly reset and pinged with its cheapest model at its lowest thinking level (resolved from `agy models` when the ping fires), and the manual ping hits every group too. The card shows the earliest pending group. See `docs/specs/keeper.md`.
-- Last-fired dates persist to `keeper_state.json` beside the config, so restarting the TUI does not re-fire a trigger that already ran.
+  - **Weekly auto-sync** — on every quota refresh, pings each weekly window that has not started yet (0% used, reset still more than 6 days 20 hours away), so a reset is never missed: not while TokenPulse was closed, not after an early reset by the provider, not after a failed ping. Each target then waits 5 hours after a successful ping (1 hour after a failed one) before it can fire again. As a fallback it also fires 1 minute after the window's reported reset time.
+  - **Antigravity quota groups** — Antigravity meters `Gemini`, `Claude`, `Gemini 4 Argon` (and any group the API adds later) on separate weekly windows. By default only the primary Gemini group triggers and is pinged with Gemini Flash Low; with `keeper_antigravity_groups = all` every group is triggered by its own weekly window and pinged with its cheapest model at its lowest thinking level (resolved from `agy models` when the ping fires), and the manual ping hits every group too. The card shows the earliest pending group. See `docs/specs/keeper.md`.
+- Last-fired times (and which weekly pings failed) persist to `keeper_state.json` beside the config, so restarting the TUI does not re-fire a trigger that already ran.
 - Bottom panel is a scrollable execution stream: timestamp, agent, trigger, status, model, prompt, command, and reply. It is seeded from the `keeper_executions` table on launch and holds the newest 50 runs; the database keeps every run.
 - Only one ping per agent (per quota group for Antigravity) runs at a time; a second trigger is skipped while one is in flight.
 
@@ -194,6 +194,7 @@ plan capitalized for display.
   - `keeper_antigravity_groups` (`gemini_flash` / `all`, default `gemini_flash`: whether the Antigravity weekly and manual Keeper pings cover only the Gemini Flash group or every quota group)
   - Individual quota provider enabled/disabled switches (`claude`, `codex`, `antigravity`)
 - Controls: use Up/Down (`j`/`k`) to navigate settings, and Space or Enter to cycle/toggle the selected setting.
+- Each change is applied to `config.toml` as it is on disk, so edits made in an editor while the TUI runs are kept and take effect from that save on.
 - The same values are readable and writable outside the TUI with `tokenpulse config show` and `tokenpulse config set KEY=VALUE`.
 
 ### Source Filter Overlay
@@ -207,7 +208,8 @@ plan capitalized for display.
 
 | Key                   | Action                                   |
 | --------------------- | ---------------------------------------- |
-| `q` / `Esc`           | Quit (close overlay if open)             |
+| `q` / `Ctrl+C`        | Quit                                     |
+| `Esc`                 | Close an overlay (never quits)           |
 | `←` / `→` / `h` / `l` | Switch tabs                              |
 | `Tab` / `Shift+Tab`   | Next/previous tab                        |
 | `j` / `↓`             | Move selected row down / next day        |

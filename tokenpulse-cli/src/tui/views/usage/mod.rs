@@ -778,6 +778,8 @@ pub struct UsageState {
     pub selected_keeper_index: usize,
     pub keeper_daily_triggered: HashMap<String, NaiveDate>,
     pub keeper_weekly_triggered: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    /// Weekly target keys whose last weekly ping failed (shorter cooldown).
+    pub keeper_weekly_failed: HashSet<String>,
     pub keeper_logs: Vec<tokenpulse_core::keeper::KeeperExecutionRecord>,
     pub keeper_pings_in_progress: BTreeSet<String>,
     /// Cheapest model per Keeper agent (error text on failure), resolved at
@@ -906,6 +908,7 @@ impl UsageState {
             selected_keeper_index: 0,
             keeper_daily_triggered: HashMap::new(),
             keeper_weekly_triggered: HashMap::new(),
+            keeper_weekly_failed: HashSet::new(),
             keeper_logs: Vec::new(),
             keeper_pings_in_progress: BTreeSet::new(),
             keeper_models: HashMap::new(),
@@ -1080,6 +1083,7 @@ impl UsageState {
         self.keeper_logs = std::mem::take(&mut previous.keeper_logs);
         self.keeper_daily_triggered = std::mem::take(&mut previous.keeper_daily_triggered);
         self.keeper_weekly_triggered = std::mem::take(&mut previous.keeper_weekly_triggered);
+        self.keeper_weekly_failed = std::mem::take(&mut previous.keeper_weekly_failed);
         self.keeper_pings_in_progress = std::mem::take(&mut previous.keeper_pings_in_progress);
         self.keeper_models = std::mem::take(&mut previous.keeper_models);
         self.keeper_models_resolved_on = previous.keeper_models_resolved_on;
@@ -1127,6 +1131,7 @@ impl UsageState {
         tokenpulse_core::keeper::KeeperTriggerState {
             daily_triggered: self.keeper_daily_triggered.clone(),
             weekly_triggered: self.keeper_weekly_triggered.clone(),
+            weekly_failed: self.keeper_weekly_failed.clone(),
         }
         .save(path);
     }
@@ -1444,6 +1449,7 @@ where
     let keeper_state = tokenpulse_core::keeper::KeeperTriggerState::load(&keeper_state_path);
     state.keeper_daily_triggered = keeper_state.daily_triggered;
     state.keeper_weekly_triggered = keeper_state.weekly_triggered;
+    state.keeper_weekly_failed = keeper_state.weekly_failed;
 
     // Seed the log panel from the database so the last runs are visible right
     // away instead of the panel starting empty on every launch.
@@ -1539,11 +1545,12 @@ where
                     );
                 }
                 TuiMessage::QuotaReloadSuccess(new_snapshots, errors) => {
-                    // Check keeper auto-trigger on major quota cycle reset (e.g. weekly/monthly
-                    // window resetting to 100% full) before mutating state.quota_snapshots.
+                    // Weekly Keeper: ping every target whose weekly window has not
+                    // started yet (docs/specs/keeper.md "Weekly targets").
                     if config.keeper.enabled {
                         let default_agents = tokenpulse_core::config::default_keeper_agents();
                         let now_utc = chrono::Utc::now();
+                        let mut fired_any = false;
                         for &agent_id in keeper::KEEPER_AGENTS {
                             let Some(agent_cfg) = config
                                 .keeper
@@ -1558,11 +1565,6 @@ where
                                 continue;
                             }
 
-                            let prev_snap = tokenpulse_core::keeper::find_snapshot_for_agent(
-                                &state.quota_snapshots,
-                                agent_id,
-                            )
-                            .cloned();
                             let Some(new_snap) = tokenpulse_core::keeper::find_snapshot_for_agent(
                                 &new_snapshots,
                                 agent_id,
@@ -1571,49 +1573,34 @@ where
                             };
                             let groups = tokenpulse_core::keeper::weekly_groups(new_snap);
 
-                            for target in tokenpulse_core::keeper::weekly_targets(
+                            for target in tokenpulse_core::keeper::idle_weekly_targets(
                                 agent_id,
-                                Some(new_snap),
+                                new_snap,
                                 agent_cfg.weekly_all_groups,
+                                &state.keeper_weekly_triggered,
+                                &state.keeper_weekly_failed,
+                                now_utc,
                             ) {
                                 if state.keeper_pings_in_progress.contains(&target.key) {
                                     continue;
                                 }
-
-                                // Debounce: do not re-trigger if already triggered recently (within 12 hours)
-                                if let Some(last_time) =
-                                    state.keeper_weekly_triggered.get(&target.key)
-                                {
-                                    if now_utc.signed_duration_since(*last_time)
-                                        < chrono::Duration::hours(12)
-                                    {
-                                        continue;
-                                    }
-                                }
-
-                                if tokenpulse_core::keeper::did_agent_cycle_reset_to_full(
-                                    prev_snap.as_ref(),
-                                    new_snap,
-                                    target.group.as_deref(),
-                                ) {
-                                    // Stamp the observation time, matching the fallback path.
-                                    // The new snapshot's `resets_at` already points at the
-                                    // *next* cycle, so stamping it would suppress that cycle.
-                                    state
-                                        .keeper_weekly_triggered
-                                        .insert(target.key.clone(), now_utc);
-                                    state.persist_keeper_triggers(&keeper_state_path);
-                                    start_keeper_target_ping(
-                                        &mut state,
-                                        &msg_tx,
-                                        agent_id,
-                                        agent_cfg,
-                                        &target,
-                                        &groups,
-                                        tokenpulse_core::keeper::KeeperTriggerType::Weekly,
-                                    );
-                                }
+                                state
+                                    .keeper_weekly_triggered
+                                    .insert(target.key.clone(), now_utc);
+                                fired_any = true;
+                                start_keeper_target_ping(
+                                    &mut state,
+                                    &msg_tx,
+                                    agent_id,
+                                    agent_cfg,
+                                    &target,
+                                    &groups,
+                                    tokenpulse_core::keeper::KeeperTriggerType::Weekly,
+                                );
                             }
+                        }
+                        if fired_any {
+                            state.persist_keeper_triggers(&keeper_state_path);
                         }
                     }
 
@@ -1697,6 +1684,20 @@ where
                         level,
                     );
                     state.keeper_pings_in_progress.remove(&key);
+                    // A failed weekly ping retries after the shorter cooldown.
+                    if matches!(
+                        record.trigger_type,
+                        tokenpulse_core::keeper::KeeperTriggerType::Weekly
+                    ) {
+                        let changed = if success {
+                            state.keeper_weekly_failed.remove(&key)
+                        } else {
+                            state.keeper_weekly_failed.insert(key.clone())
+                        };
+                        if changed {
+                            state.persist_keeper_triggers(&keeper_state_path);
+                        }
+                    }
                     state.push_keeper_log(record);
                 }
             }
@@ -1880,8 +1881,7 @@ where
             let ev = event::read()?;
             if state.is_refreshing() {
                 if let Event::Key(key) = &ev {
-                    if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc || is_ctrl_c(key)
-                    {
+                    if key.code == KeyCode::Char('q') || is_ctrl_c(key) {
                         break;
                     }
                 }
@@ -1971,7 +1971,7 @@ where
 
                     match state.page {
                         UsagePage::Models => match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Char('q') => break,
                             KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
                             KeyCode::Right | KeyCode::Char('l') => state.next_page(),
                             KeyCode::Up | KeyCode::Char('k') => {
@@ -2008,7 +2008,7 @@ where
                             _ => {}
                         },
                         UsagePage::Daily => match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Char('q') => break,
                             KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
                             KeyCode::Right | KeyCode::Char('l') => state.next_page(),
                             KeyCode::Up | KeyCode::Char('k') => {
@@ -2064,7 +2064,7 @@ where
                             _ => {}
                         },
                         UsagePage::Heatmap => match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Char('q') => break,
                             KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
                             KeyCode::Right | KeyCode::Char('l') => state.next_page(),
                             KeyCode::Tab => {
@@ -2109,7 +2109,7 @@ where
                             _ => {}
                         },
                         UsagePage::Quota => match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Char('q') => break,
                             KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
                             KeyCode::Right | KeyCode::Char('l') => state.next_page(),
                             KeyCode::Tab => {
@@ -2122,7 +2122,7 @@ where
                             _ => {}
                         },
                         UsagePage::Keeper => match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Char('q') => break,
                             KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
                             KeyCode::Right | KeyCode::Char('l') => state.next_page(),
                             KeyCode::Tab => {
@@ -2255,7 +2255,7 @@ where
                             _ => {}
                         },
                         UsagePage::Settings => match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Char('q') => break,
                             KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
                             KeyCode::Right | KeyCode::Char('l') => state.next_page(),
                             KeyCode::Tab => {
@@ -2295,7 +2295,7 @@ where
                             _ => {}
                         },
                         _ => match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Char('q') => break,
                             KeyCode::Left | KeyCode::Char('h') => state.previous_page(),
                             KeyCode::Right | KeyCode::Char('l') => state.next_page(),
                             KeyCode::Tab => {
@@ -3010,7 +3010,7 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, state: &UsageState, t
         ("s", "toggle source filter"),
         ("r", "refresh raw project sessions"),
         ("?", "toggle this help overlay"),
-        ("q / Esc / Ctrl+C", "quit dashboard"),
+        ("q / Ctrl+C", "quit dashboard"),
     ];
 
     match state.page {

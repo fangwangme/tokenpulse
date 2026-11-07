@@ -290,34 +290,75 @@ fn window_in_group(window: &crate::provider::RateWindow, group: Option<&str>) ->
     }
 }
 
-/// Detects if an agent's major cycle quota window transitioned from partially/fully
-/// consumed (`used_percent > 0.0`) back to fully reset (`used_percent <= 0.0`).
-///
-/// With a `group`, only that group's weekly windows count, so a reset in one
-/// Antigravity quota group cannot fire another group's ping.
-pub fn did_agent_cycle_reset_to_full(
-    prev_snapshot: Option<&crate::provider::QuotaSnapshot>,
-    new_snapshot: &crate::provider::QuotaSnapshot,
+/// How long a window may have been running and still count as not started.
+/// It must stay below the success cooldown, so a window a ping just started
+/// has its fixed `resets_at` inside this margin before the key may fire again.
+const UNSTARTED_MARGIN_HOURS: i64 = 4;
+/// Quiet time for a weekly target key after a successful weekly ping.
+const WEEKLY_SUCCESS_COOLDOWN_HOURS: i64 = 5;
+/// Quiet time after a failed weekly ping, before it is retried.
+const WEEKLY_FAILURE_COOLDOWN_HOURS: i64 = 1;
+
+/// The weekly window a target follows: its group's window, or for a target
+/// without a group the agent's overall window (no `model_family`), never a
+/// per-model sub-limit such as Claude's `Opus (7d)`.
+fn target_weekly_window<'a>(
+    snapshot: &'a crate::provider::QuotaSnapshot,
     group: Option<&str>,
-) -> bool {
-    let Some(prev) = prev_snapshot else {
+) -> Option<&'a crate::provider::RateWindow> {
+    snapshot
+        .windows
+        .iter()
+        .find(|w| is_weekly_cycle_window(w) && w.model_family.as_deref() == group)
+}
+
+/// A weekly window that has not started its cycle: nothing used, and its reset
+/// still more than its period minus the margin away (6 days 20 hours for a 7d
+/// window). A started window keeps a fixed `resets_at` even while its usage
+/// still reads 0%, so it drops below that within the margin.
+fn is_unstarted_weekly_window(window: &crate::provider::RateWindow, now: DateTime<Utc>) -> bool {
+    if window.used_percent > 0.0 {
         return false;
-    };
-
-    for new_window in &new_snapshot.windows {
-        if !is_weekly_cycle_window(new_window) || !window_in_group(new_window, group) {
-            continue;
-        }
-        if new_window.used_percent <= 0.0 {
-            if let Some(prev_window) = prev.windows.iter().find(|w| w.label == new_window.label) {
-                if prev_window.used_percent > 0.0 {
-                    return true;
-                }
-            }
-        }
     }
+    let Some(resets_at) = window.resets_at else {
+        return true;
+    };
+    let period = window
+        .period_duration_ms
+        .map(chrono::Duration::milliseconds)
+        .unwrap_or_else(|| chrono::Duration::days(7));
+    resets_at - now > period - chrono::Duration::hours(UNSTARTED_MARGIN_HOURS)
+}
 
-    false
+/// The agent's weekly targets to ping now (`docs/specs/keeper.md` "Weekly
+/// targets"): the target's window has not started, and the key's last weekly
+/// ping (`weekly_triggered`) is past its cooldown, which is shorter when that
+/// ping failed (`weekly_failed`).
+pub fn idle_weekly_targets(
+    agent: &str,
+    snapshot: &crate::provider::QuotaSnapshot,
+    all_groups: bool,
+    weekly_triggered: &std::collections::HashMap<String, DateTime<Utc>>,
+    weekly_failed: &std::collections::HashSet<String>,
+    now: DateTime<Utc>,
+) -> Vec<WeeklyTarget> {
+    weekly_targets(agent, Some(snapshot), all_groups)
+        .into_iter()
+        .filter(|target| {
+            weekly_triggered.get(&target.key).is_none_or(|last_time| {
+                let cooldown = if weekly_failed.contains(&target.key) {
+                    WEEKLY_FAILURE_COOLDOWN_HOURS
+                } else {
+                    WEEKLY_SUCCESS_COOLDOWN_HOURS
+                };
+                now.signed_duration_since(*last_time) >= chrono::Duration::hours(cooldown)
+            })
+        })
+        .filter(|target| {
+            target_weekly_window(snapshot, target.group.as_deref())
+                .is_some_and(|window| is_unstarted_weekly_window(window, now))
+        })
+        .collect()
 }
 
 /// Evaluates whether the Weekly auto-sync trigger should fire based on expected reset time.
@@ -714,6 +755,10 @@ pub struct KeeperTriggerState {
     pub daily_triggered: std::collections::HashMap<String, NaiveDate>,
     #[serde(default)]
     pub weekly_triggered: std::collections::HashMap<String, DateTime<Utc>>,
+    /// Weekly target keys whose last weekly ping failed; they retry after the
+    /// shorter failure cooldown.
+    #[serde(default)]
+    pub weekly_failed: std::collections::HashSet<String>,
 }
 
 impl KeeperTriggerState {
@@ -873,67 +918,6 @@ mod tests {
         // Target is in future -> should NOT trigger
         let future_target = "11:00";
         assert!(!should_trigger_daily(future_target, None, now));
-    }
-
-    #[test]
-    fn test_did_agent_cycle_reset_to_full() {
-        use crate::provider::{QuotaSnapshot, RateWindow};
-
-        let make_snap = |gemini_5h_used: f64, gemini_7d_used: f64| QuotaSnapshot {
-            provider: "antigravity".to_string(),
-            plan: None,
-            account: None,
-            windows: vec![
-                RateWindow {
-                    label: "Gemini (5h)".to_string(),
-                    model_family: Some("Gemini".to_string()),
-                    used_percent: gemini_5h_used,
-                    resets_at: None,
-                    period_duration_ms: Some(5 * 60 * 60 * 1000),
-                },
-                RateWindow {
-                    label: "Gemini (7d)".to_string(),
-                    model_family: Some("Gemini".to_string()),
-                    used_percent: gemini_7d_used,
-                    resets_at: None,
-                    period_duration_ms: Some(7 * 24 * 60 * 60 * 1000),
-                },
-            ],
-            credits: None,
-            rate_limit_reset_credits: vec![],
-            fetched_at: Utc::now(),
-        };
-
-        // None previous snapshot -> should NOT trigger
-        let snap_full = make_snap(0.0, 0.0);
-        assert!(!did_agent_cycle_reset_to_full(None, &snap_full, None));
-
-        // 7d window was 25% used, now reset to 0% -> SHOULD trigger
-        let prev_used = make_snap(50.0, 25.0);
-        let curr_reset = make_snap(10.0, 0.0);
-        assert!(did_agent_cycle_reset_to_full(
-            Some(&prev_used),
-            &curr_reset,
-            None
-        ));
-
-        // 7d window was already 0%, still 0% -> should NOT trigger (avoid repeat)
-        let prev_already_zero = make_snap(20.0, 0.0);
-        let curr_still_zero = make_snap(0.0, 0.0);
-        assert!(!did_agent_cycle_reset_to_full(
-            Some(&prev_already_zero),
-            &curr_still_zero,
-            None
-        ));
-
-        // Only 5h session window reset, but 7d cycle was NOT reset -> should NOT trigger weekly keeper
-        let prev_5h_used = make_snap(40.0, 30.0);
-        let curr_5h_reset = make_snap(0.0, 30.0);
-        assert!(!did_agent_cycle_reset_to_full(
-            Some(&prev_5h_used),
-            &curr_5h_reset,
-            None
-        ));
     }
 
     #[test]

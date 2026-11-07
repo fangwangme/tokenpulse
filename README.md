@@ -267,7 +267,7 @@ at startup and once a day. The tab header shows the exact configuration path.
 - **`←` / `→` (or `h` / `l`)** — Switch between dashboard tabs
 - **`↑` / `↓` (or `k` / `j` / `Tab`)** — Select agent card (Claude Code / Codex / Antigravity)
 - **`1` / `d`** — Toggle 5h daily morning wakeup timer (default `10:30`; a missed run is only caught up within 2 hours of it)
-- **`2` / `w`** — Toggle weekly auto-sync (fires 1 min after quota resets)
+- **`2` / `w`** — Toggle weekly auto-sync (pings every weekly window that has not started yet, so a reset is never missed)
 - **`p`** — Immediately test ping the selected agent
 - **Mouse Wheel** — Scroll the live execution and heartbeat history stream
 

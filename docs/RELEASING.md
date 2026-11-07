@@ -153,11 +153,15 @@ use user-facing names instead:
 | `x86_64-unknown-linux-gnu` | `tokenpulse-linux-x64-gnu.tar.gz` |
 | `aarch64-unknown-linux-gnu` | `tokenpulse-linux-arm64-gnu.tar.gz` |
 
-Both macOS targets build on `macos-14`; the x86_64 one is cross-compiled. Do not
-reintroduce the Intel `macos-13` runner — GitHub no longer allocates it, and a
-job requesting it does not fail fast. It sits queued for the full 24-hour limit
-and is then cancelled, taking the whole release with it. Every release before
-v0.5.0 was lost this way.
+Both macOS targets build on Apple Silicon `macos-latest`; the x86_64 one is
+cross-compiled. The label is left unpinned on purpose: GitHub retires pinned
+macOS images, and a retired label breaks every run that names it. `macos-14`
+was retired on 2026-11-02 and now fails at once with "The configuration
+'macos-14-arm64-us-default' is not supported". The Intel `macos-13` runner
+failed worse: a job requesting it sat queued for the full 24-hour limit and was
+then cancelled, taking the whole release with it, so every release before
+v0.5.0 was lost. The build host does not set the binary's minimum macOS
+version; rustc's default deployment target does.
 
 `publish-release` and `publish-npm` both wait on `build`, so a failure on any
 platform stops the release before anything is published.
