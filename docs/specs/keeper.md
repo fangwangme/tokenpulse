@@ -25,6 +25,26 @@ from used (> 0%) back to 0% (at most once per 12 hours per key). It also
 fires as a fallback once `resets_at + 1 minute` has passed without a ping
 for that cycle.
 
+### Baseline
+
+The "used" side of that check is the **baseline**: the last quota snapshot
+the Keeper evaluated for the agent. It is persisted in `keeper_state.json`
+(`weekly_baseline`, keyed by agent) and replaced after every quota refresh
+the TUI receives, so a weekly reset that happens while TokenPulse is not
+running, including an early reset by the provider, is observed on the first
+refresh after it starts. Without it the fallback cannot catch such a reset:
+once a window has reset, the snapshot's `resets_at` already points at the
+next cycle.
+
+- Only the TUI Keeper writes the baseline. Quota fetched by other commands
+  (plain-text and JSON output) also updates the quota cache, but not the
+  baseline, so it cannot consume a reset the Keeper has not seen.
+- The baseline has no age limit: a used → 0% change after any gap means the
+  window reset. The 12-hour per-key guard still applies.
+- With no baseline for the agent (first run, or a `keeper_state.json` from
+  an older version), the first refresh fires nothing and becomes the
+  baseline. The file's existing trigger times still load.
+
 Claude and Codex always have exactly one target, keyed by the agent name,
 with no group.
 
