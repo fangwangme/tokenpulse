@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.15] - 2026-11-07
+
+### Fixed
+- **Keeper: weekly resets while TokenPulse is closed**: a weekly quota reset that happens while TokenPulse is not running, including an early reset by the provider, now fires the weekly ping on the first refresh after it starts. The Keeper keeps the last quota snapshot it evaluated in `keeper_state.json` and compares against it, for every agent and every Antigravity quota group. Before, a restart lost that comparison and the reset was missed until the next cycle (#99).
+
 ## [0.6.14] - 2026-11-05
 
 ### Added
