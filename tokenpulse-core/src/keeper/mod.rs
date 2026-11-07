@@ -320,6 +320,28 @@ pub fn did_agent_cycle_reset_to_full(
     false
 }
 
+/// The agent's weekly targets whose window was observed resetting between the
+/// `baseline` (the last snapshot the Keeper evaluated) and `new`, skipping keys
+/// fired within the last 12 hours. No baseline fires nothing.
+pub fn observed_weekly_resets(
+    agent: &str,
+    baseline: Option<&crate::provider::QuotaSnapshot>,
+    new: &crate::provider::QuotaSnapshot,
+    all_groups: bool,
+    weekly_triggered: &std::collections::HashMap<String, DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Vec<WeeklyTarget> {
+    weekly_targets(agent, Some(new), all_groups)
+        .into_iter()
+        .filter(|target| {
+            weekly_triggered.get(&target.key).is_none_or(|last_time| {
+                now.signed_duration_since(*last_time) >= chrono::Duration::hours(12)
+            })
+        })
+        .filter(|target| did_agent_cycle_reset_to_full(baseline, new, target.group.as_deref()))
+        .collect()
+}
+
 /// Evaluates whether the Weekly auto-sync trigger should fire based on expected reset time.
 /// Fires when current time >= `resets_at + 1 minute` (buffer to avoid provider/client clock skew)
 /// and has not already triggered for this cycle.
@@ -714,6 +736,11 @@ pub struct KeeperTriggerState {
     pub daily_triggered: std::collections::HashMap<String, NaiveDate>,
     #[serde(default)]
     pub weekly_triggered: std::collections::HashMap<String, DateTime<Utc>>,
+    /// The last quota snapshot the Keeper evaluated, per agent: the "used"
+    /// side of the weekly reset check, kept across restarts so a reset that
+    /// happens while TokenPulse is not running is still observed.
+    #[serde(default)]
+    pub weekly_baseline: std::collections::HashMap<String, crate::provider::QuotaSnapshot>,
 }
 
 impl KeeperTriggerState {
