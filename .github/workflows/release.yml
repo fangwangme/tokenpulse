@@ -105,6 +105,11 @@ jobs:
   publish-npm:
     needs: build
     runs-on: ubuntu-latest
+    # id-token lets npm exchange this run's OIDC identity for a publish
+    # credential (Trusted Publishing), so no long-lived token is stored.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -117,7 +122,8 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Trusted Publishing needs npm >= 11.5.1, which ships with Node 24.
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       # Fails loudly when the tag and the crate version disagree, before
@@ -130,6 +136,4 @@ jobs:
             --out .local/npm-dist
 
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node npm/scripts/publish-packages.mjs .local/npm-dist
