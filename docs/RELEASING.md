@@ -261,9 +261,28 @@ node npm/scripts/publish-packages.mjs .local/npm-dist --dry-run
 
 ### 3d. Prerequisites
 
-`NPM_TOKEN` must exist as a repository secret, from an npm automation token with
-publish rights on the `@fangwangme` scope. Scoped packages default to private,
-so the scripts pass `--access public`.
+`publish-npm` authenticates with npm **Trusted Publishing** (GitHub OIDC); no
+npm token or repository secret is involved. The job needs `id-token: write` and
+Node 24 (npm >= 11.5.1), and npm attaches provenance to every package
+automatically. Scoped packages default to private, so the scripts pass
+`--access public`.
+
+Each of the five packages needs a Trusted Publisher configured once on
+npmjs.com (package → Settings → Trusted Publisher → GitHub Actions):
+
+| Field | Value |
+| --- | --- |
+| Organization or user | `fangwangme` |
+| Repository | `tokenpulse` |
+| Workflow filename | `release.yml` |
+| Environment | empty |
+| Allow npm publish | checked |
+
+A new configuration shows "Pending validation" until one publish from
+`release.yml` succeeds with it, and expires if that does not happen within
+about 2 days — tag a release soon after adding it. A new platform package
+(§3b) needs the same setup before its first release, and the first publish of a
+brand-new package name must be done by hand once so the package exists.
 
 ## 4. After release
 

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.16] - 2026-11-09
+
+### Changed
+- **Release: npm publishing uses Trusted Publishing**: the `publish-npm` job authenticates to npm with GitHub OIDC instead of the `NPM_TOKEN` secret, runs on Node 24, and publishes every package with provenance. Each package needs a Trusted Publisher entry for `release.yml` on npmjs.com (see `docs/RELEASING.md` §3d) (#101).
+
 ## [0.6.15] - 2026-11-07
 
 ### Changed
