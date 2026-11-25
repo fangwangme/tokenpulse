@@ -635,6 +635,13 @@ func (m *model) handleKeeperKey(key string) (tea.Model, tea.Cmd) {
 		m.opts.Config = cfg
 	case "w":
 		agent := keeper.Agents[m.keeperCursor]
+		if m.serveMode {
+			entry := cfg.Keeper.Agents[agent]
+			entry.WeeklyKeeperEnabled = !entry.WeeklyKeeperEnabled
+			cfg.Keeper.Agents[agent] = entry
+			m.saveConfig(cfg)
+			return m, m.patchSettings(map[string]any{"keeper.agents." + agent + ".weekly_keeper_enabled": entry.WeeklyKeeperEnabled})
+		}
 		state, err := m.opts.ConfigManager.ToggleAgentWeeklyKeeper(agent)
 		if err != nil {
 			m.status = err.Error()
@@ -644,9 +651,6 @@ func (m *model) handleKeeperKey(key string) (tea.Model, tea.Cmd) {
 		entry.WeeklyKeeperEnabled = state
 		cfg.Keeper.Agents[agent] = entry
 		m.opts.Config = cfg
-		if m.serveMode {
-			return m, m.patchSettings(map[string]any{"keeper.agents." + agent + ".weekly_keeper_enabled": state})
-		}
 	case "p":
 		agent := keeper.Agents[m.keeperCursor]
 		if m.serveMode {
@@ -764,6 +768,10 @@ func (m *model) changeSetting() tea.Cmd {
 }
 
 func (m *model) saveConfig(cfg config.Config) {
+	if m.serveMode {
+		m.opts.Config = cfg
+		return
+	}
 	if err := m.opts.ConfigManager.Save(&cfg); err != nil {
 		m.status = err.Error()
 		return

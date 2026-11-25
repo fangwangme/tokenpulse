@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fangwangme/tokenpulse/internal/config"
 	"github.com/fangwangme/tokenpulse/internal/keeper"
@@ -243,15 +244,16 @@ func TestAPIAgentNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	date := time.Now().In(time.Local).Format("2006-01-02")
 	_, err = db.Exec(`INSERT INTO usage_messages (source, client, provider_id, model_id, canonical_model_id,
         session_id, message_key, timestamp_ms, date, input_tokens, output_tokens, cache_read_tokens,
         cache_write_tokens, reasoning_tokens, total_tokens, cost_usd, pricing_day, parser_version, unpriced)
         VALUES ('antigravity','antigravity-cli','google','gemini-4-carbon','gemini-4-carbon',
-        's','m',1764000000000,'2026-11-25',10,5,0,0,0,15,0.1,'2026-11-25','antigravity-v7',0)`)
+        's','m',?1,?2,10,5,0,0,0,15,0.1,?2,'antigravity-v7',0)`, time.Now().UnixMilli(), date)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := request(http.MethodGet, "https://tokenpulse.test/api/usage?preset=custom&from=2026-11-25&to=2026-11-26&agents=agy", "")
+	r := request(http.MethodGet, "https://tokenpulse.test/api/usage?preset=today&agents=agy", "")
 	r.Header.Set("Authorization", "Bearer "+token)
 	recorder := perform(server, r)
 	if recorder.Code != http.StatusOK {
