@@ -145,12 +145,16 @@ func (s *Server) Run() error {
 		return err
 	}
 	defer release()
-	socket, err := s.listenLocalSocket()
+	socketPath, err := SocketPath(s.DataDir)
+	if err != nil {
+		return err
+	}
+	socket, err := s.listenLocalSocket(socketPath)
 	if err != nil {
 		return err
 	}
 	defer socket.Close()
-	defer os.Remove(filepath.Join(s.DataDir, "serve.sock"))
+	defer os.Remove(socketPath)
 
 	s.Access = buildAccess(s.Options.Port, s.Options.HTTPSPort, s.Options.NoTailscale, s.Options.LAN)
 	_ = os.WriteFile(filepath.Join(s.DataDir, "serve.url"), []byte(s.Access.URL), 0o600)
@@ -217,8 +221,7 @@ func (s *Server) acquireLock() (func(), error) {
 	return func() { _ = os.Remove(path) }, nil
 }
 
-func (s *Server) listenLocalSocket() (net.Listener, error) {
-	path := filepath.Join(s.DataDir, "serve.sock")
+func (s *Server) listenLocalSocket(path string) (net.Listener, error) {
 	if conn, err := net.DialTimeout("unix", path, 200*time.Millisecond); err == nil {
 		conn.Close()
 		return nil, errors.New("serve.sock is already accepting connections")

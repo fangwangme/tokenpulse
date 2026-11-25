@@ -57,7 +57,7 @@ tokenpulse/
 │   ├── tui/                      # Bubble Tea dashboard
 │   ├── usage/                    # parsers and SQLite ledger
 │   └── version/                  # the single version constant
-├── web/                          # Solid + Vite phone app, embedded at build time
+├── web/                          # Solid + TypeScript + Vite phone app, embedded at build time
 ├── testdata/parity/              # synthetic fixtures and Rust 0.6.16 goldens
 └── docs/
     ├── DESIGN.md                 # this file
@@ -76,7 +76,7 @@ tokenpulse/
 | `BurntSushi/toml` | `config.toml` |
 | `SherClockHolmes/webpush-go` | Web Push |
 | `skip2/go-qrcode` | pairing QR code |
-| `web/` (Solid + Vite) | mobile PWA embedded with `go:embed` |
+| `web/` (Solid + TypeScript + Vite) | mobile PWA embedded with `go:embed` |
 
 ---
 

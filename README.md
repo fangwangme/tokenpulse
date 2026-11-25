@@ -359,7 +359,7 @@ tokenpulse/
 │   ├── tui/                 # Bubble Tea dashboard
 │   ├── usage/               # session parsers and SQLite store
 │   └── ...
-├── web/                     # Solid + Vite phone app, embedded at build time
+├── web/                     # Solid + TypeScript + Vite phone app, embedded at build time
 ├── testdata/parity/         # synthetic parser and quota fixtures + goldens
 └── docs/
     ├── specs/               # binding behavior

@@ -49,8 +49,9 @@ Top to bottom:
 `Esc` closes it (`Esc` never quits).
 
 - **Day detail** — totals (cost, tokens, input, output, cache read, cache write
-  as `—` when 0, cache hit with two decimals, messages, sessions), then per
-  agent its cost and per model its cost, tokens, input, output and cache read.
+  as `—` when 0, messages, sessions), then per agent its cost and per model its
+  cost, tokens, cache read and cache hit with two decimals. Cache hit is per
+  model, not a day-wide total across models.
 - **Model detail** — the model in its company color, `company · range`,
   totals, last used, per-agent tokens and cost, and in a period the per-day
   bars.

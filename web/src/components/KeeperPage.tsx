@@ -1,0 +1,221 @@
+import { createEffect, createSignal, For, on, onMount, Show } from "solid-js";
+import { loadKeeper, patchSettings, pingKeeper } from "../api";
+import { showToast, state, type KeeperAgent, type KeeperPayload } from "../store";
+import { AGENT_NAMES } from "../shared/defaults";
+import { Icon } from "./ui";
+import { t } from "../i18n";
+
+function formatTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function agentName(id: string): string {
+  return AGENT_NAMES[id] || id;
+}
+
+export function KeeperPage() {
+  const [keeper, setKeeper] = createSignal<KeeperPayload | null>(null);
+  const [error, setError] = createSignal("");
+  const [busy, setBusy] = createSignal("");
+  const [wakeups, setWakeups] = createSignal<Record<string, string>>({});
+
+  const load = async () => {
+    setError("");
+    try {
+      const value = await loadKeeper();
+      setKeeper(value);
+      const times: Record<string, string> = {};
+      for (const [id, agent] of Object.entries(value.agents || {})) {
+        times[id] = agent.dailyWakeupTime || "10:30";
+      }
+      setWakeups(times);
+    } catch (err: any) {
+      setError(err?.message || t("usage.loadFailed"));
+    }
+  };
+
+  onMount(() => void load());
+  createEffect(
+    on(
+      () => state.keeperNonce,
+      () => void load(),
+      { defer: true },
+    ),
+  );
+
+  const update = async (key: string, value: unknown) => {
+    try {
+      await patchSettings({ [key]: value });
+      await load();
+    } catch (err: any) {
+      showToast(err?.message || t("usage.loadFailed"));
+    }
+  };
+
+  const ping = async (agent: string, group?: string) => {
+    const key = agent + (group || "");
+    setBusy(key);
+    try {
+      await pingKeeper(agent, group);
+      showToast(t("quota.refreshing"));
+      window.setTimeout(() => void load(), 700);
+    } catch (err: any) {
+      showToast(err?.message || t("usage.loadFailed"));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const agentCard = (id: string, agent: KeeperAgent) => (
+    <div class="card" style={{ "margin-top": "10px" }}>
+      <div class="li" style={{ "align-items": "center" }}>
+        <span style={{ width: "9px", height: "9px", "border-radius": "50%", background: `var(--agent-${id === "agy" ? "agy" : id})`, flex: "none" }} />
+        <div class="tx">
+          {agentName(id)}
+          <Show when={agent.running}>
+            <small>{t("keeper.running")}</small>
+          </Show>
+        </div>
+        <Show when={agent.running}>
+          <span class="sdot working" />
+        </Show>
+      </div>
+      <button class="li" onClick={() => void update(`keeper.agents.${id}.session_keeper_enabled`, !agent.sessionKeeperEnabled)}>
+        <div class="tx">{t("keeper.session")}</div>
+        <span class={`tg${agent.sessionKeeperEnabled ? "" : " off"}`} />
+      </button>
+      <button class="li" onClick={() => void update(`keeper.agents.${id}.weekly_keeper_enabled`, !agent.weeklyKeeperEnabled)}>
+        <div class="tx">{t("keeper.weekly")}</div>
+        <span class={`tg${agent.weeklyKeeperEnabled ? "" : " off"}`} />
+      </button>
+      <Show when={id === "agy"}>
+        <button class="li" onClick={() => void update("keeper.agents.agy.weekly_all_groups", !agent.weeklyAllGroups)}>
+          <div class="tx">{t("keeper.allGroups")}</div>
+          <span class={`tg${agent.weeklyAllGroups ? "" : " off"}`} />
+        </button>
+      </Show>
+      <div class="li">
+        <div class="tx">{t("keeper.wakeup")}</div>
+        <input
+          class="inp"
+          type="time"
+          style={{ width: "140px", height: "36px", "font-size": "13px" }}
+          value={wakeups()[id] || agent.dailyWakeupTime || "10:30"}
+          onInput={(event) => setWakeups({ ...wakeups(), [id]: event.currentTarget.value })}
+          onChange={(event) => void update(`keeper.agents.${id}.daily_wakeup_time`, event.currentTarget.value)}
+        />
+      </div>
+      <div class="li" style={{ "flex-wrap": "wrap", gap: "8px" }}>
+        <button
+          class="btn acc"
+          style={{ "min-height": "34px", padding: "0 14px", "font-size": "13px", "border-radius": "17px" }}
+          disabled={busy() === id}
+          onClick={() => void ping(id)}
+        >
+          {busy() === id ? t("keeper.running") : t("keeper.ping")}
+        </button>
+        <For each={agent.targets || []}>
+          {(target) => (
+            <Show when={target.group}>
+              <button
+                class="btn"
+                style={{ "min-height": "34px", padding: "0 14px", "font-size": "13px", "border-radius": "17px" }}
+                disabled={busy() === id + target.group}
+                onClick={() => void ping(id, target.group)}
+              >
+                {target.group} · {t("keeper.ping")}
+              </button>
+            </Show>
+          )}
+        </For>
+      </div>
+    </div>
+  );
+
+  return (
+    <div class="page">
+      <div class="hdr">
+        <div style={{ width: "44px" }} />
+        <div class="ht">
+          <div class="t">{t("keeper.title")}</div>
+        </div>
+        <button class="cbtn" aria-label={t("app.reload")} onClick={() => void load()}>
+          <Icon name="refresh" />
+        </button>
+      </div>
+      <div class="scroll">
+        <div class="settings">
+          <Show when={error()}>
+            <div
+              style={{
+                background: "var(--dangerbg)",
+                border: "1px solid var(--danger)",
+                "border-radius": "14px",
+                padding: "10px 14px",
+                "font-size": "13px",
+                color: "var(--danger)",
+                display: "flex",
+                gap: "8px",
+                "align-items": "center",
+              }}
+            >
+              <Icon name="alert" sm />
+              <span style={{ flex: 1 }}>{error()}</span>
+              <button class="lnk" onClick={() => void load()}>{t("usage.retry")}</button>
+            </div>
+          </Show>
+          <Show when={keeper()}>
+            <div class="card" style={{ "margin-top": "10px" }}>
+              <button class="li" onClick={() => void update("keeper.enabled", !keeper()!.engine)}>
+                <div class="tx">
+                  {t("keeper.engine")}
+                  <small>{keeper()!.engine ? t("settings.on") : t("settings.off")}</small>
+                </div>
+                <span class={`tg${keeper()!.engine ? "" : " off"}`} />
+              </button>
+            </div>
+            <Show when={!keeper()!.engine}>
+              <p class="note">{t("keeper.engineOff")}</p>
+            </Show>
+            <For each={Object.entries(keeper()!.agents || {})}>{([id, agent]) => agentCard(id, agent)}</For>
+            <div class="sec">{t("keeper.recent")}</div>
+            <div class="card">
+              <Show
+                when={(keeper()!.executions || []).length > 0}
+                fallback={<div class="li"><div class="tx">{t("keeper.none")}</div></div>}
+              >
+                <For each={[...keeper()!.executions].reverse()}>
+                  {(execution) => (
+                    <div class="li" style={{ "align-items": "flex-start" }}>
+                      <div class="tx">
+                        {agentName(execution.agent)} · {execution.trigger}
+                        <small>{formatTime(execution.time)} · {execution.model}</small>
+                        <Show when={execution.reply}>
+                          <small style={{ "margin-top": "4px", "overflow-wrap": "anywhere" }}>{execution.reply}</small>
+                        </Show>
+                      </div>
+                      <span
+                        class="v"
+                        style={{ color: execution.status === "success" ? "var(--addfg)" : "var(--danger)", "font-weight": 600 }}
+                      >
+                        {execution.status === "success" ? t("keeper.success") : t("keeper.failed")}
+                      </span>
+                    </div>
+                  )}
+                </For>
+              </Show>
+            </div>
+          </Show>
+        </div>
+      </div>
+    </div>
+  );
+}

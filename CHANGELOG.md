@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.0] - 2026-11-26
 
 ### Added
-- **Remote mode**: `tokenpulse serve` runs scanning, quota refreshes, the Keeper and quota-recovery notifications, and serves a mobile PWA over Tailscale Serve HTTPS (LAN on explicit opt-in) with fragment pairing, hashed session cookies, a strict typed settings allowlist, Keeper control and Web Push for quota recovery. `tokenpulse service install` installs it as a systemd user unit (launchd on macOS); `tokenpulse remote reset-token|url|status` manages pairing.
+- **Remote mode**: `tokenpulse serve` runs scanning, quota refreshes, the Keeper and quota-recovery notifications, and serves a mobile PWA over Tailscale Serve HTTPS (LAN on explicit opt-in) with fragment pairing, hashed session cookies, a strict typed settings allowlist, Keeper control and Web Push for quota recovery. The Usage, Quota and Settings pages follow the reference mobile design component by component, under a bottom Usage/Quota/Keeper/Settings tab bar. `tokenpulse service install` installs it as a systemd user unit (launchd on macOS); `tokenpulse remote reset-token|url|status` manages pairing.
 - **One usage report** shared by the TUI and the phone: range presets, custom ranges, period and today-to-the-minute comparison, three heatmap layouts, day and model detail, agent filters and a Token/Cost switch.
 - **New pricing**: official-provider-first exact-key catalog selection, price periods, an `unpriced` ledger flag, and `tokenpulse reprice` with a dry run, fingerprint guard and 0600 backup.
 - **Quota changes**: windows ordered by family then period, corrected pace and level, extra usage, and reset credits. Claude, Codex and Antigravity credentials are read-only and are never refreshed or written.
@@ -18,13 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Go instead of Rust**: one statically linked, cgo-free binary per platform, built for macOS and Linux. Every existing CLI command, config key, parser, quota provider, Keeper rule, notification and data file is kept. `usage.db` and `tokenpulse.db` migrate in place with a timestamped `*.pre-0.7.<timestamp>.bak` backup (0600); stored costs above 0 never move without `reprice --apply`.
 - **TUI**: the Usage tabs are rebuilt into one page with the new report; Quota, Keeper and Settings stay, and a running `serve` owns scanning and refreshing.
-- **Web build**: the binary embeds a committed “frontend not built” placeholder; CI builds the Solid + Vite app before the Go binary.
+- **Web build**: the binary embeds a committed “frontend not built” placeholder; CI type-checks and builds the Solid + TypeScript + Vite app before the Go binary.
 
 ### Removed
 - The Rust workspace, `Cargo.toml`/`Cargo.lock`/`.cargo`, the Rust-only `pricing.json` cache (neither read nor deleted) and the `cargo install` launch hints.
 
 ### Fixed
 - A stored cost above 0 is preserved byte for byte on migration and later ingests, and an explicit reprice recomputes only models whose price periods changed.
+- A data directory too long for a Unix socket no longer stops `serve`: the socket moves to `$XDG_RUNTIME_DIR` or the system temporary directory under a hash of the data directory, still mode 0600, and the TUI/CLI resolve the same path.
+- The phone day sheet shows cache hit on each model row instead of a day-wide rate across models.
 
 ## [0.6.16] - 2026-11-09
 

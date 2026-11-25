@@ -120,8 +120,10 @@ keeps at least one agent selected.
 `day(date, agents)` answers `{ date, totals, agents: [...] }`. Each agent entry
 carries its `UsageTotals` and `models`: per model, its `UsageTotals` and
 `company`. Agents and their models are ordered by tokens descending. The
-surfaces show input, output, cache read, cache write (`—` when 0), cache hit,
-messages and sessions.
+surfaces show total input, output, cache read, cache write (`—` when 0),
+messages and sessions. Cache hit is shown per model, next to its cache read,
+because a cache is read by one model; a day-wide hit rate mixing models has no
+meaning.
 
 ## Model detail
 

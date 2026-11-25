@@ -47,6 +47,13 @@ it. The TUI and CLI commands (`reprice`, `remote status`) use it to find a
 running `serve`; a socket that refuses connections is a stale file and is
 replaced at start.
 
+A Unix socket path is limited by the kernel (107 bytes on Linux, 103 on macOS).
+When `<data dir>/serve.sock` does not fit, `serve` puts the socket in
+`$XDG_RUNTIME_DIR`, or the system temporary directory when that is unset,
+named `tokenpulse-<hash>.sock` after the absolute data directory, still with
+mode 0600. The TUI and CLI resolve the path with the same rule, so a long
+`TOKENPULSE_DATA_DIR` changes neither how `serve` starts nor how they find it.
+
 ## Desktop TUI
 
 - At start, and on every refresh tick, the TUI checks the local socket. With
@@ -202,23 +209,41 @@ and a QR code of it, the access mode, and any recovery command.
 
 ## Web app
 
-A mobile-first single-page app under `web/` (Solid + Vite), built into the
-binary at build time; `serve --web-dir <dir>` serves a directory from disk for
+A mobile-first single-page app under `web/` (Solid + TypeScript + Vite),
+built into the binary at build time; `serve --web-dir <dir>` serves a directory from disk for
 development. The embedded directory always contains a committed placeholder
 page saying the frontend was not built, which the web build replaces, so a
 plain `go build` without Node succeeds and the API works unchanged.
+
+The Usage and Quota pages are a component-by-component port of the reference
+mobile design, not a reinterpretation: layout, spacing, type scale, color
+tokens, heatmap shapes, bottom sheets, skeleton and error states, and visible
+wording follow that design. The Usage page opens on `today`. In a period the
+list card has one `By date | By model` segmented switch; date and model are not
+two separate entries. The heatmap keeps its three shapes (`strip`,
+`week-rows`, `week-columns`), the 24 px `week-columns` cells, Monday-only date
+labels, opening at the newest week, drag scrolling and no zoom.
+
+The app shell is the bottom tab bar Usage, Quota, Keeper and Settings, with
+safe-area padding at the bottom and centered at 520 px on wide screens. The bar
+owns page switching, so the reference-design pages carry no top
+`Quota | Usage` switch and no back button; their headers keep the title,
+last-refresh line and refresh button.
 
 The app knows all seven agents (`claude`, `codex`, `copilot`, `gemini`,
 `opencode`, `pi`, `agy`) with a name and color each, and shows those the
 server lists as enabled.
 
 - **Pages**: Usage (`usage-report.md` presentation: range presets with custom
-  dates, KPI cards with comparison in periods, heatmap, date/model list of 10
-  rows expanding by 20, day and model sheets, agent filter, Token/Cost switch),
-  Quota (`quota.md`: per provider card with plan and account per
-  `account_display`, ordered windows with bar, pace, reset time, credits, extra
-  usage, error next to the last snapshot), Keeper (status, toggles, manual
-  ping, recent executions), Settings (the editable settings, push on/off).
+  dates, KPI cards with comparison in periods, heatmap with active/current/
+  longest streaks and a five-step legend, date/model list of 10 rows expanding
+  by 20, day and model sheets, agent filter, Token/Cost switch), Quota
+  (`quota.md`: per provider card with plan and account per `account_display`,
+  ordered windows with bar, pace, reset time, credits, extra usage, error next
+  to the last snapshot), Keeper (status, toggles, manual ping, recent
+  executions), Settings (the editable settings, theme, language, push).
+  Keeper and pairing have no counterpart in the reference design and use the
+  same components and tokens.
 - A header shows the page's last refresh time and a refresh button.
 - Pages update silently on `usage_updated` / `quota_updated`; the socket
   reconnects with backoff, and failed or unloaded data is re-requested once it

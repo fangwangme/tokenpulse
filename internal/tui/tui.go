@@ -1498,14 +1498,15 @@ func (m *model) renderDetail(width int) string {
 	case report.DayDetail:
 		b.WriteString(s.title.Render("Day " + detail.Date))
 		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("cost %s  tokens %s  input %s  output %s  cache read %s  cache write %s  hit %.2f%%  messages %d  sessions %d\n",
+		b.WriteString(fmt.Sprintf("cost %s  tokens %s  input %s  output %s  cache read %s  cache write %s  messages %d  sessions %d\n",
 			formatCost(detail.Totals.Cost), formatInt(detail.Totals.Tokens), formatInt(detail.Totals.Input),
 			formatInt(detail.Totals.Output), formatInt(detail.Totals.CacheRead), formatCacheWrite(detail.Totals.CacheWrite),
-			cacheHit(detail.Totals), detail.Totals.Messages, detail.Totals.Sessions))
+			detail.Totals.Messages, detail.Totals.Sessions))
 		for _, agent := range detail.Agents {
 			b.WriteString(fmt.Sprintf("  %-12s %s  %s\n", agent.Agent, formatCost(agent.Totals.Cost), formatInt(agent.Totals.Tokens)))
 			for _, model := range agent.Models {
-				b.WriteString(fmt.Sprintf("    %-34s %s  %s\n", truncate(model.Model, 34), formatCost(model.Cost), formatInt(model.Tokens)))
+				b.WriteString(fmt.Sprintf("    %-34s %s  %s  cache read %s  hit %.2f%%\n", truncate(model.Model, 34),
+					formatCost(model.Cost), formatInt(model.Tokens), formatInt(model.CacheRead), cacheHit(model.Totals)))
 			}
 		}
 	case report.ModelDetail:

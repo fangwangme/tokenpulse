@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -18,10 +17,14 @@ import (
 type LocalClient struct {
 	Socket string
 	client *http.Client
+	err    error
 }
 
 func NewLocalClient(dataDir string) *LocalClient {
-	socket := filepath.Join(dataDir, "serve.sock")
+	socket, err := SocketPath(dataDir)
+	if err != nil {
+		return &LocalClient{err: err}
+	}
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			dialer := net.Dialer{}
@@ -42,6 +45,9 @@ type StateInfo struct {
 }
 
 func (c *LocalClient) do(method, path string, body any, out any) (int, error) {
+	if c.err != nil {
+		return 0, c.err
+	}
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -110,6 +116,9 @@ func (c *LocalClient) State() (*StateInfo, error) {
 
 // WebSocket connects to serve's event stream.
 func (c *LocalClient) WebSocket() (*websocket.Conn, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
 	dialer := websocket.Dialer{
 		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			var dial net.Dialer

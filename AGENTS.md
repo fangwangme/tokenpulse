@@ -52,8 +52,8 @@
 - **CLI/TUI**: Cobra-style command dispatch in `internal/cli`; Bubble Tea +
   Lip Gloss dashboard in `internal/tui`
 - **Remote**: `tokenpulse serve` in `internal/remote` owns scanning and quota
-  refreshes, serves the HTTP API, the local Unix socket and the embedded Solid
-  web app in `web/`
+  refreshes, serves the HTTP API, the local Unix socket and the embedded Solid +
+  TypeScript web app in `web/`
 - **Data**: SQLite via modernc.org/sqlite (pure Go) — `usage.db` (ledger and
   price periods) and `tokenpulse.db` (quota cache + observation history)
 - **Logging**: rotating file under `~/.local/share/tokenpulse/log/`; never
