@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/fangwangme/tokenpulse/internal/provider"
 	"github.com/fangwangme/tokenpulse/internal/usage"
@@ -47,6 +48,9 @@ type golden struct {
 // only allowed differences are the unversioned-family fixtures this release
 // resolves on purpose; their expected ids are listed in the golden.
 func TestParityFixtures(t *testing.T) {
+	oldLocal := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() { time.Local = oldLocal })
 	root := filepath.Join("..", "..", "testdata", "parity")
 	var want golden
 	data, err := os.ReadFile(filepath.Join(root, "golden.json"))
