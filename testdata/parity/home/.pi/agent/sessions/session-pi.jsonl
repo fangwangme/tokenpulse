@@ -1,0 +1,4 @@
+{"type":"session","id":"pi-session-1"}
+{"type":"model_change","provider":"nvidia-nim","modelId":"gpt-4.1"}
+{"type":"message","id":"pi-msg-1","timestamp":"2026-11-22T08:50:30.109Z","message":{"role":"assistant","provider":"nvidia-nim","model":"gpt-4.1","usage":{"input":10,"output":20,"cacheRead":3,"cacheWrite":1},"timestamp":1795337430109,"responseId":"pi-resp-1"}}
+{"type":"assistant","id":"pi-msg-2","timestamp":"2026-11-22T08:51:00.000Z","message":{"role":"assistant","provider":"openai","model":"gpt-5.1","usage":{"input_tokens":4,"output_tokens":2}}}

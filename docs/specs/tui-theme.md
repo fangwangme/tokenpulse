@@ -2,7 +2,7 @@
 
 ## Background Behavior
 
-The TUI uses `ratatui` and `crossterm`. To allow host terminal styling (native background colors, terminal themes, window transparency, and background blur) to pass through cleanly, the base dashboard background does not enforce a solid opaque RGB color block across the terminal viewport.
+The TUI uses Bubble Tea and Lip Gloss. To allow host terminal styling (native background colors, terminal themes, window transparency, and background blur) to pass through cleanly, the base dashboard background does not enforce a solid opaque RGB color block across the terminal viewport.
 
 - `Theme.bg` is `Color::Reset` for both dark and light theme modes.
 - When drawing the root dashboard (`render_dashboard`), no solid full-viewport background widget is rendered during normal operation. The viewport preserves default cell background attributes, allowing the terminal emulator's background to show through.

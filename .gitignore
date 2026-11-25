@@ -4,8 +4,13 @@
 # Worktree-local state
 .local/
 
-# Fallback Rust output if CARGO_TARGET_DIR is overridden
-target/
+# Go build output
+/tokenpulse
+
+# Web build output; the placeholder index stays tracked
+web/node_modules/
+web/dist/*
+!web/dist/index.html
 
 # macOS
 .DS_Store

@@ -18,75 +18,74 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Both macOS targets build on Apple Silicon `macos-latest`, left
-          # unpinned because pinned macOS images get retired (`macos-13`
-          # stopped being allocated, `macos-14` was retired on 2026-11-02).
-          # The host OS does not set the binary's minimum macOS: rustc's
-          # default deployment target does. Apple's clang cross-compiles by
-          # architecture flag, so the x86_64 build needs only the extra target.
           - runner: macos-latest
-            target: x86_64-apple-darwin
+            goos: darwin
+            goarch: amd64
             asset: tokenpulse-darwin-x64
           - runner: macos-latest
-            target: aarch64-apple-darwin
+            goos: darwin
+            goarch: arm64
             asset: tokenpulse-darwin-arm64
-          # 22.04 rather than latest: the binary then needs only glibc 2.35,
-          # so it also runs on distros a couple of releases behind.
           - runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
+            goos: linux
+            goarch: amd64
             asset: tokenpulse-linux-x64-gnu
           - runner: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
+            goos: linux
+            goarch: arm64
             asset: tokenpulse-linux-arm64-gnu
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          targets: ${{ matrix.target }}
+          go-version-file: go.mod
+          cache: true
 
-      # `.cargo/config.toml` builds into `.local/target`, not `./target`. Keyed
-      # by target because both macOS builds share a runner image and job id.
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Set up Node
+        uses: actions/setup-node@v4
         with:
-          key: ${{ matrix.target }}
-          workspaces: ". -> .local/target"
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web app
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
 
       - name: Build release binary
-        run: cargo build --release -p tokenpulse-cli --locked --target ${{ matrix.target }}
-
-      - name: Package archive
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
         run: |
-          mkdir -p .local/release/tokenpulse-${{ matrix.target }}
-          cp .local/target/${{ matrix.target }}/release/tokenpulse \
-            .local/release/tokenpulse-${{ matrix.target }}/tokenpulse
-          tar -C .local/release/tokenpulse-${{ matrix.target }} \
-            -czf .local/release/tokenpulse-${{ matrix.target }}/${{ matrix.asset }}.tar.gz tokenpulse
+          mkdir -p .local/release/${{ matrix.asset }}
+          go build -trimpath -ldflags="-s -w" -o .local/release/${{ matrix.asset }}/tokenpulse .
+          tar -C .local/release/${{ matrix.asset }} -czf .local/release/${{ matrix.asset }}/${{ matrix.asset }}.tar.gz tokenpulse
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tokenpulse-${{ matrix.target }}
-          path: .local/release/tokenpulse-${{ matrix.target }}/${{ matrix.asset }}.tar.gz
+          name: ${{ matrix.asset }}
+          path: .local/release/${{ matrix.asset }}/${{ matrix.asset }}.tar.gz
 
   publish-release:
     needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
 
-      # The curated CHANGELOG entry is the release note. Fall back to generated
-      # notes only when a version has no section, rather than failing the release.
       - name: Publish GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -105,14 +104,12 @@ jobs:
   publish-npm:
     needs: build
     runs-on: ubuntu-latest
-    # id-token lets npm exchange this run's OIDC identity for a publish
-    # credential (Trusted Publishing), so no long-lived token is stored.
     permissions:
       contents: read
       id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -122,12 +119,9 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          # Trusted Publishing needs npm >= 11.5.1, which ships with Node 24.
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      # Fails loudly when the tag and the crate version disagree, before
-      # anything reaches the registry — a published version cannot be replaced.
       - name: Assemble packages
         run: |
           node npm/scripts/build-packages.mjs \

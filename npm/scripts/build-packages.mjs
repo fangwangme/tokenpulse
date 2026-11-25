@@ -17,28 +17,24 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const LAUNCHER_SRC = path.join(HERE, "..", "launcher");
 const REPO_ROOT = path.join(HERE, "..", "..");
 
-/** Rust target triple and release archive → npm package. Keep in sync with release.yml. */
+/** Go target and release archive → npm package. Keep in sync with release.yml. */
 const TARGETS = [
   {
-    triple: "aarch64-apple-darwin",
     asset: "tokenpulse-darwin-arm64",
     os: "darwin",
     cpu: "arm64",
   },
   {
-    triple: "x86_64-apple-darwin",
     asset: "tokenpulse-darwin-x64",
     os: "darwin",
     cpu: "x64",
   },
   {
-    triple: "aarch64-unknown-linux-gnu",
     asset: "tokenpulse-linux-arm64-gnu",
     os: "linux",
     cpu: "arm64",
   },
   {
-    triple: "x86_64-unknown-linux-gnu",
     asset: "tokenpulse-linux-x64-gnu",
     os: "linux",
     cpu: "x64",
@@ -65,14 +61,14 @@ function parseArgs(argv) {
   return args;
 }
 
-/** The crate version is the source of truth; a mismatch means a mistagged release. */
-function assertVersionMatchesCrate(version) {
-  const manifest = fs.readFileSync(path.join(REPO_ROOT, "Cargo.toml"), "utf8");
-  const crateVersion = manifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
-  if (crateVersion !== version) {
+/** The Go version constant is the source of truth; a mismatch means a mistagged release. */
+function assertVersionMatchesGo(version) {
+  const source = fs.readFileSync(path.join(REPO_ROOT, "internal", "version", "version.go"), "utf8");
+  const goVersion = source.match(/Version\s*=\s*"([^"]+)"/)?.[1];
+  if (goVersion !== version) {
     throw new Error(
-      `Version mismatch: tag says ${version}, Cargo.toml says ${crateVersion}. ` +
-        `Bump the crate version or retag.`,
+      `Version mismatch: tag says ${version}, internal/version/version.go says ${goVersion}. ` +
+        `Bump the version or retag.`,
     );
   }
 }
@@ -83,7 +79,7 @@ function assertVersionMatchesCrate(version) {
  * locally assembled directory.
  */
 function binaryFor(artifactsDir, target) {
-  const artifactName = `tokenpulse-${target.triple}`;
+  const artifactName = target.asset;
   const direct = path.join(artifactsDir, artifactName, "tokenpulse");
   if (fs.existsSync(direct)) return direct;
 
@@ -94,7 +90,7 @@ function binaryFor(artifactsDir, target) {
   );
   if (!fs.existsSync(tarball)) {
     throw new Error(
-      `No binary or ${target.asset}.tar.gz for ${target.triple} under ${artifactsDir}`,
+      `No binary or ${target.asset}.tar.gz for ${target.asset} under ${artifactsDir}`,
     );
   }
   const extractDir = path.join(artifactsDir, artifactName);
@@ -177,7 +173,7 @@ function buildLauncher({ version, outDir, platformNames }) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  assertVersionMatchesCrate(args.version);
+  assertVersionMatchesGo(args.version);
 
   const outDir = path.resolve(args.out);
   fs.rmSync(outDir, { recursive: true, force: true });

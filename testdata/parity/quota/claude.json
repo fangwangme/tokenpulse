@@ -1,0 +1,11 @@
+{
+  "five_hour": {"utilization": 12.5, "resets_at": "2026-11-25T18:00:00Z"},
+  "seven_day": {"utilization": 63, "resets_at": "2026-11-30T00:00:00Z"},
+  "seven_day_sonnet": {"utilization": 40, "resets_at": "2026-11-30T00:00:00Z"},
+  "seven_day_opus": {"utilization": 75, "resets_at": "2026-11-30T00:00:00Z"},
+  "limits": [
+    {"kind": "weekly_scoped", "percent": 33.5, "resets_at": "2026-11-30T00:00:00Z", "scope": {"model": {"display_name": "Fable"}}},
+    {"kind": "weekly_scoped", "percent": 10, "scope": {"model": {"display_name": "Other"}}}
+  ],
+  "extra_usage": {"is_enabled": true, "used_credits": 1234, "monthly_limit": 5000, "decimal_places": 2, "currency": "USD"}
+}

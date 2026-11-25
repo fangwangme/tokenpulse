@@ -1,0 +1,5 @@
+{"type":"session_meta","payload":{"id":"codex-root","model_provider":"openai","model":"gpt-5"}}
+{"type":"event_msg","timestamp":"2026-11-20T12:00:00.000Z","payload":{"type":"token_count","info":{"model":"gpt-5","last_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":120,"reasoning_output_tokens":5},"total_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":120,"reasoning_output_tokens":5}}}}
+{"type":"event_msg","timestamp":"2026-11-20T12:01:00.000Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"output_tokens":40,"cached_input_tokens":140,"reasoning_output_tokens":7}}}}
+{"type":"event_msg","timestamp":"2026-11-20T12:02:00.000Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"output_tokens":5},"total_token_usage":{"input_tokens":180,"output_tokens":40,"cached_input_tokens":140,"reasoning_output_tokens":7}}}}
+{"type":"event_msg","timestamp":"2026-11-20T12:03:00.000Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":30,"output_tokens":6},"total_token_usage":{"input_tokens":140,"output_tokens":30}}}}

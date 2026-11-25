@@ -1,16 +1,16 @@
 # TokenPulse
 
-TokenPulse is a Rust CLI + TUI dashboard for tracking token usage, cost, and
+TokenPulse is a Go CLI + TUI dashboard for tracking token usage, cost, and
 quota across multiple AI coding agents. It parses local session data into a
-SQLite ledger and presents an interactive dashboard — or plain-text/JSON/CSV
-output for scripting.
+SQLite ledger and presents an interactive dashboard — or a mobile web app over
+Tailscale, plain-text, JSON or CSV output for scripting.
 
 ## Install
 
 TokenPulse reads agent session data from the local filesystem, so install it on
 the same machine the agents run on.
 
-### Prebuilt binary (no Rust toolchain needed)
+### Prebuilt binary (no build toolchain needed)
 
 Install globally via npm:
 
@@ -46,10 +46,10 @@ platform, build from source instead.
 
 ### From source
 
-Requires a Rust toolchain (1.75+):
+Requires Go 1.27+:
 
 ```bash
-cargo install --git https://github.com/fangwangme/tokenpulse tokenpulse-cli
+go install github.com/fangwangme/tokenpulse@latest
 ```
 
 Or clone and build:
@@ -57,7 +57,7 @@ Or clone and build:
 ```bash
 git clone https://github.com/fangwangme/tokenpulse
 cd tokenpulse
-cargo install --path tokenpulse-cli
+go build -o tokenpulse .
 ```
 
 ## Screenshots
@@ -90,7 +90,7 @@ cargo install --path tokenpulse-cli
 | OpenCode | `${XDG_DATA_HOME:-~/.local/share}/opencode/` (1.x and 2.x storage, or `OPENCODE_DB`) |
 | Gemini CLI | `~/.gemini/tmp/` |
 | PI | `~/.pi/agent/sessions/` |
-| Antigravity | Language Server (GUI/CLI) |
+| Antigravity | Language Server (GUI/CLI), local conversation databases |
 
 **Quota fetching** (remaining rate-limits / credits):
 
@@ -109,16 +109,21 @@ cargo install --path tokenpulse-cli
 
 ## Features
 
-- **Unified dashboard** — usage (Overview/Models/Daily/Activity/Quota/Keeper/Settings)
-  and quota in one interactive TUI, plus plain-text/JSON/CSV exports for scripting
+- **Unified usage report** — one Usage page with range presets, comparison,
+  heatmaps and day/model detail, plus Quota, Keeper and Settings tabs
+- **Remote mode** — `tokenpulse serve` runs scanning and refreshing, serves a
+  mobile PWA over Tailscale Serve, and stays in sync with the TUI over a local
+  socket
 - **Session Keeper & Automated Heartbeats** — scheduled lightweight heartbeats for
   Claude Code, Codex, and Google Antigravity to trigger 5h cooldown timers early
   and auto-sync immediately after weekly quota resets. Off by default; each ping
   spends real quota, so you opt in per agent
 - **Live Execution Stream** — real-time heartbeat log panel with executed commands,
   prompts, replies, durations, status codes, and smooth mouse-wheel scrolling
-- **Ledger-backed** — local SQLite with per-day pricing snapshots so historical
-  cost does not silently drift
+- **Ledger-backed** — local SQLite; stored costs never drift, and price changes
+  apply only through an explicit `tokenpulse reprice --apply`
+- **Price periods** — official-provider-first catalog selection, exact model
+  keys, historical price periods and a fingerprint-guarded repricing command
 - **Quota overview** — up to the top 4 windows per provider; each is a
   full-width progress bar with an expected-progress marker plus a detail line
   led by a uniform window tag (`5H:`, `WEEKLY · SONNET:`) and showing the reset
@@ -294,59 +299,89 @@ All local state lives under a single directory:
 ~/.local/share/tokenpulse/
 ├── config.toml        # user configuration
 ├── keeper_state.json  # Keeper last-fired bookkeeping
-├── usage.db           # SQLite usage ledger
+├── usage.db           # SQLite usage ledger + price periods
 ├── tokenpulse.db      # quota cache + quota/Keeper observation history
-├── pricing.json       # cached model pricing
-├── antigravity-cache/ # raw Antigravity session cache
-└── log/               # daily rotating diagnostics log
+├── pricing-cache.json # cached model pricing catalog
+├── antigravity-cache/ # raw Antigravity session cache and learned aliases
+├── remote.json        # remote token and hashed phone sessions
+├── serve.sock         # local control socket while serve runs
+├── vapid.json         # Web Push key pair
+└── log/               # rotating diagnostics log
 ```
+
+Set `TOKENPULSE_DATA_DIR` to move this directory, or
+`TOKENPULSE_CONFIG_PATH` to override only the config file. `TOKENPULSE_ENV=test`
+marks a test run and requires `TOKENPULSE_DATA_DIR`.
 
 `tokenpulse.db` keeps an append-only record of every quota poll (per provider,
 per rate window, per model family) and every Keeper run, for later analysis. It
 has no retention policy — delete old rows yourself if it grows too large.
 
+## Remote mode
+
+Run TokenPulse on the computer that holds the agent sessions:
+
+```bash
+tokenpulse serve
+```
+
+`serve` prints a pairing URL and QR code. The URL carries the token in its
+fragment, so it never reaches a request line or log. Open it on a phone on the
+same tailnet; the web app can be added to the home screen. Default ports are
+`4120` (local HTTP) and `8444` (Tailscale Serve HTTPS); a test run uses
+`14120`/`18444`.
+
+- `--no-tailscale` binds localhost only; `--lan` binds all interfaces and warns
+  that LAN traffic is not encrypted.
+- `tokenpulse remote url` prints the pairing URL again; `tokenpulse remote
+  reset-token` invalidates every phone session.
+- `tokenpulse service install` installs a systemd user unit on Linux (or a
+  launchd agent on macOS) that runs `serve` and restarts it on failure.
+- Exactly one `serve` owns refreshing. A running TUI reads its data and sends
+  settings, Keeper pings and `r` requests through `serve` instead of scanning
+  itself.
+
 ## Project Structure
 
 ```
 tokenpulse/
-├── Cargo.toml                  # workspace root
-├── tokenpulse-core/            # library: parsing, pricing, quota, ledger
-│   ├── Cargo.toml
-│   └── src/
-│       ├── auth/               # provider credential detection
-│       ├── config/             # config model & persistence
-│       ├── history/            # quota + Keeper observation history (SQLite)
-│       ├── keeper/             # scheduled agent pings
-│       ├── pricing/            # model pricing (LiteLLM, OpenRouter, Models.dev)
-│       ├── quota/              # live quota fetchers
-│       └── usage/              # session parsers & SQLite store
-├── tokenpulse-cli/             # binary: CLI entrypoints & TUI
-│   ├── Cargo.toml
-│   └── src/
-│       ├── commands/           # init, config, usage, quota registry
-│       ├── tui/                # ratatui dashboard
-│       │   ├── views/usage/    # Overview, Models, Daily, Activity, Quota, Keeper, Settings
-│       │   └── widgets/        # barchart, heatmap, gauge, trend
-│       └── main.rs
+├── main.go                  # CLI entrypoint
+├── internal/
+│   ├── cli/                 # commands and output
+│   ├── config/              # config.toml model and persistence
+│   ├── keeper/              # scheduled agent pings
+│   ├── pricing/             # catalog, price periods, reprice
+│   ├── quota/               # read-only quota fetchers and cache
+│   ├── remote/              # serve, auth, API, Tailscale, push, local client
+│   ├── report/              # shared usage report queries
+│   ├── scan/                # refresh orchestration
+│   ├── service/             # systemd/launchd install
+│   ├── tui/                 # Bubble Tea dashboard
+│   ├── usage/               # session parsers and SQLite store
+│   └── ...
+├── web/                     # Solid + Vite phone app, embedded at build time
+├── testdata/parity/         # synthetic parser and quota fixtures + goldens
 └── docs/
-    └── DESIGN.md               # design document & architecture notes
+    ├── specs/               # binding behavior
+    └── DESIGN.md            # design notes
 ```
 
 ## Development
 
 ```bash
-cargo fmt --all
-cargo test --workspace
+gofmt -w .
+go vet ./...
+go test ./...
+
+# Phone app (Node 20+); the Go binary embeds web/dist
+cd web && npm ci && npm run build
 ```
 
-> **Performance Profiling**
->
-> When testing startup latency, file parsing speed, or TUI performance, always
-> build and run with `--release` (e.g., `cargo run --release`). The unoptimized
-> debug build (`dev` profile) runs mtime stat checks, JSON parsing, and SQLite
-> queries up to 5× slower, which can distort measurements.
+A plain `go build` needs no Node: `web/dist/index.html` is a committed
+placeholder until the web build replaces it.
 
-Primary design notes live in [docs/DESIGN.md](docs/DESIGN.md).
+Primary design notes live in [docs/DESIGN.md](docs/DESIGN.md) and the binding
+behavior is in [docs/specs](docs/specs).
 
 ## Acknowledgments
 

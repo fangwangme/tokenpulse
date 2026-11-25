@@ -1,0 +1,6 @@
+{
+  "credits": [
+    {"id": "available-1", "reset_type": "manual", "status": "available", "granted_at": "2026-11-01T00:00:00Z", "expires_at": "2026-12-01T00:00:00Z"},
+    {"id": "used-1", "status": "used"}
+  ]
+}

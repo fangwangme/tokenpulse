@@ -1,0 +1,4 @@
+{"sessionId":"gem-stream","startTime":"2026-11-21T12:28:18.748Z","lastUpdated":"2026-11-21T12:28:18.748Z","kind":"main"}
+{"id":"gem-dup","timestamp":"2026-11-21T12:29:01.000Z","type":"gemini","model":"gemini-3.1-pro-preview","tokens":{"input":100,"output":10,"cached":40,"thoughts":5,"tool":0,"total":115}}
+{"id":"gem-dup","timestamp":"2026-11-21T12:29:02.000Z","type":"gemini","model":"gemini-3.1-pro-preview","tokens":{"input":130,"output":20,"cached":50,"thoughts":7,"tool":0,"total":157}}
+{"id":"gem-tool","timestamp":"2026-11-21T12:30:00.000Z","type":"gemini","model":"gemini-3.1-pro-preview","tokens":{"input":100,"output":20,"cached":30,"thoughts":5,"tool":7,"total":162}}

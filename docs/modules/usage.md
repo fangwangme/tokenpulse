@@ -1,321 +1,48 @@
 # Usage Module
 
-## Overview
-
-The usage module scans local agent history, normalizes token events into a stable ledger, and renders historical usage views from ledger-backed aggregates.
-
-Current goals:
-
-- ingest local session history from supported agents
-- persist normalized messages in SQLite
-- derive daily, weekly, and monthly usage from stored aggregates
-- estimate historical cost using pricing snapshots captured at ingest time
-- power both CLI summaries and the usage TUI from the same aggregate layer
-
-## Provider Status
-
-Current provider maturity:
-
-- `Claude Code`: usable for daily token tracking
-- `Codex`: usable for daily token tracking
-- `Copilot`: usable for daily token tracking (OTEL events)
-- `OpenCode`: usable for daily token tracking
-- `Gemini CLI`: historical parser only
-- `PI`: parser retained, secondary product scope
-- `Antigravity`: usable for daily token tracking and LS sync
-
-## Architecture
-
-```
-usage/
-├── mod.rs          # aggregate contracts and summary builders
-├── store.rs        # SQLite ledger and aggregate queries
-├── scanner.rs      # local file discovery
-├── claude.rs       # Claude Code JSONL parser
-├── codex.rs        # Codex JSONL parser
-├── copilot.rs      # GitHub Copilot OTEL JSONL parser
-├── opencode.rs     # OpenCode SQLite parser
-├── gemini.rs       # Gemini CLI JSON parser
-└── pi.rs           # PI JSONL parser
-```
-
-The usage pipeline is:
-
-1. scan local session sources
-2. parse provider-specific history into `UnifiedMessage`
-3. write messages into `usage_messages`
-4. rebuild `daily_model_usage` for affected dates
-5. derive `DashboardDay`, weekly rollups, monthly rollups, agent summaries, and normalized model summaries from the ledger
-
-For file-backed agents, incremental runs treat a modified session file as the authoritative copy for that session: changed files are parsed in parallel, then the ledger rows for those changed sessions are replaced before daily aggregates are rebuilt. This keeps rewritten or compacted session files from leaving stale messages behind. OpenCode remains row-incremental through its own SQLite timestamp filter (see below), and Antigravity keeps its own cache database, now filled from the conversation SQLite files themselves rather than only from the language server.
-
-## Core Data Model
-
-### Parsed Messages
-
-`UnifiedMessage` is the parser output contract.
-
-```rust
-pub struct UnifiedMessage {
-    pub client: String,
-    pub client_detail: Option<String>,
-    pub model_id: String,
-    pub provider_id: String,
-    pub session_id: String,
-    pub message_key: String,
-    pub timestamp: i64,
-    pub date: String,
-    pub tokens: TokenBreakdown,
-    pub cost: f64,
-    pub pricing_day: String,
-    pub parser_version: String,
-}
-```
-
-### Dashboard Aggregates
-
-All usage views should read from daily aggregates rather than raw files.
-
-```rust
-pub struct DashboardDay {
-    pub date: String,
-    pub total_tokens: i64,
-    pub total_cost_usd: f64,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cache_read_tokens: i64,
-    pub cache_write_tokens: i64,
-    pub reasoning_tokens: i64,
-    pub message_count: i64,
-    pub session_count: i64,
-    pub intensity_tokens: u8,
-    pub intensity_cost: u8,
-}
-
-pub struct UsageRollup {
-    pub label: String,
-    pub start_date: String,
-    pub end_date: String,
-    pub total_tokens: i64,
-    pub total_cost_usd: f64,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cache_read_tokens: i64,
-    pub cache_write_tokens: i64,
-    pub reasoning_tokens: i64,
-    pub message_count: i64,
-    pub session_count: i64,
-    pub active_days: i64,
-}
-```
-
-## Ledger Storage
-
-The usage ledger lives in the user cache directory:
-
-- default path: `~/.local/share/tokenpulse/usage.db`
-
-Main tables:
-
-- `usage_messages`: normalized message ledger
-- `daily_model_usage`: day/provider/model aggregates
-- `daily_pricing_snapshots`: captured pricing used for historical cost
-
-Important rule:
-
-- historical cost should come from stored snapshots and stored rows, not from recomputing against the latest remote pricing on every view
-
-## Parser Notes
-
-### Claude Code
-
-- source paths:
-  - `~/.claude/projects`
-  - `~/.claude/transcripts`
-- parses `assistant` entries with `message.usage`
-- deduplicates with `message.id + requestId` when available
-
-### Codex
-
-- source paths:
-  - `~/.codex/sessions`
-  - `~/.codex/archived_sessions`
-  - `$CODEX_HOME/sessions`
-- primary token source is `last_token_usage`
-- supports fallback delta computation from `total_token_usage`
-- includes cumulative-regression guards
-- a forked or sub-agent session (`forked_from_id`, `parent_thread_id` or
-  `source.subagent` in `session_meta`) opens with its parent's token history;
-  token counts before its first `turn_context` only seed the running total
-
-### OpenCode
-
-- source paths (all opened read-only):
-  - `OPENCODE_DB` when set (a relative value resolves against the data dir)
-  - otherwise `opencode.db` plus every `opencode-<channel>.db` sibling in the
-    data dir, `${XDG_DATA_HOME:-~/.local/share}/opencode`; SQLite `-wal`,
-    `-shm` and `-journal` files are not databases and are skipped
-- one database can hold two layouts, and both are read:
-  - OpenCode 2.x: `session_message`, `type` column, model at `data.model.{id, providerID}`
-  - OpenCode 1.x: `message`, `data.role`, model at `data.modelID` / `data.providerID`
-- counted rows: 2.x `assistant` rows with `tokens`, and 2.x `compaction` rows
-  with `tokens` (completed or failed; a running compaction has none). A failed
-  compaction carries no model, so the session's `session_v2.model` stands in,
-  else `unknown`. 1.x: `assistant` rows with `tokens`
-- precedence is per message, not per session: a 1.x row is used only when its
-  id is absent from `session_message`. The v1 → v2 migration keeps message ids
-  but drops some assistant messages (the one that produced a compaction
-  summary, subtask parents, rows failing validation) and never deletes v1
-  rows, so a migrated session can still have usage that exists only in 1.x.
-  The 1.x table is therefore read even when `migration.v1-v2` is `completed`
-- forks: forking copies the parent's rows into the new session under new ids
-  but the same `seq` and identical `data`. For each `session_v2` row with
-  `fork_session_id` and `fork_boundary`, the cutoff is the boundary message's
-  `seq` (`through`) or the parent's largest `seq` below it (`before`); the
-  fork's rows at or below the cutoff are skipped. An unresolvable boundary
-  keeps all rows
-- the ledger key is the message id, so a message keeps its key when its
-  session migrates, and each id is counted once across all scanned databases
-- each database is read inside one read transaction, so table detection, fork
-  cutoffs and both message reads see the same snapshot; a message OpenCode
-  migrates mid-scan cannot fall between the 2.x and 1.x reads
-- a database that cannot be read fails the whole OpenCode scan for that run
-  (the error names the file) instead of being skipped: a partial result would
-  pass for a complete one, and a parser-version rebuild would replace the
-  ledger with it. A row whose values have an unexpected type is skipped
-- 1.x rows that name the model `model` / `provider` instead of `modelID` /
-  `providerID` are still read
-- incremental runs filter by `time_created` in SQL (2.x through
-  `session_message_time_created_idx`, 1.x through the covering index
-  `(session_id, time_created, id)`) and read only the needed JSON fields with
-  `json_extract`, not the full `data` column
-- source cost is ignored; cost comes from centralized pricing
-
-### Gemini CLI (Historical Only)
-
-> [!NOTE]
-> Gemini support has been deprecated/removed. The Gemini CLI parser is retained for historical data analytics only.
-
-- source path:
-  - `~/.gemini/tmp/**/session-*.json`
-  - `~/.gemini/tmp/**/session-*.jsonl`
-- current parser is still lower-confidence than Claude/Codex/OpenCode/Copilot, but now handles two Gemini-specific quirks:
-  - streamed JSONL records are deduplicated by message `id`, keeping the last chunk per response
-  - cache-inclusive `input` values are normalized when `total` indicates that `cached` tokens are already included in the prompt count
-- timestamp fallback behavior still needs broader validation against real samples
-- parser version changes can invalidate previously ingested Gemini rows; `tokenpulse` will automatically clear and rebuild stale Gemini ledger entries on the next run
-
-### PI
-
-- source path:
-  - `~/.pi/agent/sessions/**/*.jsonl`
-- retained but not a primary dashboard target
-- provider detection now follows the same model-family mapping as Copilot
-
-### GitHub Copilot
-
-- source path:
-  - `~/.local/share/github-copilot/events.jsonl`
-  - `~/.copilot/session-state/**/events.jsonl`
-- parses OTEL JSONL events (OpenTelemetry format)
-- event name filter: `gen_ai.client.inference.operation.details`
-- deduplication by `response_id` within each parse run
-- uses official cache fields when present:
-  - `gen_ai.usage.cache_read.input_tokens`
-  - `gen_ai.usage.cache_creation.input_tokens`
-- OTEL fallback for older files: estimates cache by same-session input growth
-- Copilot CLI session-state fallback can read `session.shutdown` summaries when OTEL is unavailable
-- session-state summaries are aggregate-at-shutdown data, so cross-day daily attribution is approximate
-- provider detection from model name is shared across agents
-- `codex/gpt/o*` → `openai`
-- `claude*` → `anthropic`
-- `gemini*` → `google`
-- unsupported or miscellaneous model families default to `other`
-- quota reset is treated as month-start (`day 1, 00:00`) when GitHub does not return an explicit reset timestamp
-- requires VS Code setting: `"github.copilot.chat.otel.enabled": true`
-
-## CLI Behavior
-
-Current command shape:
-
-```bash
-tokenpulse
-tokenpulse --no-tui
-tokenpulse --since 2026-03-01
-tokenpulse --refresh-days 2026-03-01:2026-03-07
-tokenpulse --refresh-pricing
-tokenpulse --rebuild-all
-tokenpulse --log
-```
-
-`tokenpulse` now opens the interactive dashboard automatically when both stdin/stdout are attached to a terminal. Use `--no-tui` to force the plain-text summary for scripts, pipes, or quick dumps.
-
-`--log` writes startup timing for the current run to a new timestamped file under `~/.local/share/tokenpulse/log/`. The log records provider parsing, ingest, aggregate queries, and the point where the TUI starts, so slow dashboard startup can be traced without enabling logs by default.
-
-Antigravity usage sync maintains a local cache database in `~/.local/share/tokenpulse/antigravity-cache/cache.db`. Regular runs rebuild sessions whose Antigravity or Antigravity CLI conversation files were modified in the last two days. Running with `--rebuild-all` clears the database of parsed messages and fully rebuilds the local SQLite cache database by querying all discoverable sessions from a running Antigravity language server.
-
-Token usage comes from the conversation databases themselves, so it no longer depends on a running language server. Both `~/.gemini/antigravity-cli/conversations/` (CLI) and `~/.gemini/antigravity/conversations/` (Desktop) are scanned; `antigravity-ide/` and `antigravity-backup/` are not, because they hold only encrypted `.pb` files and `backup` duplicates `ide`. For each `.db` conversation the parser decodes the protobuf blobs in the `gen_metadata` table and writes one `session_usage` row per generation, tagged with the current `parser_version` (`antigravity-v6`):
-
-| `gen_metadata` field | language-server field | column |
-|---|---|---|
-| `1.4.2` | `inputTokens` | `input_tokens` |
-| `1.4.5` | `cacheReadTokens` | `cache_read_tokens` |
-| `1.4.9` | `thinkingOutputTokens` | `reasoning_tokens` |
-| `1.4.10` | `responseOutputTokens` | `output_tokens` |
-| `1.4.11` | `responseId` | `response_id` |
-| the `model_enum` pair in `1.20` | `model` | `model_enum` |
-| `1.19` | `responseModel` | `served_model` |
-
-`model_id` is resolved enum-first through the alias table and re-resolved on every read; see `docs/specs/antigravity-model-aliases.md`.
-
-`output_tokens` deliberately comes from `1.4.10` rather than `1.4.3` (`outputTokens`): `1.4.3` already contains the thinking tokens, and cost calculation adds reasoning on top of output, so `1.4.3` would double-count. Both the local parser and the language-server path funnel through one `normalize_antigravity_tokens` function that applies this rule and verifies `thinking + response == total`, so the two sources cannot drift apart; a record failing that check is logged and skipped rather than stored. When a source reports only the total, the disjoint output is recovered as `total - thinking`. Antigravity reports no cache-write tokens on either path, so `cache_write_tokens` is always 0. Wall-clock times are joined from `steps.metadata` through the request UUID the two tables share; a `Timestamp` whose nanoseconds fall outside `[0, 1e9)` is not one and is skipped.
-
-Encrypted `.pb` conversations carry no readable usage and remain the language server's job. Both paths write the same `client:session_id:responseId` key with `INSERT OR REPLACE`, so a session read locally and over RPC overwrites in place instead of duplicating. A conversation is re-read when its file (or its `-wal`/`-shm` sidecar) is newer than the cached copy, or when the cache holds no usage row for it at the current `parser_version` — which is what backfills a cache built by an earlier release, and what makes a future `parser_version` bump re-read every conversation. Because that rescan touches every session at once, the local upsert only fills the columns a conversation database actually holds and leaves language-server-supplied metadata (title, workspace path, git root, branch) untouched.
-
-Antigravity CLI and Desktop are treated as sub-clients of the same `antigravity` source. The parser stores the concrete runtime in `client_detail` (`antigravity-cli` or `antigravity-desktop`) and uses a storage key shaped like `client:session_id:message_id`, while usage aggregates deduplicate on the logical `antigravity + session_id + message_id` key. This allows the same message to exist in both CLI and Desktop cache paths without counting its tokens twice.
-
-Claude Code, Codex, Copilot, Gemini CLI, and PI do not maintain separate raw cache databases. Their normal incremental path discovers session files by arrival time (the later of mtime and ctime), parses matching files concurrently, and replaces only the sessions represented by those files. Range refreshes, full rebuilds and parser upgrades replace a source's ledger rows (within the range, if any) in one transaction, and only once its parse has succeeded; a failed or empty parse leaves them untouched.
-
-The incremental window starts a day before the source's previous refresh (recorded in `source_refresh_state` in `usage.db`). Without a recorded refresh it starts two days before the newest stored message; a source with no data is scanned in full. Runs narrowed by `--since` or `--refresh-days` do not move the anchor.
-
-Non-TUI output includes:
-
-- overall totals
-- by-provider totals
-- by-model totals (all models)
-- recent daily totals (up to the last 365 days)
-- weekly totals
-- monthly totals
-
-The daily CSV export (`--csv`) emits separate `cache_read_tokens` and `cache_write_tokens` columns rather than a single combined cache figure.
-
-The plain-text and `--json` outputs also append quota snapshots for enabled
-providers. Both honor `display.refresh_quota`: when it is off they build no
-quota fetcher and contact no quota API, showing only unexpired cached
-snapshots. This matches the TUI, where the same setting gates startup,
-auto-refresh, and manual `r`. `--csv` never fetches quota.
-
-## Interactive TUI
-
-When stdin/stdout are attached to a terminal, `tokenpulse` automatically opens the interactive TUI.
-The TUI is organized into seven tabs (`Overview`, `Models`, `Daily`, `Activity`, `Quota`, `Keeper`, `Settings`).
-
-- All tabs support runtime source filtering via `s` (toggle individual providers on/off; updates immediately).
-- For complete view layouts, metrics, and keybindings, see [`docs/modules/tui.md`](tui.md).
-
-## Known Limits
-
-Current limits worth keeping in mind:
-
-- durable append-only scan-state is not complete yet
-- weekly/monthly `session_count` should not be treated as audit-grade unique-session counts yet
-- Gemini historical accuracy needs more fixtures
-- Antigravity `.pb` conversations (encrypted) still require the active language server process; `.db` conversations are parsed directly
-- cost accuracy depends on model pricing matching or source-provided cost
-
-## Working Rules
-
-- parse once, normalize once, aggregate many times
-- keep quota status and historical usage separate
-- treat daily rows as the dashboard source of truth
-- avoid dashboard business logic in the TUI layer
+The usage module turns local agent history into the SQLite ledger every surface
+reads. Binding behavior is in [`../specs/usage-sources.md`](../specs/usage-sources.md),
+[`../specs/model-ids.md`](../specs/model-ids.md) and
+[`../specs/antigravity-model-aliases.md`](../specs/antigravity-model-aliases.md).
+
+## Pipeline
+
+1. `internal/scan` discovers and parses every selected source.
+2. Parsers return `provider.UnifiedMessage` rows with source, client, model,
+   session, message key, timestamp and token breakdown.
+3. `internal/usage.Store` upserts the rows into `usage_messages`, de-duplicates
+   by ledger key, then rebuilds `daily_model_usage` for affected dates.
+4. `internal/report` answers the usage report, day detail and model detail from
+   the same ledger.
+5. `internal/summary` keeps the 0.6.x CLI summary shape.
+
+## Sources
+
+| Agent | Implementation |
+| :--- | :--- |
+| Claude Code | `claude.go` — `projects` and `transcripts` JSONL |
+| Codex | `codex.go` — rollout JSONL, cumulative counters and forks |
+| Copilot | `copilot.go` — OTEL events and session-state summaries |
+| OpenCode | `opencode.go` — 1.x/2.x SQLite databases |
+| Gemini CLI | `gemini.go` — legacy JSON and streamed JSONL |
+| Pi | `pi.go` — session JSONL |
+| Antigravity | `antigravity*.go` — local conversation SQLite/protobuf, language-server RPC and learned aliases |
+
+File-backed sources replace rows by changed session; OpenCode upserts by
+message id; Antigravity reads its cache and re-resolves raw model identities on
+every read.
+
+## Store
+
+`usage.db` keeps:
+
+- `usage_messages` — one row per ledger key with token counts, stored cost and
+  the `unpriced` flag;
+- `daily_model_usage` — the rollups the CLI summary reads;
+- `source_refresh_state` — the incremental refresh anchor;
+- `model_price_periods` / `model_releases` — see [`pricing.md`](pricing.md);
+- `app_state` — `scanned_at` and reprice time.
+
+Parser versions are unchanged from 0.6.16, so an upgrade never triggers a
+stale-parser rebuild. A 0.6.x database migrates in place with a
+`*.pre-0.7.<timestamp>.bak` backup (0600).

@@ -2,7 +2,7 @@
 
 ## Overview
 
-A Rust CLI tool with two core features:
+A Go CLI tool with two core features:
 1. **Quota** - On-demand check of remaining usage quota for coding agents
 2. **Usage** - Ledger-backed historical usage dashboard with cost estimation
 
@@ -10,20 +10,22 @@ A Rust CLI tool with two core features:
 **Current Quota Scope:** Claude Code, Codex, Antigravity
 **Maturity Note:** Historical usage is strongest today for Claude Code, Codex, and OpenCode. Gemini CLI has been deprecated and is retained for historical data analytics only.
 
-**Language:** Rust
+**Language:** Go
 **Key Principle:** On-demand by default, with optional auto-refresh. Run command → see results → exit. Configure a single auto-refresh interval (default 5m, applies to both quota and usage) in the CLI or live in the TUI Settings tab.
 
 ---
 
 ## Current State
 
-As of 2026-04-25:
+As of 0.7.0:
 
 - usage parsing writes normalized messages into a local SQLite ledger
-- the dashboard reads daily aggregates from the ledger, not from raw files in the TUI layer
-- the usage TUI is organized around `Overview`, `Models`, `Daily`, `Activity`, `Quota`, and `Settings`
-- CLI usage output includes daily, weekly, and monthly summaries
-- pricing snapshots are stored per day/model so historical cost does not silently drift
+- the dashboard reads the same report queries as the phone app, not raw files
+- the TUI is organized around `Usage`, `Quota`, `Keeper`, and `Settings`
+- `tokenpulse serve` can own scanning, quota refreshes and Keeper pings while
+  the TUI and phone app read its data
+- price periods are stored per model, and stored costs move only through
+  `tokenpulse reprice --apply`
 - quota view shows up to the top 4 windows per provider in Overview tab; all windows in per-provider detail tabs
 - each quota window renders a progress bar (with an expected-progress marker `▏`) and, when height allows, a detail line below it with the reset countdown, used/remaining percentages, and an at-current-rate pace indicator
 - activity heatmap uses solid colored cells scaled to value intensity, with a theme-invariant background/border
@@ -40,81 +42,41 @@ Known gaps:
 
 ```
 tokenpulse/
-├── Cargo.toml                    # workspace root
-├── AGENTS.md
-├── docs/
-│   └── DESIGN.md                 # this file
-│
-├── tokenpulse-core/              # library crate
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       ├── provider.rs           # UnifiedMessage, TokenBreakdown, provider traits
-│       ├── auth/                 # credential loading and token refresh
-│       ├── history/              # append-only quota + Keeper observation history
-│       ├── keeper/               # scheduled agent pings and trigger evaluation
-│       ├── quota/                # API-based quota fetching and cache
-│       ├── usage/
-│       │   ├── mod.rs            # dashboard contracts and summary builders
-│       │   ├── store.rs          # SQLite usage ledger
-│       │   ├── scanner.rs        # local discovery
-│       │   ├── claude.rs         # Claude Code parser
-│       │   ├── codex.rs          # Codex parser
-│       │   ├── copilot.rs        # GitHub Copilot OTEL parser
-│       │   ├── opencode.rs       # OpenCode parser
-│       │   ├── gemini.rs         # Gemini CLI parser
-│   │   ├── pi.rs             # PI parser
-│   │   ├── antigravity.rs    # Antigravity parser
-│   │   └── utils.rs          # model/provider normalization helpers
-│       ├── quota/
-│       │   ├── mod.rs
-│       │   ├── claude.rs
-│       │   ├── codex.rs
-│       │   ├── antigravity.rs
-│       │   └── cache.rs
-│       └── pricing/              # model pricing and cost calculation
-│
-└── tokenpulse-cli/               # binary crate
-    ├── Cargo.toml
-    └── src/
-        ├── main.rs
-        ├── commands/
-        │   ├── mod.rs
-        │   ├── quota.rs
-        │   └── usage.rs
-        └── tui/
-            ├── mod.rs
-            ├── theme.rs
-            ├── widgets/
-            │   ├── mod.rs
-            │   ├── gauge.rs
-            │   ├── heatmap.rs
-            │   ├── trend.rs
-            │   └── barchart.rs
-            └── views/
-                ├── mod.rs
-                ├── quota.rs
-                └── usage.rs
+├── main.go                       # CLI entrypoint
+├── internal/
+│   ├── cli/                      # commands and text/JSON/CSV output
+│   ├── config/                   # config.toml model and persistence
+│   ├── keeper/                   # scheduled agent pings and trigger evaluation
+│   ├── pricing/                  # catalog, price periods and reprice
+│   ├── provider/                 # shared data contracts
+│   ├── quota/                    # read-only quota fetching and cache
+│   ├── remote/                   # serve, auth, API, Tailscale, push, local client
+│   ├── report/                   # shared usage report queries
+│   ├── scan/                     # refresh orchestration
+│   ├── service/                  # systemd/launchd install
+│   ├── tui/                      # Bubble Tea dashboard
+│   ├── usage/                    # parsers and SQLite ledger
+│   └── version/                  # the single version constant
+├── web/                          # Solid + Vite phone app, embedded at build time
+├── testdata/parity/              # synthetic fixtures and Rust 0.6.16 goldens
+└── docs/
+    ├── DESIGN.md                 # this file
+    └── specs/                    # binding behavior
 ```
 
 ---
 
 ## Dependencies
 
-| Crate | Purpose |
+| Module | Purpose |
 |---|---|
-| `clap` (derive) | CLI argument parsing |
-| `reqwest` (json, rustls-tls) | HTTP for quota APIs + pricing |
-| `tokio` (rt-multi-thread) | async runtime |
-| `serde` + `serde_json` | JSON serialization |
-| `chrono` | timestamps |
-| `ratatui` + `crossterm` | TUI framework for fancy dashboards |
-| `rusqlite` (bundled) | OpenCode SQLite parsing |
-| `walkdir` | directory traversal |
-| `rayon` | parallel file parsing |
-| `dirs` | home directory paths |
-| `anyhow` | error handling |
-| `humantime` | "3h 12m" style formatting |
+| `net/http` + `gorilla/websocket` | quota/pricing HTTP and the remote event stream |
+| `modernc.org/sqlite` | pure-Go SQLite, no cgo |
+| `charmbracelet/bubbletea` + `lipgloss` | TUI framework |
+| `BurntSushi/toml` | `config.toml` |
+| `SherClockHolmes/webpush-go` | Web Push |
+| `skip2/go-qrcode` | pairing QR code |
+| `web/` (Solid + Vite) | mobile PWA embedded with `go:embed` |
 
 ---
 
@@ -238,7 +200,7 @@ back to a single line in compact cards:
   │  other          █░░░░░░░░░░░░░░░░░░░░░░░░░   3%    $2.30         │
   ╰───────────────────────────────────────────────────────────────────╯
 
-  Tab: [Overview] [Models] [Daily] [Activity] [Quota] [Settings]
+  Tab: [Usage] [Quota] [Keeper] [Settings]
   Press q to quit │ ←/→ switch tabs │ ↑/↓ move selected row/day
 ```
 
@@ -257,10 +219,9 @@ The TUI uses company color for model names and chart segments, while agent/sourc
 ## Data Models
 
 The shared data contracts (`QuotaSnapshot`, `RateWindow`, `CreditInfo`,
-`TokenBreakdown`, `UnifiedMessage`, `ModelSummary`, …) live in
-[`tokenpulse-core/src/provider.rs`](../tokenpulse-core/src/provider.rs) and
-`tokenpulse-core/src/usage/mod.rs`. Those definitions are the source of truth —
-read them there rather than maintaining a second copy here.
+`TokenBreakdown`, `UnifiedMessage`, report summaries, …) live in
+`internal/provider` and `internal/report`. Those definitions are the source of
+truth — read them there rather than maintaining a second copy here.
 
 ---
 
@@ -285,12 +246,8 @@ Credentials on macOS (ordered candidates):
   3. ~/.claude/.credentials.json
 Credentials on other platforms: ~/.claude/.credentials.json
 
-Token refresh:
-  POST https://platform.claude.com/v1/oauth/token
-  Body: grant_type=refresh_token&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&refresh_token=<token>
-  Reuse stored scopes unchanged; omit scope when metadata is absent so the original authorization is inherited.
-  Persist only to the supplying source without dropping unknown fields; discard the rotation if a newer login appears.
-  Recheck credentials after the usage response and restart once if the active login changed.
+Credentials are read-only: an expired login is reported and the user opens
+Claude Code to refresh it. No credential file is written.
 ```
 
 ### Codex Quota
@@ -303,9 +260,8 @@ Headers:
 Credentials: ~/.config/codex/auth.json or ~/.codex/auth.json
   → tokens.access_token, tokens.refresh_token
 
-Token refresh:
-  POST https://auth.openai.com/oauth/token
-  Body (form): grant_type=refresh_token&client_id=app_EMoamEEZ73f0CkXaXp7hrann&refresh_token=<token>
+Credentials are read-only: an expired login is reported and the user opens
+Codex to refresh it.
 
 Quota windows:
   primary_window and secondary_window are positional only. Emit each non-null
@@ -323,15 +279,15 @@ Quota windows:
 | PI | `~/.pi/agent/sessions/**/*.jsonl` | JSONL with header + entries |
 | GitHub Copilot | `~/.local/share/github-copilot/events.jsonl` | OTEL JSONL events |
 | Gemini CLI | `~/.gemini/tmp/**/session-*.json{,l}` | JSON + streamed JSONL session files |
-| Antigravity | `~/.local/share/tokenpulse/antigravity-cache/cache.db` | SQLite |
+| Antigravity | `~/.gemini/antigravity*/conversations/*.db` + Language Server | SQLite/protobuf and JSON-RPC |
 
-Normal incremental scans parse changed file-backed session files in parallel and replace rows for the changed sessions. OpenCode is kept on direct SQLite timestamp filtering, and Antigravity keeps the dedicated LS-backed cache because those sources already expose stronger incremental boundaries than file mtime alone.
+Normal incremental scans parse changed file-backed session files in parallel and replace rows for the changed sessions. OpenCode is kept on direct SQLite timestamp filtering, and Antigravity keeps a cache because those sources expose stronger incremental boundaries than file mtime alone.
 
 ### Pricing Source
 
 ```
-GET https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
-Cache: ~/.local/share/tokenpulse/pricing.json (24h TTL)
+models.dev plus LiteLLM; official-provider entries win over regional and
+OpenRouter fallbacks. Cache: ~/.local/share/tokenpulse/pricing-cache.json
 ```
 
 ---
@@ -339,7 +295,7 @@ Cache: ~/.local/share/tokenpulse/pricing.json (24h TTL)
 ## Implementation Phases
 
 ### Phase 1 - MVP
-- [x] Cargo workspace setup
+- [x] Go module setup
 - [x] Claude Code: auth + quota fetching
 - [x] Codex: auth + quota fetching
 - [x] Quota TUI gauge display

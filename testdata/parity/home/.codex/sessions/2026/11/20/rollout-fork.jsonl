@@ -1,0 +1,5 @@
+{"type":"session_meta","payload":{"id":"codex-fork","forked_from_id":"codex-root","model_provider":"openai","model":"gpt-5","source":{"subagent":{"thread_spawn":{"depth":1}}}}}
+{"type":"event_msg","timestamp":"2026-11-20T13:00:00.000Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":28000000,"output_tokens":700000}}}}
+{"type":"event_msg","timestamp":"2026-11-20T13:00:01.000Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":30000,"output_tokens":1000},"total_token_usage":{"input_tokens":28030000,"output_tokens":701000}}}}
+{"type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"type":"event_msg","timestamp":"2026-11-20T13:05:00.000Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":40000,"output_tokens":2000},"total_token_usage":{"input_tokens":28070000,"output_tokens":703000}}}}
