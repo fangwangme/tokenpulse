@@ -55,7 +55,8 @@ line per window (`label: percent used|remaining (resets in Xh Ym)`), credits and
 banked resets. With no data: `No usage data found in the local ledger.` on
 stderr, followed by the checked source paths.
 
-Counts use comma grouping; costs use two decimals.
+Counts use comma grouping; costs use the compact money format in
+`usage-report.md` "Numbers". JSON and CSV keep exact numbers.
 
 ## JSON
 

@@ -3,6 +3,7 @@ import { navigate, state } from "../store";
 import { fetchQuota } from "../api";
 import { QUOTA_PROVIDER_KEYS as ORDERED_PROVIDERS, scanIntervalToMs } from "../shared/defaults";
 import { quotaLevel, quotaPace } from "../shared/quota";
+import { formatMoney } from "../shared/money";
 import { FeatureDisabledNotice, Icon } from "./ui";
 import { t } from "../i18n";
 
@@ -447,8 +448,7 @@ export function QuotaPage() {
                         {/* Extra Usage (Claude) */}
                         <Show when={p.snapshot?.extraUsage}>
                           {(eu) => {
-                            const fmtAmount = (amount: number, currency: string) =>
-                              currency.toUpperCase() === "USD" ? `$${amount.toFixed(2)}` : `${amount.toFixed(2)} ${currency.toUpperCase()}`;
+                            const fmtAmount = (amount: number, currency: string) => formatMoney(amount, currency);
                             const cur = () => eu().currency ?? "USD";
                             return (
                               <div

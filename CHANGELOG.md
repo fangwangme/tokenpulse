@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Go instead of Rust**: one statically linked, cgo-free binary per platform, built for macOS and Linux. Every existing CLI command, config key, parser, quota provider, Keeper rule, notification and data file is kept. `usage.db` and `tokenpulse.db` migrate in place with a timestamped `*.pre-0.7.<timestamp>.bak` backup (0600); stored costs above 0 never move without `reprice --apply`.
 - **TUI**: the Usage tabs are rebuilt into one page with the new report; Quota, Keeper and Settings stay, and a running `serve` owns scanning and refreshing.
 - **Web build**: the binary embeds a committed “frontend not built” placeholder; CI type-checks and builds the Solid + TypeScript + Vite app before the Go binary.
+- **Money display**: amounts below $1,000 keep two decimals; $1,000 and above use three decimals with `K`, and $1,000,000 and above with `M`, on the phone, TUI and CLI, so growing totals no longer widen the layout. JSON and CSV keep exact numbers.
 
 ### Removed
 - The Rust workspace, `Cargo.toml`/`Cargo.lock`/`.cargo`, the Rust-only `pricing.json` cache (neither read nor deleted) and the `cargo install` launch hints.

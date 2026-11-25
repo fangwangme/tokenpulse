@@ -3,6 +3,7 @@ import { state } from "../store";
 import { request } from "../api";
 import { scanIntervalToMs, USAGE_AGENT_KINDS as AGENT_KEYS } from "../shared/defaults";
 import { cacheHitPercent, daysBetween, formatYMD, heatmapLayout, type UsagePreset } from "../shared/usage";
+import { formatCost } from "../shared/money";
 import type {
   UsageDayPayload,
   UsageDaySummary,
@@ -68,9 +69,7 @@ export function fmtTokens(n: number): string {
   return Math.round(n).toString();
 }
 
-export function fmtCost(c: number): string {
-  return "$" + c.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
+export const fmtCost = formatCost;
 
 export function fmtNumber(n: number): string {
   return Math.round(n).toLocaleString("en-US");

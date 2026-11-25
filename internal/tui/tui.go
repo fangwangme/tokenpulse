@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/fangwangme/tokenpulse/internal/config"
+	money "github.com/fangwangme/tokenpulse/internal/format"
 	"github.com/fangwangme/tokenpulse/internal/keeper"
 	"github.com/fangwangme/tokenpulse/internal/notification"
 	"github.com/fangwangme/tokenpulse/internal/provider"
@@ -1376,9 +1377,9 @@ func (m *model) renderQuota(width int) string {
 		if snapshot.ExtraUsage != nil {
 			limit := ""
 			if snapshot.ExtraUsage.Limit != nil {
-				limit = fmt.Sprintf(" / $%.2f", *snapshot.ExtraUsage.Limit)
+				limit = " / " + money.Cost(*snapshot.ExtraUsage.Limit)
 			}
-			fmt.Fprintf(&b, "  Extra usage: $%.2f%s %s\n", snapshot.ExtraUsage.Used, limit, snapshot.ExtraUsage.Currency)
+			fmt.Fprintf(&b, "  Extra usage: %s%s %s\n", money.Cost(snapshot.ExtraUsage.Used), limit, snapshot.ExtraUsage.Currency)
 		}
 		if len(snapshot.RateLimitResetCredits) > 0 {
 			fmt.Fprintf(&b, "  Banked resets: %d available\n", len(snapshot.RateLimitResetCredits))
@@ -1576,7 +1577,7 @@ func (m *model) renderFooter(width int) string {
 
 // ── formatting ──
 
-func formatCost(value float64) string { return fmt.Sprintf("$%.2f", value) }
+func formatCost(value float64) string { return money.Cost(value) }
 
 func formatInt(value int64) string {
 	raw := fmt.Sprintf("%d", value)

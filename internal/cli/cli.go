@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fangwangme/tokenpulse/internal/config"
+	money "github.com/fangwangme/tokenpulse/internal/format"
 	"github.com/fangwangme/tokenpulse/internal/keeper"
 	"github.com/fangwangme/tokenpulse/internal/notification"
 	"github.com/fangwangme/tokenpulse/internal/paths"
@@ -413,24 +414,24 @@ func outputText(scanner *scan.Scanner, cfg config.Config, messages, sessions int
 
 func printSummary(result summary.Summary) {
 	fmt.Println("\n=== Usage Summary ===")
-	fmt.Printf("Total cost: $%.2f\n", result.TotalCost)
+	fmt.Printf("Total cost: %s\n", money.Cost(result.TotalCost))
 	fmt.Printf("Total tokens: %s\n", formatInt(result.TotalTokens))
 	fmt.Printf("Messages: %s\n", formatInt(int64(result.MessageCount)))
 	fmt.Printf("Sessions: %s\n", formatInt(int64(result.SessionCount)))
 	fmt.Printf("Active days: %s\n", formatInt(int64(result.ActiveDays)))
-	fmt.Printf("Avg daily cost: $%.2f\n", result.AvgDailyCost)
+	fmt.Printf("Avg daily cost: %s\n", money.Cost(result.AvgDailyCost))
 	fmt.Printf("Avg daily tokens: %s\n", formatInt(int64(result.AvgDailyTokens+0.5)))
 
 	fmt.Println("\n=== By Provider ===")
 	for _, provider := range result.ByProvider {
-		fmt.Printf("%s: %s tokens | $%.2f | %s messages | %s sessions\n",
-			strings.ToUpper(provider.Provider), formatInt(provider.Tokens), provider.Cost,
+		fmt.Printf("%s: %s tokens | %s | %s messages | %s sessions\n",
+			strings.ToUpper(provider.Provider), formatInt(provider.Tokens), money.Cost(provider.Cost),
 			formatInt(int64(provider.MessageCount)), formatInt(int64(provider.SessionCount)))
 	}
 	fmt.Println("\n=== By Model ===")
 	for _, model := range result.ByModel {
-		fmt.Printf("%s [%s]: %s tokens | $%.2f | %s messages\n", model.Model, model.Source,
-			formatInt(model.Tokens), model.Cost, formatInt(int64(model.MessageCount)))
+		fmt.Printf("%s [%s]: %s tokens | %s | %s messages\n", model.Model, model.Source,
+			formatInt(model.Tokens), money.Cost(model.Cost), formatInt(int64(model.MessageCount)))
 	}
 	fmt.Println("\n=== Recent Daily Totals ===")
 	days := result.Daily
@@ -438,8 +439,8 @@ func printSummary(result summary.Summary) {
 		days = days[len(days)-365:]
 	}
 	for _, day := range days {
-		fmt.Printf("%s: %s tokens | $%.2f | %s messages | %s sessions\n", day.Date,
-			formatInt(day.TotalTokens), day.TotalCostUSD, formatInt(day.MessageCount), formatInt(day.SessionCount))
+		fmt.Printf("%s: %s tokens | %s | %s messages | %s sessions\n", day.Date,
+			formatInt(day.TotalTokens), money.Cost(day.TotalCostUSD), formatInt(day.MessageCount), formatInt(day.SessionCount))
 	}
 	fmt.Println("\n=== Weekly Totals ===")
 	weeks := result.Weekly
@@ -447,8 +448,8 @@ func printSummary(result summary.Summary) {
 		weeks = weeks[len(weeks)-8:]
 	}
 	for _, week := range weeks {
-		fmt.Printf("%s: %s tokens | $%.2f | %s messages | %s active days\n", week.Label,
-			formatInt(week.TotalTokens), week.TotalCostUSD, formatInt(week.MessageCount), formatInt(week.ActiveDays))
+		fmt.Printf("%s: %s tokens | %s | %s messages | %s active days\n", week.Label,
+			formatInt(week.TotalTokens), money.Cost(week.TotalCostUSD), formatInt(week.MessageCount), formatInt(week.ActiveDays))
 	}
 	fmt.Println("\n=== Monthly Totals ===")
 	months := result.Monthly
@@ -456,8 +457,8 @@ func printSummary(result summary.Summary) {
 		months = months[len(months)-6:]
 	}
 	for _, month := range months {
-		fmt.Printf("%s: %s tokens | $%.2f | %s messages | %s active days\n", month.Label,
-			formatInt(month.TotalTokens), month.TotalCostUSD, formatInt(month.MessageCount), formatInt(month.ActiveDays))
+		fmt.Printf("%s: %s tokens | %s | %s messages | %s active days\n", month.Label,
+			formatInt(month.TotalTokens), money.Cost(month.TotalCostUSD), formatInt(month.MessageCount), formatInt(month.ActiveDays))
 	}
 	fmt.Printf("\nLoaded %s ledger messages from %s provider(s).\n",
 		formatInt(int64(result.MessageCount)), formatInt(int64(len(result.ByProvider))))
@@ -605,8 +606,8 @@ func runRaw(date string, jsonOut bool) error {
 		fmt.Printf("No usage records found for %s.\n", target.Format("2006-01-02"))
 		return nil
 	}
-	fmt.Printf("Summary: %d models | %s tokens | $%.2f | %s msgs | %s sessions\n",
-		len(rows), formatInt(totalTokens), totalCost, formatInt(totalMessages), formatInt(sessions))
+	fmt.Printf("Summary: %d models | %s tokens | %s | %s msgs | %s sessions\n",
+		len(rows), formatInt(totalTokens), money.Cost(totalCost), formatInt(totalMessages), formatInt(sessions))
 	fmt.Printf("%-12s %-36s %-30s %-28s %12s %10s %8s\n",
 		"Source", "Raw / Served Model", "Tier / Alias", "Canonical", "Total Tkns", "Cost USD", "Calls")
 	for _, row := range rows {
@@ -616,7 +617,7 @@ func runRaw(date string, jsonOut bool) error {
 		}
 		fmt.Printf("%-12s %-36s %-30s %-28s %12s %10s %8s\n",
 			row.Source, truncate(row.RawModelID, 36), truncate(tier, 30), truncate(row.CanonicalModelID, 28),
-			formatInt(row.TotalTokens), fmt.Sprintf("$%.2f", row.CostUSD), formatInt(row.MessageCount))
+			formatInt(row.TotalTokens), money.Cost(row.CostUSD), formatInt(row.MessageCount))
 	}
 	return nil
 }

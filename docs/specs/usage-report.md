@@ -88,6 +88,12 @@ cost). Selecting a day with usage opens its day detail.
   notice whenever the range contains an unpriced model, and always say that
   cost is an estimate at public API prices that subscriptions are not billed
   by.
+- **Money display** is one format everywhere: below $1,000, `$` and two
+  decimals; from $1,000 to below $1,000,000, `$` and three decimals with a `K`
+  suffix; from $1,000,000, `$` and three decimals with an `M` suffix. Examples:
+  `$999.99`, `$1.000K`, `$9.877K`, `$10.000K`, `$1.235M`. The phone KPI cards,
+  list rows, sheets, heatmap legend and Quota extra usage, and the TUI/CLI
+  amounts all use it; machine-readable JSON and CSV keep the exact number.
 - Antigravity sources (`antigravity`, `antigravity-cli`, `antigravity-desktop`,
   `antigravity-ide`) count as one agent, `antigravity`, as the ledger already
   does.

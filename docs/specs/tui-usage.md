@@ -50,8 +50,9 @@ Top to bottom:
 
 - **Day detail** — totals (cost, tokens, input, output, cache read, cache write
   as `—` when 0, messages, sessions), then per agent its cost and per model its
-  cost, tokens, cache read and cache hit with two decimals. Cache hit is per
-  model, not a day-wide total across models.
+  cost, tokens, cache read, and cache hit as a percentage with two decimals.
+  Cache hit is per model, not a day-wide total across models. Costs use the
+  compact money format in `usage-report.md` "Numbers".
 - **Model detail** — the model in its company color, `company · range`,
   totals, last used, per-agent tokens and cost, and in a period the per-day
   bars.
