@@ -331,6 +331,8 @@ func (m *model) handleEvent(payload string) tea.Cmd {
 		m.toast = "A quota window was restored"
 		m.toastAt = time.Now()
 		m.loadReport()
+	case strings.Contains(payload, "keeper_updated"):
+		m.keeperLog = m.engine.History.Recent(20)
 	case strings.Contains(payload, "settings_updated"):
 		if cfg, err := m.opts.ConfigManager.Load(); err == nil {
 			m.opts.Config = cfg

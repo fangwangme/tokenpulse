@@ -118,7 +118,8 @@ func NewServer(opts Options) (*Server, error) {
 	}
 	logDir := filepath.Join(dataDir, "log")
 	_ = os.MkdirAll(logDir, 0o755)
-	logFile, _ := os.OpenFile(filepath.Join(logDir, "tokenpulse.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	logFile, _ := os.OpenFile(filepath.Join(logDir, "tokenpulse-"+time.Now().Format("2006-01-02")+".log"),
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	server := &Server{
 		DataDir: dataDir, Options: opts, State: NewStateStore(dataDir), Config: manager,
 		Scanner: scanner, Report: scanner.Report, Pricing: scanner.Pricing,
