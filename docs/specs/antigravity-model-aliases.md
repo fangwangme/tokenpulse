@@ -15,10 +15,14 @@ Every generation reports two identities:
 
 `resolve_antigravity_model` takes the first that applies:
 
-1. the enum's alias, when the alias table names it;
-2. the served name, unless it is a pseudo id (`gemini-default`);
-3. the raw enum (`model-placeholder-m319`);
-4. `unknown`.
+1. the enum's alias, when the alias table names it, unless the alias's label
+   names only an unversioned family (see "Unversioned families");
+2. the served name, unless it is a pseudo id (`gemini-default`) or a routing
+   slug (see "Unversioned families");
+3. the unversioned family named by the alias label or the routing slug,
+   resolved by date;
+4. the raw enum (`model-placeholder-m319`);
+5. `unknown`.
 
 Both raw identities are stored on each cached usage row (`model_enum`,
 `served_model`) and re-resolved on every read. A session whose id changes is
@@ -32,6 +36,33 @@ such as `thinking` or `high` stay; `model_id::canonical` folds them (and
 `-tiered`, `preview`) for display, and pricing applies the same spelling rules
 to catalog keys (`docs/model-pricing-mapping.md`). There are no per-model
 rules.
+
+## Unversioned families
+
+Antigravity logs planner and worker steps under names that say which Gemini
+family ran but not which version: labels such as `Orchestrator (Carbon)`,
+`Orchestrator (Argon)` or `Gemini Flash`, and routing slugs. Each such step
+merges into the official model of that family that was current on the step's
+date, instead of a synthetic row of its own (decided 2026-11-25; rejected:
+hardcoding current generation numbers, keeping separate orchestrator rows).
+
+- **Family from a routing slug**: `gemini-pro-orchestrator` → `carbon`;
+  `gemini-pro-orchestrator-g1-pro` → `argon`; `gemini-pro-orchestrator-<x>` →
+  `<x>`; `gemini-<family>-worker` and `gemini-<family>-worker-agy` →
+  `<family>`. A routing slug never becomes a model id itself.
+- **Family from a label**: a label whose only model words are a family name or
+  codename (`Carbon`, `Argon`, `Flash`, or any future element name), with role
+  words such as `Orchestrator` and tier tags such as `(High)` removed.
+- **Resolution**: among catalog models named `gemini-<major>[-<minor>]-<family>`,
+  the highest version whose `release_date` is on or before the step's date;
+  when every dated release is later, the earliest release of the family; only
+  when the family has no dated entry at all, the highest undated version. When
+  the catalog has no model of the family, the id stays `gemini-<family>` until
+  it does.
+- Release dates come from `model_releases` (`pricing.md`). When they change,
+  every ledger message whose model was resolved from an unversioned family is
+  resolved again, and its cost follows its new model.
+- Every other Antigravity identity keeps the steps above unchanged.
 
 ## Alias table
 

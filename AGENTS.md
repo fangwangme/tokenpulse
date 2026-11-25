@@ -21,6 +21,22 @@
   commit. Doc-only pushes to `main` are already skipped by CI's
   `paths-ignore`; a doc-only push to a PR branch simply runs CI.
 
+## Test Environment
+- Every run from a worktree sets `TOKENPULSE_ENV=test`,
+  `TOKENPULSE_DATA_DIR=<worktree>/.local/data/tokenpulse` and
+  `TOKENPULSE_CONFIG_PATH=<worktree>/.local/data/tokenpulse/config.toml`; the
+  binary shows `<version> (test)` and refuses to run in test mode without a
+  data directory (`docs/specs/go-rewrite.md`).
+- Seed the data directory with copies of the main data files: SQLite through
+  `sqlite3 -readonly <src> ".backup '<dst>'"`, the config and
+  `keeper_state.json` with `cp`. Never point a worktree run at
+  `~/.local/share/tokenpulse`.
+- Quota fetches read the agents' real credentials and call the providers'
+  read-only usage endpoints; that is allowed. Keeper pings spend real quota:
+  never run one from a worktree unless the user asks for that run.
+- Test `serve` uses ports `14120`/`18444` and must not touch the production
+  Tailscale Serve mapping on `8444`.
+
 ## Review Focus
 - CI format failures must be checked at the workflow/toolchain level, not just
   with local `cargo fmt`. In particular, verify `.github/workflows/*.yml`
