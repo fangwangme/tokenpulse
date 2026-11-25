@@ -45,6 +45,11 @@ neither read nor deleted (`pricing.md`).
   writes, so the stale-parser rule (a version change replaces that source's
   ledger rows with a fresh parse) never fires on upgrade. Changing a parser
   version later is a deliberate act with the same consequence as before.
+- One 0.7.0 repair runs once for Codex: every session whose rollout file is
+  readable (plain or zstd) is reparsed and its ledger rows are replaced; rows
+  of sessions whose source file is gone are kept. The run is recorded in
+  `app_state` (`codex-zstd-repair-v1`), so later runs are incremental. The
+  same session-level rule applies to `--rebuild-all` for Codex.
 - Before its first migration of a database, the program writes a WAL-safe
   backup next to it, `<name>.pre-0.7.<timestamp>.bak`, mode 0600. An existing
   backup is never overwritten, so an interrupted migration that is retried
@@ -71,8 +76,14 @@ parity check runs the Go build on the fixtures and compares:
 Costs, window order and pace are judged by `pricing.md` and `quota.md`
 instead, and Antigravity records whose model is an unversioned family by
 `antigravity-model-aliases.md`, because this release changes them on purpose;
-the fixtures list those records with their expected new ids. Any other
-difference is a port defect.
+the fixtures list those records with their expected new ids.
+
+Codex compressed rollouts are the other deliberate exception. 0.6.16 ignored
+`.jsonl.zst`/`.zst`, so its ledger lacks those sessions and can keep inherited
+fork history for rows written before fork handling existed. 0.7.0 parses them
+and replaces the affected sessions once; `expectedExtraRows` in the parity
+golden holds the compressed fork rows the Rust build never produced. Any other
+difference remains a port defect.
 
 The fixture set has at least one case for every distinction a source's parser
 makes (for example Codex cumulative counters, forks and compressed files;

@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - A stored cost above 0 is preserved byte for byte on migration and later ingests, and an explicit reprice recomputes only models whose price periods changed.
 - A data directory too long for a Unix socket no longer stops `serve`: the socket moves to `$XDG_RUNTIME_DIR` or the system temporary directory under a hash of the data directory, still mode 0600, and the TUI/CLI resolve the same path.
+- Codex now reads compressed `.jsonl.zst`/`.zst` rollouts. On upgrade, every readable Codex session is reparsed once with fork-aware history and its rows replaced, so inherited fork history no longer inflates totals; sessions whose source file is gone keep their rows. Codex historical totals fall as a result.
 - The phone day sheet shows cache hit on each model row instead of a day-wide rate across models.
 
 ## [0.6.16] - 2026-11-09

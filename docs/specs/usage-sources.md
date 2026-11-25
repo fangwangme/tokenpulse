@@ -41,9 +41,12 @@ else the model family. ANSI escapes are stripped before reading the route.
 
 ## Codex (`codex-v4`)
 
-Paths: `~/.codex/sessions`, `~/.codex/archived_sessions`, and
-`$CODEX_HOME/sessions` (`~/.codex` when unset), `**/*.jsonl`. Compressed
-`.jsonl.zst` files are not read by 0.6.16.
+Paths: `~/.codex/sessions`, `~/.codex/archived_sessions`,
+`$CODEX_HOME/sessions` and `$CODEX_HOME/archived_sessions` (`~/.codex` when
+unset), `**/*.jsonl`, `**/*.jsonl.zst` and `**/*.zst`. Compressed files are
+decoded with a pure-Go zstd decoder; no external `zstd` and no cgo. The parser
+version stays `codex-v4`: compressed support and the upgrade repair do not
+change the row shape for files the Rust release already read.
 
 `session_meta` gives the session id, `model_provider` (default `openai`) and
 model; a forked or sub-agent session (`forked_from_id`, `parent_thread_id`, or
@@ -51,9 +54,17 @@ model; a forked or sub-agent session (`forked_from_id`, `parent_thread_id`, or
 `turn_context`. Token counts come from `event_msg`/`token_count`:
 `last_token_usage` when its total is non-zero, else the delta of
 `total_token_usage`; a repeated or regressed cumulative total is skipped.
-Cached input is subtracted from input and reasoning from output, so the stored
-total is unchanged. The key is session, timestamp, model, input, output, cache
-read and reasoning.
+Cached input is subtracted from input and reasoning from output. A compacted
+step can carry only `total_tokens` with every breakdown field zero; that total
+is kept, with the unaccounted remainder in input so the ledger total is
+correct. The key is session, timestamp, model, input, output, cache read and
+reasoning.
+
+On the first 0.7.0 run against an existing ledger, every readable Codex
+session is reparsed once and its rows are replaced. Rows of sessions whose
+source file no longer exists are left untouched; `--rebuild-all` uses the same
+session-level rule for Codex. Later refreshes are incremental and include
+compressed files whose arrival time is in the window.
 
 ## Gemini (`gemini-v3`)
 

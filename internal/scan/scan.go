@@ -13,6 +13,8 @@ import (
 	"github.com/fangwangme/tokenpulse/internal/usage"
 )
 
+const codexRepairMigration = "codex-zstd-repair-v1"
+
 type Options struct {
 	Since           *time.Time
 	RefreshFrom     *time.Time
@@ -76,14 +78,32 @@ func (s *Scanner) Run(options Options) error {
 		}
 	}
 
+	codexRepair := false
+	if options.Since == nil && options.RefreshFrom == nil {
+		for _, parser := range parsers {
+			if parser.Name() != "codex" {
+				continue
+			}
+			done, err := s.Store.MigrationDone(codexRepairMigration)
+			if err != nil {
+				return err
+			}
+			codexRepair = !done
+			break
+		}
+	}
+
 	type parseTarget struct {
 		parser usage.Parser
 		since  *time.Time
+		full   bool
 	}
 	targets := make([]parseTarget, 0, len(parsers))
 	for _, parser := range parsers {
 		since := options.Since
-		if options.RebuildAll || options.RefreshFrom != nil || stale[parser.Name()] {
+		full := options.RebuildAll || options.RefreshFrom != nil || stale[parser.Name()] ||
+			(parser.Name() == "codex" && codexRepair)
+		if full {
 			since = nil
 		} else {
 			since, err = s.Store.DefaultSince(parser.Name(), options.Since)
@@ -91,7 +111,7 @@ func (s *Scanner) Run(options Options) error {
 				return err
 			}
 		}
-		targets = append(targets, parseTarget{parser, since})
+		targets = append(targets, parseTarget{parser, since, full})
 	}
 
 	type parsed struct {
@@ -121,14 +141,27 @@ func (s *Scanner) Run(options Options) error {
 		if options.RefreshFrom != nil {
 			messages = filterRange(messages, *options.RefreshFrom, *options.RefreshTo)
 		}
-		replaceSource := options.RebuildAll || options.RefreshFrom != nil || stale[result.target.parser.Name()]
+		replaceSource := options.RebuildAll || options.RefreshFrom != nil || stale[result.target.parser.Name()] ||
+			(result.target.parser.Name() == "codex" && codexRepair)
+		preserveMissing := false
+		if policy, ok := result.target.parser.(usage.SessionPreservingParser); ok {
+			preserveMissing = policy.PreserveMissingSessions()
+		}
+		replaceParsedSessions := replaceSource && preserveMissing && options.RefreshFrom == nil
 		if len(messages) == 0 {
 			if recordsRefresh {
 				_ = s.Store.RecordRefreshStarted(result.target.parser.Name(), refreshStarted)
 			}
+			if result.target.parser.Name() == "codex" && result.target.full && codexRepair {
+				if err := s.Store.MarkMigration(codexRepairMigration); err != nil {
+					return err
+				}
+			}
 			continue
 		}
-		if replaceSource {
+		if replaceParsedSessions {
+			_, err = s.Store.ReplaceParsedSessions(messages, cost)
+		} else if replaceSource {
 			_, err = s.Store.ReplaceSourceMessages(result.target.parser.Name(), options.RefreshFrom, options.RefreshTo, messages, cost)
 		} else if result.target.parser.IncrementalMode() == usage.ReplaceChangedSessions {
 			_, err = s.Store.ReplaceSessionsMessages(messages, cost)
@@ -140,6 +173,11 @@ func (s *Scanner) Run(options Options) error {
 		}
 		if recordsRefresh {
 			if err := s.Store.RecordRefreshStarted(result.target.parser.Name(), refreshStarted); err != nil {
+				return err
+			}
+		}
+		if result.target.parser.Name() == "codex" && result.target.full && codexRepair {
+			if err := s.Store.MarkMigration(codexRepairMigration); err != nil {
 				return err
 			}
 		}

@@ -292,6 +292,139 @@ func (s *Store) ReplaceSessionsMessages(messages []provider.UnifiedMessage, cost
 	return affected, tx.Commit()
 }
 
+// ReplaceParsedSessions replaces every ledger row of the sessions present in
+// messages, deleting rows the fresh parse no longer produces. Sessions with no
+// readable source file are not in messages and keep their rows. Costs of rows
+// that survive are preserved by upsertMessage; only removed rows disappear.
+func (s *Store) ReplaceParsedSessions(messages []provider.UnifiedMessage, cost CostFunc) (map[string]bool, error) {
+	if len(messages) == 0 {
+		return map[string]bool{}, nil
+	}
+	db, err := s.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	parsed := map[[3]string]map[string]bool{}
+	for _, message := range messages {
+		client := message.ClientDetail
+		if client == "" {
+			client = message.Client
+		}
+		key := [3]string{message.Client, client, message.SessionID}
+		if parsed[key] == nil {
+			parsed[key] = map[string]bool{}
+		}
+		parsed[key][message.MessageKey] = true
+	}
+
+	affected := map[string]bool{}
+	for key, keep := range parsed {
+		rows, err := tx.Query("SELECT rowid, message_key, date FROM usage_messages WHERE source = ?1 AND client = ?2 AND session_id = ?3",
+			key[0], key[1], key[2])
+		if err != nil {
+			return nil, err
+		}
+		var deleteIDs []int64
+		for rows.Next() {
+			var rowID int64
+			var messageKey, date string
+			if err := rows.Scan(&rowID, &messageKey, &date); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if !keep[messageKey] {
+				deleteIDs = append(deleteIDs, rowID)
+				affected[date] = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		if err := deleteUsageRows(tx, deleteIDs); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, message := range messages {
+		changed, err := upsertMessage(tx, message, cost)
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			affected[message.Date] = true
+		}
+	}
+	sources := map[string]bool{}
+	for _, message := range messages {
+		sources[message.Client] = true
+	}
+	if err := collapseCrossClientDuplicates(tx, sources, affected); err != nil {
+		return nil, err
+	}
+	now := time.Now().UnixMilli()
+	for date := range affected {
+		if err := rebuildDaily(tx, date, now); err != nil {
+			return nil, err
+		}
+	}
+	return affected, tx.Commit()
+}
+
+func deleteUsageRows(tx *sql.Tx, rowIDs []int64) error {
+	for start := 0; start < len(rowIDs); start += 500 {
+		end := start + 500
+		if end > len(rowIDs) {
+			end = len(rowIDs)
+		}
+		placeholders := make([]string, end-start)
+		args := make([]any, end-start)
+		for i, rowID := range rowIDs[start:end] {
+			placeholders[i] = "?"
+			args[i] = rowID
+		}
+		if _, err := tx.Exec("DELETE FROM usage_messages WHERE rowid IN ("+strings.Join(placeholders, ",")+")", args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MigrationDone reports whether a named one-time data repair has run.
+func (s *Store) MigrationDone(name string) (bool, error) {
+	db, err := s.Open()
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	var value string
+	err = db.QueryRow("SELECT value FROM app_state WHERE key = ?1", name).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// MarkMigration records a completed one-time data repair.
+func (s *Store) MarkMigration(name string) error {
+	db, err := s.Open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	_, err = db.Exec(`INSERT INTO app_state (key, value) VALUES (?1, ?2)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`, name, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
 // ReplaceSourceMessages replaces one source's ledger rows, in range or all.
 func (s *Store) ReplaceSourceMessages(source string, from, to *time.Time, messages []provider.UnifiedMessage, cost CostFunc) (map[string]bool, error) {
 	db, err := s.Open()

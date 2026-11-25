@@ -36,6 +36,7 @@ type ledgerRow struct {
 
 type golden struct {
 	RustRows          []ledgerRow                  `json:"rustRows"`
+	ExpectedExtraRows []ledgerRow                  `json:"expectedExtraRows"`
 	ExpectedOverrides map[string]map[string]string `json:"expectedOverrides"`
 	OpencodeOverride  struct {
 		Env      map[string]string `json:"env"`
@@ -45,8 +46,9 @@ type golden struct {
 
 // Protects go-rewrite.md "Parity": every usage source's fixture rows match the
 // 0.6.16 golden for identity, dedup, dates, parser versions and tokens. The
-// only allowed differences are the unversioned-family fixtures this release
-// resolves on purpose; their expected ids are listed in the golden.
+// allowed differences are the unversioned-family fixtures this release
+// resolves on purpose and the compressed Codex fork 0.6.16 never read; both
+// are listed in the golden.
 func TestParityFixtures(t *testing.T) {
 	oldLocal := time.Local
 	time.Local = time.UTC
@@ -90,7 +92,8 @@ func TestParityFixtures(t *testing.T) {
 	db := ingest(t, store, parsers)
 
 	got := readRows(t, db)
-	wantRows := applyOverrides(want.RustRows, want.ExpectedOverrides)
+	wantRows := append(applyOverrides(want.RustRows, want.ExpectedOverrides), want.ExpectedExtraRows...)
+	sortRows(wantRows)
 	assertRows(t, got, wantRows)
 	assertTotals(t, db, wantRows)
 
@@ -175,13 +178,17 @@ func readRows(t *testing.T, db *sql.DB) []ledgerRow {
 		}
 		out = append(out, row)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Source != out[j].Source {
-			return out[i].Source < out[j].Source
-		}
-		return out[i].MessageKey < out[j].MessageKey
-	})
+	sortRows(out)
 	return out
+}
+
+func sortRows(rows []ledgerRow) {
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Source != rows[j].Source {
+			return rows[i].Source < rows[j].Source
+		}
+		return rows[i].MessageKey < rows[j].MessageKey
+	})
 }
 
 func applyOverrides(rows []ledgerRow, overrides map[string]map[string]string) []ledgerRow {
@@ -199,12 +206,7 @@ func applyOverrides(rows []ledgerRow, overrides map[string]map[string]string) []
 			out[i].CanonicalModelID = value
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Source != out[j].Source {
-			return out[i].Source < out[j].Source
-		}
-		return out[i].MessageKey < out[j].MessageKey
-	})
+	sortRows(out)
 	return out
 }
 

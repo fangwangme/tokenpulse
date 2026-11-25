@@ -30,6 +30,12 @@ type Parser interface {
 	IncrementalMode() IncrementalMode
 }
 
+// SessionPreservingParser is a parser whose full parse must replace only the
+// sessions whose source files are readable, keeping rows for deleted files.
+type SessionPreservingParser interface {
+	PreserveMissingSessions() bool
+}
+
 // ClaudeParser reads Claude Code transcripts.
 type ClaudeParser struct{}
 

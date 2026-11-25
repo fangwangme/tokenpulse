@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import struct
 import sys
+from compression import zstd
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -280,8 +281,22 @@ def main():
              "last_token_usage": {"input_tokens": 7, "output_tokens": 3},
              "total_token_usage": {"input_tokens": 7, "output_tokens": 3}}}},
     ])
-    # Never read by 0.6.16; proves compressed files are ignored by both.
-    (HOME / ".codex/sessions/2026/11/20/rollout-zipped.jsonl.zst").write_bytes(b"\x28\xb5\x2f\xfdnot-a-real-zstd-stream")
+    # A compressed fork: 0.7.0 reads it and skips the inherited history.
+    compressed_fork = [
+        {"type": "session_meta", "payload": {"id": "codex-zst-fork", "forked_from_id": "codex-root",
+                                             "model_provider": "openai", "model": "gpt-5"}},
+        {"type": "event_msg", "timestamp": "2026-11-20T15:00:00.000Z",
+         "payload": {"type": "token_count", "info": {
+             "last_token_usage": {"input_tokens": 0, "output_tokens": 0},
+             "total_token_usage": {"input_tokens": 5_000_000, "output_tokens": 200_000}}}},
+        {"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}},
+        {"type": "event_msg", "timestamp": "2026-11-20T15:05:00.000Z",
+         "payload": {"type": "token_count", "info": {
+             "last_token_usage": {"input_tokens": 40_000, "output_tokens": 2_000},
+             "total_token_usage": {"input_tokens": 5_040_000, "output_tokens": 202_000}}}},
+    ]
+    (HOME / ".codex/sessions/2026/11/20/rollout-zipped.jsonl.zst").write_bytes(
+        zstd.compress("".join(json.dumps(e, separators=(",", ":")) + "\n" for e in compressed_fork).encode()))
 
     # Gemini: legacy JSON with cache-inclusive input, streamed JSONL with tool
     # tokens, a duplicate id where the later record wins, and a non-gemini row.

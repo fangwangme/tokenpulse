@@ -3,6 +3,7 @@ package usage
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,11 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/fangwangme/tokenpulse/internal/provider"
 )
 
-// CodexParser reads Codex rollout files. The 0.6.16 reference discovers plain
-// .jsonl only; compressed .jsonl.zst files were never parsed.
+// CodexParser reads Codex rollout files, plain or zstd-compressed.
 type CodexParser struct{}
 
 const codexParserVersion = "codex-v4"
@@ -25,63 +27,82 @@ func (p *CodexParser) Name() string                     { return "codex" }
 func (p *CodexParser) ParserVersion() string            { return codexParserVersion }
 func (p *CodexParser) IncrementalMode() IncrementalMode { return ReplaceChangedSessions }
 
+// PreserveMissingSessions keeps ledger rows whose source rollout file is gone;
+// only sessions that are still readable are replaced.
+func (p *CodexParser) PreserveMissingSessions() bool { return true }
+
 func (p *CodexParser) SessionPaths() []string {
 	home, _ := os.UserHomeDir()
 	codexHome := os.Getenv("CODEX_HOME")
 	if codexHome == "" {
 		codexHome = filepath.Join(home, ".codex")
 	}
-	return []string{
+	paths := []string{
 		filepath.Join(home, ".codex", "sessions"),
 		filepath.Join(home, ".codex", "archived_sessions"),
-		filepath.Join(codexHome, "sessions"),
 	}
+	if codexHome != filepath.Join(home, ".codex") {
+		paths = append(paths,
+			filepath.Join(codexHome, "sessions"),
+			filepath.Join(codexHome, "archived_sessions"),
+		)
+	}
+	return paths
 }
 
 type codexUsage struct {
-	input     int64
-	output    int64
-	cached    int64
-	reasoning int64
+	input      int64
+	output     int64
+	cached     int64
+	cacheWrite int64
+	reasoning  int64
+	total      int64
 }
 
-func (u codexUsage) total() int64 { return u.input + u.output }
+func (u codexUsage) totalTokens() int64 {
+	if u.total > 0 {
+		return u.total
+	}
+	return u.input + u.output + u.cacheWrite
+}
 
 func (u codexUsage) delta(previous codexUsage) (codexUsage, bool) {
-	if u.input < previous.input || u.output < previous.output || u.cached < previous.cached || u.reasoning < previous.reasoning {
+	if u.input < previous.input || u.output < previous.output || u.cached < previous.cached ||
+		u.cacheWrite < previous.cacheWrite || u.reasoning < previous.reasoning {
 		return codexUsage{}, false
 	}
 	return codexUsage{
 		input: u.input - previous.input, output: u.output - previous.output,
-		cached: u.cached - previous.cached, reasoning: u.reasoning - previous.reasoning,
+		cached: u.cached - previous.cached, cacheWrite: u.cacheWrite - previous.cacheWrite,
+		reasoning: u.reasoning - previous.reasoning, total: u.totalTokens() - previous.totalTokens(),
 	}, true
 }
 
 func (u codexUsage) tokens() provider.TokenBreakdown {
-	cached := u.cached
-	if cached > u.input {
-		cached = u.input
+	cached := max64(u.cached, 0)
+	if input := max64(u.input, 0); cached > input {
+		cached = input
 	}
-	if cached < 0 {
-		cached = 0
+	reasoning := max64(u.reasoning, 0)
+	if output := max64(u.output, 0); reasoning > output {
+		reasoning = output
 	}
-	reasoning := u.reasoning
-	if reasoning > u.output {
-		reasoning = u.output
-	}
-	if reasoning < 0 {
-		reasoning = 0
-	}
-	return provider.TokenBreakdown{
+	tokens := provider.TokenBreakdown{
 		Input: max64(u.input-cached, 0), Output: max64(u.output-reasoning, 0),
-		CacheRead: cached, Reasoning: reasoning,
+		CacheRead: cached, CacheWrite: max64(u.cacheWrite, 0), Reasoning: reasoning,
 	}
+	// A compacted Codex step can carry only total_tokens. Keep that total
+	// visible even when every breakdown field is zero.
+	if u.totalTokens() > tokens.Total() {
+		tokens.Input += u.totalTokens() - tokens.Total()
+	}
+	return tokens
 }
 
 func (p *CodexParser) Parse(since *time.Time) ([]provider.UnifiedMessage, error) {
 	var all []provider.UnifiedMessage
 	for _, root := range p.SessionPaths() {
-		files := DiscoverFiles(root, []string{"jsonl"}, since)
+		files := DiscoverFiles(root, []string{"jsonl", "zst"}, since)
 		all = append(all, ParseFilesParallel(files, p.parseFile)...)
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].Timestamp < all[j].Timestamp })
@@ -95,15 +116,25 @@ func (p *CodexParser) parseFile(path string) []provider.UnifiedMessage {
 	}
 	defer file.Close()
 
+	var reader io.Reader = file
+	if strings.HasSuffix(path, ".zst") {
+		decoder, err := zstd.NewReader(file, zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			return nil
+		}
+		defer decoder.Close()
+		reader = decoder
+	}
+
 	var messages []provider.UnifiedMessage
 	var currentModel string
 	var previousTotals *codexUsage
 	inheritsHistory := false
 	turnStarted := false
 	providerID := "openai"
-	sessionID := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	sessionID := codexSessionID(path)
 
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -166,7 +197,7 @@ func (p *CodexParser) parseFile(path string) []provider.UnifiedMessage {
 		}
 
 		if inheritsHistory && !turnStarted {
-			if total, ok := parseCodexUsage(info["total_token_usage"]); ok && total.total() > 0 {
+			if total, ok := parseCodexUsage(info["total_token_usage"]); ok && total.totalTokens() > 0 {
 				previousTotals = &total
 			}
 			continue
@@ -185,21 +216,21 @@ func (p *CodexParser) parseFile(path string) []provider.UnifiedMessage {
 		}
 
 		lastUsage, hasLast := parseCodexUsage(info["last_token_usage"])
-		if hasLast && lastUsage.total() == 0 {
+		if hasLast && lastUsage.totalTokens() == 0 {
 			hasLast = false
 		}
 		totalUsage, hasTotal := parseCodexUsage(info["total_token_usage"])
-		if hasTotal && totalUsage.total() == 0 {
+		if hasTotal && totalUsage.totalTokens() == 0 {
 			hasTotal = false
 		}
 
 		var usage codexUsage
 		if hasLast {
 			if previousTotals != nil && hasTotal {
-				if totalUsage.total() == previousTotals.total() {
+				if totalUsage.totalTokens() == previousTotals.totalTokens() {
 					continue
 				}
-				if totalUsage.total() < previousTotals.total() && totalUsage.total()+lastUsage.total() >= previousTotals.total() {
+				if totalUsage.totalTokens() < previousTotals.totalTokens() && totalUsage.totalTokens()+lastUsage.totalTokens() >= previousTotals.totalTokens() {
 					continue
 				}
 			}
@@ -210,7 +241,7 @@ func (p *CodexParser) parseFile(path string) []provider.UnifiedMessage {
 		} else if hasTotal && previousTotals != nil {
 			delta, ok := totalUsage.delta(*previousTotals)
 			previousTotals = &totalUsage
-			if !ok || delta.total() <= 0 {
+			if !ok || delta.totalTokens() <= 0 {
 				continue
 			}
 			usage = delta
@@ -233,6 +264,16 @@ func (p *CodexParser) parseFile(path string) []provider.UnifiedMessage {
 		messages = append(messages, msg)
 	}
 	return messages
+}
+
+func codexSessionID(path string) string {
+	name := filepath.Base(path)
+	for _, suffix := range []string{".jsonl.zst", ".jsonl", ".zst"} {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(name, suffix)
+		}
+	}
+	return strings.TrimSuffix(name, filepath.Ext(name))
 }
 
 func extractCodexModel(primary map[string]any, fallback *map[string]any) (string, bool) {
@@ -272,8 +313,13 @@ func parseCodexUsage(raw any) (codexUsage, bool) {
 	}
 	output, _ := codexInt(value, "output_tokens", "output")
 	cached, _ := codexInt(value, "cached_input_tokens", "cache_read_input_tokens", "cached_tokens")
+	cacheWrite, _ := codexInt(value, "cache_creation_input_tokens", "cache_write_input_tokens")
 	reasoning, _ := codexInt(value, "reasoning_output_tokens", "reasoning_tokens")
-	return codexUsage{input: max64(input, 0), output: max64(output, 0), cached: max64(cached, 0), reasoning: max64(reasoning, 0)}, true
+	total, _ := codexInt(value, "total_tokens")
+	return codexUsage{
+		input: max64(input, 0), output: max64(output, 0), cached: max64(cached, 0),
+		cacheWrite: max64(cacheWrite, 0), reasoning: max64(reasoning, 0), total: max64(total, 0),
+	}, true
 }
 
 func codexInt(value map[string]any, keys ...string) (int64, bool) {

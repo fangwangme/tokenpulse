@@ -12,10 +12,15 @@ go test ./internal/parity -run TestParityFixtures -v
 ```
 
 `golden.json` holds the ledger recorded from the 0.6.16 Rust binary on the
-same home. The only allowed differences are the two records listed under
-`expectedOverrides`: unversioned Antigravity families resolve on purpose in
-0.7.0. Everything else — source, client, session, key, date, timestamp, model
-ids, served model, parser version and every token count — must match.
+same home. The allowed differences are:
+
+- the two records under `expectedOverrides`: unversioned Antigravity families
+  resolve on purpose in 0.7.0;
+- the row under `expectedExtraRows`: 0.6.16 ignored the compressed Codex fork
+  fixture, while 0.7.0 reads it and skips its inherited history.
+
+Everything else — source, client, session, key, date, timestamp, model ids,
+served model, parser version and every token count — must match.
 
 The harness also runs the `OPENCODE_DB` override scenario recorded under
 `opencodeOverride`.
@@ -25,7 +30,7 @@ The harness also runs the `OPENCODE_DB` override scenario recorded under
 | Source | Cases in `home/` |
 | :--- | :--- |
 | Claude | `projects` and `transcripts`; model route hint; negative input clamped; duplicate id+request id keeps the later copy; fallback key |
-| Codex | `sessions` and `CODEX_HOME`; last usage; cumulative fallback; repeated and regressed totals; forked replay skipped until the first `turn_context`; `.jsonl.zst` ignored |
+| Codex | `sessions`, `archived_sessions`, `.jsonl.zst` and `.zst`, and `CODEX_HOME`; last usage; cumulative fallback; repeated and regressed totals; forked replay skipped until the first `turn_context`; compressed fork |
 | Gemini | legacy JSON with cache-inclusive input; JSONL tool tokens; duplicate message id where the later record wins |
 | Pi | session/model change; `responseId`; entry id; `input_tokens` spelling; numeric timestamp |
 | Copilot | OTEL event, explicit cache fields, duplicate response id; session-state shutdown summary and model change |
