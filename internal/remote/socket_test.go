@@ -30,8 +30,8 @@ func TestLongDataDirSocketMovesToRuntimeDir(t *testing.T) {
 	if socket == filepath.Join(dataDir, socketName) {
 		t.Fatalf("socket stayed in the long data directory: %s", socket)
 	}
-	if filepath.Dir(socket) != runtimeDir {
-		t.Fatalf("socket directory = %s, want %s", filepath.Dir(socket), runtimeDir)
+	if directory := filepath.Dir(socket); directory != runtimeDir && directory != os.TempDir() {
+		t.Fatalf("socket directory = %s, want %s or %s", directory, runtimeDir, os.TempDir())
 	}
 	if len(socket) > unixSocketPathLimit() {
 		t.Fatalf("socket path is still too long: %s", socket)

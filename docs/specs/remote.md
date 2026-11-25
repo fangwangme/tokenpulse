@@ -49,9 +49,9 @@ replaced at start.
 
 A Unix socket path is limited by the kernel (107 bytes on Linux, 103 on macOS).
 When `<data dir>/serve.sock` does not fit, `serve` puts the socket in
-`$XDG_RUNTIME_DIR`, or the system temporary directory when that is unset,
-named `tokenpulse-<hash>.sock` after the absolute data directory, still with
-mode 0600. The TUI and CLI resolve the path with the same rule, so a long
+`$XDG_RUNTIME_DIR`, or the system temporary directory when that is unset or
+the candidate still does not fit, named `tokenpulse-<hash>.sock` after the
+absolute data directory, still with mode 0600. The TUI and CLI resolve the path with the same rule, so a long
 `TOKENPULSE_DATA_DIR` changes neither how `serve` starts nor how they find it.
 
 ## Desktop TUI
