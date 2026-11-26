@@ -1,7 +1,8 @@
 # Quota Providers
 
-The provider sections below are the 0.6.16 mapping. `quota.md` carries the
-rules every surface shares and the read-only credential policy.
+The provider sections below describe each provider's credential source and
+response mapping. `quota.md` carries the rules every surface shares and the
+read-only credential policy.
 
 ## Credential sources
 
@@ -15,6 +16,14 @@ rules every surface shares and the read-only credential policy.
   `{ "tokens": { access_token, refresh_token, id_token, account_id } }` or
   `{ "OPENAI_API_KEY": "..." }`. Expiry comes from the access token's JWT
   `exp` with a five-minute buffer.
+- OpenCode: `$OPENCODE_DB` (a relative value is inside the OpenCode data
+  directory), else `$XDG_DATA_HOME/opencode/opencode.db` or
+  `~/.local/share/opencode/opencode.db`. Read-only SQLite table `credential`,
+  active row where `integration_id = 'opencode'`. Value shape:
+  `{ "type": "key", "key": "..." }` or
+  `{ "type": "oauth", "access": "...", "expires": <ms>, "metadata": { "orgID":
+  "...", "email": "..." } }`. `expires` is milliseconds; `0` means unknown.
+  Expired and `external` credentials are skipped.
 - Antigravity: `~/.gemini/antigravity-cli/antigravity-oauth-token` (override
   `TOKENPULSE_ANTIGRAVITY_AUTH_PATH`), then the macOS Keychain item `gemini` /
   `antigravity` (value `go-keyring-base64:<base64 JSON>`). Shape:
@@ -55,6 +64,21 @@ milliseconds when positive. Reset is `reset_at` (Unix seconds), else now plus
 `reset_after_seconds`. Plan is `plan_type`; account is the `id_token` JWT
 `email`. Reset credits keep only `status = available`. All windows have no
 family.
+
+## OpenCode Go
+
+`GET https://opencode.ai/inference/go/v1/usage` with the credential as a bearer,
+`User-Agent: tokenpulse/<version>`, an optional `x-opencode-org-id` from
+`metadata.orgID`, and a 20-second timeout.
+
+`rolling` → `5h`, 5 h; `weekly` → `Weekly`, 7 d; `monthly` → `Monthly`, 30 d.
+The labels stay short; the period behind them is what pace uses. Percent is
+`percent`, clamped to 0–100; `status = rate-limited` counts as 100. Reset is
+RFC3339. There is no plan in the response. The account is `metadata.email`,
+read only when the account display asks for it.
+
+A 401 or 403 omits the provider (expired login or no Go subscription); it is
+not an error.
 
 ## Antigravity
 

@@ -111,7 +111,8 @@ The phone may change exactly these keys, each checked against its own rule:
 | `display.refresh_quota`, `display.scan_antigravity`, `display.show_empty_providers` | boolean |
 | `display.notification_level` | the values `config set notification_level` accepts |
 | `display.notification_sound` | the TUI's fixed sound list |
-| `providers.<id>.enabled` | boolean, for `claude`, `codex`, `agy` |
+| `display.quota_provider_order` | the four quota provider IDs, each exactly once |
+| `providers.<id>.enabled` | boolean, for `claude`, `codex`, `opencode`, `agy` |
 | `keeper.enabled` (the Keeper master switch) | boolean |
 | `keeper.agents.<agent>.session_keeper_enabled`, `weekly_keeper_enabled` | boolean, for agents the Keeper drives |
 | `keeper.agents.<agent>.daily_wakeup_time` | `HH:MM`, 00:00–23:59 |
@@ -232,6 +233,11 @@ color, so the system does not blur content scrolling under it.
 `env(safe-area-inset-*)`, and the initial `theme-color` follows the light or
 dark palette background.
 
+The manifest requests `portrait`, and an installed Android app also calls
+`screen.orientation.lock("portrait")` on start where the browser allows it.
+iOS supports neither, so an iPhone keeps rotating and its landscape layout
+stays usable; TokenPulse does not block it.
+
 The window never scrolls. `html`, `body` and `#root` are fixed to the layout
 viewport with `overflow: hidden`; a page fills that viewport with a fixed
 frame, and only its inner scroll area scrolls. The page's bottom safe-area
@@ -278,7 +284,9 @@ server lists as enabled.
   to the last snapshot), Keeper (status, toggles, manual ping, recent
   executions), Settings (the editable settings, theme, language, push).
   Keeper and pairing have no counterpart in the reference design and use the
-  same components and tokens.
+  same components and tokens. Settings presents the quota providers as one
+  ordered list: each row has a drag handle and an enable switch, dragging from
+  the handle saves the order, and the switch saves independently.
 - The page header is the compact status line (last scan/refresh time) and the
   refresh button, not a second title.
 - Pages update silently on `usage_updated` / `quota_updated`; the socket

@@ -2,7 +2,7 @@
 
 `config.toml` lives in the data directory (default
 `~/.local/share/tokenpulse/config.toml`; `TOKENPULSE_CONFIG_PATH` overrides the
-file alone). The current schema version is 5. A missing file is written with
+file alone). The current schema version is 6. A missing file is written with
 the defaults. An older version is upgraded in place. Missing Keeper agents and
 empty Keeper commands are filled from the defaults. A file that does not parse
 is never overwritten: `config set`, `enable`, `disable`, the Keeper toggles and
@@ -12,12 +12,13 @@ is never overwritten: `config set`, `enable`, `disable`, the Keeper toggles and
 
 | Key | Default | Values |
 | :--- | :--- | :--- |
-| `version` | 5 | integer |
-| `providers.<id>.enabled` | true for claude, codex, antigravity | boolean |
+| `version` | 6 | integer |
+| `providers.<id>.enabled` | true for claude, codex, opencode, antigravity | boolean |
 | `providers.<id>.path` | absent | path (quota config only) |
 | `display.show_empty_providers` | false | boolean |
 | `display.theme` | `auto` | `auto`, `dark`, `light` |
 | `display.quota_display_mode` | `remaining` | `used`, `remaining` |
+| `display.quota_provider_order` | `claude`, `codex`, `opencode`, `antigravity` | quota provider IDs, each once |
 | `display.auto_refresh_secs` | 900 | 0, 60, 120, 300, 600, 900 (0 falls back to 900) |
 | `display.account_display` | `full` | `none`, `plan`, `full` |
 | `display.scan_antigravity` | true | boolean |
@@ -50,10 +51,16 @@ not configured here.
 `tokenpulse config set KEY=VALUE` accepts `quota_display_mode`,
 `show_empty_providers`, `account_display`, `theme`, `auto_refresh_interval`
 (minutes 0/1/2/5/10/15), `refresh_quota`, `notification_level`,
-`notification_sound`, `keeper_engine` and `keeper_antigravity_groups`
-(`gemini_flash`/`all`). Any other key or value is rejected with the accepted
-values. `config enable`/`disable` accept exactly `claude`, `codex` and
+`notification_sound`, `keeper_engine`, `keeper_antigravity_groups`
+(`gemini_flash`/`all`) and `quota_provider_order` (comma-separated IDs). Any
+other key or value is rejected with the accepted values. `config
+enable`/`disable` accept exactly `claude`, `codex`, `opencode` and
 `antigravity`.
+
+`quota_provider_order` is normalized before use: unknown IDs are dropped,
+duplicates collapse to the first occurrence, and missing quota providers append
+in the default order. The setting only changes display order. The phone's
+Settings list writes it through the same rule.
 
 ## Keeper state
 

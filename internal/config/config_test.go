@@ -113,6 +113,44 @@ func TestParseDefaults(t *testing.T) {
 	}
 }
 
+// Protects config.md "CLI values": quota provider order keeps known IDs once
+// and appends missing providers in the default order.
+func TestQuotaProviderOrder(t *testing.T) {
+	ids := []string{"claude", "codex", "opencode", "antigravity"}
+	wantDefault := []string{"claude", "codex", "opencode", "antigravity"}
+	cfg := Default()
+	if got := cfg.QuotaProviderOrder(ids); !sameStrings(got, wantDefault) {
+		t.Fatalf("default order = %v", got)
+	}
+
+	cfg.Display.QuotaProviderOrder = []string{"antigravity", "opencode", "missing", "claude", "claude"}
+	wantCustom := []string{"antigravity", "opencode", "claude", "codex"}
+	if got := cfg.QuotaProviderOrder(ids); !sameStrings(got, wantCustom) {
+		t.Fatalf("custom order = %v, want %v", got, wantCustom)
+	}
+
+	parsed, err := Parse("[display]\nquota_provider_order = [\"opencode\", \"claude\"]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantParsed := []string{"opencode", "claude", "codex", "antigravity"}
+	if got := parsed.QuotaProviderOrder(ids); !sameStrings(got, wantParsed) {
+		t.Fatalf("parsed order = %v, want %v", got, wantParsed)
+	}
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // Protects config.md "CLI values": Keeper agents are only the documented three.
 func TestKeeperDefaults(t *testing.T) {
 	agents := DefaultKeeperAgents()
