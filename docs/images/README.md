@@ -4,8 +4,8 @@ The two images in this directory show the mobile web dashboard. They are
 generated from a deterministic synthetic dataset and do not contain a real
 account, real usage, or real quota values.
 
-- `mobile-usage.png` — phone Usage, 7 days, By model
-- `mobile-quota.png` — phone Quota, OpenCode Go card
+- `mobile-usage.png` — phone Usage, first screen, 7 days, By model
+- `mobile-quota.png` — phone Quota, first screen
 
 ## Regenerate
 
@@ -30,9 +30,9 @@ TOKENPULSE_CONFIG_PATH=$PWD/.local/data/tokenpulse/config.toml \
 ```
 
 Open the pairing URL from the banner in a 393×852 phone viewport and enable
-subscription quota in Settings. Use 7 days and By model for the usage image,
-and scroll to the OpenCode Go card for the quota image. Keep the viewport at
-one phone screen; do not stitch a long page.
+subscription quota in Settings. Use 7 days and By model for the usage image.
+Both images are the first screen with the bottom tab bar visible; do not scroll
+and do not stitch a long page.
 
 The demo config starts with `display.refresh_quota=false` and
 `display.scan_antigravity=false`, so the test server does not contact a real
