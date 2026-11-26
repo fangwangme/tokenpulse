@@ -5,6 +5,23 @@ quota across AI coding agents. It stores parsed sessions in a local SQLite
 ledger and exposes the data through a terminal dashboard, a mobile web app
 over Tailscale, and plain-text, JSON, or CSV output.
 
+## Screenshots
+
+**Desktop (TUI)**
+
+![TokenPulse usage dashboard](docs/images/tui-usage.png)
+
+![TokenPulse quota dashboard](docs/images/tui-quota.png)
+
+**Mobile**
+
+<p>
+  <img src="docs/images/mobile-usage.png" width="320" alt="TokenPulse mobile usage, 7 days by model">
+  <img src="docs/images/mobile-quota.png" width="320" alt="TokenPulse mobile quota">
+</p>
+
+The screenshots use synthetic demo data, not a real account.
+
 ## Install
 
 TokenPulse reads agent session data from the local filesystem, so install it on
@@ -81,6 +98,7 @@ go install github.com/fangwangme/tokenpulse@latest
 |---|---|
 | Claude Code | ✅ |
 | Codex | ✅ |
+| OpenCode Go | ✅ |
 | Antigravity | ✅ |
 
 > Notes:
@@ -89,6 +107,9 @@ go install github.com/fangwangme/tokenpulse@latest
 > - Antigravity usage syncs with running Language Servers (GUI/CLI) and
 >   maintains a local raw cache under
 >   `~/.local/share/tokenpulse/antigravity-cache/`.
+> - OpenCode Go reads the active credential from OpenCode's own database and
+>   calls the Go usage endpoint. It never copies or refreshes the credential,
+>   and it stays hidden when the account has no Go subscription.
 
 ## Features
 
@@ -98,8 +119,9 @@ go install github.com/fangwangme/tokenpulse@latest
 - **Remote phone mode** — `tokenpulse serve` owns scanning and quota refreshes,
   serves a mobile PWA over Tailscale Serve HTTPS, and syncs live with the TUI
   over a local Unix socket
-- **Read-only quota tracking** — checks Claude Code, Codex, and Antigravity
-  quota without writing or refreshing credentials; shows remaining/used bars,
+- **Read-only quota tracking** — checks Claude Code, Codex, OpenCode Go, and
+  Antigravity quota without writing or refreshing credentials; shows
+  remaining/used bars,
   reset times, pace, extra usage, and reset credits (off by default; enable it
   in Settings or with `tokenpulse config set refresh_quota=true`)
 - **Session Keeper** — optional scheduled heartbeats for Claude Code, Codex,
@@ -152,7 +174,8 @@ tokenpulse --csv models
 - Keeper: `e` toggles the engine, `Enter`/`Space` toggles the 5h keeper,
   `w` toggles the weekly keeper, `p` sends a test ping.
 - Settings: `↑` / `↓` moves, `Enter`/`Space` changes the row; the quota-provider
-  row cycles Claude → Codex → Antigravity.
+  row cycles Claude → Codex → OpenCode Go → Antigravity, following the order
+  set on the phone.
 - `b` cycles the theme; `Esc` closes an overlay without quitting.
 
 ### Filters & maintenance
@@ -190,9 +213,12 @@ tokenpulse --log
 # Show current config
 tokenpulse config show
 
-# Enable / disable quota providers (claude, codex, antigravity)
+# Enable / disable quota providers (claude, codex, opencode, antigravity)
 tokenpulse config enable claude
 tokenpulse config disable antigravity
+
+# Provider card order (the phone's Settings list edits the same value)
+tokenpulse config set quota_provider_order=opencode,claude,codex,antigravity
 
 # Quota display mode: "remaining" (default) or "used"
 tokenpulse config set quota_display_mode=used
