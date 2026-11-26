@@ -78,7 +78,7 @@ export function QuotaPage() {
     on(
       () => state.reconnectNonce,
       () => {
-        if (state.configReady) void fetchQuota();
+        if (state.configReady && state.quotaEnabled) void fetchQuota();
       },
       { defer: true },
     ),
