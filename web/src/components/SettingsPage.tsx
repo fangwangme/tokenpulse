@@ -1,7 +1,7 @@
 import { createSignal, For, onMount, Show } from "solid-js";
 import { patchSettings, getPushKey, addPushSubscription, removePushSubscription } from "../api";
 import { createScrollNavHandler, saveLocale, saveTheme, setting, showToast, state } from "../store";
-import { QUOTA_PROVIDER_KEYS } from "../shared/defaults";
+import { ProviderOrderList } from "./ProviderOrderList";
 import { LOCALES, setLocale, t, type LocalePref } from "../i18n";
 import type { ThemeMode } from "../types";
 
@@ -252,27 +252,7 @@ export function SettingsPage() {
           <p class="note">{t("settings.refreshIntervalHint")}</p>
 
           <div class="sec">{t("settings.queriedProviders")}</div>
-          <div class="tp-card" style={{ overflow: "hidden" }}>
-            <For each={QUOTA_PROVIDER_KEYS}>
-              {(provider) => {
-                const enabled = () => state.quotaProviders[provider] !== false;
-                return (
-                  <button
-                    class="li"
-                    onClick={() =>
-                      void update(`providers.${provider === "antigravity" ? "agy" : provider}.enabled`, !enabled())
-                    }
-                  >
-                    <div class="tx">
-                      {provider === "claude" ? "Claude Code" : provider === "codex" ? "Codex" : "Antigravity"}
-                      <small>{enabled() ? t("settings.providerActive") : t("settings.providerDisabled")}</small>
-                    </div>
-                    <span class={`tg${enabled() ? "" : " off"}`} />
-                  </button>
-                );
-              }}
-            </For>
-          </div>
+          <ProviderOrderList />
 
           <div class="sec">{t("settings.notifications")}</div>
           <div class="tp-card" style={{ overflow: "hidden" }}>

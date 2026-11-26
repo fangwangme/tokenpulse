@@ -6,8 +6,8 @@ TokenPulse is a single Go binary that tracks AI coding agent usage, checks
 subscription quota, optionally runs Session Keeper pings, and exposes the data
 through a TUI, CLI, and mobile web app.
 
-- **Quota** — on-demand, read-only quota checks for Claude Code, Codex, and
-  Antigravity.
+- **Quota** — on-demand, read-only quota checks for Claude Code, Codex,
+  OpenCode Go, and Antigravity.
 - **Usage** — a local SQLite ledger of session usage, priced from an
   official-provider-first catalog and shared across the TUI, CLI, and phone app.
 - **Remote mode** — `tokenpulse serve` owns scanning, quota refreshes, and

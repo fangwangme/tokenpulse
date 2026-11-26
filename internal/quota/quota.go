@@ -9,8 +9,8 @@ import (
 	"github.com/fangwangme/tokenpulse/internal/provider"
 )
 
-// ProviderIDs in display order.
-var ProviderIDs = []string{"claude", "codex", "antigravity"}
+// ProviderIDs in default display order.
+var ProviderIDs = []string{"claude", "codex", "opencode", "antigravity"}
 
 func IsProvider(id string) bool {
 	for _, provider := range ProviderIDs {
@@ -27,6 +27,8 @@ func DisplayName(id string) string {
 		return "CLAUDE CODE"
 	case "codex":
 		return "CODEX"
+	case "opencode":
+		return "OPENCODE GO"
 	case "antigravity":
 		return "ANTIGRAVITY"
 	default:

@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -185,12 +184,18 @@ func (m *model) loadQuota() {
 func (m *model) applyQuotaView(view rt.QuotaView) {
 	m.snapshots = nil
 	m.quotaErrors = map[string]string{}
+	showEmpty := m.opts.Config.Display.ShowEmptyProviders
 	for _, entry := range view.Providers {
+		if !entry.Enabled {
+			continue
+		}
 		if entry.Error != nil && entry.Error.Message != "" {
 			m.quotaErrors[entry.Provider] = entry.Error.Message
 		}
 		if entry.Snapshot != nil {
-			m.upsertSnapshot(*entry.Snapshot)
+			m.snapshots = append(m.snapshots, *entry.Snapshot)
+		} else if showEmpty {
+			m.snapshots = append(m.snapshots, provider.QuotaSnapshot{Provider: entry.Provider})
 		}
 	}
 }
@@ -354,7 +359,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case configMsg:
 		m.opts.Config = msg.cfg
-		return m, nil
+		return m, m.fetchQuotaCmd()
 	case webToggleMsg:
 		m.webBusy = false
 		if msg.clearClient {
@@ -802,7 +807,7 @@ func (m *model) changeSetting() tea.Cmd {
 	case 10:
 		update = map[string]any{"keeper.agents.agy.weekly_all_groups": !cfg.Keeper.AntigravityAllGroups()}
 	case 11:
-		ids := []string{"claude", "codex", "antigravity"}
+		ids := cfg.QuotaProviderOrder(quota.ProviderIDs)
 		id := ids[m.providerCursor%len(ids)]
 		m.providerCursor = (m.providerCursor + 1) % len(ids)
 		update = map[string]any{"providers." + id + ".enabled": !cfg.Providers[id].Enabled}
@@ -911,32 +916,6 @@ func (m *model) refresh() tea.Cmd {
 			return toastMsg{fmt.Sprintf("Showing cache; retry in %ds", result.RetryAfter)}
 		}
 		return toastMsg{"Refresh complete"}
-	}
-}
-
-func (m *model) upsertSnapshot(snapshot provider.QuotaSnapshot) {
-	for i := range m.snapshots {
-		if m.snapshots[i].Provider == snapshot.Provider {
-			m.snapshots[i] = snapshot
-			return
-		}
-	}
-	m.snapshots = append(m.snapshots, snapshot)
-	sort.SliceStable(m.snapshots, func(i, j int) bool {
-		return providerOrder(m.snapshots[i].Provider) < providerOrder(m.snapshots[j].Provider)
-	})
-}
-
-func providerOrder(provider string) int {
-	switch provider {
-	case "claude":
-		return 0
-	case "codex":
-		return 1
-	case "antigravity":
-		return 2
-	default:
-		return 3
 	}
 }
 
@@ -1297,7 +1276,7 @@ func (m *model) renderQuota(width int) string {
 		if m.opts.Config.Display.AccountDisplay.ShowsAccount() && snapshot.Account != "" {
 			account = "  " + snapshot.Account
 		}
-		b.WriteString(style.Render(strings.ToUpper(snapshot.Provider)+plan+account) + "\n")
+		b.WriteString(style.Render(quota.DisplayName(snapshot.Provider)+plan+account) + "\n")
 		if err := m.quotaErrors[snapshot.Provider]; err != "" {
 			b.WriteString(s.error.Render("  "+err) + "\n")
 		}
@@ -1466,7 +1445,7 @@ func (m *model) renderSettings(width int) string {
 
 func enabledProviderLabel(cfg config.Config) string {
 	var enabled []string
-	for _, id := range []string{"claude", "codex", "antigravity"} {
+	for _, id := range cfg.QuotaProviderOrder(quota.ProviderIDs) {
 		if cfg.Providers[id].Enabled {
 			enabled = append(enabled, id)
 		}

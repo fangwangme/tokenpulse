@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-11-27
+
+### Added
+- **OpenCode Go quota**: reads the active credential from OpenCode's local SQLite database and displays the Go plan's `5h`, `Weekly`, and `Monthly` windows. Credentials are never copied, refreshed, or written; accounts without a Go subscription stay hidden and clear any stale cache instead of showing an error.
+- **Configurable quota provider order**: config schema 6 adds `display.quota_provider_order` (default: Claude Code, Codex, OpenCode Go, Antigravity). The web app's Settings page combines drag-to-reorder and per-provider enable switches in one list, and the TUI and CLI (`--json`, text summary, `tokenpulse config set quota_provider_order=...`) follow the same order.
+
+### Changed
+- **Web-focused README**: leads with the mobile web dashboard and two synthetic mobile screenshots (Usage on 7 days by model, and Quota), removing the old TUI screenshots.
+- **Quota page header**: removed the redundant top-left `QUOTA` label in the web app, leaving the compact refresh status aligned to the right.
+
+### Fixed
+- **Android PWA orientation**: the web manifest requests portrait and an installed Android app calls `screen.orientation.lock("portrait")` where supported, while iOS keeps rotating with its existing landscape layout.
+
 ## [0.7.1] - 2026-11-26
 
 ### Fixed

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -276,8 +277,9 @@ func (r *Runtime) UsageModel(model, from, to string, agents []string) (report.Mo
 
 func (r *Runtime) Quota() QuotaView {
 	cfg, _ := r.Config.Load()
+	order := cfg.QuotaProviderOrder(quota.ProviderIDs)
 	enabled := map[string]bool{}
-	for _, id := range cfg.EnabledQuotaProviders(quota.ProviderIDs) {
+	for _, id := range cfg.EnabledQuotaProviders(order) {
 		enabled[id] = true
 	}
 	r.mu.Lock()
@@ -292,8 +294,8 @@ func (r *Runtime) Quota() QuotaView {
 	fetchedAt := r.lastFetchedAt
 	r.mu.Unlock()
 
-	providers := make([]QuotaProviderView, 0, len(quota.ProviderIDs))
-	for _, id := range quota.ProviderIDs {
+	providers := make([]QuotaProviderView, 0, len(order))
+	for _, id := range order {
 		view := QuotaProviderView{Provider: id, Enabled: enabled[id]}
 		if snapshot, ok := snapshots[id]; ok {
 			copy := snapshot
@@ -675,12 +677,15 @@ func (r *Runtime) doRefresh(flags refreshFlags) {
 // FetchersFor builds the configured read-only quota fetchers.
 func FetchersFor(cfg config.Config) []quota.Fetcher {
 	var fetchers []quota.Fetcher
-	for _, id := range cfg.EnabledQuotaProviders(quota.ProviderIDs) {
+	order := cfg.QuotaProviderOrder(quota.ProviderIDs)
+	for _, id := range cfg.EnabledQuotaProviders(order) {
 		switch id {
 		case "claude":
 			fetchers = append(fetchers, quota.NewClaudeFetcher(cfg.Display.AccountDisplay.ShowsAccount()))
 		case "codex":
 			fetchers = append(fetchers, quota.NewCodexFetcher())
+		case "opencode":
+			fetchers = append(fetchers, quota.NewOpenCodeFetcher(cfg.Display.AccountDisplay.ShowsAccount()))
 		case "antigravity":
 			fetchers = append(fetchers, quota.NewAntigravityFetcher())
 		}
@@ -691,7 +696,19 @@ func FetchersFor(cfg config.Config) []quota.Fetcher {
 func (r *Runtime) ApplyQuotaResults(results []quota.FetchResult) {
 	r.mu.Lock()
 	var recoveries []notification.Recovery
+	var absent []string
 	for _, result := range results {
+		if result.Absent {
+			delete(r.snapshots, result.Provider)
+			delete(r.quotaErrors, result.Provider)
+			for key := range r.exhausted {
+				if strings.HasPrefix(key, result.Provider+":") {
+					delete(r.exhausted, key)
+				}
+			}
+			absent = append(absent, result.Provider)
+			continue
+		}
 		if result.Snapshot != nil {
 			r.snapshots[result.Provider] = *result.Snapshot
 			delete(r.quotaErrors, result.Provider)
@@ -717,6 +734,12 @@ func (r *Runtime) ApplyQuotaResults(results []quota.FetchResult) {
 	}
 	fetchedAt := r.lastFetchedAt
 	r.mu.Unlock()
+
+	for _, id := range absent {
+		if err := r.Cache.Forget(id); err != nil && r.Logger != nil {
+			r.Logger.Printf("clear quota cache %s: %v", id, err)
+		}
+	}
 
 	for _, recovery := range recoveries {
 		r.Events.Publish("quota_recovered", map[string]any{

@@ -4,8 +4,15 @@ import type { UsagePreset } from "../types";
 
 export type UsageScanInterval = "1m" | "2m" | "5m" | "10m" | "15m";
 
-/** Quota providers in display order, in TokenPulse's internal names. */
-export const QUOTA_PROVIDER_KEYS = ["claude", "codex", "antigravity"] as const;
+/** Quota providers in default display order, in TokenPulse's internal names. */
+export const QUOTA_PROVIDER_KEYS = ["claude", "codex", "opencode", "antigravity"] as const;
+
+export const QUOTA_PROVIDER_NAMES: Record<string, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  opencode: "OpenCode Go",
+  antigravity: "Antigravity",
+};
 
 /** The seven agents the API can report. */
 export const USAGE_AGENT_KINDS = ["claude", "codex", "copilot", "gemini", "opencode", "pi", "agy"] as const;

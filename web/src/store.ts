@@ -1,6 +1,6 @@
 import { createMutable } from "solid-js/store";
 import type { QuotaProviderState, Route, ThemeMode } from "./types";
-import type { UsageScanInterval } from "./shared/defaults";
+import { QUOTA_PROVIDER_KEYS, type UsageScanInterval } from "./shared/defaults";
 import type { LocalePref } from "./i18n";
 
 export interface KeeperExecution {
@@ -48,6 +48,7 @@ interface AppState {
   quotaUpdated: number | null;
   quotaSnapshots: QuotaProviderState[];
   quotaProviders: Record<string, boolean>;
+  quotaProviderOrder: string[];
   quotaDisplay: "remaining" | "used";
   accountDisplay: "none" | "plan" | "full";
   quotaShowAccount: boolean;
@@ -86,7 +87,8 @@ export const state = createMutable<AppState>({
   quotaLoading: false,
   quotaUpdated: null,
   quotaSnapshots: [],
-  quotaProviders: { claude: true, codex: true, antigravity: true },
+  quotaProviders: { claude: true, codex: true, opencode: true, antigravity: true },
+  quotaProviderOrder: [...QUOTA_PROVIDER_KEYS],
   quotaDisplay: "remaining",
   accountDisplay: "full",
   quotaShowAccount: true,

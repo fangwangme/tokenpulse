@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fangwangme/tokenpulse/internal/config"
+	"github.com/fangwangme/tokenpulse/internal/provider"
+	"github.com/fangwangme/tokenpulse/internal/quota"
 	rt "github.com/fangwangme/tokenpulse/internal/runtime"
 	"github.com/fangwangme/tokenpulse/internal/summary"
 	"github.com/fangwangme/tokenpulse/internal/usage"
@@ -50,6 +53,29 @@ func TestDailyCSVUsesEscaping(t *testing.T) {
 
 // Protects cli.md "remote status": the timestamp is human-readable, not a bare
 // epoch.
+// Protects quota.md "Order": cached snapshots follow display.quota_provider_order.
+func TestCurrentSnapshotsFollowsConfiguredOrder(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TOKENPULSE_DATA_DIR", dir)
+	cfg := config.Default()
+	cfg.Display.QuotaProviderOrder = []string{"opencode", "claude", "codex", "antigravity"}
+	cache := quota.NewCache(dir)
+	now := time.Now().UTC()
+	for _, id := range quota.ProviderIDs {
+		if err := cache.Save(id, now, &provider.QuotaSnapshot{Provider: id, FetchedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var got []string
+	for _, snapshot := range currentSnapshots(cfg) {
+		got = append(got, snapshot.Provider)
+	}
+	if want := "opencode,claude,codex,antigravity"; strings.Join(got, ",") != want {
+		t.Fatalf("order = %v, want %s", got, want)
+	}
+}
+
 func TestDisplayEpoch(t *testing.T) {
 	if got := displayEpoch(0); got != "never" {
 		t.Fatalf("zero = %q", got)

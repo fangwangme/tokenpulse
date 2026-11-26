@@ -1,10 +1,10 @@
 # Quota
 
 Quota is how much of each subscription's rate-limit windows is used, for the
-agents whose provider exposes it: Claude Code, Codex and Antigravity. The
-provider endpoints, response mapping, account display and observation history
-are described in the provider sections of this spec (ported from the Rust
-release); this file fixes the rules every surface shares.
+agents whose provider exposes it: Claude Code, Codex, OpenCode Go and
+Antigravity. The provider endpoints, response mapping, account display and
+observation history are described in `quota-providers.md`; this file fixes the
+rules every surface shares.
 
 ## Snapshot
 
@@ -29,7 +29,10 @@ data misled.
 
 ## Order
 
-Providers are listed Claude, Codex, Antigravity.
+Providers are listed in `display.quota_provider_order` (config.md), defaulting
+to Claude, Codex, OpenCode Go, Antigravity. The setting controls display order
+on every surface; it never changes which providers are enabled or how they are
+fetched.
 
 Windows are grouped by `family` in the order the provider first names each
 family; windows without a family form one group of their own in the same way.
@@ -74,7 +77,7 @@ out, and a long-running `serve` would make that likely; the gain is only a
 quota figure. This replaces the Claude, Codex and Antigravity token refresh of
 the Rust releases, including Antigravity's copy of a Keychain credential into
 `~/.gemini/antigravity-cli/antigravity-oauth-token`: TokenPulse writes no file
-of an agent's at all.
+of an agent's at all, and OpenCode Go follows the same read-only rule.
 
 - Credential sources are read in their existing order. A source whose access
   token has expired is skipped; when every source is expired or the usage call
@@ -88,6 +91,12 @@ of an agent's at all.
 - Antigravity's `agy` CLI source runs even when the cached token file has
   expired, because the CLI refreshing its own login is the agent acting on its
   own credential.
+- OpenCode Go is the exception to the failure rule: a missing or expired
+  OpenCode credential, a 401/403 from its usage endpoint (no Go subscription),
+  or an empty usage payload omits the provider instead of failing, and clears
+  any previously cached snapshot or error for it. Most OpenCode users have a
+  credential without a Go subscription, so an error card would be noise.
+  Network, parse and unexpected-HTTP errors still fail normally.
 
 ## Fetching and failures
 

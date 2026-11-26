@@ -10,6 +10,7 @@ Binding behavior is in [`../specs/quota.md`](../specs/quota.md) and
 | :--- | :--- |
 | Claude | macOS Keychain or `~/.claude/.credentials.json`, then `GET /api/oauth/usage` |
 | Codex | `$CODEX_HOME/auth.json`, `~/.config/codex/auth.json` or `~/.codex/auth.json`, then the `wham` usage and reset-credit endpoints |
+| OpenCode Go | `$OPENCODE_DB`, or `opencode.db` / `opencode-<channel>.db` under `${XDG_DATA_HOME:-~/.local/share}/opencode/`, then `GET https://opencode.ai/inference/go/v1/usage` |
 | Antigravity | running language server, `agy` CLI ≥1.4, then Cloud Code with the cached OAuth token |
 
 Credentials are never refreshed or written. An expired login is returned as a

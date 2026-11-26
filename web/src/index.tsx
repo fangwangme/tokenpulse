@@ -34,7 +34,13 @@ function fitToVisualViewport(): void {
 
 if (typeof window !== "undefined") {
   const standalone = window.matchMedia("(display-mode: standalone)").matches || Boolean((navigator as any).standalone);
-  if (standalone) document.documentElement.setAttribute("data-mode", "standalone");
+  if (standalone) {
+    document.documentElement.setAttribute("data-mode", "standalone");
+    // Best effort: Android installed apps can lock, iOS rejects this and the
+    // manifest orientation, where the existing landscape layout stays usable.
+    const orientation = screen.orientation as ScreenOrientation & { lock?: (value: string) => Promise<void> };
+    void orientation?.lock?.("portrait").catch(() => {});
+  }
   window.addEventListener("focusin", fitToVisualViewport);
   window.addEventListener("focusout", () => {
     // Focus may be moving to another field; act on where it lands.

@@ -121,6 +121,17 @@ func (c *Cache) Save(providerID string, observedAt time.Time, snapshot *provider
 	return c.RecordSnapshot(providerID, observedAt, snapshot)
 }
 
+// Forget drops the provider's cached snapshot but keeps observation history.
+func (c *Cache) Forget(providerID string) error {
+	db, err := c.open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	_, err = db.Exec(`DELETE FROM quota_cache WHERE provider = ?1`, providerID)
+	return err
+}
+
 // RecordSnapshot appends one observation row per window plus credits.
 func (c *Cache) RecordSnapshot(providerID string, observedAt time.Time, snapshot *provider.QuotaSnapshot) error {
 	db, err := c.open()
@@ -255,16 +266,19 @@ CREATE INDEX IF NOT EXISTS idx_keeper_executions_agent_time ON keeper_executions
 	return nil
 }
 
-// FetchResult is one provider's poll outcome: a snapshot, an error, or both.
+// FetchResult is one provider's poll outcome: a snapshot, an error, both, or
+// an explicit absence that clears anything a previous poll published.
 type FetchResult struct {
 	Provider  string
 	Snapshot  *provider.QuotaSnapshot
 	Err       error
+	Absent    bool
 	FetchedAt time.Time
 }
 
-// FetchAll polls every enabled provider in parallel, saves successes and
-// keeps the previous snapshot of a failed provider.
+// FetchAll polls every enabled provider in parallel, saves successes, keeps
+// the previous snapshot of a failed provider, and marks providers that report
+// nothing as absent.
 func FetchAll(dataDir string, fetchers []Fetcher) []FetchResult {
 	cache := NewCache(dataDir)
 	type outcome struct {
@@ -285,6 +299,13 @@ func FetchAll(dataDir string, fetchers []Fetcher) []FetchResult {
 		result := <-results
 		fetcher := fetchers[result.index]
 		entry := FetchResult{Provider: fetcher.ProviderID(), Err: result.err, FetchedAt: now}
+		if result.err == nil && result.snapshot == nil {
+			// The provider has nothing to report (for example, no subscription
+			// on this account); the runtime clears any data an earlier poll left.
+			entry.Absent = true
+			out[result.index] = entry
+			continue
+		}
 		if result.snapshot != nil {
 			Normalize(result.snapshot)
 			entry.Snapshot = result.snapshot

@@ -1,18 +1,12 @@
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { createScrollNavHandler, setting, state } from "../store";
 import { fetchQuota } from "../api";
-import { QUOTA_PROVIDER_KEYS as ORDERED_PROVIDERS, scanIntervalToMs } from "../shared/defaults";
+import { QUOTA_PROVIDER_KEYS as ORDERED_PROVIDERS, QUOTA_PROVIDER_NAMES, scanIntervalToMs } from "../shared/defaults";
 import { quotaLevel, quotaPace } from "../shared/quota";
 import { formatMoney } from "../shared/money";
 import { FeatureDisabledNotice, Icon } from "./ui";
 import { t } from "../i18n";
 
-
-const PROVIDER_NAMES: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex",
-  antigravity: "Antigravity",
-};
 
 export function formatDurationShort(ms: number): string {
   const min = Math.max(0, Math.floor(ms / 60000));
@@ -97,19 +91,19 @@ export function QuotaPage() {
 
   const used = () => state.quotaDisplay === "used";
 
+  const orderedProviders = () =>
+    state.quotaProviderOrder.length > 0 ? state.quotaProviderOrder : [...ORDERED_PROVIDERS];
+
   const enabledProviderKeys = () => {
-    const list: (typeof ORDERED_PROVIDERS)[number][] = [];
-    for (const key of ORDERED_PROVIDERS) {
-      if (state.quotaProviders[key] !== false) list.push(key);
-    }
-    return list.length > 0 ? list : (ORDERED_PROVIDERS as readonly (typeof ORDERED_PROVIDERS)[number][]);
+    const list = orderedProviders().filter((key) => state.quotaProviders[key] !== false);
+    return list.length > 0 ? list : orderedProviders();
   };
 
   const showEmptyProviders = () => setting("display.show_empty_providers", false);
 
   const enabledProviders = () => {
     const list: typeof state.quotaSnapshots = [];
-    for (const key of ORDERED_PROVIDERS) {
+    for (const key of orderedProviders()) {
       if (state.quotaProviders[key] === false) continue;
       const found = state.quotaSnapshots.find((s) => s.provider === key);
       if (found) {
@@ -130,22 +124,19 @@ export function QuotaPage() {
       <div class="scroll" onScroll={onScroll}>
         <div class="tp-page-body">
           <Show when={state.quotaEnabled} fallback={<FeatureDisabledNotice message={t("quota.disabledNotice")} />}>
-          <div
-            style={{
-              display: "flex",
-              "align-items": "center",
-              "justify-content": "space-between",
-              gap: "10px",
-              padding: "2px 2px 6px",
-              "font-size": "12px",
-              color: "var(--muted)",
-              "font-variant-numeric": "tabular-nums",
-            }}
-          >
-            <span style={{ "font-size": "12px", "font-weight": 650, "letter-spacing": ".04em", "text-transform": "uppercase", color: "var(--faint)" }}>
-              {t("home.quota")}
-            </span>
-            <Show when={isLoading() || state.quotaUpdated}>
+          <Show when={isLoading() || state.quotaUpdated}>
+            <div
+              style={{
+                display: "flex",
+                "align-items": "center",
+                "justify-content": "flex-end",
+                gap: "10px",
+                padding: "2px 2px 6px",
+                "font-size": "12px",
+                color: "var(--muted)",
+                "font-variant-numeric": "tabular-nums",
+              }}
+            >
               <span
                 style={{
                   display: "inline-flex",
@@ -168,8 +159,8 @@ export function QuotaPage() {
                   ? (refreshing() ? t("quota.refreshing") : t("quota.loading"))
                   : t("quota.refreshedAt", { time: formatTime(state.quotaUpdated!) })}
               </span>
-            </Show>
-          </div>
+            </div>
+          </Show>
 
           {/* Skeleton Template when loading without data */}
           <Show when={showSkeleton()}>
@@ -212,7 +203,7 @@ export function QuotaPage() {
                           opacity: 0.7,
                         }}
                       >
-                        {PROVIDER_NAMES[key] || key.toUpperCase()}
+                        {QUOTA_PROVIDER_NAMES[key] || key.toUpperCase()}
                       </span>
                       <div style={{ flex: 1 }} />
                       <div class="skel" style={{ width: "64px", height: "14px", "border-radius": "10px" }} />
@@ -310,7 +301,7 @@ export function QuotaPage() {
                               color: "var(--fg)",
                             }}
                           >
-                            {PROVIDER_NAMES[p.provider] || p.provider}
+                            {QUOTA_PROVIDER_NAMES[p.provider] || p.provider}
                           </span>
                           <Show when={state.accountDisplay !== "none" && p.snapshot?.plan}>
                             <span

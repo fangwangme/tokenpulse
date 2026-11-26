@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fangwangme/tokenpulse/internal/config"
+	"github.com/fangwangme/tokenpulse/internal/quota"
 )
 
 var soundCycle = []string{"chime", "Hero", "Glass", "Submarine", "none"}
@@ -18,6 +19,7 @@ type SettingSpec struct {
 func phoneSettings() map[string]SettingSpec {
 	specs := map[string]SettingSpec{
 		"display.quota_display_mode":          {Allowed: []any{"used", "remaining"}},
+		"display.quota_provider_order":        {Allowed: []any{"claude", "codex", "opencode", "antigravity"}},
 		"display.auto_refresh_secs":           {Allowed: []any{60, 120, 300, 600, 900}},
 		"display.account_display":             {Allowed: []any{"none", "plan", "full"}},
 		"display.refresh_quota":               {Allowed: []any{true, false}},
@@ -28,7 +30,7 @@ func phoneSettings() map[string]SettingSpec {
 		"keeper.enabled":                      {Allowed: []any{true, false}},
 		"keeper.agents.agy.weekly_all_groups": {Allowed: []any{true, false}},
 	}
-	for _, id := range []string{"claude", "codex", "agy"} {
+	for _, id := range []string{"claude", "codex", "opencode", "agy"} {
 		specs["providers."+id+".enabled"] = SettingSpec{Allowed: []any{true, false}}
 	}
 	for _, agent := range []string{"claude", "codex", "agy"} {
@@ -47,6 +49,7 @@ type SettingsSnapshot map[string]any
 func currentSettings(cfg config.Config) SettingsSnapshot {
 	return SettingsSnapshot{
 		"display.quota_display_mode":                  string(cfg.Display.QuotaDisplayMode),
+		"display.quota_provider_order":                cfg.QuotaProviderOrder(quota.ProviderIDs),
 		"display.auto_refresh_secs":                   int(cfg.Display.AutoRefreshSecs),
 		"display.account_display":                     string(cfg.Display.AccountDisplay),
 		"display.refresh_quota":                       cfg.Display.RefreshQuota,
@@ -58,6 +61,7 @@ func currentSettings(cfg config.Config) SettingsSnapshot {
 		"keeper.agents.agy.weekly_all_groups":         cfg.Keeper.AntigravityAllGroups(),
 		"providers.claude.enabled":                    providerEnabled(cfg, "claude"),
 		"providers.codex.enabled":                     providerEnabled(cfg, "codex"),
+		"providers.opencode.enabled":                  providerEnabled(cfg, "opencode"),
 		"providers.agy.enabled":                       providerEnabled(cfg, "antigravity"),
 		"keeper.agents.claude.session_keeper_enabled": agentKeeper(cfg, "claude").SessionKeeperEnabled,
 		"keeper.agents.claude.weekly_keeper_enabled":  agentKeeper(cfg, "claude").WeeklyKeeperEnabled,
@@ -126,6 +130,13 @@ func validatePhoneUpdates(updates map[string]json.RawMessage) ([]settingChange, 
 			return nil, fmt.Errorf("unknown setting %q", key)
 		}
 		value := decodeValue(raw)
+		if key == "display.quota_provider_order" {
+			if !validProviderOrder(value) {
+				return nil, fmt.Errorf("invalid value for %s", key)
+			}
+			changes = append(changes, settingChange{key, value})
+			continue
+		}
 		if !allowed(spec, value) {
 			return nil, fmt.Errorf("invalid value for %s", key)
 		}
@@ -140,6 +151,22 @@ func decodeValue(raw json.RawMessage) any {
 		return nil
 	}
 	return value
+}
+
+func validProviderOrder(value any) bool {
+	items, ok := value.([]any)
+	if !ok || len(items) == 0 || len(items) > len(quota.ProviderIDs) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, item := range items {
+		id, ok := item.(string)
+		if !ok || !quota.IsProvider(id) || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return true
 }
 
 func allowed(spec SettingSpec, value any) bool {
@@ -183,6 +210,14 @@ func applyOne(cfg *config.Config, key string, value any) error {
 	switch {
 	case key == "display.quota_display_mode":
 		cfg.Display.QuotaDisplayMode = config.QuotaDisplayMode(stringValue)
+	case key == "display.quota_provider_order":
+		items := value.([]any)
+		order := make([]string, 0, len(items))
+		for _, item := range items {
+			order = append(order, item.(string))
+		}
+		cfg.Display.QuotaProviderOrder = order
+		cfg.Display.QuotaProviderOrder = cfg.QuotaProviderOrder(quota.ProviderIDs)
 	case key == "display.auto_refresh_secs":
 		number := int(value.(float64))
 		cfg.Display.AutoRefreshSecs = uint32(number)
