@@ -547,7 +547,7 @@ func (r *Runtime) refreshInterval() time.Duration {
 			return time.Duration(cfg.Display.AutoRefreshSecs) * time.Second
 		}
 	}
-	return 300 * time.Second
+	return 900 * time.Second
 }
 
 func (r *Runtime) keeperLoop() {

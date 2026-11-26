@@ -58,8 +58,8 @@ export function SettingsPage() {
 
   const value = <T,>(key: string, fallback: T): T => setting<T>(key, fallback);
   const scanSeconds = () => {
-    const seconds = Number(value("display.auto_refresh_secs", 300));
-    return seconds > 0 ? seconds : 300;
+    const seconds = Number(value("display.auto_refresh_secs", 900));
+    return seconds > 0 ? seconds : 900;
   };
 
   onMount(() => {
@@ -113,7 +113,7 @@ export function SettingsPage() {
   return (
     <div class="page">
       <div class="scroll" onScroll={onScroll}>
-        <div class="settings" style={{ "padding-top": "calc(10px + env(safe-area-inset-top))" }}>
+        <div class="settings">
           <div class="sec">{t("settings.appearance")}</div>
           <div class="tp-card" style={{ overflow: "hidden" }}>
             <div class="li" style={{ "flex-direction": "column", "align-items": "stretch", gap: "8px" }}>

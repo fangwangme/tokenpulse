@@ -128,7 +128,7 @@ export function QuotaPage() {
   return (
     <div class="page">
       <div class="scroll" onScroll={onScroll}>
-        <div style={{ padding: "calc(12px + env(safe-area-inset-top)) 16px calc(104px + env(safe-area-inset-bottom))" }}>
+        <div class="tp-page-body">
           <Show when={state.quotaEnabled} fallback={<FeatureDisabledNotice message={t("quota.disabledNotice")} />}>
           <div
             style={{
@@ -136,7 +136,7 @@ export function QuotaPage() {
               "align-items": "center",
               "justify-content": "space-between",
               gap: "10px",
-              padding: "2px 2px 8px",
+              padding: "2px 2px 6px",
               "font-size": "12px",
               color: "var(--muted)",
               "font-variant-numeric": "tabular-nums",
@@ -254,7 +254,7 @@ export function QuotaPage() {
 
           {/* Provider cards */}
           <Show when={!showSkeleton()}>
-            <div style={{ "margin-top": "10px", display: "flex", "flex-direction": "column", gap: "12px" }}>
+            <div style={{ "margin-top": "6px", display: "flex", "flex-direction": "column", gap: "12px" }}>
             <For each={enabledProviders()}>
               {(p) => {
                 const providerDotColor = () => {

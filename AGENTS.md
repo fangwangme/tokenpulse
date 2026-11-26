@@ -32,7 +32,10 @@
   data directory (`docs/specs/go-rewrite.md`).
 - Seed the data directory with copies of the main data files: SQLite through
   `sqlite3 -readonly <src> ".backup '<dst>'"`, the config and
-  `keeper_state.json` with `cp`. Never point a worktree run at
+  `keeper_state.json` with `cp`. After copying, keep the worktree development
+  defaults: set `display.refresh_quota = false` and
+  `display.auto_refresh_secs = 900` in the copied config (the production file
+  may carry different explicit values). Never point a worktree run at
   `~/.local/share/tokenpulse`.
 - Quota fetches read the agents' real credentials and call the providers'
   read-only usage endpoints; that is allowed. Keeper pings spend real quota:

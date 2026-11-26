@@ -33,7 +33,7 @@ const SCAN_INTERVAL_MS: Record<UsageScanInterval, number> = {
 
 export const SCAN_INTERVALS = Object.keys(SCAN_INTERVAL_MS) as UsageScanInterval[];
 
-/** The server's refresh interval is in seconds; 0 falls back to the 5m default. */
+/** The server's refresh interval is in seconds; 0 falls back to the 15m default. */
 export function secondsToScanInterval(seconds: number): UsageScanInterval {
   switch (seconds) {
     case 60:
@@ -47,10 +47,10 @@ export function secondsToScanInterval(seconds: number): UsageScanInterval {
     case 900:
       return "15m";
     default:
-      return "5m";
+      return "15m";
   }
 }
 
 export function scanIntervalToMs(interval?: UsageScanInterval): number {
-  return (interval && SCAN_INTERVAL_MS[interval]) || SCAN_INTERVAL_MS["5m"];
+  return (interval && SCAN_INTERVAL_MS[interval]) || SCAN_INTERVAL_MS["15m"];
 }

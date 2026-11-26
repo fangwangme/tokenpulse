@@ -18,10 +18,10 @@ is never overwritten: `config set`, `enable`, `disable`, the Keeper toggles and
 | `display.show_empty_providers` | false | boolean |
 | `display.theme` | `auto` | `auto`, `dark`, `light` |
 | `display.quota_display_mode` | `remaining` | `used`, `remaining` |
-| `display.auto_refresh_secs` | 300 | 0, 60, 120, 300, 600, 900 (0 falls back to 300) |
+| `display.auto_refresh_secs` | 900 | 0, 60, 120, 300, 600, 900 (0 falls back to 900) |
 | `display.account_display` | `full` | `none`, `plan`, `full` |
 | `display.scan_antigravity` | true | boolean |
-| `display.refresh_quota` | true | boolean |
+| `display.refresh_quota` | false | boolean |
 | `display.notification_level` | `system` | `off`, `in_app`, `terminal`, `system` |
 | `display.notification_sound` | `chime` | `chime`, `none`, or a macOS system sound name |
 | `keeper.enabled` | false | boolean |

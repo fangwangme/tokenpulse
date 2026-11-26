@@ -768,7 +768,7 @@ func (m *model) changeSetting() tea.Cmd {
 		if m.client != nil && m.client.IsRemote() {
 			options = []uint32{60, 120, 300, 600, 900}
 		}
-		next := uint32(300)
+		next := uint32(900)
 		for i, value := range options {
 			if value == cfg.Display.AutoRefreshSecs {
 				next = options[(i+1)%len(options)]
