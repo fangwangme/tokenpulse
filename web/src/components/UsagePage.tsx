@@ -679,7 +679,7 @@ export function UsagePage() {
   return (
     <div class="page">
       <div class="scroll" onScroll={onScroll}>
-        <div style={{ padding: "calc(12px + env(safe-area-inset-top)) 16px calc(104px + env(safe-area-inset-bottom))" }}>
+        <div class="tp-page-body">
           <Show when={state.usageEnabled} fallback={<FeatureDisabledNotice message={t("usage.disabledNotice")} />}>
           {/* Range Chips (horizontally scrollable, Custom after All) */}
           <div class="tp-chips-scroll">

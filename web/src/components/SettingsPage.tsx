@@ -113,7 +113,7 @@ export function SettingsPage() {
   return (
     <div class="page">
       <div class="scroll" onScroll={onScroll}>
-        <div class="settings" style={{ "padding-top": "calc(10px + env(safe-area-inset-top))" }}>
+        <div class="settings">
           <div class="sec">{t("settings.appearance")}</div>
           <div class="tp-card" style={{ overflow: "hidden" }}>
             <div class="li" style={{ "flex-direction": "column", "align-items": "stretch", gap: "8px" }}>

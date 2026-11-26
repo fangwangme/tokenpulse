@@ -146,7 +146,7 @@ export function KeeperPage() {
   return (
     <div class="page">
       <div class="scroll" onScroll={onScroll}>
-        <div class="settings" style={{ "padding-top": "calc(10px + env(safe-area-inset-top))" }}>
+        <div class="settings">
           <Show when={error()}>
             <div
               style={{
@@ -159,6 +159,7 @@ export function KeeperPage() {
                 display: "flex",
                 gap: "8px",
                 "align-items": "center",
+                "margin-bottom": "10px",
               }}
             >
               <Icon name="alert" sm />
@@ -170,7 +171,6 @@ export function KeeperPage() {
             <div
               class={keeper()!.engine ? "tp-hero" : "tp-card"}
               style={{
-                "margin-top": "10px",
                 background: keeper()!.engine
                   ? "radial-gradient(100% 100% at 0% 0%, color-mix(in srgb, var(--addfg) 14%, transparent), transparent 65%), var(--surface)"
                   : "var(--surface)",
