@@ -124,22 +124,19 @@ export function QuotaPage() {
       <div class="scroll" onScroll={onScroll}>
         <div class="tp-page-body">
           <Show when={state.quotaEnabled} fallback={<FeatureDisabledNotice message={t("quota.disabledNotice")} />}>
-          <div
-            style={{
-              display: "flex",
-              "align-items": "center",
-              "justify-content": "space-between",
-              gap: "10px",
-              padding: "2px 2px 6px",
-              "font-size": "12px",
-              color: "var(--muted)",
-              "font-variant-numeric": "tabular-nums",
-            }}
-          >
-            <span style={{ "font-size": "12px", "font-weight": 650, "letter-spacing": ".04em", "text-transform": "uppercase", color: "var(--faint)" }}>
-              {t("home.quota")}
-            </span>
-            <Show when={isLoading() || state.quotaUpdated}>
+          <Show when={isLoading() || state.quotaUpdated}>
+            <div
+              style={{
+                display: "flex",
+                "align-items": "center",
+                "justify-content": "flex-end",
+                gap: "10px",
+                padding: "2px 2px 6px",
+                "font-size": "12px",
+                color: "var(--muted)",
+                "font-variant-numeric": "tabular-nums",
+              }}
+            >
               <span
                 style={{
                   display: "inline-flex",
@@ -162,8 +159,8 @@ export function QuotaPage() {
                   ? (refreshing() ? t("quota.refreshing") : t("quota.loading"))
                   : t("quota.refreshedAt", { time: formatTime(state.quotaUpdated!) })}
               </span>
-            </Show>
-          </div>
+            </div>
+          </Show>
 
           {/* Skeleton Template when loading without data */}
           <Show when={showSkeleton()}>
