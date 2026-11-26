@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -73,7 +72,10 @@ func TestLocalWebSocketSkipsOrigin(t *testing.T) {
 	dir := t.TempDir()
 	server := testServer(t)
 	server.DataDir = dir
-	socket := filepath.Join(dir, "serve.sock")
+	socket, err := SocketPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	listener, err := server.listenLocalSocket(socket)
 	if err != nil {
 		t.Fatal(err)
@@ -281,7 +283,10 @@ func TestSocketClientPatchSettingsAndShutdown(t *testing.T) {
 	server := testServer(t)
 	server.DataDir = dir
 	server.Runtime.SetWebState("http://localhost:14120/", "")
-	socket := filepath.Join(dir, "serve.sock")
+	socket, err := SocketPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	listener, err := server.listenLocalSocket(socket)
 	if err != nil {
 		t.Fatal(err)
