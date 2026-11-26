@@ -906,7 +906,7 @@ func runConfigShow() error {
 		return err
 	}
 	fmt.Printf("Config file: %s\n\nProviders:\n", manager.Path)
-	for _, name := range quota.ProviderIDs {
+	for _, name := range cfg.QuotaProviderOrder(quota.ProviderIDs) {
 		status := "disabled"
 		if p, ok := cfg.Providers[name]; ok && p.Enabled {
 			status = "enabled"
@@ -922,6 +922,7 @@ func runConfigShow() error {
 		mode = "used"
 	}
 	fmt.Printf("  quota_display_mode: %s\n", mode)
+	fmt.Printf("  quota_provider_order: %s\n", strings.Join(cfg.QuotaProviderOrder(quota.ProviderIDs), ", "))
 	refresh := "disabled"
 	if cfg.Display.AutoRefreshSecs > 0 {
 		if cfg.Display.AutoRefreshSecs%60 == 0 {
@@ -1062,8 +1063,23 @@ func runConfigSet(setting string) error {
 			return fmt.Errorf("Invalid value '%s' for notification_sound. Expected: chime (built-in), none (silent), or the name of a sound under /System/Library/Sounds (e.g. Hero, Glass, Submarine)", value)
 		}
 		cfg.Display.NotificationSound = value
+	case "quota_provider_order":
+		ids := strings.Split(value, ",")
+		order := make([]string, 0, len(ids))
+		for _, id := range ids {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			if !quota.IsProvider(id) {
+				return fmt.Errorf("Invalid provider '%s' for quota_provider_order. Expected: %s", id, strings.Join(quota.ProviderIDs, ", "))
+			}
+			order = append(order, id)
+		}
+		cfg.Display.QuotaProviderOrder = order
+		cfg.Display.QuotaProviderOrder = cfg.QuotaProviderOrder(quota.ProviderIDs)
 	default:
-		return fmt.Errorf("Unknown setting '%s'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  account_display        (none | plan | full)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)\n  notification_level     (off | in_app | terminal | system)\n  notification_sound     (chime | none | a name under /System/Library/Sounds, e.g. Hero)\n  keeper_engine          (true | false)\n  keeper_antigravity_groups (gemini_flash | all)", key)
+		return fmt.Errorf("Unknown setting '%s'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  account_display        (none | plan | full)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)\n  notification_level     (off | in_app | terminal | system)\n  notification_sound     (chime | none | a name under /System/Library/Sounds, e.g. Hero)\n  keeper_engine          (true | false)\n  keeper_antigravity_groups (gemini_flash | all)\n  quota_provider_order   (comma-separated provider IDs)", key)
 	}
 	if err := manager.Save(&cfg); err != nil {
 		return err
@@ -1134,7 +1150,7 @@ func runInit(args []string) error {
 	fmt.Println("Detecting installed providers...")
 	detected := detectProviders()
 	for _, entry := range []struct{ name, label string }{
-		{"claude", "Claude Code"}, {"codex", "Codex"}, {"antigravity", "Antigravity"},
+		{"claude", "Claude Code"}, {"codex", "Codex"}, {"opencode", "OpenCode Go"}, {"antigravity", "Antigravity"},
 	} {
 		found := detected[entry.name]
 		icon := "\u2717"
@@ -1162,7 +1178,7 @@ func runInit(args []string) error {
 		return errors.New("interactive init is not available in this build; run `tokenpulse init --default`")
 	}
 	cfg := config.Default()
-	for _, name := range []string{"claude", "codex", "antigravity"} {
+	for _, name := range []string{"claude", "codex", "opencode", "antigravity"} {
 		cfg.Providers[name] = config.ProviderConfig{Enabled: selected[name]}
 	}
 	if err := manager.Save(&cfg); err != nil {
@@ -1182,6 +1198,7 @@ func detectProviders() map[string]bool {
 	return map[string]bool{
 		"claude":      exists(filepath.Join(home, ".claude", ".credentials.json")),
 		"codex":       exists(filepath.Join(home, ".codex")) || exists(filepath.Join(home, ".config", "codex")),
+		"opencode":    exists(quota.OpenCodeDatabasePath(home)),
 		"antigravity": exists(filepath.Join(home, ".gemini", "antigravity-cli", "conversations")),
 	}
 }

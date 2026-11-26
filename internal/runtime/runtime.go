@@ -276,8 +276,9 @@ func (r *Runtime) UsageModel(model, from, to string, agents []string) (report.Mo
 
 func (r *Runtime) Quota() QuotaView {
 	cfg, _ := r.Config.Load()
+	order := cfg.QuotaProviderOrder(quota.ProviderIDs)
 	enabled := map[string]bool{}
-	for _, id := range cfg.EnabledQuotaProviders(quota.ProviderIDs) {
+	for _, id := range cfg.EnabledQuotaProviders(order) {
 		enabled[id] = true
 	}
 	r.mu.Lock()
@@ -292,8 +293,8 @@ func (r *Runtime) Quota() QuotaView {
 	fetchedAt := r.lastFetchedAt
 	r.mu.Unlock()
 
-	providers := make([]QuotaProviderView, 0, len(quota.ProviderIDs))
-	for _, id := range quota.ProviderIDs {
+	providers := make([]QuotaProviderView, 0, len(order))
+	for _, id := range order {
 		view := QuotaProviderView{Provider: id, Enabled: enabled[id]}
 		if snapshot, ok := snapshots[id]; ok {
 			copy := snapshot
@@ -675,12 +676,15 @@ func (r *Runtime) doRefresh(flags refreshFlags) {
 // FetchersFor builds the configured read-only quota fetchers.
 func FetchersFor(cfg config.Config) []quota.Fetcher {
 	var fetchers []quota.Fetcher
-	for _, id := range cfg.EnabledQuotaProviders(quota.ProviderIDs) {
+	order := cfg.QuotaProviderOrder(quota.ProviderIDs)
+	for _, id := range cfg.EnabledQuotaProviders(order) {
 		switch id {
 		case "claude":
 			fetchers = append(fetchers, quota.NewClaudeFetcher(cfg.Display.AccountDisplay.ShowsAccount()))
 		case "codex":
 			fetchers = append(fetchers, quota.NewCodexFetcher())
+		case "opencode":
+			fetchers = append(fetchers, quota.NewOpenCodeFetcher(cfg.Display.AccountDisplay.ShowsAccount()))
 		case "antigravity":
 			fetchers = append(fetchers, quota.NewAntigravityFetcher())
 		}

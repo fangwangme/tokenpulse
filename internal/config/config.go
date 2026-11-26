@@ -17,7 +17,9 @@ import (
 
 // Version is the config schema version; Load rewrites an older file in the
 // current shape.
-const Version = 5
+const Version = 6
+
+var defaultQuotaProviderOrder = []string{"claude", "codex", "opencode", "antigravity"}
 
 type Config struct {
 	Version   uint32                    `toml:"version"`
@@ -35,6 +37,7 @@ type DisplayConfig struct {
 	ShowEmptyProviders bool              `toml:"show_empty_providers"`
 	Theme              ThemePreference   `toml:"theme"`
 	QuotaDisplayMode   QuotaDisplayMode  `toml:"quota_display_mode"`
+	QuotaProviderOrder []string          `toml:"quota_provider_order"`
 	AutoRefreshSecs    uint32            `toml:"auto_refresh_secs"`
 	AccountDisplay     AccountDisplay    `toml:"account_display"`
 	ScanAntigravity    bool              `toml:"scan_antigravity"`
@@ -185,12 +188,14 @@ func Default() Config {
 		Providers: map[string]ProviderConfig{
 			"claude":      {Enabled: true},
 			"codex":       {Enabled: true},
+			"opencode":    {Enabled: true},
 			"antigravity": {Enabled: true},
 		},
 		Display: DisplayConfig{
 			ShowEmptyProviders: false,
 			Theme:              ThemeAuto,
 			QuotaDisplayMode:   QuotaRemaining,
+			QuotaProviderOrder: append([]string(nil), defaultQuotaProviderOrder...),
 			AutoRefreshSecs:    900,
 			AccountDisplay:     AccountFull,
 			ScanAntigravity:    true,
@@ -319,6 +324,35 @@ func normalizeDefaults(cfg *Config) {
 	if cfg.Display.NotificationSound == "" {
 		cfg.Display.NotificationSound = "chime"
 	}
+	if len(cfg.Display.QuotaProviderOrder) == 0 {
+		cfg.Display.QuotaProviderOrder = append([]string(nil), defaultQuotaProviderOrder...)
+	}
+}
+
+// QuotaProviderOrder returns the configured display order normalized against
+// the providers this build supports: unknown IDs are dropped, duplicates
+// collapse, and missing providers append in the default order.
+func (c Config) QuotaProviderOrder(quotaIDs []string) []string {
+	known := make(map[string]bool, len(quotaIDs))
+	for _, id := range quotaIDs {
+		known[id] = true
+	}
+	seen := make(map[string]bool, len(quotaIDs))
+	out := make([]string, 0, len(quotaIDs))
+	for _, id := range c.Display.QuotaProviderOrder {
+		if !known[id] || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	for _, id := range quotaIDs {
+		if !seen[id] {
+			out = append(out, id)
+			seen[id] = true
+		}
+	}
+	return out
 }
 
 // Save writes the config, refusing to overwrite a file that does not parse.

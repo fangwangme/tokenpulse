@@ -63,7 +63,7 @@ prompt = "Hi"
 		t.Fatalf("upgraded = %+v", cfg)
 	}
 	written, _ := os.ReadFile(path)
-	if !strings.Contains(string(written), "version = 5") || !strings.Contains(string(written), "codex") {
+	if !strings.Contains(string(written), "version = 6") || !strings.Contains(string(written), "codex") {
 		t.Fatalf("file = %s", written)
 	}
 }

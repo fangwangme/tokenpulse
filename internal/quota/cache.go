@@ -279,11 +279,16 @@ func FetchAll(dataDir string, fetchers []Fetcher) []FetchResult {
 			results <- outcome{index: index, snapshot: snapshot, err: err}
 		}(i, fetcher)
 	}
-	out := make([]FetchResult, len(fetchers))
+	out := make([]FetchResult, 0, len(fetchers))
 	now := time.Now().UTC()
 	for range fetchers {
 		result := <-results
 		fetcher := fetchers[result.index]
+		if result.err == nil && result.snapshot == nil {
+			// The provider has nothing to report (for example, no subscription
+			// on this account); that is not a failure and publishes no entry.
+			continue
+		}
 		entry := FetchResult{Provider: fetcher.ProviderID(), Err: result.err, FetchedAt: now}
 		if result.snapshot != nil {
 			Normalize(result.snapshot)
@@ -295,7 +300,7 @@ func FetchAll(dataDir string, fetchers []Fetcher) []FetchResult {
 				entry.Snapshot = &cached.Snapshot
 			}
 		}
-		out[result.index] = entry
+		out = append(out, entry)
 	}
 	return out
 }

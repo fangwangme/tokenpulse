@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -802,7 +801,7 @@ func (m *model) changeSetting() tea.Cmd {
 	case 10:
 		update = map[string]any{"keeper.agents.agy.weekly_all_groups": !cfg.Keeper.AntigravityAllGroups()}
 	case 11:
-		ids := []string{"claude", "codex", "antigravity"}
+		ids := cfg.QuotaProviderOrder([]string{"claude", "codex", "opencode", "antigravity"})
 		id := ids[m.providerCursor%len(ids)]
 		m.providerCursor = (m.providerCursor + 1) % len(ids)
 		update = map[string]any{"providers." + id + ".enabled": !cfg.Providers[id].Enabled}
@@ -922,22 +921,6 @@ func (m *model) upsertSnapshot(snapshot provider.QuotaSnapshot) {
 		}
 	}
 	m.snapshots = append(m.snapshots, snapshot)
-	sort.SliceStable(m.snapshots, func(i, j int) bool {
-		return providerOrder(m.snapshots[i].Provider) < providerOrder(m.snapshots[j].Provider)
-	})
-}
-
-func providerOrder(provider string) int {
-	switch provider {
-	case "claude":
-		return 0
-	case "codex":
-		return 1
-	case "antigravity":
-		return 2
-	default:
-		return 3
-	}
 }
 
 // ── view ──
@@ -1297,7 +1280,7 @@ func (m *model) renderQuota(width int) string {
 		if m.opts.Config.Display.AccountDisplay.ShowsAccount() && snapshot.Account != "" {
 			account = "  " + snapshot.Account
 		}
-		b.WriteString(style.Render(strings.ToUpper(snapshot.Provider)+plan+account) + "\n")
+		b.WriteString(style.Render(quota.DisplayName(snapshot.Provider)+plan+account) + "\n")
 		if err := m.quotaErrors[snapshot.Provider]; err != "" {
 			b.WriteString(s.error.Render("  "+err) + "\n")
 		}
@@ -1466,7 +1449,7 @@ func (m *model) renderSettings(width int) string {
 
 func enabledProviderLabel(cfg config.Config) string {
 	var enabled []string
-	for _, id := range []string{"claude", "codex", "antigravity"} {
+	for _, id := range cfg.QuotaProviderOrder([]string{"claude", "codex", "opencode", "antigravity"}) {
 		if cfg.Providers[id].Enabled {
 			enabled = append(enabled, id)
 		}

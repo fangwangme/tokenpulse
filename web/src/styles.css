@@ -345,6 +345,11 @@ svg.i.sm { width: 16px; height: 16px; }
 .li.off { opacity: .5; }
 .li.more { color: var(--accent); font-size: 14.5px; min-height: 44px; }
 .li.more .chev { color: var(--accent); }
+.provider-row { padding-left: 6px; }
+.provider-drag { width: 32px; height: 44px; display: grid; place-items: center; color: var(--muted); cursor: grab; touch-action: none; flex: none; }
+.provider-drag:active { cursor: grabbing; }
+.provider-row.dragging { position: relative; z-index: 2; background: var(--surface); box-shadow: 0 6px 18px rgba(0,0,0,.18); }
+body.reordering { user-select: none; -webkit-user-select: none; }
 .tile3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .tile3 button, .tile3 label { background: var(--surface); border: 1px solid var(--line); border-radius: 20px; height: 96px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; font-size: 15px; cursor: pointer; }
 .tile3 svg.i { width: 24px; height: 24px; }

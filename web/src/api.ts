@@ -1,6 +1,6 @@
 import { showToast, state } from "./store";
 import { t } from "./i18n";
-import { secondsToScanInterval } from "./shared/defaults";
+import { QUOTA_PROVIDER_KEYS, secondsToScanInterval } from "./shared/defaults";
 import type {
   QuotaGetPayload,
   QuotaProviderState,
@@ -12,6 +12,24 @@ import type {
 import type { KeeperPayload } from "./store";
 
 const jsonHeaders = { "Content-Type": "application/json" };
+
+function normalizeProviderOrder(value: unknown): string[] {
+  const known = new Set<string>(QUOTA_PROVIDER_KEYS);
+  const seen = new Set<string>();
+  const order: string[] = [];
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (typeof item === "string" && known.has(item) && !seen.has(item)) {
+        seen.add(item);
+        order.push(item);
+      }
+    }
+  }
+  for (const id of QUOTA_PROVIDER_KEYS) {
+    if (!seen.has(id)) order.push(id);
+  }
+  return order;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -148,8 +166,10 @@ export async function loadState(): Promise<void> {
   state.quotaProviders = {
     claude: raw.settings["providers.claude.enabled"] !== false,
     codex: raw.settings["providers.codex.enabled"] !== false,
+    opencode: raw.settings["providers.opencode.enabled"] !== false,
     antigravity: raw.settings["providers.agy.enabled"] !== false,
   };
+  state.quotaProviderOrder = normalizeProviderOrder(raw.settings["display.quota_provider_order"]);
   state.quotaEnabled = raw.settings["display.refresh_quota"] !== false;
   state.usageEnabled = true;
   state.configReady = true;
@@ -307,8 +327,10 @@ export async function patchSettings(updates: Record<string, unknown>): Promise<v
   state.quotaProviders = {
     claude: values["providers.claude.enabled"] !== false,
     codex: values["providers.codex.enabled"] !== false,
+    opencode: values["providers.opencode.enabled"] !== false,
     antigravity: values["providers.agy.enabled"] !== false,
   };
+  state.quotaProviderOrder = normalizeProviderOrder(values["display.quota_provider_order"]);
   state.quotaEnabled = values["display.refresh_quota"] !== false;
   state.keeperEngine = Boolean(values["keeper.enabled"]);
 }
