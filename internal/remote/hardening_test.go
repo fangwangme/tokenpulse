@@ -109,6 +109,7 @@ func TestBroadcastConcurrentWriters(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	waitForWebSocketClient(t, server)
 
 	const writers = 20
 	var group sync.WaitGroup
@@ -128,6 +129,21 @@ func TestBroadcastConcurrentWriters(t *testing.T) {
 			t.Fatalf("read %d: %v", i, err)
 		}
 	}
+}
+
+func waitForWebSocketClient(t *testing.T, server *Server) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		server.mu.Lock()
+		count := len(server.wsClients)
+		server.mu.Unlock()
+		if count > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("websocket was not registered")
 }
 
 func TestStateStoreRejectsCorruptFileAndCapsSessions(t *testing.T) {
@@ -232,6 +248,7 @@ func TestResetTokenClosesWebSockets(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	waitForWebSocketClient(t, server)
 	if _, err := server.State.ResetToken(); err != nil {
 		t.Fatal(err)
 	}
