@@ -8,12 +8,13 @@ that file and link to it from elsewhere rather than copying content.
 
 | Doc | Audience | Canonical home for |
 | --- | --- | --- |
-| [`../README.md`](../README.md) | Users | Install + quick start, feature highlights, screenshots. Keep it short; link here for depth. |
+| [`../README.md`](../README.md) | Users | Install, quick start, and feature highlights. Keep it short; link here for depth. |
 | [`DESIGN.md`](DESIGN.md) | Contributors | Architecture overview: scope, principles, package layout, data flow. |
 | [`modules/quota.md`](modules/quota.md) | Contributors | Per-provider quota fetching: endpoints, auth, response→`RateWindow` mapping. |
 | [`modules/usage.md`](modules/usage.md) | Contributors | Usage parsing/ingest pipeline, providers, store schema, CLI/TUI output. |
 | [`modules/pricing.md`](modules/pricing.md) | Contributors | Pricing catalog, lazy refresh, daily snapshots, cost derivation. |
 | [`modules/tui.md`](modules/tui.md) | Contributors | TUI tabs, key bindings, settings, rendering widgets. |
+| [`specs/remote.md`](specs/remote.md) | Contributors | Remote mode: `serve`, pairing, API/WS, Tailscale, Web Push, and phone PWA. |
 | [`specs/`](specs/) | Contributors | Product/feature specs (named by feature, no dates). See `specs/README.md`. |
 | [`model-pricing-mapping.md`](model-pricing-mapping.md) | Contributors | Retired pointer to `specs/pricing.md`. |
 | [`RELEASING.md`](RELEASING.md) | Maintainers | The release runbook: versioning, writing the release note, tagging, and what CI publishes to GitHub and npm. |

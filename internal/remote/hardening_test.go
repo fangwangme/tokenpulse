@@ -259,3 +259,19 @@ func TestResetTokenClosesWebSockets(t *testing.T) {
 		}
 	}
 }
+
+func TestHostAcceptedCaseInsensitiveAndLocalServeTarget(t *testing.T) {
+	server := testServer(t)
+	server.Access.Hosts["MyHost.Tail.ts.net"] = true
+	for _, host := range []string{"LOCALHOST:4120", "myhost.tail.ts.net:8444", "MYHOST.TAIL.TS.NET."} {
+		if !server.hostAccepted(host) {
+			t.Errorf("hostAccepted(%q) = false, want true", host)
+		}
+	}
+	if !isLocalServeTarget("http://127.0.0.1:4120", 4120) || !isLocalServeTarget("http://localhost:4120", 4120) || !isLocalServeTarget("http://[::1]:4120", 4120) {
+		t.Error("expected loopback targets to match")
+	}
+	if isLocalServeTarget("http://10.0.0.5:4120", 4120) || isLocalServeTarget("http://127.0.0.1:9999", 4120) {
+		t.Error("non-loopback or wrong-port target must not match")
+	}
+}

@@ -80,7 +80,7 @@ func printHelp() {
 Usage: tokenpulse [OPTIONS] [COMMAND]
 
 Commands:
-  init     Interactive setup wizard
+  init     Write default configuration (--default)
   config   Show or change configuration
   usage    Inspect usage
   reprice  Recompute costs under the current price rules
@@ -100,6 +100,7 @@ Options:
       --no-tui                Use plain text instead of the interactive dashboard
       --raw                   Show raw model usage
       --date <DATE>           Date for --raw
+      --log                   Write a performance log line
   -h, --help                  Print help
   -V, --version               Print version`)
 }
@@ -707,12 +708,15 @@ func round6(value float64) float64 {
 }
 
 func truncate(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
 	runes := []rune(value)
 	if len(runes) <= width {
 		return value
 	}
-	if width <= 1 {
-		return string(runes[:width])
+	if width == 1 {
+		return string(runes[:1])
 	}
 	return string(runes[:width-1]) + "…"
 }

@@ -150,8 +150,8 @@ npm job stops before publishing anything.
 | `publish-npm` | Assembles and publishes the five npm packages (§3) |
 
 Targets: `darwin/amd64`, `darwin/arm64`, `linux/amd64`, `linux/arm64`, all
-built with `CGO_ENABLED=0` so the binaries are static. Linux builds run on
-`ubuntu-22.04`, so they still run on distros a couple of releases behind.
+built with `CGO_ENABLED=0` so the binaries are statically linked (Linux runs on
+`ubuntu-22.04` / `ubuntu-22.04-arm`).
 
 | Go target | Release asset |
 | --- | --- |
@@ -238,11 +238,12 @@ fails immediately.
 
 ### 3b. Adding a platform
 
-Three places have to agree, and the build fails loudly if they do not:
+Four places have to agree, and the build fails loudly if they do not:
 
 1. `release.yml` — add a `runner` / `goos` / `goarch` entry to the `build` matrix.
 2. `npm/scripts/build-packages.mjs` — add the asset to `TARGETS`.
 3. `npm/launcher/package.json` — add the package to `optionalDependencies`.
+4. `npm/launcher/bin/tokenpulse.js` — add the target to `SUPPORTED_PLATFORMS`.
 
 Windows is deliberately absent: it has never been built or exercised, so it is
 not advertised on npm.

@@ -215,7 +215,7 @@ export function QuotaPage() {
           </Show>
 
           {/* Empty state (only when loading finished and still no data) */}
-          <Show when={!showSkeleton() && !hasAnyData()}>
+          <Show when={!showSkeleton() && !hasAnyData() && !(showEmptyProviders() && enabledProviders().length > 0)}>
             <div
               style={{
                 margin: "14px 0 0",

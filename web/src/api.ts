@@ -270,7 +270,10 @@ export async function loadQuota(refresh = false): Promise<void> {
   state.quotaLoading = true;
   try {
     if (refresh) {
-      await manualRefresh({ usage: false, quota: true });
+      const res = await manualRefresh({ usage: false, quota: true });
+      if (res.throttled && !res.accepted && state.quotaSnapshots.length > 0) {
+        return;
+      }
     }
     const raw = await api<RawQuota>("/api/quota");
     state.quotaSnapshots = mapQuota(raw);

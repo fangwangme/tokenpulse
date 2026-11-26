@@ -280,8 +280,16 @@ func (s *Server) hostAccepted(host string) bool {
 	if parsed, _, err := net.SplitHostPort(host); err == nil {
 		name = parsed
 	}
-	name = strings.Trim(name, "[]")
-	return s.Access.Hosts[name]
+	name = strings.ToLower(strings.TrimSuffix(strings.Trim(name, "[]"), "."))
+	if s.Access.Hosts[name] {
+		return true
+	}
+	for allowed, ok := range s.Access.Hosts {
+		if ok && strings.ToLower(strings.TrimSuffix(strings.Trim(allowed, "[]"), ".")) == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handle(w http.ResponseWriter, r *http.Request, local bool) {

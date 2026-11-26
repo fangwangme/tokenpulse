@@ -2,23 +2,25 @@
 
 ## Overview
 
-TokenPulse is one Go binary with two jobs:
+TokenPulse is a single Go binary that tracks AI coding agent usage, checks
+subscription quota, optionally runs Session Keeper pings, and exposes the data
+through a TUI, CLI, and mobile web app.
 
-1. **Quota** - on-demand, read-only quota checks for Claude Code, Codex and
-   Antigravity.
-2. **Usage** - a local SQLite ledger of session usage, priced from a
-   provider-first catalog and rendered by the TUI, the CLI and the phone app.
+- **Quota** — on-demand, read-only quota checks for Claude Code, Codex, and
+  Antigravity.
+- **Usage** — a local SQLite ledger of session usage, priced from an
+  official-provider-first catalog and shared across the TUI, CLI, and phone app.
+- **Remote mode** — `tokenpulse serve` owns scanning, quota refreshes, and
+  Keeper execution while serving the embedded mobile PWA and syncing with the
+  TUI over a local Unix socket.
 
 Supported usage sources: Claude Code, Codex, OpenCode, Gemini CLI (historical),
-Pi, GitHub Copilot and Antigravity.
+Pi, GitHub Copilot, and Antigravity.
 
-The program is cgo-free and statically linked. The TUI uses Bubble Tea; the
-phone app is Solid + TypeScript + Vite and is embedded into the binary at
-build time. A running `tokenpulse serve` can own scanning, quota refreshes and
-Keeper pings while the TUI and phone read its API.
-
-The authoritative behaviour lives in `docs/specs/`; this document describes
-the architecture and points at those specs.
+The binary is cgo-free and statically linked. The TUI uses Bubble Tea; the
+phone app is Solid + TypeScript + Vite and is embedded at build time.
+Authoritative behavior lives in `docs/specs/`; this document summarizes the
+architecture.
 
 ---
 
@@ -31,15 +33,15 @@ agent session files / APIs
         ├── internal/quota   read-only fetchers + cache (tokenpulse.db)
         └── internal/pricing catalog, price periods, cost lookup
                     │
-             internal/scan     one refresh: price, parse, ingest, rebuild
+             internal/scan   one refresh: price, parse, ingest, rebuild
                     │
         ┌───────────┼────────────┐
         │           │            │
-   internal/report  │      internal/keeper
-        │           │            │
-   internal/tui  internal/cli  internal/remote
+ internal/report  internal/cli  internal/keeper
         │                        │
-   internal/report         HTTP/WS + embedded web/
+   ┌────┴────┐              internal/remote
+   │         │                   │
+internal/tui └── HTTP/WS + embedded web/
 ```
 
 - `internal/usage` writes `usage.db`: normalized messages and daily rollups.
@@ -131,7 +133,7 @@ tokenpulse --refresh-pricing | --rebuild-all | --no-scan | --log
 tokenpulse init --default
 tokenpulse config show|enable|disable|set|test-notification
 tokenpulse reprice [--apply --yes --expect <fingerprint>] [--json]
-tokenpulse serve [--port N] [--https-port N] [--lan] [--no-tailscale]
+tokenpulse serve [--port N] [--https-port N] [--lan] [--no-tailscale] [--web-dir DIR]
 tokenpulse remote reset-token|url|status
 tokenpulse service install|uninstall|status
 ```
@@ -144,9 +146,10 @@ See `cli.md`, `config.md`, `pricing.md` and `remote.md` for the full rules.
 
 The dashboard has four tabs: `Usage`, `Quota`, `Keeper`, `Settings`.
 
-- **Usage**: range presets `1-6`, a Token/Cost switch (`m`), a list/heatmap
-  switch (`f`), row movement (`↑/↓` or `j/k`), detail (`Enter`), range shift
-  (`[`/`]`), agent filter (`s`), refresh (`r`), theme (`b`), quit (`q`).
+- **Usage**: range presets `1-6`, Token/Cost switch (`m`), dates/models list
+  toggle (`v`), heatmap/list focus toggle (`f`), row movement (`↑/↓` or `j/k`),
+  detail (`Enter`), range shift (`[`/`]`), agent filter (`s`), refresh (`r`),
+  theme (`b`), quit (`q`).
 - **Quota**: provider cards with bars, reset time and pace; `↑/↓` moves the
   provider cursor.
 - **Keeper**: per-agent switches and history; `e` toggles the engine.

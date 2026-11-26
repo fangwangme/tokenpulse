@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -99,13 +100,12 @@ func buildAccess(port, httpsPort int, noTailscale, lan bool) Access {
 	if !ok {
 		return Access{Mode: "local", BindHost: "127.0.0.1", URL: fmt.Sprintf("http://localhost:%d/", port), Hosts: hosts}
 	}
-	hosts[info.DNSName] = true
+	hosts[strings.ToLower(strings.TrimSuffix(info.DNSName, "."))] = true
 	for _, ip := range info.IPs {
 		hosts[ip] = true
 	}
-	local := fmt.Sprintf("http://127.0.0.1:%d", port)
 	if target, found := serveTarget(httpsPort); found {
-		if target == local || strings.HasSuffix(target, fmt.Sprintf(":%d", port)) {
+		if isLocalServeTarget(target, port) {
 			url := fmt.Sprintf("https://%s:%d/", info.DNSName, httpsPort)
 			if httpsPort == 443 {
 				url = fmt.Sprintf("https://%s/", info.DNSName)
@@ -179,4 +179,20 @@ func firstNonLoopback() string {
 		return ""
 	}
 	return addresses[0]
+}
+
+func isLocalServeTarget(target string, port int) bool {
+	parsed, err := url.Parse(strings.TrimSpace(target))
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	host, targetPort, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		return false
+	}
+	if targetPort != strconv.Itoa(port) {
+		return false
+	}
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }

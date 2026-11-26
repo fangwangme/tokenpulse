@@ -1,9 +1,9 @@
 # TokenPulse
 
-TokenPulse is a Go CLI + TUI dashboard for tracking token usage, cost, and
-quota across multiple AI coding agents. It parses local session data into a
-SQLite ledger and presents an interactive dashboard — or a mobile web app over
-Tailscale, plain-text, JSON or CSV output for scripting.
+TokenPulse is a Go CLI and TUI dashboard for tracking token usage, cost, and
+quota across AI coding agents. It stores parsed sessions in a local SQLite
+ledger and exposes the data through a terminal dashboard, a mobile web app
+over Tailscale, and plain-text, JSON, or CSV output.
 
 ## Install
 
@@ -46,14 +46,7 @@ platform, build from source instead.
 
 ### From source
 
-Requires Go 1.27+:
-
-```bash
-go install github.com/fangwangme/tokenpulse@latest
-```
-
-Or clone and build. Build the phone app first, otherwise the binary embeds
-only the "frontend not built" placeholder:
+Requires Go 1.27+ and Node 20+ (to build the embedded phone app):
 
 ```bash
 git clone https://github.com/fangwangme/tokenpulse
@@ -61,9 +54,12 @@ cd tokenpulse/web && npm ci && npm run build && cd ..
 go build -o tokenpulse .
 ```
 
-`go install github.com/fangwangme/tokenpulse@latest` cannot run the web build,
-so the installed binary serves the placeholder page. Use a prebuilt binary or
-the npm package for remote mode.
+If you only need the CLI/TUI (without the phone web app), `go install` works
+without Node and embeds a placeholder page at `/`:
+
+```bash
+go install github.com/fangwangme/tokenpulse@latest
+```
 
 ## Supported Providers
 
@@ -96,39 +92,27 @@ the npm package for remote mode.
 
 ## Features
 
-- **Unified usage report** — one Usage page with range presets, comparison,
-  heatmaps and day/model detail, plus Quota, Keeper and Settings tabs
-- **Remote mode** — `tokenpulse serve` runs scanning and refreshing, serves a
-  mobile PWA over Tailscale Serve, and stays in sync with the TUI over a local
-  socket
-- **Session Keeper & Automated Heartbeats** — scheduled lightweight heartbeats for
-  Claude Code, Codex, and Google Antigravity to trigger 5h cooldown timers early
-  and auto-sync immediately after weekly quota resets. Off by default; each ping
-  spends real quota, so you opt in per agent
-- **Live Execution Stream** — real-time heartbeat log panel with executed commands,
-  prompts, replies, durations, status codes, and smooth mouse-wheel scrolling
-- **Ledger-backed** — local SQLite; stored costs never drift, and price changes
-  apply only through an explicit `tokenpulse reprice --apply`
-- **Price periods** — official-provider-first catalog selection, exact model
-  keys, historical price periods and a fingerprint-guarded repricing command
-- **Quota overview** — up to the top 4 windows per provider; each is a
-  full-width progress bar with an expected-progress marker plus a detail line
-  led by a uniform window tag (`5H:`, `WEEKLY · SONNET:`) and showing the reset
-  countdown, used/remaining percentages, and an at-current-rate pace indicator
-- **Auto-refresh in TUI** — one interval for both quota and usage
-  (0/1/2/5/10/15 min, default 5 min); cycle or toggle in the Settings tab, with
-  a countdown shown in the footer
-- **`r` to refresh** — from any TUI tab without restarting it
-- **Usage report** — range presets, comparison, a Token/Cost switch, a
-  heatmap, date/model lists, day and model detail, and an agent filter
-- **Company-aware model coloring** — agent / provider separation in the data
-  model
-- **Plain-text mode** — for scripting and remote shells
-- **JSON output** — usage summary + quota snapshots in one payload
-- **CSV output** — per-model or daily breakdown for further analysis
-- **Observation history** — every quota poll (per provider, rate window, and
-  model family) and every Keeper run is appended to a local SQLite database for
-  your own trend analysis
+- **Unified usage report** — one Usage view shared by the TUI and phone app,
+  with range presets, period comparison, a Token/Cost switch, heatmaps,
+  date/model lists, day/model detail, and an agent filter
+- **Remote phone mode** — `tokenpulse serve` owns scanning and quota refreshes,
+  serves a mobile PWA over Tailscale Serve HTTPS, and syncs live with the TUI
+  over a local Unix socket
+- **Read-only quota tracking** — checks Claude Code, Codex, and Antigravity
+  quota without writing or refreshing credentials; shows remaining/used bars,
+  reset times, pace, extra usage, and reset credits
+- **Session Keeper** — optional scheduled heartbeats for Claude Code, Codex,
+  and Antigravity to trigger 5h cooldowns early and wake weekly windows after
+  resets (disabled by default; each ping spends real quota)
+- **Ledger & price periods** — local SQLite ledger with official-provider-first
+  pricing and dated price periods; stored costs stay untouched unless you run
+  `tokenpulse reprice --apply`
+- **Auto-refresh & on-demand reload** — configurable refresh interval
+  (default 5 min) plus `r` in any TUI tab to refresh immediately
+- **Scripting outputs** — `--no-tui` plain text, `--json` (usage + quota),
+  and `--csv daily|models`
+- **Observation history** — every quota poll and Keeper run is appended to
+  `tokenpulse.db` for trend analysis
 
 ## Quick Start
 
@@ -158,20 +142,24 @@ tokenpulse --csv models
 
 ### TUI keys
 
-- `Tab` / `Shift+Tab` — switch Usage, Quota, Keeper, Settings; `q` / `Ctrl+C` quits.
-- Usage: `1`–`5` presets (`today`, `7d`, `30d`, `year`, `all`), `m` toggles
-  Token/Cost, `v` toggles list/heatmap, `Enter` opens detail, `[` / `]` shifts
-  the range, `s` opens the agent filter, `f` toggles focus, `r` refreshes.
-- Quota: `↑` / `↓` moves the provider.
+- `Tab` / `Shift+Tab` — switch between Usage, Quota, Keeper, and Settings; `q` / `Ctrl+C` quits.
+- Usage: `1`–`6` presets (`today`, `7d`, `30d`, `year`, `all`, `custom`), `m` toggles
+  Token/Cost, `v` toggles dates/models list, `f` switches focus between heatmap
+  and list, `Enter` opens detail, `[` / `]` shifts the range, `s` opens the agent
+  filter, `r` refreshes.
+- Quota: `↑` / `↓` selects a provider.
 - Keeper: `e` toggles the engine, `Enter`/`Space` toggles the session keeper,
-  `w` the weekly keeper, `p` sends a test ping.
+  `w` toggles the weekly keeper, `p` sends a test ping.
 - Settings: `↑` / `↓` moves, `Enter`/`Space` changes the row; the quota-provider
   row cycles Claude → Codex → Antigravity.
-- `b` cycles the theme; `Esc` closes a detail/filter without quitting.
+- `b` cycles the theme; `Esc` closes an overlay without quitting.
 
-### Filters
+### Filters & maintenance
 
 ```bash
+# Read the cached ledger without scanning
+tokenpulse --no-scan
+
 # Show data starting from a specific date
 tokenpulse --since 2026-04-01
 
@@ -181,17 +169,19 @@ tokenpulse --refresh-days 2026-04-01:2026-04-09
 # Force a fresh pricing fetch (otherwise uses cached pricing)
 tokenpulse --refresh-pricing
 
+# Preview or apply repricing under current price rules
+tokenpulse reprice
+
 # Full rebuild from scratch
 tokenpulse --rebuild-all
-```
 
-> [!IMPORTANT]
-> **Antigravity Sync after Rebuild**: If you rebuild the database (e.g. via `--rebuild-all`), you must run the Antigravity CLI and Desktop concurrently once to allow full synchronization of usage history. This is required because they need to be active at the same time to sync and align the data.
-
-```bash
 # Write timing diagnostics to a log file
 tokenpulse --log
 ```
+
+> [!IMPORTANT]
+> **Antigravity Sync after Rebuild**: After running `--rebuild-all`, launch the
+> Antigravity CLI and Desktop together once so both can sync and align history.
 
 ### Provider setup
 
@@ -211,8 +201,8 @@ tokenpulse config set quota_display_mode=used
 # switches light/dark when you change the system setting while it's running (macOS).
 tokenpulse config set theme=dark
 
-# Auto-refresh interval in minutes for quota + usage (0 = disabled)
-tokenpulse config set auto_refresh_secs=300
+# Auto-refresh interval in minutes for quota + usage (0, 1, 2, 5, 10, 15; 0 = disabled)
+tokenpulse config set auto_refresh_interval=5
 
 # Show empty providers in the dashboard
 tokenpulse config set show_empty_providers=true
@@ -252,25 +242,16 @@ fix or remove the file, then retry.
 
 ### Session Keeper (Heartbeats & Wakeup)
 
-The **Keeper** tab lets you manage scheduled pings and wakeups for Claude Code, Codex, and Google Antigravity to keep sessions warm and trigger cooldown cycles at designated times.
+The **Keeper** tab manages scheduled pings for Claude Code, Codex, and
+Antigravity to start 5h cooldown cycles early and wake weekly windows after a
+reset.
 
-Every ping spends real quota, so the engine ships **disabled**. Turn it on with
-the `keeper.enabled` row in the Settings tab, then enable the switches you want
-per agent. Wakeup times, prompts, and command templates live in `config.toml`
-under `[keeper]`; Keeper dynamically resolves the cheapest active model for each
-agent (Claude Haiku, Codex Luna, Antigravity Flash-Low) from local catalogs
-at startup and once a day. The tab header shows the exact configuration path.
-
-- **`Tab` / `Shift+Tab`** — Switch between Usage, Quota, Keeper and Settings.
-- **`↑` / `↓` (or `j` / `k`)** — Move the selection.
-- **`e`** — Toggle the Keeper engine.
-- **`Enter` / `Space`** — Toggle the selected agent's session keeper.
-- **`w`** — Toggle the selected agent's weekly keeper.
-- **`p`** — Immediately test-ping the selected agent.
-- **`r`** — Refresh; **`q`** or **`Ctrl+C`** quits.
-
-The Keeper panel shows the newest 20 runs and reloads them on launch; the full
-history is kept in `tokenpulse.db`.
+Because every ping spends real quota, the engine ships **disabled**. Enable it
+in the Keeper tab (`e`) or Settings tab, then opt in per agent. Wakeup times,
+prompts, and command templates live under `[keeper]` in `config.toml`; Keeper
+picks the cheapest active model per agent from local catalogs at startup and
+once a day. The Keeper tab shows the newest 20 runs; full history stays in
+`tokenpulse.db`.
 
 ## Data Model
 

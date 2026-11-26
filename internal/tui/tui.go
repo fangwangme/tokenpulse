@@ -122,7 +122,8 @@ type fetchResult struct {
 type toastMsg struct{ text string }
 type wsMsg struct{ payload string }
 type tickMsg struct{}
-type keeperMsg struct{ records []keeper.ExecutionRecord }
+type keeperTickMsg struct{}
+type keeperCheckMsg struct{ records []keeper.ExecutionRecord }
 
 func Run(opts Options) error {
 	m := newModel(opts)
@@ -326,15 +327,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		cmds := []tea.Cmd{m.scanCmd(), m.quotaCmd(), tea.Tick(interval, func(time.Time) tea.Msg { return tickMsg{} })}
 		return m, tea.Batch(cmds...)
-	case keeperMsg:
-		if len(msg.records) > 0 {
-			m.keeperLog = msg.records
-		}
+	case keeperTickMsg:
 		cmds := []tea.Cmd{m.keeperTickCmd()}
 		if !m.serveMode && m.opts.Config.Keeper.Enabled {
 			cmds = append(cmds, m.keeperCheckCmd())
 		}
 		return m, tea.Batch(cmds...)
+	case keeperCheckMsg:
+		if len(msg.records) > 0 {
+			m.keeperLog = msg.records
+		}
+		return m, nil
 	case toastMsg:
 		m.toast = msg.text
 		m.toastAt = time.Now()
@@ -662,6 +665,9 @@ func (m *model) handleKeeperKey(key string) (tea.Model, tea.Cmd) {
 		entry.SessionKeeperEnabled = state
 		cfg.Keeper.Agents[agent] = entry
 		m.opts.Config = cfg
+		if m.engine != nil {
+			m.engine.UpdateConfig(cfg.Keeper)
+		}
 	case "w":
 		agent := keeper.Agents[m.keeperCursor]
 		if m.serveMode {
@@ -680,6 +686,9 @@ func (m *model) handleKeeperKey(key string) (tea.Model, tea.Cmd) {
 		entry.WeeklyKeeperEnabled = state
 		cfg.Keeper.Agents[agent] = entry
 		m.opts.Config = cfg
+		if m.engine != nil {
+			m.engine.UpdateConfig(cfg.Keeper)
+		}
 	case "p":
 		agent := keeper.Agents[m.keeperCursor]
 		if m.serveMode {
@@ -733,6 +742,9 @@ func (m *model) changeSetting() tea.Cmd {
 		update = map[string]any{"display.quota_display_mode": string(cfg.Display.QuotaDisplayMode)}
 	case 2:
 		options := []uint32{0, 60, 120, 300, 600, 900}
+		if m.serveMode {
+			options = []uint32{60, 120, 300, 600, 900}
+		}
 		next := uint32(300)
 		for i, value := range options {
 			if value == cfg.Display.AutoRefreshSecs {
@@ -801,6 +813,9 @@ func (m *model) saveConfig(cfg config.Config) {
 		return
 	}
 	m.opts.Config = cfg
+	if m.engine != nil {
+		m.engine.UpdateConfig(cfg.Keeper)
+	}
 }
 
 func (m *model) patchSettings(update map[string]any) tea.Cmd {
@@ -889,7 +904,7 @@ func (m *model) keeperTickCmd() tea.Cmd {
 	if interval < 10*time.Second {
 		interval = 10 * time.Second
 	}
-	return tea.Tick(interval, func(time.Time) tea.Msg { return keeperMsg{} })
+	return tea.Tick(interval, func(time.Time) tea.Msg { return keeperTickMsg{} })
 }
 
 func (m *model) pollState() tea.Cmd {
@@ -1443,8 +1458,8 @@ func (m *model) renderQuota(width int) string {
 			bars := barCells(percent)
 			bar := strings.Repeat("█", bars) + strings.Repeat("░", 20-bars)
 			pace := ""
-			if pace := computePace(window); pace != "" {
-				pace = "  " + pace
+			if text := computePace(window); text != "" {
+				pace = "  " + text
 			}
 			fmt.Fprintf(&b, "  %-20s %s %5.1f%%%s\n", truncate(window.Label, 20), level.Render(bar), percent, pace)
 		}
@@ -1668,7 +1683,7 @@ func (m *model) keeperCheckCmd() tea.Cmd {
 			record := engine.Execute(request)
 			engine.Finish(request, record)
 		}
-		return keeperMsg{records: engine.History.Recent(20)}
+		return keeperCheckMsg{records: engine.History.Recent(20)}
 	}
 }
 
@@ -1748,12 +1763,15 @@ func displayPlan(plan string) string {
 }
 
 func truncate(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
 	runes := []rune(value)
 	if len(runes) <= width {
 		return value
 	}
-	if width <= 1 {
-		return string(runes[:width])
+	if width == 1 {
+		return string(runes[:1])
 	}
 	return string(runes[:width-1]) + "…"
 }
