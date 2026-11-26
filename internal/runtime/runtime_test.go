@@ -5,11 +5,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/fangwangme/tokenpulse/internal/config"
+	"github.com/fangwangme/tokenpulse/internal/provider"
+	"github.com/fangwangme/tokenpulse/internal/quota"
 	"github.com/fangwangme/tokenpulse/internal/scan"
 )
 
@@ -71,6 +74,19 @@ func TestRefreshGateCooldown(t *testing.T) {
 	}
 }
 
+func TestApplyLocalSettingProviderOrder(t *testing.T) {
+	cfg := config.Default()
+	if err := ApplyLocalSetting(&cfg, "display.quota_provider_order", []any{"opencode", "claude", "opencode"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.Display.QuotaProviderOrder, ","); got != "opencode,claude,codex,antigravity" {
+		t.Fatalf("provider order = %s", got)
+	}
+	if err := ApplyLocalSetting(&cfg, "display.quota_provider_order", []any{"bogus"}); err == nil {
+		t.Fatal("unknown provider accepted")
+	}
+}
+
 func TestInProcessClientPatchSettingsAndEvents(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TOKENPULSE_DATA_DIR", dir)
@@ -101,15 +117,19 @@ func TestInProcessClientPatchSettingsAndEvents(t *testing.T) {
 	defer cancel()
 
 	cfg, err := client.PatchSettings(map[string]any{
-		"display.theme":             "dark",
-		"display.auto_refresh_secs": 120,
-		"keeper.enabled":            true,
+		"display.theme":                "dark",
+		"display.auto_refresh_secs":    120,
+		"display.quota_provider_order": []string{"opencode", "claude"},
+		"keeper.enabled":               true,
 	})
 	if err != nil {
 		t.Fatalf("PatchSettings: %v", err)
 	}
 	if cfg.Display.Theme != config.ThemeDark || cfg.Display.AutoRefreshSecs != 120 || !cfg.Keeper.Enabled {
 		t.Fatalf("unexpected cfg: %+v", cfg.Display)
+	}
+	if got := strings.Join(cfg.Display.QuotaProviderOrder, ","); got != "opencode,claude,codex,antigravity" {
+		t.Fatalf("provider order = %s", got)
 	}
 	select {
 	case ev := <-events:
@@ -118,6 +138,46 @@ func TestInProcessClientPatchSettingsAndEvents(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for settings_updated event")
+	}
+}
+
+func TestApplyQuotaResultsClearsAbsentProvider(t *testing.T) {
+	dir := t.TempDir()
+	manager := config.NewWithPath(filepath.Join(dir, "config.toml"))
+	scanner, err := scan.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(dir, manager, scanner, "standalone", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	snapshot := &provider.QuotaSnapshot{
+		Provider:  "opencode",
+		FetchedAt: now,
+		Windows:   []provider.RateWindow{{ID: "5h", Label: "5h", UsedPercent: 100}},
+	}
+	if err := r.Cache.Save("opencode", now, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	r.snapshots["opencode"] = *snapshot
+	r.quotaErrors["opencode"] = QuotaError{Message: "old", At: now}
+	r.exhausted["opencode:5h"] = true
+
+	r.ApplyQuotaResults([]quota.FetchResult{{Provider: "opencode", Absent: true, FetchedAt: now}})
+
+	if _, ok := r.snapshots["opencode"]; ok {
+		t.Fatal("absent provider kept its snapshot")
+	}
+	if _, ok := r.quotaErrors["opencode"]; ok {
+		t.Fatal("absent provider kept its error")
+	}
+	if r.exhausted["opencode:5h"] {
+		t.Fatal("absent provider kept its exhausted window")
+	}
+	if cached, err := r.Cache.LoadAny("opencode"); err != nil || cached != nil {
+		t.Fatalf("absent provider kept its cache: cached=%+v err=%v", cached, err)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 
 	"github.com/fangwangme/tokenpulse/internal/config"
 	"github.com/fangwangme/tokenpulse/internal/keeper"
+	"github.com/fangwangme/tokenpulse/internal/quota"
 	"github.com/fangwangme/tokenpulse/internal/report"
 )
 
@@ -109,6 +110,30 @@ func (c *InProcessClient) Close() error {
 	return nil
 }
 
+func localProviderOrder(value any) ([]string, error) {
+	var order []string
+	switch v := value.(type) {
+	case []string:
+		order = append(order, v...)
+	case []any:
+		for _, item := range v {
+			id, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("invalid value for display.quota_provider_order")
+			}
+			order = append(order, id)
+		}
+	default:
+		return nil, fmt.Errorf("invalid value for display.quota_provider_order")
+	}
+	for _, id := range order {
+		if !quota.IsProvider(id) {
+			return nil, fmt.Errorf("invalid provider %q for display.quota_provider_order", id)
+		}
+	}
+	return order, nil
+}
+
 // ApplyLocalSetting applies a setting key/value pair from local trusted clients
 // (TUI / CLI) onto cfg.
 func ApplyLocalSetting(cfg *config.Config, key string, value any) error {
@@ -132,6 +157,13 @@ func ApplyLocalSetting(cfg *config.Config, key string, value any) error {
 		}
 	case key == "display.account_display":
 		cfg.Display.AccountDisplay = config.AccountDisplay(strVal)
+	case key == "display.quota_provider_order":
+		order, err := localProviderOrder(value)
+		if err != nil {
+			return err
+		}
+		cfg.Display.QuotaProviderOrder = order
+		cfg.Display.QuotaProviderOrder = cfg.QuotaProviderOrder(quota.ProviderIDs)
 	case key == "display.refresh_quota":
 		cfg.Display.RefreshQuota = boolVal
 	case key == "display.scan_antigravity":
