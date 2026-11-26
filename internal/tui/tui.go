@@ -1319,7 +1319,7 @@ func (m *model) renderQuota(width int) string {
 					reset = "  " + s.dim.Render("resets in "+formatDurationShort(rem))
 				}
 			}
-			fmt.Fprintf(&b, "  %-20s %s %5.1f%%%s%s\n", truncate(window.Label, 20), level.Render(bar), percent, pace, reset)
+			fmt.Fprintf(&b, "  %-20s %s %5.1f%%%s%s\n", truncate(displayWindowLabel(window.Label), 20), level.Render(bar), percent, pace, reset)
 		}
 		if snapshot.ExtraUsage != nil {
 			limit := ""
@@ -1334,6 +1334,17 @@ func (m *model) renderQuota(width int) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+func displayWindowLabel(label string) string {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "session (5h)", "5h", "5 hours":
+		return "5h"
+	case "weekly (7d)", "weekly":
+		return "Weekly"
+	default:
+		return label
+	}
 }
 
 func levelStyle(used float64, s styles) lipgloss.Style {

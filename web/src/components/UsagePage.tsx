@@ -860,46 +860,79 @@ export function UsagePage() {
               </div>
             }
           >
-            <div style={{ "margin-top": "10px", display: "grid", "grid-template-columns": "repeat(3, minmax(0, 1fr))", gap: "8px" }}>
-              <For each={kpis()}>
-                {(k) => (
-                  <div
-                    style={{
-                      background: "var(--surface)",
-                      border: "1px solid var(--line)",
-                      "border-radius": "14px",
-                      padding: "10px 12px",
-                    }}
-                  >
-                    <div style={{ "font-size": "12px", color: "var(--muted)" }}>{k.label}</div>
-                    <div
-                      style={{
-                        "font-size": "18px",
-                        "font-weight": 750,
-                        "letter-spacing": "-.02em",
-                        color: k.color,
-                        "font-variant-numeric": "tabular-nums",
-                        "white-space": "nowrap",
-                      }}
-                    >
-                      {k.value}
-                    </div>
-                    <Show when={!isSingleDay()}>
-                      <div
+            {(() => {
+              const items = kpis();
+              const heroIdx = metric() === "cost" ? 0 : 1;
+              const hero = items[heroIdx] ?? items[0];
+              const secondary = items.filter((_, idx) => idx !== heroIdx);
+              return (
+                <div class="tp-hero" style={{ "margin-top": "10px", padding: "16px 18px 14px" }}>
+                  <div style={{ display: "flex", "align-items": "center", "justify-content": "space-between", gap: "8px" }}>
+                    <span style={{ "font-size": "12.5px", "font-weight": 550, color: "var(--muted)" }}>{hero.label}</span>
+                    <Show when={!isSingleDay() && hero.delta.text && hero.delta.text !== "—"}>
+                      <span
+                        class="tp-pill"
                         style={{
-                          "font-size": "11.5px",
-                          color: k.delta.color,
-                          "font-variant-numeric": "tabular-nums",
-                          "white-space": "nowrap",
+                          color: hero.delta.color,
+                          background: `color-mix(in srgb, ${hero.delta.color} 14%, transparent)`,
                         }}
                       >
-                        {k.delta.text}
-                      </div>
+                        {hero.delta.text}
+                      </span>
                     </Show>
                   </div>
-                )}
-              </For>
-            </div>
+                  <div
+                    style={{
+                      "font-size": "34px",
+                      "font-weight": 780,
+                      "letter-spacing": "-.035em",
+                      "line-height": 1.12,
+                      "margin-top": "4px",
+                      color: hero.color,
+                      "font-variant-numeric": "tabular-nums",
+                    }}
+                  >
+                    {hero.value}
+                  </div>
+                  <div
+                    style={{
+                      "margin-top": "14px",
+                      "padding-top": "12px",
+                      "border-top": "1px solid var(--line)",
+                      display: "grid",
+                      "grid-template-columns": "repeat(2, minmax(0, 1fr))",
+                      gap: "12px",
+                    }}
+                  >
+                    <For each={secondary}>
+                      {(k) => (
+                        <div>
+                          <div style={{ "font-size": "11.5px", color: "var(--muted)" }}>{k.label}</div>
+                          <div style={{ display: "flex", "align-items": "baseline", gap: "6px", "margin-top": "2px" }}>
+                            <span
+                              style={{
+                                "font-size": "17px",
+                                "font-weight": 700,
+                                "letter-spacing": "-.02em",
+                                color: k.color,
+                                "font-variant-numeric": "tabular-nums",
+                              }}
+                            >
+                              {k.value}
+                            </span>
+                            <Show when={!isSingleDay() && k.delta.text && k.delta.text !== "—"}>
+                              <span style={{ "font-size": "11px", color: k.delta.color, "font-variant-numeric": "tabular-nums" }}>
+                                {k.delta.text}
+                              </span>
+                            </Show>
+                          </div>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                </div>
+              );
+            })()}
           </Show>
 
           {/* Comparison line (only when multi-day period and data loaded) */}
@@ -1234,18 +1267,10 @@ export function UsagePage() {
           </Show>
 
           {/* List Card */}
-          <div
-            style={{
-              "margin-top": "12px",
-              background: "var(--surface)",
-              border: "1px solid var(--line)",
-              "border-radius": "18px",
-              padding: "12px 0 4px",
-            }}
-          >
+          <div class="tp-card" style={{ "margin-top": "12px", padding: "14px 0 6px" }}>
             {/* List Header */}
-            <div style={{ display: "flex", "align-items": "center", padding: "0 14px", "min-height": "34px" }}>
-              <span style={{ "font-weight": 650, "font-size": "15px", flex: 1 }}>
+            <div style={{ display: "flex", "align-items": "center", padding: "0 16px", "min-height": "34px" }}>
+              <span style={{ "font-weight": 680, "font-size": "15px", flex: 1 }}>
                 {isSingleDay() ? t("usage.byModel") : group() === "date" ? t("usage.byDate") : t("usage.byModel")}
               </span>
               <Show when={!isSingleDay()}>
@@ -1254,7 +1279,7 @@ export function UsagePage() {
                     display: "flex",
                     background: "var(--bg)",
                     border: "1px solid var(--line)",
-                    "border-radius": "8px",
+                    "border-radius": "10px",
                     padding: "2px",
                   }}
                 >
@@ -1262,13 +1287,15 @@ export function UsagePage() {
                     onClick={() => setGroup("date")}
                     style={{
                       height: "28px",
-                      padding: "0 10px",
-                      "border-radius": "6px",
+                      padding: "0 11px",
+                      "border-radius": "8px",
                       border: 0,
                       font: "inherit",
                       "font-size": "12.5px",
-                      background: group() === "date" ? "var(--code)" : "none",
+                      "font-weight": group() === "date" ? 600 : 450,
+                      background: group() === "date" ? "var(--surface)" : "none",
                       color: group() === "date" ? "var(--fg)" : "var(--muted)",
+                      "box-shadow": group() === "date" ? "0 1px 4px rgba(0,0,0,.12)" : "none",
                     }}
                   >
                     {t("usage.byDate")}
@@ -1277,13 +1304,15 @@ export function UsagePage() {
                     onClick={() => setGroup("model")}
                     style={{
                       height: "28px",
-                      padding: "0 10px",
-                      "border-radius": "6px",
+                      padding: "0 11px",
+                      "border-radius": "8px",
                       border: 0,
                       font: "inherit",
                       "font-size": "12.5px",
-                      background: group() === "model" ? "var(--code)" : "none",
+                      "font-weight": group() === "model" ? 600 : 450,
+                      background: group() === "model" ? "var(--surface)" : "none",
                       color: group() === "model" ? "var(--fg)" : "var(--muted)",
+                      "box-shadow": group() === "model" ? "0 1px 4px rgba(0,0,0,.12)" : "none",
                     }}
                   >
                     {t("usage.byModel")}
@@ -1291,6 +1320,57 @@ export function UsagePage() {
                 </div>
               </Show>
             </div>
+
+            {/* Company Share Pill Bar */}
+            <Show when={usageReport() && usageReport()!.models.length > 0}>
+              {(() => {
+                const models = usageReport()!.models;
+                const byCompany = new Map<string, number>();
+                let sum = 0;
+                for (const m of models) {
+                  const val = metric() === "cost" ? m.cost : m.tokens;
+                  if (val <= 0) continue;
+                  const co = m.company || "other";
+                  byCompany.set(co, (byCompany.get(co) || 0) + val);
+                  sum += val;
+                }
+                if (sum <= 0) return null;
+                const segs = Array.from(byCompany.entries())
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([co, val]) => ({
+                    co,
+                    pct: (val / sum) * 100,
+                    color: COMPANY_COLORS[co] || COMPANY_COLORS.other,
+                  }));
+                const coLabel = (co: string) =>
+                  co === "anthropic" ? "Anthropic" : co === "openai" ? "OpenAI" : co === "google" ? "Google" : co;
+                return (
+                  <div style={{ padding: "10px 16px 8px" }}>
+                    <div class="tp-share-bar">
+                      <For each={segs}>
+                        {(seg) => (
+                          <div
+                            class="tp-share-seg"
+                            style={{ width: `${Math.max(2, seg.pct)}%`, background: seg.color }}
+                          />
+                        )}
+                      </For>
+                    </div>
+                    <div style={{ display: "flex", "flex-wrap": "wrap", gap: "10px", "margin-top": "7px" }}>
+                      <For each={segs}>
+                        {(seg) => (
+                          <span style={{ display: "inline-flex", "align-items": "center", gap: "5px", "font-size": "11.5px", color: "var(--muted)", "font-variant-numeric": "tabular-nums" }}>
+                            <span style={{ width: "7px", height: "7px", "border-radius": "50%", background: seg.color }} />
+                            <span>{coLabel(seg.co)}</span>
+                            <b style={{ color: "var(--fg)", "font-weight": 600 }}>{Math.round(seg.pct)}%</b>
+                          </span>
+                        )}
+                      </For>
+                    </div>
+                  </div>
+                );
+              })()}
+            </Show>
 
             {/* Skeleton Rows when loading */}
             <Show when={isLoading() && !usageReport()}>

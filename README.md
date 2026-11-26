@@ -148,7 +148,7 @@ tokenpulse --csv models
   and list, `Enter` opens detail, `[` / `]` shifts the range, `s` opens the agent
   filter, `r` refreshes.
 - Quota: `↑` / `↓` selects a provider.
-- Keeper: `e` toggles the engine, `Enter`/`Space` toggles the session keeper,
+- Keeper: `e` toggles the engine, `Enter`/`Space` toggles the 5h keeper,
   `w` toggles the weekly keeper, `p` sends a test ping.
 - Settings: `↑` / `↓` moves, `Enter`/`Space` changes the row; the quota-provider
   row cycles Claude → Codex → Antigravity.

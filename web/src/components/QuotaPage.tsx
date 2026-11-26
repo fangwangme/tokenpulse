@@ -9,9 +9,9 @@ import { t } from "../i18n";
 
 
 const PROVIDER_NAMES: Record<string, string> = {
-  claude: "CLAUDE CODE",
-  codex: "CODEX",
-  antigravity: "ANTIGRAVITY",
+  claude: "Claude Code",
+  codex: "Codex",
+  antigravity: "Antigravity",
 };
 
 export function formatDurationShort(ms: number): string {
@@ -278,43 +278,44 @@ export function QuotaPage() {
 
                     {/* Card */}
                     <Show when={p.snapshot || showEmptyProviders()}>
-                      <div
-                        style={{
-                          background: "var(--surface)",
-                          border: "1px solid var(--line)",
-                          "border-radius": "18px",
-                          padding: "14px 16px 8px",
-                        }}
-                      >
-                        <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+                      <div class="tp-card" style={{ padding: "16px 18px 10px" }}>
+                        <div style={{ display: "flex", "align-items": "center", gap: "9px" }}>
                           <span
                             style={{
-                              width: "8px",
-                              height: "8px",
+                              width: "9px",
+                              height: "9px",
                               "border-radius": "50%",
                               background: providerDotColor(),
+                              "box-shadow": `0 0 0 3px color-mix(in srgb, ${providerDotColor()} 20%, transparent)`,
                               flex: "none",
                             }}
                           />
                           <span
                             style={{
-                              "font-weight": 700,
-                              "font-size": "15px",
-                              "letter-spacing": ".02em",
+                              "font-weight": 720,
+                              "font-size": "16px",
+                              "letter-spacing": "-.01em",
                               color: "var(--fg)",
                             }}
                           >
-                            {PROVIDER_NAMES[p.provider] || p.provider.toUpperCase()}
+                            {PROVIDER_NAMES[p.provider] || p.provider}
                           </span>
+                          <Show when={state.accountDisplay !== "none" && p.snapshot?.plan}>
+                            <span
+                              class="tp-pill"
+                              style={{
+                                background: "var(--accentbg)",
+                                color: "var(--accent)",
+                                "font-size": "11px",
+                              }}
+                            >
+                              {p.snapshot?.plan}
+                            </span>
+                          </Show>
                         </div>
-                        <Show when={state.accountDisplay !== "none" && (p.snapshot?.plan || p.snapshot?.account)}>
-                          <div style={{ "font-size": "12.5px", color: "var(--muted)", "margin-top": "2px" }}>
-                            <Show when={p.snapshot?.plan}>
-                              <b style={{ color: "var(--fg)", "font-weight": 600 }}>{p.snapshot?.plan}</b>
-                            </Show>
-                            <Show when={state.accountDisplay === "full" && p.snapshot?.account}>
-                              <span>{p.snapshot?.plan ? " · " : ""}{p.snapshot?.account}</span>
-                            </Show>
+                        <Show when={state.accountDisplay === "full" && p.snapshot?.account}>
+                          <div style={{ "font-size": "12px", color: "var(--muted)", "margin-top": "3px", "padding-left": "18px" }}>
+                            {p.snapshot?.account}
                           </div>
                         </Show>
 
@@ -331,10 +332,18 @@ export function QuotaPage() {
                             const lvl = () => quotaLevel(u());
                             const pResult = () => quotaPace(w, now());
 
+                            const displayWindowLabel = (label: string) => {
+                              const lower = label.trim().toLowerCase();
+                              if (lower === "session (5h)" || lower === "5h" || lower === "5 hours") return "5h";
+                              if (lower === "weekly (7d)" || lower === "weekly") return "Weekly";
+                              return label.replace(/^Session \(5h\)/i, "5h").replace(/^Weekly \(7d\)/i, "Weekly");
+                            };
+
                             const tag = () => {
-                              if (!w.family) return w.label;
-                              if (w.label.toLowerCase().includes(w.family.toLowerCase())) return w.label;
-                              return `${w.label} · ${w.family}`;
+                              const base = displayWindowLabel(w.label);
+                              if (!w.family) return base;
+                              if (base.toLowerCase().includes(w.family.toLowerCase())) return base;
+                              return `${base} · ${w.family}`;
                             };
 
                             const resetText = () => {
@@ -389,32 +398,43 @@ export function QuotaPage() {
                               };
                             };
 
+                            const bigPct = () => `${Math.round(used() ? u() : Math.max(0, 100 - u()))}%`;
+
                             return (
-                              <div style={{ padding: "10px 0 8px", "border-top": "1px solid var(--line)", "margin-top": "8px" }}>
+                              <div style={{ padding: "12px 0 8px", "border-top": "1px solid var(--line)", "margin-top": "10px" }}>
                                 <div style={{ display: "flex", "align-items": "baseline", gap: "8px" }}>
-                                  <span style={{ "font-size": "13.5px", "font-weight": 650, flex: 1, "letter-spacing": ".01em" }}>
+                                  <span style={{ "font-size": "13.5px", "font-weight": 650, flex: 1 }}>
                                     {tag()}
                                   </span>
-                                  <span style={{ "font-size": "12.5px", color: "var(--muted)", "font-variant-numeric": "tabular-nums" }}>
-                                    {resetText()}
+                                  <span
+                                    style={{
+                                      "font-size": "19px",
+                                      "font-weight": 750,
+                                      "letter-spacing": "-.02em",
+                                      color: firstColor(),
+                                      "font-variant-numeric": "tabular-nums",
+                                    }}
+                                  >
+                                    {bigPct()}
                                   </span>
                                 </div>
-                                <div style={{ position: "relative", height: "14px", margin: "5px 0", display: "flex", "align-items": "center" }}>
+                                <div style={{ position: "relative", height: "16px", margin: "6px 0", display: "flex", "align-items": "center" }}>
                                   <div
                                     style={{
                                       width: "100%",
-                                      height: "8px",
-                                      "border-radius": "4px",
+                                      height: "10px",
+                                      "border-radius": "999px",
                                       background: "var(--line2)",
                                       overflow: "hidden",
                                     }}
                                   >
                                     <div
                                       style={{
-                                        height: "8px",
+                                        height: "10px",
+                                        "border-radius": "999px",
                                         width: barWidth(),
                                         background: barColor(),
-                                        transition: "width .2s ease-out",
+                                        transition: "width .25s cubic-bezier(.2,.8,.2,1)",
                                       }}
                                     />
                                   </div>
@@ -422,22 +442,29 @@ export function QuotaPage() {
                                     <span
                                       style={{
                                         position: "absolute",
-                                        top: 0,
-                                        left: `calc(${markerPos()!.toFixed(1)}% - 1px)`,
-                                        width: "2px",
+                                        top: "1px",
+                                        left: `calc(${markerPos()!.toFixed(1)}% - 1.5px)`,
+                                        width: "3px",
                                         height: "14px",
-                                        "border-radius": "1px",
+                                        "border-radius": "999px",
                                         background: "var(--fg)",
-                                        "box-shadow": "0 0 0 1px var(--surface)",
+                                        "box-shadow": "0 0 0 1.5px var(--surface)",
                                       }}
                                     />
                                   </Show>
                                 </div>
-                                <div style={{ display: "flex", "align-items": "baseline", gap: "10px", "font-size": "12.5px", "font-variant-numeric": "tabular-nums" }}>
-                                  <span style={{ color: firstColor(), "font-weight": 600 }}>{firstText()}</span>
+                                <div style={{ display: "flex", "align-items": "center", gap: "8px", "font-size": "12px", "font-variant-numeric": "tabular-nums" }}>
+                                  <span style={{ color: "var(--muted)" }}>{firstText()} · {resetText()}</span>
                                   <span style={{ flex: 1 }} />
                                   <Show when={paceInfo()}>
-                                    <span style={{ color: paceInfo()!.color, "font-weight": 550, "text-align": "right" }}>
+                                    <span
+                                      class="tp-pill"
+                                      style={{
+                                        color: paceInfo()!.color,
+                                        background: `color-mix(in srgb, ${paceInfo()!.color} 14%, transparent)`,
+                                        "font-size": "11px",
+                                      }}
+                                    >
                                       {paceInfo()!.text}
                                     </span>
                                   </Show>
@@ -452,6 +479,7 @@ export function QuotaPage() {
                           {(eu) => {
                             const fmtAmount = (amount: number, currency: string) => formatMoney(amount, currency);
                             const cur = () => eu().currency ?? "USD";
+                            const pct = () => (eu().limit && eu().limit! > 0 ? Math.min(100, Math.max(0, (eu().used / eu().limit!) * 100)) : null);
                             return (
                               <div
                                 style={{
@@ -459,18 +487,26 @@ export function QuotaPage() {
                                   "margin-top": "8px",
                                   padding: "10px 0 6px",
                                   "font-size": "12.5px",
-                                  display: "flex",
-                                  "justify-content": "space-between",
                                   color: "var(--muted)",
                                   "font-variant-numeric": "tabular-nums",
                                 }}
                               >
-                                <span>
-                                  {t("quota.extraUsage", {
-                                    used: fmtAmount(eu().used, cur()),
-                                    limit: eu().limit !== null ? fmtAmount(eu().limit!, cur()) : "—",
-                                  })}
-                                </span>
+                                <div style={{ display: "flex", "justify-content": "space-between", "align-items": "center" }}>
+                                  <span>
+                                    {t("quota.extraUsage", {
+                                      used: fmtAmount(eu().used, cur()),
+                                      limit: eu().limit !== null ? fmtAmount(eu().limit!, cur()) : "—",
+                                    })}
+                                  </span>
+                                  <Show when={pct() !== null}>
+                                    <b style={{ color: "var(--fg)", "font-weight": 600 }}>{Math.round(pct()!)}%</b>
+                                  </Show>
+                                </div>
+                                <Show when={pct() !== null}>
+                                  <div style={{ height: "6px", "border-radius": "999px", background: "var(--line2)", overflow: "hidden", "margin-top": "6px" }}>
+                                    <div style={{ height: "6px", "border-radius": "999px", width: `${pct()!}%`, background: "var(--accent)" }} />
+                                  </div>
+                                </Show>
                               </div>
                             );
                           }}

@@ -26,6 +26,7 @@ export function KeeperPage() {
   const [error, setError] = createSignal("");
   const [busy, setBusy] = createSignal("");
   const [wakeups, setWakeups] = createSignal<Record<string, string>>({});
+  const [expanded, setExpanded] = createSignal<Record<string, boolean>>({});
 
   const load = async () => {
     setError("");
@@ -75,7 +76,7 @@ export function KeeperPage() {
   };
 
   const agentCard = (id: string, agent: KeeperAgent) => (
-    <div class="card" style={{ "margin-top": "10px" }}>
+    <div class="tp-card" style={{ "margin-top": "10px", overflow: "hidden" }}>
       <div class="li" style={{ "align-items": "center" }}>
         <span style={{ width: "9px", height: "9px", "border-radius": "50%", background: `var(--agent-${id === "agy" ? "agy" : id})`, flex: "none" }} />
         <div class="tx">
@@ -170,10 +171,18 @@ export function KeeperPage() {
             </div>
           </Show>
           <Show when={keeper()}>
-            <div class="card" style={{ "margin-top": "10px" }}>
+            <div
+              class={keeper()!.engine ? "tp-hero" : "tp-card"}
+              style={{
+                "margin-top": "10px",
+                background: keeper()!.engine
+                  ? "radial-gradient(100% 100% at 0% 0%, color-mix(in srgb, var(--addfg) 14%, transparent), transparent 65%), var(--surface)"
+                  : "var(--surface)",
+              }}
+            >
               <button class="li" onClick={() => void update("keeper.enabled", !keeper()!.engine)}>
                 <div class="tx">
-                  {t("keeper.engine")}
+                  <span style={{ "font-weight": 680 }}>{t("keeper.engine")}</span>
                   <small>{keeper()!.engine ? t("settings.on") : t("settings.off")}</small>
                 </div>
                 <span class={`tg${keeper()!.engine ? "" : " off"}`} />
@@ -184,29 +193,80 @@ export function KeeperPage() {
             </Show>
             <For each={Object.entries(keeper()!.agents || {})}>{([id, agent]) => agentCard(id, agent)}</For>
             <div class="sec">{t("keeper.recent")}</div>
-            <div class="card">
+            <div class="tp-card" style={{ overflow: "hidden" }}>
               <Show
                 when={(keeper()!.executions || []).length > 0}
                 fallback={<div class="li"><div class="tx">{t("keeper.none")}</div></div>}
               >
                 <For each={[...keeper()!.executions].reverse()}>
-                  {(execution) => (
-                    <div class="li" style={{ "align-items": "flex-start" }}>
-                      <div class="tx">
-                        {agentName(execution.agent)} · {execution.trigger}
-                        <small>{formatTime(execution.time)} · {execution.model}</small>
-                        <Show when={execution.reply}>
-                          <small style={{ "margin-top": "4px", "overflow-wrap": "anywhere" }}>{execution.reply}</small>
-                        </Show>
-                      </div>
-                      <span
-                        class="v"
-                        style={{ color: execution.status === "success" ? "var(--addfg)" : "var(--danger)", "font-weight": 600 }}
+                  {(execution, idx) => {
+                    const rowKey = () => `${execution.time}-${execution.agent}-${idx()}`;
+                    const isOpen = () => Boolean(expanded()[rowKey()]);
+                    const cleanReply = () => (execution.reply || "").replace(/\s+/g, " ").trim();
+                    const ok = () => execution.status === "success";
+                    const triggerLabel = () => {
+                      const raw = (execution.trigger || "").toLowerCase();
+                      if (raw === "session" || raw === "daily" || raw === "5h") return "5h";
+                      if (raw === "weekly") return "weekly";
+                      return execution.trigger;
+                    };
+                    return (
+                      <button
+                        class="li tp-press"
+                        style={{ "align-items": "flex-start", "text-align": "left" }}
+                        onClick={() => setExpanded({ ...expanded(), [rowKey()]: !isOpen() })}
                       >
-                        {execution.status === "success" ? t("keeper.success") : t("keeper.failed")}
-                      </span>
-                    </div>
-                  )}
+                        <span
+                          style={{
+                            width: "8px",
+                            height: "8px",
+                            "border-radius": "50%",
+                            background: ok() ? "var(--addfg)" : "var(--danger)",
+                            "margin-top": "6px",
+                            flex: "none",
+                          }}
+                        />
+                        <div class="tx" style={{ "min-width": 0 }}>
+                          <div style={{ display: "flex", "align-items": "center", gap: "6px", "flex-wrap": "wrap" }}>
+                            <span style={{ "font-weight": 650 }}>{agentName(execution.agent)}</span>
+                            <span class="tp-pill" style={{ background: "var(--code)", color: "var(--muted)", "font-size": "10.5px" }}>
+                              {triggerLabel()}
+                            </span>
+                            <Show when={execution.model}>
+                              <span style={{ "font-size": "11.5px", color: "var(--faint)" }}>{execution.model}</span>
+                            </Show>
+                          </div>
+                          <small>{formatTime(execution.time)}</small>
+                          <Show when={cleanReply()}>
+                            <small
+                              style={{
+                                "margin-top": "4px",
+                                color: "var(--muted)",
+                                display: isOpen() ? "block" : "-webkit-box",
+                                "-webkit-line-clamp": isOpen() ? "unset" : "2",
+                                "-webkit-box-orient": "vertical",
+                                overflow: "hidden",
+                                "overflow-wrap": "anywhere",
+                              }}
+                            >
+                              {cleanReply()}
+                            </small>
+                          </Show>
+                        </div>
+                        <span
+                          class="tp-pill"
+                          style={{
+                            color: ok() ? "var(--addfg)" : "var(--danger)",
+                            background: ok() ? "var(--addbg)" : "var(--dangerbg)",
+                            "font-size": "11px",
+                            flex: "none",
+                          }}
+                        >
+                          {ok() ? t("keeper.success") : t("keeper.failed")}
+                        </span>
+                      </button>
+                    );
+                  }}
                 </For>
               </Show>
             </div>
