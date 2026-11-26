@@ -90,7 +90,7 @@ export const state = createMutable<AppState>({
   quotaDisplay: "remaining",
   accountDisplay: "full",
   quotaShowAccount: true,
-  usageScanInterval: "5m",
+  usageScanInterval: "15m",
   settings: {},
   agents: [],
   keeperEngine: false,

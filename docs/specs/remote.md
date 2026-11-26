@@ -17,7 +17,7 @@ Keeper. The TUI stays a full client of the same data.
 - **Refresh ownership.** The runtime host is the sole writer that scans usage,
   fetches quota, schedules Keeper pings, and fires quota-recovery alerts.
   `serve` refreshes immediately on start, then every `display.auto_refresh_secs`
-  (falling back to 300 seconds when set to 0). On start it warms its usage and
+  (falling back to 900 seconds when set to 0). On start it warms its usage and
   quota caches from disk so clients see cached data immediately. Scans and
   fetches never run on HTTP request paths; `/api/usage*` and `/api/quota` read
   only the cache.

@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **iOS Home Screen app**: the phone app no longer requests a translucent status bar, so an installed PWA starts below an opaque status bar and reaches the screen's bottom edge without the blurred top strip or the empty band under the bottom tabs. The bottom tab bar spans the screen edge and fills the bottom safe area, the refresh action is a solid accent button that hides with the bar while scrolling, and the shell follows the visual viewport only while a text field is focused and ignores stale readings after the keyboard closes.
 
+### Changed
+- **Defaults**: a new config starts with quota balance refresh off and a 15-minute refresh interval. Existing configs keep their explicit values.
+
 ## [0.7.0] - 2026-11-26
 
 ### Added

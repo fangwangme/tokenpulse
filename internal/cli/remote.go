@@ -41,7 +41,7 @@ func runServe(args []string) error {
 	}
 	if !quiet {
 		if cfg, err := manager.Load(); err == nil && cfg.Display.AutoRefreshSecs == 0 {
-			fmt.Println("display.auto_refresh_secs is 0; serve refreshes every 300s")
+			fmt.Println("display.auto_refresh_secs is 0; serve refreshes every 900s")
 		}
 	}
 	server, err := remote.NewServer(remote.Options{

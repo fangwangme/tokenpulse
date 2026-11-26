@@ -16,8 +16,8 @@ func TestMissingFileGetsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Version != Version || !cfg.Providers["claude"].Enabled || cfg.Display.AutoRefreshSecs != 300 ||
-		cfg.Keeper.Agents["claude"].Command == "" {
+	if cfg.Version != Version || !cfg.Providers["claude"].Enabled || cfg.Display.AutoRefreshSecs != 900 ||
+		cfg.Display.RefreshQuota || cfg.Keeper.Agents["claude"].Command == "" {
 		t.Fatalf("defaults = %+v", cfg)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -37,6 +37,7 @@ enabled = false
 [display]
 theme = "dark"
 auto_refresh_secs = 60
+refresh_quota = true
 
 [keeper]
 enabled = true
@@ -56,7 +57,7 @@ prompt = "Hi"
 		t.Fatal(err)
 	}
 	if cfg.Version != Version || cfg.Providers["claude"].Enabled || cfg.Display.Theme != ThemeDark ||
-		cfg.Display.AutoRefreshSecs != 60 || !cfg.Keeper.Enabled || cfg.Keeper.Agents["claude"].DailyWakeupTime != "08:15" ||
+		cfg.Display.AutoRefreshSecs != 60 || !cfg.Display.RefreshQuota || !cfg.Keeper.Enabled || cfg.Keeper.Agents["claude"].DailyWakeupTime != "08:15" ||
 		cfg.Keeper.Agents["claude"].SessionKeeperEnabled ||
 		cfg.Keeper.Agents["claude"].Command == "" || cfg.Keeper.Agents["codex"].Command == "" {
 		t.Fatalf("upgraded = %+v", cfg)

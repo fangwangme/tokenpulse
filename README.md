@@ -100,7 +100,8 @@ go install github.com/fangwangme/tokenpulse@latest
   over a local Unix socket
 - **Read-only quota tracking** — checks Claude Code, Codex, and Antigravity
   quota without writing or refreshing credentials; shows remaining/used bars,
-  reset times, pace, extra usage, and reset credits
+  reset times, pace, extra usage, and reset credits (off by default; enable it
+  in Settings or with `tokenpulse config set refresh_quota=true`)
 - **Session Keeper** — optional scheduled heartbeats for Claude Code, Codex,
   and Antigravity to trigger 5h cooldowns early and wake weekly windows after
   resets (disabled by default; each ping spends real quota)
@@ -108,7 +109,7 @@ go install github.com/fangwangme/tokenpulse@latest
   pricing and dated price periods; stored costs stay untouched unless you run
   `tokenpulse reprice --apply`
 - **Auto-refresh & on-demand reload** — configurable refresh interval
-  (default 5 min) plus `r` in any TUI tab to refresh immediately
+  (default 15 min) plus `r` in any TUI tab to refresh immediately
 - **Scripting outputs** — `--no-tui` plain text, `--json` (usage + quota),
   and `--csv daily|models`
 - **Observation history** — every quota poll and Keeper run is appended to
@@ -202,7 +203,7 @@ tokenpulse config set quota_display_mode=used
 tokenpulse config set theme=dark
 
 # Auto-refresh interval in minutes for quota + usage (0, 1, 2, 5, 10, 15; 0 = disabled)
-tokenpulse config set auto_refresh_interval=5
+tokenpulse config set auto_refresh_interval=15
 
 # Show empty providers in the dashboard
 tokenpulse config set show_empty_providers=true
@@ -210,8 +211,8 @@ tokenpulse config set show_empty_providers=true
 # Account row in quota cards: none, plan, or full (plan + email; default)
 tokenpulse config set account_display=plan
 
-# Enable / disable quota refresh (default: true)
-tokenpulse config set refresh_quota=false
+# Enable / disable quota refresh (default: false)
+tokenpulse config set refresh_quota=true
 
 # Quota recovery alerts: how far the notification reaches
 #   off       nothing at all

@@ -58,8 +58,8 @@ export function SettingsPage() {
 
   const value = <T,>(key: string, fallback: T): T => setting<T>(key, fallback);
   const scanSeconds = () => {
-    const seconds = Number(value("display.auto_refresh_secs", 300));
-    return seconds > 0 ? seconds : 300;
+    const seconds = Number(value("display.auto_refresh_secs", 900));
+    return seconds > 0 ? seconds : 900;
   };
 
   onMount(() => {
