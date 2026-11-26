@@ -844,6 +844,11 @@ svg.i.sm { width: 16px; height: 16px; }
   backdrop-filter: blur(20px) saturate(1.4);
   transition: transform .26s cubic-bezier(.22, 1, .36, 1), opacity .22s ease;
 }
+[data-mode="standalone"] .bottom-nav {
+  bottom: 0;
+  padding-bottom: calc(6px + env(safe-area-inset-bottom));
+  border-radius: 26px 26px 0 0;
+}
 .bottom-nav.hidden {
   transform: translateY(calc(100% + 28px));
   opacity: 0;

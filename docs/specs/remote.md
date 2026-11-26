@@ -235,8 +235,9 @@ dark palette background.
 The window never scrolls. `html`, `body` and `#root` are fixed to the layout
 viewport with `overflow: hidden`; a page fills that viewport with a fixed
 frame, and only its inner scroll area scrolls. The page's bottom safe-area
-padding lives inside that scroll area, and the bottom tab bar sits above the
-home indicator. The layout uses no `100dvh`/`100lvh`: on iOS 26 those units can
+padding lives inside that scroll area. In standalone mode the bottom tab bar's
+background fills the bottom safe area while its controls stay above the home
+indicator. The layout uses no `100dvh`/`100lvh`: on iOS 26 those units can
 include the status-bar height and leave a fixed empty band under the bottom
 controls.
 
