@@ -1078,6 +1078,7 @@ func runConfigSet(setting string) error {
 		}
 		cfg.Display.QuotaProviderOrder = order
 		cfg.Display.QuotaProviderOrder = cfg.QuotaProviderOrder(quota.ProviderIDs)
+		value = strings.Join(cfg.Display.QuotaProviderOrder, ",")
 	default:
 		return fmt.Errorf("Unknown setting '%s'. Available settings:\n  quota_display_mode     (used | remaining)\n  show_empty_providers   (true | false)\n  account_display        (none | plan | full)\n  theme                  (auto | dark | light)\n  auto_refresh_interval  (0 | 1 | 2 | 5 | 10 | 15 — minutes, 0 = disabled)\n  refresh_quota          (true | false)\n  notification_level     (off | in_app | terminal | system)\n  notification_sound     (chime | none | a name under /System/Library/Sounds, e.g. Hero)\n  keeper_engine          (true | false)\n  keeper_antigravity_groups (gemini_flash | all)\n  quota_provider_order   (comma-separated provider IDs)", key)
 	}

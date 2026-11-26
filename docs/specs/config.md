@@ -61,8 +61,8 @@ On load, `quota_provider_order` is normalized: unknown IDs are dropped,
 duplicates collapse to the first occurrence, and missing quota providers append
 in the default order. `config set quota_provider_order=...` rejects unknown IDs
 and normalizes duplicates and missing providers; the phone's `PATCH /api/settings`
-requires all four quota provider IDs, each once. The setting only changes
-display order.
+accepts a non-empty list of unique known IDs and appends any missing providers
+in the default order. The setting only changes display order.
 
 ## Keeper state
 

@@ -173,7 +173,7 @@ func TestSettingsWhitelist(t *testing.T) {
 		`{"providers.antigravity.path":"/tmp/x"}`,
 		`{"display.quota_display_mode":"bogus"}`,
 		`{"display.auto_refresh_secs":42}`,
-		`{"display.quota_provider_order":["claude","codex","opencode"]}`,
+		`{"display.quota_provider_order":[]}`,
 		`{"display.quota_provider_order":["claude","codex","opencode","opencode"]}`,
 		`{"display.quota_provider_order":["claude","codex","opencode","bogus"]}`,
 		`{"display.quota_provider_order":"claude,codex,opencode,antigravity"}`,
@@ -212,6 +212,18 @@ func TestSettingsWhitelist(t *testing.T) {
 	}
 	if got := strings.Join(cfg.Display.QuotaProviderOrder, ","); got != "opencode,claude,codex,antigravity" {
 		t.Fatalf("provider order = %s", got)
+	}
+
+	gotSubset := send(`{"display.quota_provider_order":["antigravity","opencode"]}`)
+	if gotSubset.Code != http.StatusOK {
+		t.Fatalf("subset patch = %d %s", gotSubset.Code, gotSubset.Body.String())
+	}
+	cfg, err = server.Runtime.Config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.Display.QuotaProviderOrder, ","); got != "antigravity,opencode,claude,codex" {
+		t.Fatalf("normalized subset order = %s", got)
 	}
 }
 

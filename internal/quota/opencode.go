@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,6 +37,13 @@ func NewOpenCodeFetcher(showAccount bool) *OpenCodeFetcher {
 
 func (f *OpenCodeFetcher) ProviderID() string { return "opencode" }
 
+func (f *OpenCodeFetcher) now() time.Time {
+	if f.Now != nil {
+		return f.Now()
+	}
+	return time.Now()
+}
+
 // OpenCodeDatabasePath resolves the database OpenCode writes credentials to.
 // OPENCODE_DB follows the usage parser: a relative value is inside the data
 // directory, not the process working directory.
@@ -48,6 +56,31 @@ func OpenCodeDatabasePath(home string) string {
 		return db
 	}
 	return filepath.Join(dataDir, "opencode.db")
+}
+
+func openCodeDatabasePaths(home string) []string {
+	dataDir := openCodeDataDir(home)
+	if db := strings.TrimSpace(os.Getenv("OPENCODE_DB")); db != "" {
+		if !filepath.IsAbs(db) {
+			db = filepath.Join(dataDir, db)
+		}
+		return []string{db}
+	}
+	paths := []string{filepath.Join(dataDir, "opencode.db")}
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return paths
+	}
+	var channels []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "opencode-") || !strings.HasSuffix(name, ".db") {
+			continue
+		}
+		channels = append(channels, filepath.Join(dataDir, name))
+	}
+	sort.Strings(channels)
+	return append(paths, channels...)
 }
 
 func openCodeDataDir(home string) string {
@@ -66,21 +99,43 @@ type openCodeCredential struct {
 }
 
 func (f *OpenCodeFetcher) credential() (string, map[string]any, bool, error) {
-	path := f.DBPath
-	if path == "" {
-		path = OpenCodeDatabasePath(f.Home)
+	paths := []string{f.DBPath}
+	if f.DBPath == "" {
+		paths = openCodeDatabasePaths(f.Home)
 	}
+	var lastErr error
+	for _, path := range paths {
+		token, metadata, ok, err := f.credentialFromDB(path)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if ok {
+			return token, metadata, true, nil
+		}
+	}
+	return "", nil, false, lastErr
+}
+
+func (f *OpenCodeFetcher) credentialFromDB(path string) (string, map[string]any, bool, error) {
 	if _, err := os.Stat(path); err != nil {
-		return "", nil, false, nil
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil, false, nil
+		}
+		return "", nil, false, fmt.Errorf("OpenCode credential database could not be accessed: %w", err)
 	}
 	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
-		return "", nil, false, nil
+		return "", nil, false, fmt.Errorf("OpenCode credential database could not be opened: %w", err)
 	}
 	defer db.Close()
 	var hasTable int
-	if err := db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'credential'`).Scan(&hasTable); err != nil {
+	err = db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'credential'`).Scan(&hasTable)
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, false, nil
+	}
+	if err != nil {
+		return "", nil, false, fmt.Errorf("OpenCode credential database could not be read: %w", err)
 	}
 	var raw string
 	err = db.QueryRow(`SELECT value FROM credential
@@ -103,7 +158,7 @@ func (f *OpenCodeFetcher) credential() (string, map[string]any, bool, error) {
 		}
 		return credential.Key, credential.Metadata, true, nil
 	case "oauth":
-		expired := credential.Expires > 0 && credential.Expires <= f.Now().UnixMilli()+300_000
+		expired := credential.Expires > 0 && credential.Expires <= f.now().UnixMilli()+300_000
 		if credential.Access == "" || expired {
 			return "", nil, false, nil
 		}
@@ -209,7 +264,7 @@ func (f *OpenCodeFetcher) Fetch() (*provider.QuotaSnapshot, error) {
 	if f.ShowAccount {
 		snapshot.Account = stringMetadata(metadata, "email")
 	}
-	snapshot.FetchedAt = f.Now().UTC()
+	snapshot.FetchedAt = f.now().UTC()
 	return snapshot, nil
 }
 

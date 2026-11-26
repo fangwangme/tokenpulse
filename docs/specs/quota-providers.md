@@ -17,9 +17,10 @@ read-only credential policy.
   `{ "OPENAI_API_KEY": "..." }`. Expiry comes from the access token's JWT
   `exp` with a five-minute buffer.
 - OpenCode: `$OPENCODE_DB` (a relative value is inside the OpenCode data
-  directory), else `$XDG_DATA_HOME/opencode/opencode.db` or
-  `~/.local/share/opencode/opencode.db`. Read-only SQLite table `credential`,
-  active row where `integration_id = 'opencode'`. Value shape:
+  directory), else `opencode.db` and `opencode-<channel>.db` under
+  `$XDG_DATA_HOME/opencode/` or `~/.local/share/opencode/`. Read-only SQLite
+  table `credential`, active row where `integration_id = 'opencode'`. Value
+  shape:
   `{ "type": "key", "key": "..." }` or
   `{ "type": "oauth", "access": "...", "expires": <ms>, "metadata": { "orgID":
   "...", "email": "..." } }`. `expires` is milliseconds; `0` means unknown.

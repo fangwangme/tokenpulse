@@ -155,7 +155,7 @@ func decodeValue(raw json.RawMessage) any {
 
 func validProviderOrder(value any) bool {
 	items, ok := value.([]any)
-	if !ok || len(items) != len(quota.ProviderIDs) {
+	if !ok || len(items) == 0 || len(items) > len(quota.ProviderIDs) {
 		return false
 	}
 	seen := map[string]bool{}
@@ -217,6 +217,7 @@ func applyOne(cfg *config.Config, key string, value any) error {
 			order = append(order, item.(string))
 		}
 		cfg.Display.QuotaProviderOrder = order
+		cfg.Display.QuotaProviderOrder = cfg.QuotaProviderOrder(quota.ProviderIDs)
 	case key == "display.auto_refresh_secs":
 		number := int(value.(float64))
 		cfg.Display.AutoRefreshSecs = uint32(number)

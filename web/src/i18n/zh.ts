@@ -198,6 +198,7 @@ export const zh: Messages = {
   "settings.providerOrderHint": "拖动左侧把手调整顺序，右侧开关控制是否查询额度。",
   "settings.reorderProvider": "调整 {name} 的顺序",
   "settings.toggleProvider": "开关 {name}",
+  "settings.saveFailed": "保存设置失败",
   "settings.off": "关闭",
   "settings.on": "开启",
   "settings.notificationLevel": "通知级别",

@@ -47,16 +47,16 @@ export function ProviderOrderList() {
     if (!dragID && !settleTimer) setOrder([...state.quotaProviderOrder]);
   });
 
-  const saveOrder = async (next: string[], previous: string[]) => {
+  const saveOrder = async (next: string[], previous: string[], syncOrder = true) => {
     const previousState = [...state.quotaProviderOrder];
     state.quotaProviderOrder = [...next];
-    setOrder([...next]);
+    if (syncOrder) setOrder([...next]);
     try {
       await patchSettings({ "display.quota_provider_order": next });
     } catch (error: any) {
       state.quotaProviderOrder = previousState;
       setOrder(previous);
-      showToast(error?.message || t("usage.loadFailed"));
+      showToast(error?.message || t("settings.saveFailed"));
     }
   };
 
@@ -82,9 +82,6 @@ export function ProviderOrderList() {
       if (commit) setOrder(commit.next);
       resetDragState();
     });
-    if (commit && !sameOrder(commit.next, commit.previous)) {
-      void saveOrder(commit.next, commit.previous);
-    }
   };
 
   const stopListeners = () => {
@@ -163,6 +160,7 @@ export function ProviderOrderList() {
 
     if (prefersReducedMotion()) {
       flushSettle();
+      if (changed) void saveOrder(next, previous);
       return;
     }
 
@@ -172,6 +170,7 @@ export function ProviderOrderList() {
       setDragOffset(finalDy);
     });
     settleTimer = setTimeout(flushSettle, SETTLE_MS);
+    if (changed) void saveOrder(next, previous, false);
   };
 
   const finish = (event: PointerEvent) => {
@@ -286,7 +285,7 @@ export function ProviderOrderList() {
       await patchSettings({ [providerSetting(id)]: !enabled });
     } catch (error: any) {
       state.quotaProviders[id] = enabled;
-      showToast(error?.message || t("usage.loadFailed"));
+      showToast(error?.message || t("settings.saveFailed"));
     }
   };
 

@@ -111,7 +111,7 @@ The phone may change exactly these keys, each checked against its own rule:
 | `display.refresh_quota`, `display.scan_antigravity`, `display.show_empty_providers` | boolean |
 | `display.notification_level` | the values `config set notification_level` accepts |
 | `display.notification_sound` | the TUI's fixed sound list |
-| `display.quota_provider_order` | the four quota provider IDs, each exactly once |
+| `display.quota_provider_order` | non-empty list of unique quota provider IDs (missing IDs append in default order) |
 | `providers.<id>.enabled` | boolean, for `claude`, `codex`, `opencode`, `agy` |
 | `keeper.enabled` (the Keeper master switch) | boolean |
 | `keeper.agents.<agent>.session_keeper_enabled`, `weekly_keeper_enabled` | boolean, for agents the Keeper drives |

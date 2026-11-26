@@ -267,3 +267,44 @@ func TestFetchAllMarksProviderWithNothingToReportAbsent(t *testing.T) {
 		t.Fatalf("claude result = %+v", results[1])
 	}
 }
+
+func TestOpenCodeCorruptDBReturnsErrorNotAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode.db")
+	if err := os.WriteFile(path, []byte("not a sqlite database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fetcher := &OpenCodeFetcher{DBPath: path, UsageURL: "http://127.0.0.1:1"}
+	snapshot, err := fetcher.Fetch()
+	if err == nil || snapshot != nil {
+		t.Fatalf("Fetch() = (%+v, %v), want error", snapshot, err)
+	}
+	results := FetchAll(t.TempDir(), []Fetcher{fetcher})
+	if len(results) != 1 || results[0].Absent || results[0].Err == nil {
+		t.Fatalf("FetchAll() = %+v, want error without Absent", results)
+	}
+}
+
+func TestOpenCodeChannelDatabaseAndNilNow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer beta-key" {
+			t.Errorf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		w.Write([]byte(openCodeUsageFixture))
+	}))
+	defer server.Close()
+
+	xdg := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdg)
+	t.Setenv("OPENCODE_DB", "")
+	dir := filepath.Join(xdg, "opencode")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeOpenCodeCredential(t, filepath.Join(dir, "opencode-beta.db"), `{"type":"key","key":"beta-key"}`)
+
+	fetcher := &OpenCodeFetcher{Home: t.TempDir(), UsageURL: server.URL}
+	snapshot, err := fetcher.Fetch()
+	if err != nil || snapshot == nil || len(snapshot.Windows) != 3 {
+		t.Fatalf("Fetch() = (%+v, %v)", snapshot, err)
+	}
+}

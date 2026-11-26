@@ -197,6 +197,7 @@ export const en = {
   "settings.providerOrderHint": "Drag the handle to reorder. Each switch controls whether its quota is refreshed.",
   "settings.reorderProvider": "Reorder {name}",
   "settings.toggleProvider": "Toggle {name}",
+  "settings.saveFailed": "Could not save settings",
   "settings.off": "Off",
   "settings.on": "On",
   "settings.notificationLevel": "Notification level",
