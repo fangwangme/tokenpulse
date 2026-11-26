@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-11-27
+
+### Added
+- **Classic desktop dashboard**: the Go TUI draws the 0.6.16 layout again — seven tabs (Overview, Models, Daily, Activity, Quota, Keeper, Settings), bordered cards, the stacked company bar chart, the one-year Monday-start heatmap, quota gauges, tables and the help overlay.
+- **Phone-style range and details**: Overview, Models and Daily share one range (default `30d`, inline custom dates, `[`/`]` shifting); Models opens a model detail and Daily opens the phone's day detail with the vs-7-days column.
+- **Activity and provider order**: Activity sums Today, Week, Month, Year and the rolling 7/30-day windows; Quota follows `display.quota_provider_order`, and Settings moves providers with `J`/`K`.
+- **Recovery feedback**: `quota_recovered` shows the 0.6.16 toast and a short border pulse.
+
+### Changed
+- **TUI data loading**: usage, day and model details, quota, Keeper records and config load as Bubble Tea commands with per-request cache keys, so a range or filter change never renders a stale response.
+- **Numbers**: the TUI keeps the 0.7 money format, quota pace and window rules, so it shows the same values as the phone.
+
 ## [0.7.2] - 2026-11-27
 
 ### Added
