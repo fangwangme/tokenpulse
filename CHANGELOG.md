@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-26
+
+### Added
+- **Unified runtime & thin TUI client**: `internal/runtime` owns scanning, quota refreshes, Keeper scheduling, and an event bus behind an OS `flock` (`runtime.lock`). Both the TUI and `serve` sit on the same runtime boundary, and TUI Settings includes a `Web remote` toggle that starts or stops a background `serve` daemon (or shows when systemd/launchd manages it).
+- **Remote mode**: `tokenpulse serve` runs scanning, quota refreshes, the Keeper and quota-recovery notifications, and serves a mobile PWA over Tailscale Serve HTTPS (LAN on explicit opt-in) with fragment pairing, hashed session cookies, a strict typed settings allowlist, Keeper control and Web Push for quota recovery. The Usage, Quota and Settings pages follow the reference mobile design component by component, under a bottom Usage/Quota/Keeper/Settings tab bar. `tokenpulse service install` installs it as a systemd user unit (launchd on macOS); `tokenpulse remote reset-token|url|status` manages pairing.
+- **One usage report** shared by the TUI and the phone: range presets, custom ranges, period and today-to-the-minute comparison, three heatmap layouts, day and model detail, agent filters and a Token/Cost switch.
+- **New pricing**: official-provider-first exact-key catalog selection, price periods, an `unpriced` ledger flag, and `tokenpulse reprice` with a dry run, fingerprint guard and 0600 backup.
+- **Quota changes**: windows ordered by family then period, corrected pace and level, extra usage, and reset credits. Claude, Codex and Antigravity credentials are read-only and are never refreshed or written.
+- **Unversioned Antigravity families**: orchestrator and worker steps resolve to the official Gemini model current on the step's date.
+- **Data-directory and test controls**: `TOKENPULSE_DATA_DIR` moves every data file; `TOKENPULSE_ENV=test` marks a run and requires the override.
+
+### Changed
+- **Cache-first reads**: `serve` warms the usage and quota caches on start and every page/navigation reads only the cache; scanning and quota fetching stay on the background schedule (`display.auto_refresh_secs`). A manual refresh waits for the work to finish, and a second refresh of the same target within 60 seconds returns the previous cache without calling a provider.
+- **CLI/TUI**: a running `serve` owns the scan, so `tokenpulse` reads its ledger instead of scanning again; `--no-scan` reads the cached ledger explicitly. Read commands open SQLite read-only, so a concurrent scan can no longer produce `SQLITE_BUSY`, and the TUI draws its first frame before scanning. The phone shows an offline banner explaining that it is showing the last data loaded in this session.
+- **Phone settings**: the accent-color picker is gone; the app uses one fixed accent and only light/dark follows the system. The refresh interval is the primary control, and the quota master switch now actually hides or restores the Quota page.
+- **Phone headers**: the bottom tabs own navigation, so the Usage, Quota, Keeper and Settings pages no longer repeat their title at the top. Usage and Quota keep a compact scanned/refreshed time plus the refresh button inside the scroll area, and the range chips wrap instead of clipping "Custom".
+- **Private data directory**: the data directory is created with mode `0700` and an existing one is tightened on first use. `tokenpulse service install` refuses to run under `TOKENPULSE_ENV=test`, so a test session cannot install a unit pointing at a worktree directory and the test ports.
+- **Go instead of Rust**: one statically linked, cgo-free binary per platform, built for macOS and Linux. Every existing CLI command, config key, parser, quota provider, Keeper rule, notification and data file is kept. `usage.db` and `tokenpulse.db` migrate in place with a timestamped `*.pre-0.7.<timestamp>.bak` backup (0600); stored costs above 0 never move without `reprice --apply`.
+- **TUI**: the Usage tabs are rebuilt into one page with the new report; Quota, Keeper and Settings stay, and a running `serve` owns scanning and refreshing.
+- **Web build**: the binary embeds a committed “frontend not built” placeholder; CI type-checks, tests and builds the Solid + TypeScript + Vite app before the Go binary, and a separate job runs `go test -race ./...`.
+- **Money display**: amounts below $1,000 keep two decimals; $1,000 and above use three decimals with `K`, and $1,000,000 and above with `M`, on the phone, TUI and CLI, so growing totals no longer widen the layout. JSON and CSV keep exact numbers.
+
+### Removed
+- The Rust workspace, `Cargo.toml`/`Cargo.lock`/`.cargo`, the Rust-only `pricing.json` cache (neither read nor deleted) and the `cargo install` launch hints.
+
+### Fixed
+- **Remote stability and security**: concurrent WebSocket broadcasts no longer race or panic, the Keeper's state is locked across scheduled/manual runs, local Unix-socket events connect without a browser Origin, pairing is POST-only and limited per remote IP, Origin checks include scheme and port, `remote.json` is written atomically and refuses to replace a corrupt file, sessions expire and are capped, and `reset-token` closes live phone sockets. Web Push is asynchronous with a 15-second timeout and sends `{title, body}`; Tailscale with no IP stays on localhost instead of binding all interfaces.
+- **Data and TUI correctness**: reversed model ranges use the normalized dates in every query, day agent sessions are distinct across models, an empty rebuild/refresh deletes stale rows, and Antigravity parses from local midnight and reloads its cache before language-server sync. The TUI clamps quota bars, writes whole sparkline runes, stops and replaces its event reader, runs the standalone Keeper scheduler without duplicate ticks, cycles all three provider toggles, and compares the selected header metric.
+- The phone's About card stacks the install hint under its label, so it no longer squeezes the label at 320px, and hides the row when the app is already running as an installed PWA.
+- Antigravity steps now prefer the payload's `displayName` over routing slugs such as `gemini-flash-worker-agy`, carry orchestrator/executor identity through session enum hints, and retain input-only generations instead of dropping them.
+- A stored cost above 0 is preserved byte for byte on migration and later ingests, and an explicit reprice recomputes only models whose price periods changed.
+- A data directory too long for a Unix socket no longer stops `serve`: the socket moves to `$XDG_RUNTIME_DIR` or the system temporary directory under a hash of the data directory, still mode 0600, and the TUI/CLI resolve the same path.
+- Codex now reads compressed `.jsonl.zst`/`.zst` rollouts. On upgrade, every readable Codex session is reparsed once with fork-aware history and its rows replaced, so inherited fork history no longer inflates totals; sessions whose source file is gone keep their rows. Codex historical totals fall as a result.
+- The phone day sheet shows cache hit on each model row instead of a day-wide rate across models. The phone uses one WebSocket reconnect timer, reports browser offline state immediately, labels the offline data as this session's last load, and honours `display.show_empty_providers` on the Quota page.
+- CLI subcommands print their own `--help`; `remote status` shows a readable scan time; CSV output quotes fields containing commas or quotes; `init --default` reports the actual detected count.
+
 ## [0.6.16] - 2026-11-09
 
 ### Changed

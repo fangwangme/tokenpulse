@@ -1,8 +1,5 @@
 name: CI
 
-# Development happens on Linux, so this runs only on macOS: it is the one place
-# the `cfg(target_os = "macos")` code paths get compiled and tested before a
-# release. Doc-only changes are skipped by `paths-ignore`, not commit markers.
 on:
   pull_request:
     branches:
@@ -26,30 +23,74 @@ concurrency:
 jobs:
   test:
     name: Test & Smoke Check
-    # Unpinned: pinned macOS images get retired (macos-14 went on 2026-11-02).
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          components: rustfmt
+          go-version-file: go.mod
+          cache: true
 
-      # `.cargo/config.toml` builds into `.local/target`, not `./target`.
-      # The prefix bump drops the old entries that held only the registry.
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Set up Node
+        uses: actions/setup-node@v4
         with:
-          prefix-key: v1-rust
-          workspaces: ". -> .local/target"
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web app
+        working-directory: web
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
 
-      - name: Run tests
-        run: cargo test --workspace --locked
+      - name: Vet
+        run: go vet ./...
 
-      - name: Smoke test CLI
-        run: cargo run -p tokenpulse-cli --locked -- --help
+      - name: Test
+        env:
+          CGO_ENABLED: "0"
+        run: go test ./...
+
+      - name: Build and smoke test
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go build -o .local/tokenpulse .
+          ./.local/tokenpulse --version
+          ./.local/tokenpulse --help >/dev/null
+
+  race:
+    name: Race Detector
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test with the race detector
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race ./...

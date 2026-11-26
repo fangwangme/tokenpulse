@@ -20,11 +20,11 @@ a PR the same as a feature does. The tag in phase B is the one thing done on
 `main` directly, and a tag adds no commit: it just points at what was merged.
 
 Two version numbers exist and they are unrelated. The **release** version lives
-once in the root `Cargo.toml` and is what this document is about. The **config
-schema** version is an integer in `tokenpulse-core/src/config`, bumped with a
+once in `internal/version/version.go` and is what this document is about. The
+**config schema** version is an integer in `internal/config`, bumped with a
 migration whenever the on-disk config layout changes — independently of any
-release. The database schemas in `history/` and `usage/store.rs` are versioned
-the same way, via `PRAGMA user_version`.
+release. The database schemas in `internal/quota/cache.go` and
+`internal/usage/store.go` are versioned the same way, via `PRAGMA user_version`.
 
 ---
 
@@ -83,22 +83,33 @@ need. Use `Added` / `Changed` / `Fixed` / `Removed` and omit empty ones.
 
 ### Step 3 — Bump the version
 
-Only one place holds it; both crates inherit from the workspace:
+The release version lives in `internal/version/version.go`; keep
+`web/package.json` at the same value so the embedded app reports the release.
+`npm/scripts/build-packages.mjs` reads the Go constant and refuses a tag whose
+version disagrees.
 
 ```bash
-# edit [workspace.package] version in the root Cargo.toml
-cargo build --workspace          # refreshes Cargo.lock — CI builds with --locked
+# edit Version in internal/version/version.go and web/package.json
+go build ./...
 ```
-
-Commit `Cargo.lock` too. CI builds with `--locked` and fails if it is stale.
 
 ### Step 4 — Verify locally
 
+Build the web app first: the Go binary embeds `web/dist`. A plain
+`go build` after checkout embeds the committed "frontend not built" placeholder.
+
 ```bash
-cargo fmt --all -- --check
-cargo test --workspace --locked
-cargo build --release --workspace
+gofmt -l .
+go vet ./...
+CGO_ENABLED=0 go test ./...
+CGO_ENABLED=1 go test -race ./...
+(cd web && npm ci && npm run typecheck && npm test && npm run build)
+CGO_ENABLED=0 go build -o tokenpulse .
+./tokenpulse --version
 ```
+
+After verifying the embedded UI, restore `web/dist/index.html` to the tracked
+placeholder before committing; CI rebuilds it for release binaries.
 
 ### Step 5 — Open the PR and merge it
 
@@ -125,8 +136,8 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-The tag must be `vX.Y.Z` and must match the version in `Cargo.toml`, or the npm
-job stops before publishing anything.
+The tag must be `vX.Y.Z` and must match `internal/version/version.go`, or the
+npm job stops before publishing anything.
 
 ### Step 6 — CI takes over
 
@@ -138,30 +149,20 @@ job stops before publishing anything.
 | `publish-release` | GitHub Release with the `*.tar.gz` archives, body taken from the CHANGELOG section |
 | `publish-npm` | Assembles and publishes the five npm packages (§3) |
 
-Targets: `x86_64-apple-darwin`, `aarch64-apple-darwin`,
-`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`. Linux builds run on
-`ubuntu-22.04`, so the binaries need only glibc 2.35 and still run on distros a
-couple of releases behind.
+Targets: `darwin/amd64`, `darwin/arm64`, `linux/amd64`, `linux/arm64`, all
+built with `CGO_ENABLED=0` so the binaries are statically linked (Linux runs on
+`ubuntu-22.04` / `ubuntu-22.04-arm`).
 
-The Rust target triples are internal build identifiers. GitHub Release assets
-use user-facing names instead:
-
-| Rust target | Release asset |
+| Go target | Release asset |
 | --- | --- |
-| `x86_64-apple-darwin` | `tokenpulse-darwin-x64.tar.gz` |
-| `aarch64-apple-darwin` | `tokenpulse-darwin-arm64.tar.gz` |
-| `x86_64-unknown-linux-gnu` | `tokenpulse-linux-x64-gnu.tar.gz` |
-| `aarch64-unknown-linux-gnu` | `tokenpulse-linux-arm64-gnu.tar.gz` |
+| `darwin/amd64` | `tokenpulse-darwin-x64.tar.gz` |
+| `darwin/arm64` | `tokenpulse-darwin-arm64.tar.gz` |
+| `linux/amd64` | `tokenpulse-linux-x64-gnu.tar.gz` |
+| `linux/arm64` | `tokenpulse-linux-arm64-gnu.tar.gz` |
 
-Both macOS targets build on Apple Silicon `macos-latest`; the x86_64 one is
-cross-compiled. The label is left unpinned on purpose: GitHub retires pinned
-macOS images, and a retired label breaks every run that names it. `macos-14`
-was retired on 2026-11-02 and now fails at once with "The configuration
-'macos-14-arm64-us-default' is not supported". The Intel `macos-13` runner
-failed worse: a job requesting it sat queued for the full 24-hour limit and was
-then cancelled, taking the whole release with it, so every release before
-v0.5.0 was lost. The build host does not set the binary's minimum macOS
-version; rustc's default deployment target does.
+Both macOS targets build on `macos-latest`; the runner label is left unpinned
+on purpose because GitHub retires pinned macOS images. The build also builds
+the web app first, so every binary embeds the phone UI.
 
 `publish-release` and `publish-npm` both wait on `build`, so a failure on any
 platform stops the release before anything is published.
@@ -193,7 +194,7 @@ git tag -d vX.Y.Z && git push --delete origin vX.Y.Z
 | Failure | What to do |
 | --- | --- |
 | A build job fails | Nothing was published. Fix on a branch, merge, delete the tag, re-tag. |
-| `publish-npm` fails on version mismatch | The tag and `Cargo.toml` disagree. Nothing was published — delete the tag and re-tag correctly. |
+| `publish-npm` fails on version mismatch | The tag and `internal/version/version.go` disagree. Nothing was published — delete the tag and re-tag correctly. |
 | `publish-npm` fails midway | Some packages are live. Re-run the job; it skips what already published (§3c). |
 | A bad build reached npm | A version can never be replaced. `npm deprecate` it and release a patch. |
 | Wrong release notes | Edit the GitHub Release body directly, and fix `CHANGELOG.md` through a PR. |
@@ -226,24 +227,26 @@ Sources live in `npm/`:
 
 | Path | Role |
 | --- | --- |
-| `npm/launcher/` | Launcher `package.json` template and `bin/tokenpulse.js`. The template's `optionalDependencies` are the authoritative list of platforms we claim to support. |
+| `npm/launcher/` | Launcher `package.json` template and `bin/tokenpulse.js`; published as `@fangwangme/tokenpulse`. The template's `optionalDependencies` are the authoritative list of platforms we claim to support. |
 | `npm/scripts/build-packages.mjs` | Turns the CI build artifacts into ready-to-publish package directories. |
 | `npm/scripts/publish-packages.mjs` | Publishes them in dependency order. |
 
-All package versions equal the crate version, so the launcher's pinned
+All package versions equal the Go version constant, so the launcher's pinned
 `optionalDependencies` resolve. `build-packages.mjs` refuses to run when the tag
-and `Cargo.toml` disagree — check that first if the npm job fails immediately.
+and `internal/version/version.go` disagree — check that first if the npm job
+fails immediately.
 
 ### 3b. Adding a platform
 
-Three places have to agree, and the build fails loudly if they do not:
+Four places have to agree, and the build fails loudly if they do not:
 
-1. `release.yml` — add a `runner` / `target` pair to the `build` matrix.
-2. `npm/scripts/build-packages.mjs` — add the triple to `TARGETS`.
+1. `release.yml` — add a `runner` / `goos` / `goarch` entry to the `build` matrix.
+2. `npm/scripts/build-packages.mjs` — add the asset to `TARGETS`.
 3. `npm/launcher/package.json` — add the package to `optionalDependencies`.
+4. `npm/launcher/bin/tokenpulse.js` — add the target to `SUPPORTED_PLATFORMS`.
 
-Windows is deliberately absent: the code has `cfg(windows)` branches but has
-never been built or exercised there, so it is not advertised on npm.
+Windows is deliberately absent: it has never been built or exercised, so it is
+not advertised on npm.
 
 ### 3c. Recovering a partial publish
 
@@ -255,7 +258,7 @@ and cut a new patch version.
 To rehearse the whole thing without touching the registry:
 
 ```bash
-node npm/scripts/build-packages.mjs --version 0.5.0 --artifacts dist --out .local/npm-dist
+node npm/scripts/build-packages.mjs --version 0.7.0 --artifacts dist --out .local/npm-dist
 node npm/scripts/publish-packages.mjs .local/npm-dist --dry-run
 ```
 

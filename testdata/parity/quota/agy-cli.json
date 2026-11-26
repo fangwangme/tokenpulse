@@ -1,0 +1,6 @@
+{"command": {"data": {"groups": [
+  {"name": "Gemini", "buckets": [
+    {"window": "5h", "remaining_fraction": 0.6, "reset_time": "2026-11-25T18:00:00Z"},
+    {"window": "weekly", "remaining_fraction": 0.2, "reset_time": "2026-11-30T00:00:00Z"}
+  ]}
+]}}}

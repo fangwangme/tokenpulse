@@ -43,13 +43,13 @@ try {
         `  bun add -g --force @fangwangme/tokenpulse\n` +
         `  # or: npm install -g --force @fangwangme/tokenpulse\n` +
         `Or install from source:\n` +
-        `  cargo install --git https://github.com/fangwangme/tokenpulse tokenpulse-cli`,
+        `  go install github.com/fangwangme/tokenpulse@latest`,
     );
   } else {
     console.error(
       `tokenpulse: no prebuilt binary for ${process.platform}-${process.arch}.\n` +
         `Install from source instead:\n` +
-        `  cargo install --git https://github.com/fangwangme/tokenpulse tokenpulse-cli`,
+        `  go install github.com/fangwangme/tokenpulse@latest`,
     );
   }
   process.exit(1);

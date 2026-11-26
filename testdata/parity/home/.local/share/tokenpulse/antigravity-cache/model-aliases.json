@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-20T00:00:00Z",
+  "aliases": {
+    "model_placeholder_m525": {
+      "rawModelId": "MODEL_PLACEHOLDER_M525",
+      "modelId": "gemini-4-hydrogen",
+      "label": "Gemini 4 Hydrogen",
+      "source": "parity-fixture",
+      "firstSeenAt": "2026-11-20T00:00:00Z",
+      "lastSeenAt": "2026-11-20T00:00:00Z"
+    }
+  }
+}

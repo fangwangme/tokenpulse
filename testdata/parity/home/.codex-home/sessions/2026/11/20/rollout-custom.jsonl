@@ -1,0 +1,2 @@
+{"type":"session_meta","payload":{"id":"codex-custom","model_provider":"openai","model":"gpt-5"}}
+{"type":"event_msg","timestamp":"2026-11-20T14:00:00.000Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":7,"output_tokens":3},"total_token_usage":{"input_tokens":7,"output_tokens":3}}}}

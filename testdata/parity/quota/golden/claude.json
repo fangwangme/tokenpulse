@@ -1,0 +1,44 @@
+{
+  "provider": "claude",
+  "plan": "max",
+  "account": null,
+  "windows": [
+    {
+      "label": "Session (5h)",
+      "model_family": null,
+      "used_percent": 12.5,
+      "resets_at": "2026-11-25T18:00:00Z",
+      "period_duration_ms": 18000000
+    },
+    {
+      "label": "Weekly (7d)",
+      "model_family": null,
+      "used_percent": 63.0,
+      "resets_at": "2026-11-30T00:00:00Z",
+      "period_duration_ms": 604800000
+    },
+    {
+      "label": "Sonnet (7d)",
+      "model_family": "Sonnet",
+      "used_percent": 40.0,
+      "resets_at": "2026-11-30T00:00:00Z",
+      "period_duration_ms": 604800000
+    },
+    {
+      "label": "Opus (7d)",
+      "model_family": "Opus",
+      "used_percent": 75.0,
+      "resets_at": "2026-11-30T00:00:00Z",
+      "period_duration_ms": 604800000
+    },
+    {
+      "label": "Fable (7d)",
+      "model_family": "Fable",
+      "used_percent": 33.5,
+      "resets_at": "2026-11-30T00:00:00Z",
+      "period_duration_ms": 604800000
+    }
+  ],
+  "credits": null,
+  "fetched_at": "2026-11-25T15:45:08.683866657Z"
+}

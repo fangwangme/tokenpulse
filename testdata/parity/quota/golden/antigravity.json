@@ -1,0 +1,57 @@
+{
+  "account": "fixture@example.test",
+  "agyWindows": [
+    {
+      "label": "Gemini (5h)",
+      "model_family": "Gemini",
+      "period_duration_ms": 18000000,
+      "resets_at": "2026-11-25T18:00:00Z",
+      "used_percent": 40.0
+    },
+    {
+      "label": "Gemini (7d)",
+      "model_family": "Gemini",
+      "period_duration_ms": 604800000,
+      "resets_at": "2026-11-30T00:00:00Z",
+      "used_percent": 80.0
+    }
+  ],
+  "plan": "Pro",
+  "windows": [
+    {
+      "label": "Gemini (5h)",
+      "model_family": "Gemini",
+      "period_duration_ms": 18000000,
+      "resets_at": "2026-11-25T18:00:00Z",
+      "used_percent": 9.999999999999998
+    },
+    {
+      "label": "Gemini (7d)",
+      "model_family": "Gemini",
+      "period_duration_ms": 604800000,
+      "resets_at": "2026-11-30T00:00:00Z",
+      "used_percent": 25.0
+    },
+    {
+      "label": "Claude (5h)",
+      "model_family": "Claude",
+      "period_duration_ms": 18000000,
+      "resets_at": "2026-11-25T18:00:00Z",
+      "used_percent": 50.0
+    },
+    {
+      "label": "Claude (7d)",
+      "model_family": "Claude",
+      "period_duration_ms": 604800000,
+      "resets_at": "2026-11-30T00:00:00Z",
+      "used_percent": 75.0
+    },
+    {
+      "label": "Special (monthly)",
+      "model_family": "Special",
+      "period_duration_ms": null,
+      "resets_at": "2026-12-01T00:00:00Z",
+      "used_percent": 60.0
+    }
+  ]
+}

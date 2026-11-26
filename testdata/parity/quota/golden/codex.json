@@ -1,0 +1,28 @@
+{
+  "plan": "plus",
+  "rateLimitResetCredits": [
+    {
+      "expires_at": "2026-12-01T00:00:00Z",
+      "granted_at": "2026-11-01T00:00:00Z",
+      "id": "available-1",
+      "reset_type": "manual",
+      "status": "available"
+    }
+  ],
+  "windows": [
+    {
+      "label": "Weekly (7d)",
+      "model_family": null,
+      "period_duration_ms": 604800000,
+      "resets_at": "2025-12-01T02:40:00Z",
+      "used_percent": 50.0
+    },
+    {
+      "label": "Session (5h)",
+      "model_family": null,
+      "period_duration_ms": 18000000,
+      "resets_at": "2025-11-28T03:20:00Z",
+      "used_percent": 25.0
+    }
+  ]
+}

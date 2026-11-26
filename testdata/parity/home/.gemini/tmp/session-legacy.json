@@ -1,0 +1,1 @@
+{"sessionId": "gem-legacy", "startTime": "2026-11-20T12:00:00Z", "lastUpdated": "2026-11-20T12:05:00Z", "messages": [{"id": "user-1", "type": "user"}, {"id": "gem-json", "type": "gemini", "timestamp": "2026-11-20T12:01:00Z", "model": "gemini-2.5-pro", "tokens": {"input": 120, "output": 45, "cached": 30, "thoughts": 12, "total": 177}}]}

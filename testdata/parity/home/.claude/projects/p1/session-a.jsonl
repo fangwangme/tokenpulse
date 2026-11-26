@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<local-command-stdout>Set model to anthropic/nvidia_nim/deepseek-ai/deepseek-v4-pro</local-command-stdout>"}]}}
+{"type":"assistant","session_id":"claude-session-1","requestId":"req-1","timestamp":"2026-11-20T10:00:00.000Z","message":{"id":"msg-1","model":"deepseek-ai/deepseek-v4-pro","usage":{"input_tokens":10,"output_tokens":5}}}
+{"type":"assistant","session_id":"claude-session-1","requestId":"req-1","timestamp":"2026-11-20T10:00:01.000Z","message":{"id":"msg-1","model":"deepseek-ai/deepseek-v4-pro","usage":{"input_tokens":99,"output_tokens":99}}}
+{"type":"assistant","session_id":"claude-session-1","timestamp":"2026-11-20T10:05:00.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":-10,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}}
