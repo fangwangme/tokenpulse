@@ -1,34 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
   <defs>
-    <radialGradient id="bg" cx="50%" cy="42%" r="72%">
-      <stop offset="0%" stop-color="#1d202a"/>
-      <stop offset="100%" stop-color="#0b0c10"/>
-    </radialGradient>
-    <linearGradient id="ring" x1="15%" y1="15%" x2="85%" y2="85%">
-      <stop offset="0%" stop-color="#34d399"/>
-      <stop offset="38%" stop-color="#38bdf8"/>
-      <stop offset="72%" stop-color="#fb923c"/>
-      <stop offset="100%" stop-color="#facc15"/>
+    <linearGradient id="bg" x1="32" y1="0" x2="32" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#171a24"/>
+      <stop offset="100%" stop-color="#0b0d14"/>
     </linearGradient>
-    <linearGradient id="bar1" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#7dd3fc"/>
-      <stop offset="100%" stop-color="#38bdf8"/>
+    <linearGradient id="outer" x1="12" y1="50" x2="52" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="45%" stop-color="#38bdf8"/>
+      <stop offset="82%" stop-color="#a5f3fc"/>
+      <stop offset="100%" stop-color="#f8fafc"/>
     </linearGradient>
-    <linearGradient id="bar2" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#6ee7b7"/>
-      <stop offset="100%" stop-color="#10b981"/>
-    </linearGradient>
-    <linearGradient id="bar3" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#fde68a"/>
-      <stop offset="100%" stop-color="#f59e0b"/>
+    <linearGradient id="inner" x1="18" y1="40" x2="46" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="55%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#c7d2fe"/>
     </linearGradient>
   </defs>
-  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-  <circle cx="256" cy="256" r="158" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="26"/>
-  <circle cx="256" cy="256" r="158" fill="none" stroke="url(#ring)" stroke-width="22" stroke-linecap="round"
-          stroke-dasharray="780 993" transform="rotate(-90 256 256)"/>
-  <circle cx="256" cy="98" r="15" fill="#d1fae5"/>
-  <rect x="176" y="256" width="38" height="84" rx="19" fill="url(#bar1)"/>
-  <rect x="237" y="216" width="38" height="124" rx="19" fill="url(#bar2)"/>
-  <rect x="298" y="176" width="38" height="164" rx="19" fill="url(#bar3)"/>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <!-- Recessed dark tracks -->
+  <circle cx="32" cy="32" r="21.5" stroke="#1e2330" stroke-width="3.6"/>
+  <circle cx="32" cy="32" r="14.2" stroke="#1b202d" stroke-width="3.2"/>
+  <!-- Outer quota arc (~275deg) -->
+  <path
+    d="M32 53.5 A21.5 21.5 0 1 1 46.8 47.6"
+    stroke="url(#outer)"
+    stroke-width="3.6"
+    stroke-linecap="round"
+  />
+  <!-- Inner 5h quota arc (~250deg) -->
+  <path
+    d="M22.8 42.8 A14.2 14.2 0 1 1 41.2 42.8"
+    stroke="url(#inner)"
+    stroke-width="3.2"
+    stroke-linecap="round"
+  />
+  <!-- Faceted 4-point AI token diamond -->
+  <polygon points="32,23.5 34.8,29.2 32,32" fill="#ffffff"/>
+  <polygon points="32,23.5 29.2,29.2 32,32" fill="#e2e8f0"/>
+  <polygon points="40.5,32 34.8,29.2 32,32" fill="#f1f5f9"/>
+  <polygon points="40.5,32 34.8,34.8 32,32" fill="#cbd5e1"/>
+  <polygon points="32,40.5 34.8,34.8 32,32" fill="#94a3b8"/>
+  <polygon points="32,40.5 29.2,34.8 32,32" fill="#cbd5e1"/>
+  <polygon points="23.5,32 29.2,34.8 32,32" fill="#e2e8f0"/>
+  <polygon points="23.5,32 29.2,29.2 32,32" fill="#f8fafc"/>
 </svg>
