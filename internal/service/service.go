@@ -48,15 +48,8 @@ func Install() error {
 	}
 	configPath := os.Getenv("TOKENPULSE_CONFIG_PATH")
 	environment := os.Getenv("TOKENPULSE_ENV")
-	// Stop any detached serve holding runtime.lock and wait until the lock is
-	// released before starting the managed unit.
-	if local := remote.NewLocalClient(dataDir); local != nil {
-		if st, err := local.Status(); err == nil && st.ManagedBy == "daemon" {
-			_ = local.Shutdown()
-			if err := waitForLockRelease(dataDir, 5*time.Second); err != nil {
-				return fmt.Errorf("existing background serve did not release lock before service install: %w", err)
-			}
-		}
+	if err := prepareRuntimeForInstall(dataDir); err != nil {
+		return err
 	}
 	switch runtime.GOOS {
 	case "linux":
@@ -236,6 +229,27 @@ func Status() error {
 
 func currentUID() string {
 	return fmt.Sprintf("%d", os.Getuid())
+}
+
+func prepareRuntimeForInstall(dataDir string) error {
+	local := remote.NewLocalClient(dataDir)
+	if local == nil {
+		return nil
+	}
+	st, err := local.Status()
+	if err != nil {
+		return nil
+	}
+	switch st.ManagedBy {
+	case "daemon":
+		_ = local.Shutdown()
+		if err := waitForLockRelease(dataDir, 5*time.Second); err != nil {
+			return fmt.Errorf("existing background serve did not release lock before service install: %w", err)
+		}
+	case "standalone":
+		return errors.New("a local TokenPulse TUI currently owns this data directory; close it before running 'tokenpulse service install'")
+	}
+	return nil
 }
 
 func waitForLockRelease(dataDir string, timeout time.Duration) error {

@@ -299,6 +299,62 @@ func TestStopConcurrentWithRefreshAndKeeper(t *testing.T) {
 	}
 }
 
+func TestStopWaitsForInFlightRepriceAndRejectsAfterStop(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TOKENPULSE_ENV", "test")
+	t.Setenv("TOKENPULSE_DATA_DIR", dir)
+	t.Setenv("TOKENPULSE_CONFIG_PATH", filepath.Join(dir, "config.toml"))
+
+	manager, err := config.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner, err := scan.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner.Pricing.Fetch = func(string) ([]byte, error) { return []byte(`{}`), nil }
+	rt, err := New(dir, manager, scanner, "standalone", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rt.refreshMu.Lock()
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		_, _ = rt.Reprice(false, false, "")
+	}()
+	<-started
+	time.Sleep(40 * time.Millisecond)
+
+	stopDone := make(chan struct{})
+	go func() {
+		rt.Stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-stopDone:
+		t.Fatal("Stop returned while Reprice was still in flight")
+	case <-time.After(80 * time.Millisecond):
+	}
+	rt.refreshMu.Unlock()
+
+	select {
+	case <-stopDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop did not return after Reprice finished")
+	}
+
+	if _, err := rt.Reprice(false, false, ""); err == nil || err.Error() != "runtime is stopping" {
+		t.Fatalf("Reprice after Stop = %v, want runtime is stopping", err)
+	}
+	if _, err := rt.UpdateSettings(func(*config.Config) error { return nil }, false); err == nil || err.Error() != "runtime is stopping" {
+		t.Fatalf("UpdateSettings after Stop = %v, want runtime is stopping", err)
+	}
+}
+
 func TestCrossProcessLockContention(t *testing.T) {
 	dir := t.TempDir()
 	lock, err := AcquireLock(dir)

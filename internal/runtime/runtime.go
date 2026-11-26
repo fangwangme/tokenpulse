@@ -411,6 +411,10 @@ func (r *Runtime) WakeRefreshLoop() {
 // UpdateSettings serializes Load -> mutate -> atomic Save -> notify under
 // settingsMu so concurrent phone and TUI edits cannot clobber each other.
 func (r *Runtime) UpdateSettings(mutate func(*config.Config) error, refreshIntervalChanged bool) (config.Config, error) {
+	if !r.beginTask() {
+		return config.Config{}, errors.New("runtime is stopping")
+	}
+	defer r.execWG.Done()
 	r.settingsMu.Lock()
 	defer r.settingsMu.Unlock()
 	cfg, err := r.Config.Load()
@@ -459,6 +463,10 @@ func (r *Runtime) Reprice(apply, yes bool, expect string) (*pricing.RepriceRepor
 	if apply && !yes {
 		return nil, errors.New("--apply requires --yes")
 	}
+	if !r.beginTask() {
+		return nil, errors.New("runtime is stopping")
+	}
+	defer r.execWG.Done()
 	r.refreshMu.Lock()
 	defer r.refreshMu.Unlock()
 	if err := r.Pricing.Load(false); err != nil {
