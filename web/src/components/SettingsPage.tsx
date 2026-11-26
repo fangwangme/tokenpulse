@@ -1,6 +1,6 @@
 import { createSignal, For, onMount, Show } from "solid-js";
 import { patchSettings, getPushKey, addPushSubscription, removePushSubscription } from "../api";
-import { saveLocale, saveTheme, setting, showToast, state } from "../store";
+import { createScrollNavHandler, saveLocale, saveTheme, setting, showToast, state } from "../store";
 import { QUOTA_PROVIDER_KEYS } from "../shared/defaults";
 import { LOCALES, setLocale, t, type LocalePref } from "../i18n";
 import type { ThemeMode } from "../types";
@@ -108,9 +108,11 @@ export function SettingsPage() {
     }
   };
 
+  const onScroll = createScrollNavHandler();
+
   return (
     <div class="page">
-      <div class="scroll">
+      <div class="scroll" onScroll={onScroll}>
         <div class="settings" style={{ "padding-top": "calc(10px + env(safe-area-inset-top))" }}>
           <div class="sec">{t("settings.appearance")}</div>
           <div class="tp-card" style={{ overflow: "hidden" }}>

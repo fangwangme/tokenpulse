@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, on, onMount, Show } from "solid-js";
 import { loadKeeper, patchSettings, pingKeeper } from "../api";
-import { showToast, state, type KeeperAgent, type KeeperPayload } from "../store";
+import { createScrollNavHandler, showToast, state, type KeeperAgent, type KeeperPayload } from "../store";
 import { AGENT_NAMES } from "../shared/defaults";
 import { Icon } from "./ui";
 import { t } from "../i18n";
@@ -141,16 +141,12 @@ export function KeeperPage() {
     </div>
   );
 
+  const onScroll = createScrollNavHandler();
+
   return (
     <div class="page">
-      <div class="scroll">
-        <div class="settings">
-          <div class="statusbar">
-            <div class="s" />
-            <button class="cbtn" aria-label={t("app.reload")} onClick={() => void load()}>
-              <Icon name="refresh" />
-            </button>
-          </div>
+      <div class="scroll" onScroll={onScroll}>
+        <div class="settings" style={{ "padding-top": "calc(10px + env(safe-area-inset-top))" }}>
           <Show when={error()}>
             <div
               style={{

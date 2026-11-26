@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { state } from "../store";
+import { createScrollNavHandler, state } from "../store";
 import { request } from "../api";
 import { scanIntervalToMs, USAGE_AGENT_KINDS as AGENT_KEYS } from "../shared/defaults";
 import { cacheHitPercent, daysBetween, formatYMD, heatmapLayout, type UsagePreset } from "../shared/usage";
@@ -673,38 +673,16 @@ export function UsagePage() {
   });
 
   const visibleRows = () => tableRows().slice(0, rowsLimit());
+  const onScroll = createScrollNavHandler();
+  const isFiltered = () => activeAgents().size < enabledAgentKeys().length;
 
   return (
     <div class="page">
-      <div class="scroll">
-        <div style={{ padding: "0 16px calc(104px + env(safe-area-inset-bottom))" }}>
+      <div class="scroll" onScroll={onScroll}>
+        <div style={{ padding: "calc(12px + env(safe-area-inset-top)) 16px calc(104px + env(safe-area-inset-bottom))" }}>
           <Show when={state.usageEnabled} fallback={<FeatureDisabledNotice message={t("usage.disabledNotice")} />}>
-          <div class="statusbar">
-            <div class="s">
-              {isLoading()
-                ? (usageReport() ? t("quota.refreshing") : t("usage.loading"))
-                : usageReport()?.scannedAt
-                ? t("quota.scannedTo", {
-                    time: new Date(usageReport()!.scannedAt).toTimeString().slice(0, 8),
-                  })
-                : ""}
-            </div>
-            <button class="cbtn" aria-label={t("app.reload")} onClick={() => void loadUsage(true)}>
-              <span
-                style={{
-                  display: "inline-flex",
-                  "align-items": "center",
-                  "justify-content": "center",
-                  animation: isLoading() ? "sp .8s linear infinite" : "none",
-                }}
-              >
-                <Icon name="refresh" />
-              </span>
-            </button>
-          </div>
-
-          {/* Range Chips */}
-          <div style={{ "margin-top": "8px", display: "flex", gap: "5px", "flex-wrap": "wrap" }}>
+          {/* Range Chips (horizontally scrollable, Custom after All) */}
+          <div class="tp-chips-scroll">
             <For
               each={[
                 { id: "today" as const, label: t("usage.today") },
@@ -725,6 +703,8 @@ export function UsagePage() {
                 const on = () => range() === r.id;
                 return (
                   <button
+                    class="tp-chip"
+                    classList={{ active: on() }}
                     onClick={() => {
                       if (r.id === "custom") {
                         setDraftFrom(customFrom() || todayYMD());
@@ -734,18 +714,6 @@ export function UsagePage() {
                         setRange(r.id);
                       }
                     }}
-                    style={{
-                      flex: "none",
-                      height: "34px",
-                      padding: "0 11px",
-                      "border-radius": "17px",
-                      font: "inherit",
-                      "font-size": "13px",
-                      "font-weight": 550,
-                      border: on() ? "1px solid var(--accent)" : "1px solid var(--line2)",
-                      background: on() ? "var(--accentbg)" : "var(--surface)",
-                      color: on() ? "var(--accent)" : "var(--fg)",
-                    }}
                   >
                     {r.label}
                   </button>
@@ -754,49 +722,63 @@ export function UsagePage() {
             </For>
           </div>
 
-          {/* Range text */}
-          <div style={{ padding: "6px 4px 0", "font-size": "12.5px", color: "var(--faint)", "font-variant-numeric": "tabular-nums" }}>
-            {rangeText()}
+          {/* Date range (left) + Scanned timestamp (right) */}
+          <div
+            style={{
+              display: "flex",
+              "align-items": "center",
+              "justify-content": "space-between",
+              gap: "10px",
+              padding: "10px 2px 0",
+              "font-size": "12px",
+              color: "var(--muted)",
+              "font-variant-numeric": "tabular-nums",
+            }}
+          >
+            <span style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
+              {rangeText()}
+            </span>
+            <Show when={isLoading() || usageReport()?.scannedAt}>
+              <span
+                style={{
+                  display: "inline-flex",
+                  "align-items": "center",
+                  gap: "5px",
+                  flex: "none",
+                  color: "var(--faint)",
+                  "white-space": "nowrap",
+                }}
+              >
+                <span
+                  style={{
+                    width: "6px",
+                    height: "6px",
+                    "border-radius": "50%",
+                    background: isLoading() ? "var(--accent)" : "var(--addfg)",
+                    opacity: isLoading() ? 1 : 0.75,
+                  }}
+                />
+                {isLoading()
+                  ? (usageReport() ? t("quota.refreshing") : t("usage.loading"))
+                  : t("quota.scannedTo", {
+                      time: new Date(usageReport()!.scannedAt).toTimeString().slice(0, 8),
+                    })}
+              </span>
+            </Show>
           </div>
 
-          {/* Metric toggle & Agent Filter button */}
-          <div style={{ "margin-top": "8px", display: "flex", "align-items": "center", gap: "8px" }}>
-            <div
-              style={{
-                display: "flex",
-                background: "var(--surface)",
-                border: "1px solid var(--line)",
-                "border-radius": "9px",
-                padding: "2px",
-              }}
-            >
+          {/* Metric toggle & Agent Filter pill */}
+          <div style={{ "margin-top": "10px", display: "flex", "align-items": "center", gap: "8px" }}>
+            <div class="tp-seg-pill">
               <button
+                classList={{ on: metric() === "tokens" }}
                 onClick={() => setMetric("tokens")}
-                style={{
-                  height: "30px",
-                  padding: "0 12px",
-                  "border-radius": "7px",
-                  border: 0,
-                  font: "inherit",
-                  "font-size": "13px",
-                  background: metric() === "tokens" ? "var(--code)" : "transparent",
-                  color: metric() === "tokens" ? "var(--fg)" : "var(--muted)",
-                }}
               >
                 {t("usage.byTokens")}
               </button>
               <button
+                classList={{ on: metric() === "cost" }}
                 onClick={() => setMetric("cost")}
-                style={{
-                  height: "30px",
-                  padding: "0 12px",
-                  "border-radius": "7px",
-                  border: 0,
-                  font: "inherit",
-                  "font-size": "13px",
-                  background: metric() === "cost" ? "var(--code)" : "transparent",
-                  color: metric() === "cost" ? "var(--fg)" : "var(--muted)",
-                }}
               >
                 {t("usage.byCost")}
               </button>
@@ -805,21 +787,10 @@ export function UsagePage() {
             <div style={{ flex: 1 }} />
 
             <button
+              class="tp-filter-pill"
+              classList={{ filtered: isFiltered() }}
               onClick={() => setSheet("filter")}
               aria-label={t("usage.filterTitle")}
-              style={{
-                height: "34px",
-                padding: "0 11px",
-                "border-radius": "17px",
-                border: "1px solid var(--line2)",
-                background: "none",
-                color: "var(--fg)",
-                font: "inherit",
-                "font-size": "12.5px",
-                display: "flex",
-                "align-items": "center",
-                gap: "5px",
-              }}
             >
               <Icon name="sliders" sm />
               {activeAgents().size === enabledAgentKeys().length
@@ -1993,6 +1964,26 @@ export function UsagePage() {
             </button>
           </div>
         </UsageOverlay>
+      </Show>
+
+      <Show when={state.usageEnabled}>
+        <button
+          class="tp-fab"
+          classList={{ "nav-hidden": state.navHidden }}
+          aria-label={t("app.reload")}
+          onClick={() => void loadUsage(true)}
+        >
+          <span
+            style={{
+              display: "inline-flex",
+              "align-items": "center",
+              "justify-content": "center",
+              animation: isLoading() ? "sp .8s linear infinite" : "none",
+            }}
+          >
+            <Icon name="refresh" />
+          </span>
+        </button>
       </Show>
     </div>
   );

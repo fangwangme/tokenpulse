@@ -164,6 +164,11 @@ export function App() {
   });
 
   createEffect(() => {
+    void state.route.name;
+    state.navHidden = false;
+  });
+
+  createEffect(() => {
     if (state.paired === true) {
       connect();
     }
@@ -199,7 +204,7 @@ export function App() {
         <Show when={state.everConnected && !state.connected}>
           <div class="offline-banner">{t("common.offlineCache")}</div>
         </Show>
-        <nav class="bottom-nav">
+        <nav class="bottom-nav" classList={{ hidden: state.navHidden }}>
           <button
             classList={{ active: state.route.name === "usage" }}
             onClick={() => (state.route = { name: "usage" })}

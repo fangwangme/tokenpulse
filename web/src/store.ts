@@ -61,6 +61,7 @@ interface AppState {
   reconnectNonce: number;
   keeperNonce: number;
   toast: string;
+  navHidden: boolean;
 }
 
 function stored<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
@@ -99,13 +100,37 @@ export const state = createMutable<AppState>({
   reconnectNonce: 0,
   keeperNonce: 0,
   toast: "",
+  navHidden: false,
 });
 
 export function navigate(route: Route): void {
   state.route = route;
+  state.navHidden = false;
   if (typeof window !== "undefined") {
     window.scrollTo(0, 0);
   }
+}
+
+export function createScrollNavHandler(): (e: Event & { currentTarget: HTMLElement }) => void {
+  let lastTop = 0;
+  return (e) => {
+    const el = e.currentTarget;
+    const top = Math.max(0, el.scrollTop);
+    const maxScroll = el.scrollHeight - el.clientHeight;
+    if (maxScroll <= 40 || top <= 24 || top >= maxScroll - 24) {
+      if (state.navHidden) state.navHidden = false;
+      lastTop = top;
+      return;
+    }
+    const delta = top - lastTop;
+    if (delta > 8 && top > 56) {
+      if (!state.navHidden) state.navHidden = true;
+      lastTop = top;
+    } else if (delta < -8) {
+      if (state.navHidden) state.navHidden = false;
+      lastTop = top;
+    }
+  };
 }
 
 export function showToast(message: string): void {

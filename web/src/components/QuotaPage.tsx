@@ -1,5 +1,5 @@
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import { navigate, setting, state } from "../store";
+import { createScrollNavHandler, setting, state } from "../store";
 import { fetchQuota } from "../api";
 import { QUOTA_PROVIDER_KEYS as ORDERED_PROVIDERS, scanIntervalToMs } from "../shared/defaults";
 import { quotaLevel, quotaPace } from "../shared/quota";
@@ -123,32 +123,52 @@ export function QuotaPage() {
 
   const hasAnyData = () => enabledProviders().some((p) => p.snapshot && p.snapshot.windows && p.snapshot.windows.length > 0);
   const showSkeleton = () => isLoading() && !hasAnyData();
+  const onScroll = createScrollNavHandler();
 
   return (
     <div class="page">
-      <div class="scroll">
-        <div style={{ padding: "0 16px calc(104px + env(safe-area-inset-bottom))" }}>
+      <div class="scroll" onScroll={onScroll}>
+        <div style={{ padding: "calc(12px + env(safe-area-inset-top)) 16px calc(104px + env(safe-area-inset-bottom))" }}>
           <Show when={state.quotaEnabled} fallback={<FeatureDisabledNotice message={t("quota.disabledNotice")} />}>
-          <div class="statusbar">
-            <div class="s">
-              {isLoading()
-                ? (refreshing() ? t("quota.refreshing") : t("quota.loading"))
-                : state.quotaUpdated
-                ? t("quota.refreshedAt", { time: formatTime(state.quotaUpdated) })
-                : ""}
-            </div>
-            <button class="cbtn" aria-label={t("app.reload")} onClick={doRefresh}>
+          <div
+            style={{
+              display: "flex",
+              "align-items": "center",
+              "justify-content": "space-between",
+              gap: "10px",
+              padding: "2px 2px 8px",
+              "font-size": "12px",
+              color: "var(--muted)",
+              "font-variant-numeric": "tabular-nums",
+            }}
+          >
+            <span style={{ "font-size": "12px", "font-weight": 650, "letter-spacing": ".04em", "text-transform": "uppercase", color: "var(--faint)" }}>
+              {t("home.quota")}
+            </span>
+            <Show when={isLoading() || state.quotaUpdated}>
               <span
                 style={{
                   display: "inline-flex",
                   "align-items": "center",
-                  "justify-content": "center",
-                  animation: isLoading() ? "sp .8s linear infinite" : "none",
+                  gap: "5px",
+                  color: "var(--faint)",
+                  "white-space": "nowrap",
                 }}
               >
-                <Icon name="refresh" />
+                <span
+                  style={{
+                    width: "6px",
+                    height: "6px",
+                    "border-radius": "50%",
+                    background: isLoading() ? "var(--accent)" : "var(--addfg)",
+                    opacity: isLoading() ? 1 : 0.75,
+                  }}
+                />
+                {isLoading()
+                  ? (refreshing() ? t("quota.refreshing") : t("quota.loading"))
+                  : t("quota.refreshedAt", { time: formatTime(state.quotaUpdated!) })}
               </span>
-            </button>
+            </Show>
           </div>
 
           {/* Skeleton Template when loading without data */}
@@ -229,14 +249,6 @@ export function QuotaPage() {
               }}
             >
               {t("quota.noData")}
-              <div style={{ "margin-top": "12px" }}>
-                <button
-                  onClick={() => navigate({ name: "settings" })}
-                  style={{ color: "var(--accent)", "font-weight": 600 }}
-                >
-                  {t("quota.manageProviders")}
-                </button>
-              </div>
             </div>
           </Show>
 
@@ -544,35 +556,29 @@ export function QuotaPage() {
             </For>
           </div>
           </Show>
-
-          {/* Manage queried providers button (only when data is loaded) */}
-          <Show when={!showSkeleton() && hasAnyData()}>
-            <div style={{ "margin-top": "14px" }}>
-              <button
-                onClick={() => navigate({ name: "settings" })}
-                style={{
-                  display: "flex",
-                  "align-items": "center",
-                  "justify-content": "center",
-                  gap: "6px",
-                  width: "100%",
-                  "min-height": "44px",
-                  "border-radius": "12px",
-                  border: "1px solid var(--line2)",
-                  color: "var(--accent)",
-                  "font-size": "14px",
-                  "font-weight": 550,
-                  background: "none",
-                }}
-              >
-                <Icon name="sliders" sm />
-                {t("quota.manageProviders")}
-              </button>
-            </div>
-          </Show>
           </Show>
         </div>
       </div>
+
+      <Show when={state.quotaEnabled}>
+        <button
+          class="tp-fab"
+          classList={{ "nav-hidden": state.navHidden }}
+          aria-label={t("app.reload")}
+          onClick={doRefresh}
+        >
+          <span
+            style={{
+              display: "inline-flex",
+              "align-items": "center",
+              "justify-content": "center",
+              animation: isLoading() ? "sp .8s linear infinite" : "none",
+            }}
+          >
+            <Icon name="refresh" />
+          </span>
+        </button>
+      </Show>
     </div>
   );
 }
