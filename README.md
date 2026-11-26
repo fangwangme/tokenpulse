@@ -1,26 +1,25 @@
 # TokenPulse
 
-TokenPulse is a Go CLI and TUI dashboard for tracking token usage, cost, and
-quota across AI coding agents. It stores parsed sessions in a local SQLite
-ledger and exposes the data through a terminal dashboard, a mobile web app
-over Tailscale, and plain-text, JSON, or CSV output.
+TokenPulse runs on the computer that holds your AI coding agent sessions and
+serves a mobile-first web dashboard over Tailscale. It tracks token usage,
+cost, and subscription quota across agents and keeps the data fresh in the
+background. A terminal dashboard and plain-text, JSON, or CSV output are also
+available.
 
-## Screenshots
+## Web dashboard
 
-**Desktop (TUI)**
-
-![TokenPulse usage dashboard](docs/images/tui-usage.png)
-
-![TokenPulse quota dashboard](docs/images/tui-quota.png)
-
-**Mobile**
+`tokenpulse serve` keeps usage and quota fresh and serves the phone app, with
+live updates over a local Unix socket. Open the pairing URL or QR code on a
+phone on the same tailnet; the app can be added to the home screen.
 
 <p>
-  <img src="docs/images/mobile-usage.png" width="320" alt="TokenPulse mobile usage, 7 days by model">
-  <img src="docs/images/mobile-quota.png" width="320" alt="TokenPulse mobile quota">
+  <img src="docs/images/mobile-usage.png" width="360" alt="TokenPulse mobile usage, 7 days by model">
+  <img src="docs/images/mobile-quota.png" width="360" alt="TokenPulse mobile quota">
 </p>
 
-The screenshots use synthetic demo data, not a real account.
+The screenshots use synthetic demo data, not a real account. See
+[Web dashboard details](#web-dashboard-details) for pairing, ports, service
+install and LAN options.
 
 ## Install
 
@@ -51,11 +50,13 @@ npx @fangwangme/tokenpulse
 bunx @fangwangme/tokenpulse
 ```
 
-Once installed, launch the dashboard:
+Once installed, start the web dashboard:
 
 ```bash
-tokenpulse
+tokenpulse serve
 ```
+
+For the terminal dashboard, run `tokenpulse`.
 
 Prebuilt binaries are published for macOS (Intel and Apple Silicon) and Linux
 (x64 and arm64). npm/bun resolves the one matching your machine; on any other
@@ -63,7 +64,7 @@ platform, build from source instead.
 
 ### From source
 
-Requires Go 1.27+ and Node 20+ (to build the embedded phone app):
+Requires Go 1.27+ and Node 20+ (to build the embedded web app):
 
 ```bash
 git clone https://github.com/fangwangme/tokenpulse
@@ -71,7 +72,7 @@ cd tokenpulse/web && npm ci && npm run build && cd ..
 go build -o tokenpulse .
 ```
 
-If you only need the CLI/TUI (without the phone web app), `go install` works
+If you only need the CLI/TUI (without the web app), `go install` works
 without Node and embeds a placeholder page at `/`:
 
 ```bash
@@ -113,12 +114,12 @@ go install github.com/fangwangme/tokenpulse@latest
 
 ## Features
 
-- **Unified usage report** — one Usage view shared by the TUI and phone app,
-  with range presets, period comparison, a Token/Cost switch, heatmaps,
-  date/model lists, day/model detail, and an agent filter
-- **Remote phone mode** — `tokenpulse serve` owns scanning and quota refreshes,
-  serves a mobile PWA over Tailscale Serve HTTPS, and syncs live with the TUI
+- **Mobile web dashboard** — `tokenpulse serve` owns scanning and quota
+  refreshes, serves a mobile PWA over Tailscale Serve HTTPS, and updates live
   over a local Unix socket
+- **Unified usage report** — one Usage view shared by the web app and TUI, with
+  range presets, period comparison, a Token/Cost switch, heatmaps, date/model
+  lists, day/model detail, and an agent filter
 - **Read-only quota tracking** — checks Claude Code, Codex, OpenCode Go, and
   Antigravity quota without writing or refreshing credentials; shows
   remaining/used bars,
@@ -319,7 +320,7 @@ created private (`0700`). `TOKENPULSE_ENV=test` marks a test run and requires
 per rate window, per model family) and every Keeper run, for later analysis. It
 has no retention policy — delete old rows yourself if it grows too large.
 
-## Remote mode
+## Web dashboard details
 
 Run TokenPulse on the computer that holds the agent sessions:
 
