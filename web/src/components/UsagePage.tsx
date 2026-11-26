@@ -1618,11 +1618,11 @@ export function UsagePage() {
                                   <span style={{ color: "var(--faint)" }}>·</span>
                                   <span><span style={{ color: "var(--faint)", "font-weight": 400 }}>{t("usage.output")} </span><span style={{ color: "var(--fg)", "font-weight": 600 }}>{fmtTokens(m.output)}</span></span>
                                   <span style={{ color: "var(--faint)" }}>·</span>
-                                  <span><span style={{ color: "var(--faint)", "font-weight": 400 }}>{t("usage.cacheRead")} </span><span style={{ color: "var(--fg)", "font-weight": 600 }}>{fmtTokens(m.cacheRead)}</span></span>
+                                  <span title={t("usage.cacheRead")}><span style={{ color: "var(--faint)", "font-weight": 400 }}>{t("usage.cacheReadShort")} </span><span style={{ color: "var(--fg)", "font-weight": 600 }}>{fmtTokens(m.cacheRead)}</span></span>
                                   <span style={{ color: "var(--faint)" }}>·</span>
-                                  <span><span style={{ color: "var(--faint)", "font-weight": 400 }}>{t("usage.cacheWrite")} </span><span style={{ color: "var(--fg)", "font-weight": 600 }}>{m.cacheWrite > 0 ? fmtTokens(m.cacheWrite) : "—"}</span></span>
+                                  <span title={t("usage.cacheWrite")}><span style={{ color: "var(--faint)", "font-weight": 400 }}>{t("usage.cacheWriteShort")} </span><span style={{ color: "var(--fg)", "font-weight": 600 }}>{m.cacheWrite > 0 ? fmtTokens(m.cacheWrite) : "—"}</span></span>
                                   <span style={{ color: "var(--faint)" }}>·</span>
-                                  <span><span style={{ color: "var(--faint)", "font-weight": 400 }}>{t("usage.cacheHit")} </span><span style={{ color: "var(--fg)", "font-weight": 600 }}>{cacheHitPercent(m.cacheRead, m.tokens).toFixed(2)}%</span></span>
+                                  <span title={t("usage.cacheHit")}><span style={{ color: "var(--faint)", "font-weight": 400 }}>{t("usage.cacheHitShort")} </span><span style={{ color: "var(--fg)", "font-weight": 600 }}>{cacheHitPercent(m.cacheRead, m.tokens).toFixed(2)}%</span></span>
                                 </div>
                               </div>
                             )}
