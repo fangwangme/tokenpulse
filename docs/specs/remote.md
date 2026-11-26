@@ -223,6 +223,30 @@ development. The embedded directory always contains a committed placeholder
 page saying the frontend was not built, which the web build replaces, so a
 plain `go build` without Node succeeds and the API works unchanged.
 
+### Mobile PWA shell
+
+The document does not declare `apple-mobile-web-app-status-bar-style`: an
+installed iOS Home Screen app starts below an opaque status bar in the page's
+color, so the system does not blur content scrolling under it.
+`viewport-fit=cover` stays in the viewport meta, safe areas use
+`env(safe-area-inset-*)`, and the initial `theme-color` follows the light or
+dark palette background.
+
+The window never scrolls. `html`, `body` and `#root` are fixed to the layout
+viewport with `overflow: hidden`; a page fills that viewport with a fixed
+frame, and only its inner scroll area scrolls. The page's bottom safe-area
+padding lives inside that scroll area, and the bottom tab bar sits above the
+home indicator. The layout uses no `100dvh`/`100lvh`: on iOS 26 those units can
+include the status-bar height and leave a fixed empty band under the bottom
+controls.
+
+While a text field has focus, the page is sized and placed to the visual
+viewport, so the header stays visible and the page's content stays above the
+keyboard; with no text field focused the visual-viewport readings are ignored
+and the window stays at scroll position 0. iOS reads the status-bar style when
+the app is added to the Home Screen, so an already installed app picks up a
+change only after it is removed and added again.
+
 The Usage and Quota pages are a component-by-component port of the reference
 mobile design, not a reinterpretation: layout, spacing, type scale, color
 tokens, heatmap shapes, bottom sheets, skeleton and error states, and visible
