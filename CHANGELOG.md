@@ -8,12 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.2] - 2026-11-27
 
 ### Added
-- **OpenCode Go quota**: TokenPulse reads the active credential from OpenCode's local database and shows the Go plan's `5h`, `Weekly`, and `Monthly` windows. The credential is never copied, refreshed, or written, and the provider stays hidden when the account has no Go subscription; Settings has the same on/off switch as the other providers.
-- **Configurable quota provider order**: config schema 6 adds `display.quota_provider_order`. The phone's Settings page lists all quota providers with a drag handle and an independent enable switch, and the TUI follows the same order. The CLI accepts `tokenpulse config set quota_provider_order=...`.
-- **Web-focused README**: the README now leads with the mobile web dashboard and includes two synthetic English screenshots (mobile usage on 7 days with By model, and mobile quota). The old TUI screenshots are removed.
+- **OpenCode Go quota**: reads the active credential from OpenCode's local SQLite database and displays the Go plan's `5h`, `Weekly`, and `Monthly` windows. Credentials are never copied, refreshed, or written; accounts without a Go subscription stay hidden and clear any stale cache instead of showing an error.
+- **Configurable quota provider order**: config schema 6 adds `display.quota_provider_order` (default: Claude Code, Codex, OpenCode Go, Antigravity). The web app's Settings page combines drag-to-reorder and per-provider enable switches in one list, and the TUI and CLI (`--json`, text summary, `tokenpulse config set quota_provider_order=...`) follow the same order.
+
+### Changed
+- **Web-focused README**: leads with the mobile web dashboard and two synthetic mobile screenshots (Usage on 7 days by model, and Quota), removing the old TUI screenshots.
+- **Quota page header**: removed the redundant top-left `QUOTA` label in the web app, leaving the compact refresh status aligned to the right.
 
 ### Fixed
-- **Android PWA orientation**: the web manifest requests portrait and an installed Android app asks `screen.orientation.lock("portrait")` where supported. iOS keeps rotating and its existing landscape layout stays usable.
+- **Android PWA orientation**: the web manifest requests portrait and an installed Android app calls `screen.orientation.lock("portrait")` where supported, while iOS keeps rotating with its existing landscape layout.
 
 ## [0.7.1] - 2026-11-26
 

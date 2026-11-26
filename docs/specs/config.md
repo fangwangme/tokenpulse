@@ -57,10 +57,12 @@ other key or value is rejected with the accepted values. `config
 enable`/`disable` accept exactly `claude`, `codex`, `opencode` and
 `antigravity`.
 
-`quota_provider_order` is normalized before use: unknown IDs are dropped,
+On load, `quota_provider_order` is normalized: unknown IDs are dropped,
 duplicates collapse to the first occurrence, and missing quota providers append
-in the default order. The setting only changes display order. The phone's
-Settings list writes it through the same rule.
+in the default order. `config set quota_provider_order=...` rejects unknown IDs
+and normalizes duplicates and missing providers; the phone's `PATCH /api/settings`
+requires all four quota provider IDs, each once. The setting only changes
+display order.
 
 ## Keeper state
 

@@ -71,14 +71,15 @@ family.
 `User-Agent: tokenpulse/<version>`, an optional `x-opencode-org-id` from
 `metadata.orgID`, and a 20-second timeout.
 
-`rolling` → `5h`, 5 h; `weekly` → `Weekly`, 7 d; `monthly` → `Monthly`, 30 d.
-The labels stay short; the period behind them is what pace uses. Percent is
-`percent`, clamped to 0–100; `status = rate-limited` counts as 100. Reset is
-RFC3339. There is no plan in the response. The account is `metadata.email`,
-read only when the account display asks for it.
+`rolling` → `5h`, 5 h; `weekly` → `Weekly`, 7 d; `monthly` → `Monthly`, 30 d,
+mapped only when present. The labels stay short; the period behind them is what
+pace uses. Percent is `percent`, clamped to 0–100; `status = rate-limited`
+counts as 100. `resetsAt` is optional RFC3339. There is no plan in the
+response. The account is `metadata.email`, read only when the account display
+asks for it.
 
-A 401 or 403 omits the provider (expired login or no Go subscription); it is
-not an error.
+A 401, 403, or a response with no windows omits the provider (expired login or
+no Go subscription) and clears any cached entry; it is not an error.
 
 ## Antigravity
 

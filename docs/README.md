@@ -9,6 +9,7 @@ that file and link to it from elsewhere rather than copying content.
 | Doc | Audience | Canonical home for |
 | --- | --- | --- |
 | [`../README.md`](../README.md) | Users | Install, quick start, and feature highlights. Keep it short; link here for depth. |
+| [`USAGE.md`](USAGE.md) | Users | CLI flags & exports, TUI keybindings, `config set` options, Session Keeper, Tailscale/LAN/service setup, local storage, and building from source. |
 | [`DESIGN.md`](DESIGN.md) | Contributors | Architecture overview: scope, principles, package layout, data flow. |
 | [`modules/quota.md`](modules/quota.md) | Contributors | Per-provider quota fetching: endpoints, auth, response→`RateWindow` mapping. |
 | [`modules/usage.md`](modules/usage.md) | Contributors | Usage parsing/ingest pipeline, providers, store schema, CLI/TUI output. |
