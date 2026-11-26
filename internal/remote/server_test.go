@@ -173,6 +173,10 @@ func TestSettingsWhitelist(t *testing.T) {
 		`{"providers.antigravity.path":"/tmp/x"}`,
 		`{"display.quota_display_mode":"bogus"}`,
 		`{"display.auto_refresh_secs":42}`,
+		`{"display.quota_provider_order":["claude","codex","opencode"]}`,
+		`{"display.quota_provider_order":["claude","codex","opencode","opencode"]}`,
+		`{"display.quota_provider_order":["claude","codex","opencode","bogus"]}`,
+		`{"display.quota_provider_order":"claude,codex,opencode,antigravity"}`,
 		`{"keeper.agents.agy.daily_wakeup_time":"24:00"}`,
 		`{"providers.claude.enabled":false,"display.quota_display_mode":"bogus"}`,
 		`{"unknown.key":true}`,
@@ -186,7 +190,7 @@ func TestSettingsWhitelist(t *testing.T) {
 		}
 	}
 
-	got := send(`{"providers.agy.enabled":false,"keeper.agents.agy.daily_wakeup_time":"23:59","display.quota_display_mode":"used"}`)
+	got := send(`{"providers.agy.enabled":false,"providers.opencode.enabled":false,"keeper.agents.agy.daily_wakeup_time":"23:59","display.quota_display_mode":"used","display.quota_provider_order":["opencode","claude","codex","antigravity"]}`)
 	if got.Code != http.StatusOK {
 		t.Fatalf("valid patch = %d %s", got.Code, got.Body.String())
 	}
@@ -201,9 +205,13 @@ func TestSettingsWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Providers["antigravity"].Enabled || cfg.Display.QuotaDisplayMode != config.QuotaUsed ||
+	if cfg.Providers["antigravity"].Enabled || cfg.Providers["opencode"].Enabled ||
+		cfg.Display.QuotaDisplayMode != config.QuotaUsed ||
 		cfg.Keeper.Agents["antigravity"].DailyWakeupTime != "23:59" {
 		t.Fatalf("settings not applied: %+v", cfg)
+	}
+	if got := strings.Join(cfg.Display.QuotaProviderOrder, ","); got != "opencode,claude,codex,antigravity" {
+		t.Fatalf("provider order = %s", got)
 	}
 }
 
