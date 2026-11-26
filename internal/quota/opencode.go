@@ -114,16 +114,16 @@ func (f *OpenCodeFetcher) credential() (string, map[string]any, bool, error) {
 }
 
 type openCodeMeter struct {
-	Status   string    `json:"status"`
-	Percent  float64   `json:"percent"`
-	ResetsAt time.Time `json:"resetsAt"`
+	Status   string  `json:"status"`
+	Percent  float64 `json:"percent"`
+	ResetsAt *string `json:"resetsAt"`
 }
 
 type openCodeUsageResponse struct {
 	Usage struct {
-		Rolling openCodeMeter `json:"rolling"`
-		Weekly  openCodeMeter `json:"weekly"`
-		Monthly openCodeMeter `json:"monthly"`
+		Rolling *openCodeMeter `json:"rolling"`
+		Weekly  *openCodeMeter `json:"weekly"`
+		Monthly *openCodeMeter `json:"monthly"`
 	} `json:"usage"`
 }
 
@@ -136,21 +136,30 @@ func parseOpenCodeUsage(body []byte) (*provider.QuotaSnapshot, error) {
 	sevenDays := int64((7 * 24 * time.Hour) / time.Millisecond)
 	thirtyDays := int64((30 * 24 * time.Hour) / time.Millisecond)
 	windows := make([]provider.RateWindow, 0, 3)
-	add := func(label string, period *int64, meter openCodeMeter) {
+	add := func(label string, period *int64, meter *openCodeMeter) {
+		if meter == nil {
+			return
+		}
 		used := math.Max(0, math.Min(100, meter.Percent))
 		if meter.Status == "rate-limited" {
 			used = 100
 		}
 		window := provider.RateWindow{Label: label, UsedPercent: used, PeriodMs: period}
-		if !meter.ResetsAt.IsZero() {
-			reset := meter.ResetsAt
-			window.ResetsAt = &reset
+		if meter.ResetsAt != nil {
+			if text := strings.TrimSpace(*meter.ResetsAt); text != "" {
+				if reset, err := time.Parse(time.RFC3339Nano, text); err == nil {
+					window.ResetsAt = &reset
+				}
+			}
 		}
 		windows = append(windows, window)
 	}
 	add("5h", &fiveHours, raw.Usage.Rolling)
 	add("Weekly", &sevenDays, raw.Usage.Weekly)
 	add("Monthly", &thirtyDays, raw.Usage.Monthly)
+	if len(windows) == 0 {
+		return nil, nil
+	}
 	return &provider.QuotaSnapshot{Provider: "opencode", Windows: windows}, nil
 }
 
@@ -193,6 +202,9 @@ func (f *OpenCodeFetcher) Fetch() (*provider.QuotaSnapshot, error) {
 	snapshot, err := parseOpenCodeUsage(body)
 	if err != nil {
 		return nil, err
+	}
+	if snapshot == nil {
+		return nil, nil
 	}
 	if f.ShowAccount {
 		snapshot.Account = stringMetadata(metadata, "email")

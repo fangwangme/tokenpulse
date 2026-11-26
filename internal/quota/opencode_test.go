@@ -48,6 +48,32 @@ func TestOpenCodeUsageParsing(t *testing.T) {
 	}
 }
 
+func TestOpenCodeUsageParsingToleratesMissingData(t *testing.T) {
+	for name, body := range map[string]string{
+		"empty usage":   `{"usage":{}}`,
+		"missing usage": `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			snapshot, err := parseOpenCodeUsage([]byte(body))
+			if err != nil || snapshot != nil {
+				t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+			}
+		})
+	}
+
+	snapshot, err := parseOpenCodeUsage([]byte(`{"usage":{"weekly":{"status":"ok","percent":42,"resetsAt":""}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot == nil || len(snapshot.Windows) != 1 {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	weekly := snapshot.Windows[0]
+	if weekly.Label != "Weekly" || weekly.UsedPercent != 42 || weekly.ResetsAt != nil {
+		t.Fatalf("weekly = %+v", weekly)
+	}
+}
+
 func writeOpenCodeCredential(t *testing.T, path, value string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
@@ -154,6 +180,69 @@ func TestOpenCodeFetchOmitsMissingExpiredAndNotSubscribed(t *testing.T) {
 	})
 }
 
+func TestOpenCodeFetchOAuthAndHTTPStatus(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+
+	t.Run("valid oauth", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer oauth-token" {
+				t.Errorf("authorization = %q", r.Header.Get("Authorization"))
+			}
+			w.Write([]byte(openCodeUsageFixture))
+		}))
+		defer server.Close()
+
+		path := filepath.Join(t.TempDir(), "opencode.db")
+		value, _ := json.Marshal(map[string]any{
+			"type": "oauth", "access": "oauth-token", "expires": now.Add(time.Hour).UnixMilli(),
+		})
+		writeOpenCodeCredential(t, path, string(value))
+		fetcher := &OpenCodeFetcher{DBPath: path, UsageURL: server.URL, Now: func() time.Time { return now }}
+		snapshot, err := fetcher.Fetch()
+		if err != nil || snapshot == nil || len(snapshot.Windows) != 3 {
+			t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+		}
+	})
+
+	for name, status := range map[string]int{"unauthorized": http.StatusUnauthorized, "server error": http.StatusInternalServerError} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+
+			path := filepath.Join(t.TempDir(), "opencode.db")
+			writeOpenCodeCredential(t, path, `{"type":"key","key":"secret"}`)
+			fetcher := &OpenCodeFetcher{DBPath: path, UsageURL: server.URL, Now: func() time.Time { return now }}
+			snapshot, err := fetcher.Fetch()
+			if status == http.StatusUnauthorized {
+				if err != nil || snapshot != nil {
+					t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+				}
+				return
+			}
+			if err == nil || snapshot != nil {
+				t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+			}
+		})
+	}
+
+	t.Run("external credential", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("external credential made a usage request")
+		}))
+		defer server.Close()
+
+		path := filepath.Join(t.TempDir(), "opencode.db")
+		writeOpenCodeCredential(t, path, `{"type":"external"}`)
+		fetcher := &OpenCodeFetcher{DBPath: path, UsageURL: server.URL, Now: func() time.Time { return now }}
+		snapshot, err := fetcher.Fetch()
+		if err != nil || snapshot != nil {
+			t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+		}
+	})
+}
+
 type silentFetcher struct{}
 
 func (silentFetcher) ProviderID() string                      { return "silent" }
@@ -166,9 +255,15 @@ func (snapshotFetcher) Fetch() (*provider.QuotaSnapshot, error) {
 	return &provider.QuotaSnapshot{Provider: "claude"}, nil
 }
 
-func TestFetchAllSkipsProviderWithNothingToReport(t *testing.T) {
+func TestFetchAllMarksProviderWithNothingToReportAbsent(t *testing.T) {
 	results := FetchAll(t.TempDir(), []Fetcher{silentFetcher{}, snapshotFetcher{}})
-	if len(results) != 1 || results[0].Provider != "claude" {
+	if len(results) != 2 {
 		t.Fatalf("results = %+v", results)
+	}
+	if results[0].Provider != "silent" || !results[0].Absent || results[0].Err != nil {
+		t.Fatalf("silent result = %+v", results[0])
+	}
+	if results[1].Provider != "claude" || results[1].Absent || results[1].Snapshot == nil {
+		t.Fatalf("claude result = %+v", results[1])
 	}
 }

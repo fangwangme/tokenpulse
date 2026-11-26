@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -695,7 +696,19 @@ func FetchersFor(cfg config.Config) []quota.Fetcher {
 func (r *Runtime) ApplyQuotaResults(results []quota.FetchResult) {
 	r.mu.Lock()
 	var recoveries []notification.Recovery
+	var absent []string
 	for _, result := range results {
+		if result.Absent {
+			delete(r.snapshots, result.Provider)
+			delete(r.quotaErrors, result.Provider)
+			for key := range r.exhausted {
+				if strings.HasPrefix(key, result.Provider+":") {
+					delete(r.exhausted, key)
+				}
+			}
+			absent = append(absent, result.Provider)
+			continue
+		}
 		if result.Snapshot != nil {
 			r.snapshots[result.Provider] = *result.Snapshot
 			delete(r.quotaErrors, result.Provider)
@@ -721,6 +734,12 @@ func (r *Runtime) ApplyQuotaResults(results []quota.FetchResult) {
 	}
 	fetchedAt := r.lastFetchedAt
 	r.mu.Unlock()
+
+	for _, id := range absent {
+		if err := r.Cache.Forget(id); err != nil && r.Logger != nil {
+			r.Logger.Printf("clear quota cache %s: %v", id, err)
+		}
+	}
 
 	for _, recovery := range recoveries {
 		r.Events.Publish("quota_recovered", map[string]any{
