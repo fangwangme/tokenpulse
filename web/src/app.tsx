@@ -5,6 +5,7 @@ import { PairPage } from "./components/PairPage";
 import { QuotaPage } from "./components/QuotaPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { UsagePage } from "./components/UsagePage";
+import { QUOTA_PROVIDER_NAMES } from "./shared/defaults";
 import { showToast, state } from "./store";
 import { applyTheme } from "./themes";
 import { resolveLocale, setLocale, t } from "./i18n";
@@ -64,7 +65,7 @@ export function App() {
         void loadState().catch(() => {});
         void loadQuota().catch(() => {});
       } else if (payload.type === "quota_recovered") {
-        const provider = data.provider === "antigravity" ? "Antigravity" : data.provider;
+        const provider = QUOTA_PROVIDER_NAMES[data.provider] || data.provider;
         showToast(`${provider} ${data.window} · ${Math.round(data.remaining)}%`);
       }
     };
