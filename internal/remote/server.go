@@ -1082,7 +1082,15 @@ func (s *Server) broadcast(event string, data any) {
 func (s *Server) serveWeb(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/assets/") {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	} else if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/sw.js" {
+	} else if r.URL.Path == "/" ||
+		r.URL.Path == "/index.html" ||
+		r.URL.Path == "/sw.js" ||
+		r.URL.Path == "/manifest.webmanifest" ||
+		r.URL.Path == "/favicon.ico" ||
+		r.URL.Path == "/icon.svg" ||
+		r.URL.Path == "/apple-touch-icon.png" ||
+		strings.HasPrefix(r.URL.Path, "/favicon-") ||
+		strings.HasPrefix(r.URL.Path, "/icon-") {
 		w.Header().Set("Cache-Control", "no-cache")
 	}
 	if s.WebDir != "" {

@@ -39,19 +39,19 @@ export function PairPage(props: { onPaired: () => Promise<void> }) {
       <div class="scroll">
         <div class="settings" style={{ "padding-top": "24px" }}>
           <div style={{ display: "flex", "justify-content": "center", "margin-bottom": "18px" }}>
-            <span
+            <img
+              src="/icon-192.png?v=2"
+              alt="TokenPulse"
+              width="72"
+              height="72"
               style={{
-                width: "64px",
-                height: "64px",
-                "border-radius": "20px",
-                background: "var(--accentbg)",
-                color: "var(--accent)",
-                display: "grid",
-                "place-items": "center",
+                width: "72px",
+                height: "72px",
+                "border-radius": "18px",
+                display: "block",
+                "box-shadow": "0 8px 24px rgba(0,0,0,.28)",
               }}
-            >
-              <Icon name="phone" />
-            </span>
+            />
           </div>
           <p class="note" style={{ "text-align": "center", "font-size": "14px" }}>{t("pair.hint")}</p>
           <Show when={state.bootError}>
