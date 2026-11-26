@@ -1620,6 +1620,8 @@ export function UsagePage() {
                                   <span style={{ color: "var(--faint)" }}>·</span>
                                   <span><span style={{ color: "var(--faint)", "font-weight": 400 }}>{t("usage.cacheRead")} </span><span style={{ color: "var(--fg)", "font-weight": 600 }}>{fmtTokens(m.cacheRead)}</span></span>
                                   <span style={{ color: "var(--faint)" }}>·</span>
+                                  <span><span style={{ color: "var(--faint)", "font-weight": 400 }}>{t("usage.cacheWrite")} </span><span style={{ color: "var(--fg)", "font-weight": 600 }}>{m.cacheWrite > 0 ? fmtTokens(m.cacheWrite) : "—"}</span></span>
+                                  <span style={{ color: "var(--faint)" }}>·</span>
                                   <span><span style={{ color: "var(--faint)", "font-weight": 400 }}>{t("usage.cacheHit")} </span><span style={{ color: "var(--fg)", "font-weight": 600 }}>{cacheHitPercent(m.cacheRead, m.tokens).toFixed(2)}%</span></span>
                                 </div>
                               </div>
