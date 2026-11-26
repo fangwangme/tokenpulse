@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-11-27
+
+### Added
+- **OpenCode Go quota**: TokenPulse reads the active credential from OpenCode's local database and shows the Go plan's `5h`, `Weekly`, and `Monthly` windows. The credential is never copied, refreshed, or written, and the provider stays hidden when the account has no Go subscription; Settings has the same on/off switch as the other providers.
+- **Configurable quota provider order**: config schema 6 adds `display.quota_provider_order`. The phone's Settings page lists all quota providers with a drag handle and an independent enable switch, and the TUI follows the same order. The CLI accepts `tokenpulse config set quota_provider_order=...`.
+- **README screenshots**: four synthetic English screenshots replace the old TUI images, covering the desktop usage and quota views plus the mobile usage and quota views.
+
+### Fixed
+- **Android PWA orientation**: the web manifest requests portrait and an installed Android app asks `screen.orientation.lock("portrait")` where supported. iOS keeps rotating and its existing landscape layout stays usable.
+
 ## [0.7.1] - 2026-11-26
 
 ### Fixed
