@@ -26,7 +26,6 @@ import (
 	"github.com/fangwangme/tokenpulse/internal/keeper"
 	"github.com/fangwangme/tokenpulse/internal/paths"
 	"github.com/fangwangme/tokenpulse/internal/provider"
-	"github.com/fangwangme/tokenpulse/internal/quota"
 	"github.com/fangwangme/tokenpulse/internal/report"
 	rt "github.com/fangwangme/tokenpulse/internal/runtime"
 	"github.com/fangwangme/tokenpulse/internal/scan"
@@ -1145,6 +1144,3 @@ func (s *Server) Shutdown() {
 		}
 	})
 }
-
-// Keep unused import check satisfied if quota is referenced via Runtime.
-var _ = quota.ProviderIDs

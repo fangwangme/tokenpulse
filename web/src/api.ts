@@ -145,32 +145,36 @@ export async function pair(token: string): Promise<void> {
   await loadState();
 }
 
+function applySettings(values: Record<string, unknown>): void {
+  state.settings = values;
+  state.quotaDisplay = values["display.quota_display_mode"] === "used" ? "used" : "remaining";
+  state.accountDisplay =
+    values["display.account_display"] === "none"
+      ? "none"
+      : values["display.account_display"] === "plan"
+        ? "plan"
+        : "full";
+  state.quotaShowAccount = state.accountDisplay !== "none";
+  state.usageScanInterval = secondsToScanInterval(Number(values["display.auto_refresh_secs"] ?? 900));
+  state.quotaProviders = {
+    claude: values["providers.claude.enabled"] !== false,
+    codex: values["providers.codex.enabled"] !== false,
+    opencode: values["providers.opencode.enabled"] !== false,
+    antigravity: values["providers.agy.enabled"] !== false,
+  };
+  state.quotaProviderOrder = normalizeProviderOrder(values["display.quota_provider_order"]);
+  state.quotaEnabled = values["display.refresh_quota"] !== false;
+}
+
 export async function loadState(): Promise<void> {
   const raw = await api<RawState>("/api/state");
   state.version = raw.version;
   state.scannedAt = raw.scannedAt;
   state.usageScannedAt = raw.scannedAt;
-  state.settings = raw.settings || {};
   state.agents = raw.agents || [];
   state.keeperEngine = raw.keeperEngine;
   state.quotaUpdated = raw.fetchedAt || null;
-  state.quotaDisplay = raw.settings["display.quota_display_mode"] === "used" ? "used" : "remaining";
-  state.accountDisplay =
-    raw.settings["display.account_display"] === "none"
-      ? "none"
-      : raw.settings["display.account_display"] === "plan"
-        ? "plan"
-        : "full";
-  state.quotaShowAccount = state.accountDisplay !== "none";
-  state.usageScanInterval = secondsToScanInterval(Number(raw.settings["display.auto_refresh_secs"] ?? 900));
-  state.quotaProviders = {
-    claude: raw.settings["providers.claude.enabled"] !== false,
-    codex: raw.settings["providers.codex.enabled"] !== false,
-    opencode: raw.settings["providers.opencode.enabled"] !== false,
-    antigravity: raw.settings["providers.agy.enabled"] !== false,
-  };
-  state.quotaProviderOrder = normalizeProviderOrder(raw.settings["display.quota_provider_order"]);
-  state.quotaEnabled = raw.settings["display.refresh_quota"] !== false;
+  applySettings(raw.settings || {});
   state.usageEnabled = true;
   state.configReady = true;
   if (state.paired !== true) state.paired = true;
@@ -314,24 +318,7 @@ export async function patchSettings(updates: Record<string, unknown>): Promise<v
   });
   const values: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(raw.settings || {})) values[key] = entry.value;
-  state.settings = values;
-  state.quotaDisplay = values["display.quota_display_mode"] === "used" ? "used" : "remaining";
-  state.accountDisplay =
-    values["display.account_display"] === "none"
-      ? "none"
-      : values["display.account_display"] === "plan"
-        ? "plan"
-        : "full";
-  state.quotaShowAccount = state.accountDisplay !== "none";
-  state.usageScanInterval = secondsToScanInterval(Number(values["display.auto_refresh_secs"] ?? 900));
-  state.quotaProviders = {
-    claude: values["providers.claude.enabled"] !== false,
-    codex: values["providers.codex.enabled"] !== false,
-    opencode: values["providers.opencode.enabled"] !== false,
-    antigravity: values["providers.agy.enabled"] !== false,
-  };
-  state.quotaProviderOrder = normalizeProviderOrder(values["display.quota_provider_order"]);
-  state.quotaEnabled = values["display.refresh_quota"] !== false;
+  applySettings(values);
   state.keeperEngine = Boolean(values["keeper.enabled"]);
 }
 

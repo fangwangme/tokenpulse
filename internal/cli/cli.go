@@ -1178,7 +1178,7 @@ func runInit(args []string) error {
 		return errors.New("interactive init is not available in this build; run `tokenpulse init --default`")
 	}
 	cfg := config.Default()
-	for _, name := range []string{"claude", "codex", "opencode", "antigravity"} {
+	for _, name := range quota.ProviderIDs {
 		cfg.Providers[name] = config.ProviderConfig{Enabled: selected[name]}
 	}
 	if err := manager.Save(&cfg); err != nil {

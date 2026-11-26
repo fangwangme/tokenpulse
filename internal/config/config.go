@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -464,14 +463,4 @@ func (c Config) EnabledQuotaProviders(quotaIDs []string) []string {
 		}
 	}
 	return out
-}
-
-// SortedProviderNames is used by config show and the phone settings.
-func (c Config) SortedProviderNames() []string {
-	names := make([]string, 0, len(c.Providers))
-	for name := range c.Providers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }

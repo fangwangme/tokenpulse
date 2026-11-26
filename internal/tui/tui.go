@@ -193,7 +193,7 @@ func (m *model) applyQuotaView(view rt.QuotaView) {
 			m.quotaErrors[entry.Provider] = entry.Error.Message
 		}
 		if entry.Snapshot != nil {
-			m.upsertSnapshot(*entry.Snapshot)
+			m.snapshots = append(m.snapshots, *entry.Snapshot)
 		} else if showEmpty {
 			m.snapshots = append(m.snapshots, provider.QuotaSnapshot{Provider: entry.Provider})
 		}
@@ -807,7 +807,7 @@ func (m *model) changeSetting() tea.Cmd {
 	case 10:
 		update = map[string]any{"keeper.agents.agy.weekly_all_groups": !cfg.Keeper.AntigravityAllGroups()}
 	case 11:
-		ids := cfg.QuotaProviderOrder([]string{"claude", "codex", "opencode", "antigravity"})
+		ids := cfg.QuotaProviderOrder(quota.ProviderIDs)
 		id := ids[m.providerCursor%len(ids)]
 		m.providerCursor = (m.providerCursor + 1) % len(ids)
 		update = map[string]any{"providers." + id + ".enabled": !cfg.Providers[id].Enabled}
@@ -917,16 +917,6 @@ func (m *model) refresh() tea.Cmd {
 		}
 		return toastMsg{"Refresh complete"}
 	}
-}
-
-func (m *model) upsertSnapshot(snapshot provider.QuotaSnapshot) {
-	for i := range m.snapshots {
-		if m.snapshots[i].Provider == snapshot.Provider {
-			m.snapshots[i] = snapshot
-			return
-		}
-	}
-	m.snapshots = append(m.snapshots, snapshot)
 }
 
 // ── view ──
@@ -1455,7 +1445,7 @@ func (m *model) renderSettings(width int) string {
 
 func enabledProviderLabel(cfg config.Config) string {
 	var enabled []string
-	for _, id := range cfg.QuotaProviderOrder([]string{"claude", "codex", "opencode", "antigravity"}) {
+	for _, id := range cfg.QuotaProviderOrder(quota.ProviderIDs) {
 		if cfg.Providers[id].Enabled {
 			enabled = append(enabled, id)
 		}
