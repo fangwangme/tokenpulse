@@ -211,7 +211,11 @@ func (m *model) drawOverviewChart(c *canvas, area rect) {
 		value := maxValue * float64(ticks-tick) / float64(ticks)
 		row := chartArea.y + tick*chartHeight/ticks
 		label := strings.TrimRight(formatYAxis(value, m.overviewMetric), " ")
-		c.set(chartArea.x+chartYAxisWidth-len([]rune(label)), row, label, fgStyle(theme.dim))
+		start := chartArea.x + chartYAxisWidth - lipgloss.Width(label)
+		if start < chartArea.x {
+			start = chartArea.x
+		}
+		c.set(start, row, label, fgStyle(theme.dim))
 	}
 
 	chartX := chartArea.x + chartYAxisWidth

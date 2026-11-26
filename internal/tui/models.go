@@ -112,6 +112,11 @@ func (m *model) handleOverviewKey(key string) (tea.Model, tea.Cmd) {
 
 func (m *model) drawModels(c *canvas, area rect) {
 	theme := m.theme()
+	barHeight := m.drawRangeBar(c, area)
+	area = rect{x: area.x, y: area.y + barHeight, w: area.w, h: area.h - barHeight}
+	if area.h < 2 {
+		return
+	}
 	c.box(area.x, area.y, area.w, area.h, " Models ", boldStyle(theme.accent), fgStyle(theme.border))
 	inner := area.inner()
 	if inner.h <= 0 || inner.w <= 0 {

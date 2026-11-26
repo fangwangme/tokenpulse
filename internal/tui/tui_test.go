@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/fangwangme/tokenpulse/internal/config"
+	"github.com/fangwangme/tokenpulse/internal/keeper"
 	"github.com/fangwangme/tokenpulse/internal/provider"
 	"github.com/fangwangme/tokenpulse/internal/remote"
 	rt "github.com/fangwangme/tokenpulse/internal/runtime"
@@ -202,5 +203,62 @@ func TestWebToggleResubscribesAndFetchesConfig(t *testing.T) {
 	_, cmd = m.Update(webToggleMsg{client: client, toast: "ok"})
 	if cmd == nil || m.eventCh == nil {
 		t.Fatal("webToggleMsg success did not resubscribe events")
+	}
+}
+
+// Protects tui-usage.md "Range and filter": Overview, Models and Daily all
+// show the shared range presets and resolved dates under the tabs.
+func TestRangeBarOnRangePages(t *testing.T) {
+	h := startTUI(t, newLedger(t, []ledgerRow{{date: today(), model: "claude-sonnet-4-5", tokens: 100}}))
+	for _, page := range []string{"Models", "Daily"} {
+		h.key("tab")
+		found := false
+		for _, line := range h.screen() {
+			if strings.Contains(line, "1 today") && strings.Contains(line, "→") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%s page has no range bar", page)
+		}
+	}
+}
+
+// Protects tui-usage.md "Overview": a long Y-axis label stays inside the
+// chart, so it cannot overwrite the block's left border.
+func TestOverviewChartKeepsLeftBorder(t *testing.T) {
+	h := startTUI(t, newLedger(t, []ledgerRow{{
+		date: today().AddDate(0, 0, -1), model: "claude-sonnet-4-5", tokens: 910_000_000,
+	}}))
+	lines := h.screen()
+	for index, line := range lines {
+		if strings.Contains(line, "Token Usage") && strings.HasPrefix(line, "┌") {
+			if index+1 >= len(lines) {
+				t.Fatal("chart has no content row")
+			}
+			if !strings.HasPrefix(lines[index+1], "│") {
+				t.Fatalf("chart row overwrote the left border: %q", lines[index+1])
+			}
+			return
+		}
+	}
+	t.Fatal("chart block not found")
+}
+
+// Protects tui-usage.md "Keeper": the card's model and last run come from the
+// newest execution record of that agent, not the oldest.
+func TestKeeperUsesNewestRecord(t *testing.T) {
+	cfg := config.Default()
+	now := time.Now()
+	records := []keeper.ExecutionRecord{
+		{Agent: "codex", Model: "older", Timestamp: now.Add(-2 * time.Hour), Success: true, DurationMs: 100},
+		{Agent: "codex", Model: "newer", Timestamp: now.Add(-time.Hour), Success: true, DurationMs: 200},
+	}
+	m := &model{opts: Options{Config: cfg}, cfg: cfg, themeOverride: -1, width: 180, height: 60}
+	next, _ := m.Update(keeperLogMsg{records: records})
+	out := next.(*model).renderKeeper(180)
+	if !strings.Contains(out, "Model: newer") {
+		t.Fatalf("Keeper card did not pick the newest record:\n%s", out)
 	}
 }

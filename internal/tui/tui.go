@@ -732,7 +732,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.setStatus("Keeper: "+msg.err.Error(), 2)
 		} else {
-			m.keeperLog = msg.records
+			m.keeperLog = newestFirst(msg.records)
 			m.keeperLoaded = true
 		}
 		return m, nil
@@ -761,6 +761,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// newestFirst converts the keeper history's old-to-new slice into the display
+// order every page expects.
+func newestFirst(records []keeper.ExecutionRecord) []keeper.ExecutionRecord {
+	out := make([]keeper.ExecutionRecord, len(records))
+	for i := range records {
+		out[len(records)-1-i] = records[i]
+	}
+	return out
 }
 
 func (m *model) handleStatus(msg statusMsg) (tea.Model, tea.Cmd) {
