@@ -17,28 +17,28 @@ import (
 
 // Protects tui-usage.md "Quota": out-of-range provider percentages cannot
 // produce a negative or oversized bar.
-func TestBarCellsClamps(t *testing.T) {
+func TestGaugeFillClamps(t *testing.T) {
 	cases := map[float64]int{-50: 0, 0: 0, 50: 10, 100: 20, 150: 20}
 	for percent, want := range cases {
-		if got := barCells(percent); got != want {
-			t.Errorf("barCells(%v) = %d, want %d", percent, got, want)
+		if got := gaugeFill(percent, 20); got != want {
+			t.Errorf("gaugeFill(%v, 20) = %d, want %d", percent, got, want)
 		}
 	}
 }
 
 // Protects tui-usage.md "Model detail": the sparkline writes whole runes and
 // maps the largest day to the tallest level.
-func TestSparkRuneUsesWholeRunes(t *testing.T) {
+func TestSparklineUsesWholeRunes(t *testing.T) {
 	for _, test := range []struct {
-		tokens, max int64
-		want        string
-	}{{0, 10, " "}, {10, 10, "▇"}, {5, 10, "▄"}} {
-		got := sparkRune(test.tokens, test.max)
+		values []int64
+		want   string
+	}{{[]int64{0}, "▁"}, {[]int64{10}, "█"}, {[]int64{5, 10}, "▅█"}} {
+		got := sparklineText(test.values)
 		if got != test.want {
-			t.Errorf("sparkRune(%d, %d) = %q, want %q", test.tokens, test.max, got, test.want)
+			t.Errorf("sparklineText(%v) = %q, want %q", test.values, got, test.want)
 		}
-		if utf8.RuneCountInString(got) != 1 {
-			t.Errorf("sparkRune(%d, %d) is not one rune", test.tokens, test.max)
+		if utf8.RuneCountInString(got) != len(test.values) {
+			t.Errorf("sparklineText(%v) has %d runes, want %d", test.values, utf8.RuneCountInString(got), len(test.values))
 		}
 	}
 }
@@ -73,7 +73,7 @@ func TestRenderQuotaIncludesPaceAndReset(t *testing.T) {
 		}},
 	}
 	out := m.renderQuota(100)
-	if !strings.Contains(out, "ahead") || !strings.Contains(out, "resets in") {
+	if !strings.Contains(out, "pace") || !strings.Contains(out, "reset") {
 		t.Fatalf("renderQuota missing pace or reset:\n%s", out)
 	}
 }
