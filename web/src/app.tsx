@@ -207,31 +207,35 @@ export function App() {
         <nav class="bottom-nav" classList={{ hidden: state.navHidden }}>
           <button
             classList={{ active: state.route.name === "usage" }}
+            aria-label={t("home.usage")}
+            aria-current={state.route.name === "usage" ? "page" : undefined}
             onClick={() => (state.route = { name: "usage" })}
           >
-            <span><Icon name="barChart" /></span>
-            <em>{t("home.usage")}</em>
+            <Icon name="barChart" />
           </button>
           <button
             classList={{ active: state.route.name === "quota" }}
+            aria-label={t("home.quota")}
+            aria-current={state.route.name === "quota" ? "page" : undefined}
             onClick={() => (state.route = { name: "quota" })}
           >
-            <span><Icon name="gauge" /></span>
-            <em>{t("home.quota")}</em>
+            <Icon name="gauge" />
           </button>
           <button
             classList={{ active: state.route.name === "keeper" }}
+            aria-label={t("home.keeper")}
+            aria-current={state.route.name === "keeper" ? "page" : undefined}
             onClick={() => (state.route = { name: "keeper" })}
           >
-            <span><Icon name="clock" /></span>
-            <em>{t("home.keeper")}</em>
+            <Icon name="clock" />
           </button>
           <button
             classList={{ active: state.route.name === "settings" }}
+            aria-label={t("home.settings")}
+            aria-current={state.route.name === "settings" ? "page" : undefined}
             onClick={() => (state.route = { name: "settings" })}
           >
-            <span><Icon name="gear" /></span>
-            <em>{t("home.settings")}</em>
+            <Icon name="gear" />
           </button>
         </nav>
       </Show>
