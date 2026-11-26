@@ -180,15 +180,20 @@ func TestNoScanDoesNotStartRefreshLoop(t *testing.T) {
 	rt.Start(StartOptions{InitialRefresh: false, AutoRefresh: false})
 	defer rt.Stop()
 
-	select {
-	case <-rt.firstScan:
-		t.Fatal("no-scan mode unexpectedly ran a scan")
-	case <-time.After(150 * time.Millisecond):
+	time.Sleep(150 * time.Millisecond)
+	rt.mu.Lock()
+	ran := !rt.lastUsageRefresh.IsZero() || !rt.lastQuotaRefresh.IsZero()
+	rt.mu.Unlock()
+	if ran {
+		t.Fatal("no-scan mode unexpectedly ran a refresh")
 	}
 }
 
 func TestStopWaitsForInFlightRefresh(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "xdg"))
 	t.Setenv("TOKENPULSE_ENV", "test")
 	t.Setenv("TOKENPULSE_DATA_DIR", dir)
 	t.Setenv("TOKENPULSE_CONFIG_PATH", filepath.Join(dir, "config.toml"))
@@ -197,17 +202,30 @@ func TestStopWaitsForInFlightRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg := config.Default()
+	cfg.Display.RefreshQuota = false
+	cfg.Display.ScanAntigravity = false
+	_ = manager.Save(&cfg)
 	scanner, err := scan.New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	scanner.Pricing.Fetch = func(string) ([]byte, error) { return []byte(`{}`), nil }
 	rt, err := New(dir, manager, scanner, "standalone", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Simulate an in-flight refresh holding refreshMu.
+	// Block refreshMu so RequestRefresh enters execWG and waits in-flight.
 	rt.refreshMu.Lock()
+	reqStarted := make(chan struct{})
+	go func() {
+		close(reqStarted)
+		rt.RequestRefresh(true, false)
+	}()
+	<-reqStarted
+	time.Sleep(40 * time.Millisecond)
+
 	stopDone := make(chan struct{})
 	go func() {
 		rt.Stop()
@@ -216,15 +234,68 @@ func TestStopWaitsForInFlightRefresh(t *testing.T) {
 
 	select {
 	case <-stopDone:
-		t.Fatal("Stop returned while refreshMu was still held")
+		t.Fatal("Stop returned while in-flight RequestRefresh was still active")
 	case <-time.After(80 * time.Millisecond):
 	}
 	rt.refreshMu.Unlock()
 
 	select {
 	case <-stopDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("Stop did not return after in-flight refresh finished")
+	}
+}
+
+func TestStopConcurrentWithRefreshAndKeeper(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "xdg"))
+	t.Setenv("TOKENPULSE_ENV", "test")
+	t.Setenv("TOKENPULSE_DATA_DIR", dir)
+	t.Setenv("TOKENPULSE_CONFIG_PATH", filepath.Join(dir, "config.toml"))
+
+	manager, err := config.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Display.RefreshQuota = false
+	cfg.Display.ScanAntigravity = false
+	for k, agent := range cfg.Keeper.Agents {
+		agent.Command = "true"
+		cfg.Keeper.Agents[k] = agent
+	}
+	_ = manager.Save(&cfg)
+	scanner, err := scan.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner.Pricing.Fetch = func(string) ([]byte, error) { return []byte(`{}`), nil }
+	rt, err := New(dir, manager, scanner, "standalone", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.Start(StartOptions{InitialRefresh: false, AutoRefresh: false})
+
+	var callers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			rt.RequestRefresh(true, false)
+			_, _ = rt.TriggerKeeperPing("claude", "")
+		}()
+	}
+	time.Sleep(10 * time.Millisecond)
+	rt.Stop()
+	callers.Wait()
+
+	if _, err := rt.TriggerKeeperPing("claude", ""); err == nil {
+		t.Fatal("TriggerKeeperPing accepted a ping after Stop")
+	}
+	if rt.Keeper.InFlight("claude") {
+		t.Fatal("keeper still in flight after Stop returned")
 	}
 }
 

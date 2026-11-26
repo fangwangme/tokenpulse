@@ -134,28 +134,6 @@ func validatePhoneUpdates(updates map[string]json.RawMessage) ([]settingChange, 
 	return changes, nil
 }
 
-// ApplySettings validates every entry before writing anything. It returns the
-// new snapshot.
-func ApplySettings(manager *config.Manager, updates map[string]json.RawMessage) (SettingsSnapshot, error) {
-	changes, err := validatePhoneUpdates(updates)
-	if err != nil {
-		return nil, err
-	}
-	cfg, err := manager.Load()
-	if err != nil {
-		return nil, err
-	}
-	for _, change := range changes {
-		if err := applyOne(&cfg, change.key, change.value); err != nil {
-			return nil, err
-		}
-	}
-	if err := manager.Save(&cfg); err != nil {
-		return nil, err
-	}
-	return currentSettings(cfg), nil
-}
-
 func decodeValue(raw json.RawMessage) any {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {

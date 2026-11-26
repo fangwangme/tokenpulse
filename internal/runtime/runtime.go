@@ -93,11 +93,14 @@ type Runtime struct {
 	firstOnce  sync.Once
 	stop       chan struct{}
 	stopOnce   sync.Once
+	stopMu     sync.Mutex
+	stopping   bool
 	startOnce  sync.Once
 	wake       chan struct{}
 	refreshMu  sync.Mutex
 	settingsMu sync.Mutex
 	bgWG       sync.WaitGroup
+	execWG     sync.WaitGroup
 }
 
 // StartOptions controls background refresh scheduling when Start is called.
@@ -183,6 +186,9 @@ func (r *Runtime) WarmCache() {
 // Start launches the background refresh and Keeper loops.
 func (r *Runtime) Start(opts StartOptions) {
 	r.startOnce.Do(func() {
+		if !opts.InitialRefresh {
+			r.firstOnce.Do(func() { close(r.firstScan) })
+		}
 		if opts.AutoRefresh || opts.InitialRefresh {
 			r.bgWG.Add(1)
 			go func() {
@@ -198,16 +204,28 @@ func (r *Runtime) Start(opts StartOptions) {
 	})
 }
 
-// Stop terminates background loops and waits for any in-flight refresh or
-// Keeper execution to finish before returning, so callers can safely release
-// runtime.lock afterwards.
+func (r *Runtime) beginTask() bool {
+	r.stopMu.Lock()
+	defer r.stopMu.Unlock()
+	if r.stopping {
+		return false
+	}
+	r.execWG.Add(1)
+	return true
+}
+
+// Stop stops accepting new refresh/keeper tasks, terminates background loops,
+// and waits for every in-flight refresh and Keeper execution to finish before
+// returning, so callers can safely release runtime.lock afterwards.
 func (r *Runtime) Stop() {
+	r.stopMu.Lock()
+	r.stopping = true
 	r.stopOnce.Do(func() {
 		close(r.stop)
 	})
+	r.stopMu.Unlock()
 	r.bgWG.Wait()
-	r.refreshMu.Lock()
-	r.refreshMu.Unlock()
+	r.execWG.Wait()
 }
 
 // WaitFirstScan blocks until either a persisted scan exists, the first refresh
@@ -311,6 +329,11 @@ func (r *Runtime) KeeperRecords(limit int) []keeper.ExecutionRecord {
 // RequestRefresh runs a synchronous refresh subject to the 60-second per-target
 // manual cooldown.
 func (r *Runtime) RequestRefresh(usage, quotaWanted bool) RefreshResult {
+	if !r.beginTask() {
+		st := r.Status()
+		return RefreshResult{ScannedAt: st.ScannedAt, FetchedAt: st.FetchedAt}
+	}
+	defer r.execWG.Done()
 	now := time.Now()
 	r.mu.Lock()
 	lastUsage := r.lastManualUsage
@@ -415,11 +438,20 @@ func (r *Runtime) NotifySettingsUpdated(cfg config.Config, refreshIntervalChange
 }
 
 func (r *Runtime) TriggerKeeperPing(agent, group string) (keeper.Request, error) {
+	if !r.beginTask() {
+		return keeper.Request{}, errors.New("runtime is stopping")
+	}
 	request, err := r.Keeper.Manual(agent, group)
 	if err != nil {
+		r.execWG.Done()
 		return keeper.Request{}, err
 	}
-	r.startKeeper(request)
+	go func() {
+		defer r.execWG.Done()
+		record := r.Keeper.Execute(request)
+		r.Keeper.Finish(request, record)
+		r.Events.Publish("keeper_updated", map[string]any{"agent": record.Agent})
+	}()
 	return request, nil
 }
 
@@ -697,9 +729,11 @@ func (r *Runtime) ApplyQuotaResults(results []quota.FetchResult) {
 }
 
 func (r *Runtime) startKeeper(request keeper.Request) {
-	r.bgWG.Add(1)
+	if !r.beginTask() {
+		return
+	}
 	go func() {
-		defer r.bgWG.Done()
+		defer r.execWG.Done()
 		record := r.Keeper.Execute(request)
 		r.Keeper.Finish(request, record)
 		r.Events.Publish("keeper_updated", map[string]any{"agent": record.Agent})

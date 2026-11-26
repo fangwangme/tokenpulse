@@ -53,7 +53,9 @@ func Install() error {
 	if local := remote.NewLocalClient(dataDir); local != nil {
 		if st, err := local.Status(); err == nil && st.ManagedBy == "daemon" {
 			_ = local.Shutdown()
-			waitForLockRelease(dataDir, 5*time.Second)
+			if err := waitForLockRelease(dataDir, 5*time.Second); err != nil {
+				return fmt.Errorf("existing background serve did not release lock before service install: %w", err)
+			}
 		}
 	}
 	switch runtime.GOOS {
@@ -236,12 +238,15 @@ func currentUID() string {
 	return fmt.Sprintf("%d", os.Getuid())
 }
 
-func waitForLockRelease(dataDir string, timeout time.Duration) {
+func waitForLockRelease(dataDir string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	for {
 		if lock, err := rt.AcquireLock(dataDir); err == nil {
 			_ = lock.Release()
-			return
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("timed out waiting for runtime.lock")
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

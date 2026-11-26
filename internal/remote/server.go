@@ -53,15 +53,16 @@ type Server struct {
 	Push    *pushStore
 	WebDir  string
 
-	mu           sync.Mutex
-	pairMu       sync.Mutex
-	pairTimes    map[string][]time.Time
-	wsClients    map[*wsClient]bool
-	wsValidation time.Duration
-	stop         chan struct{}
-	stopOnce     sync.Once
-	httpServer   *http.Server
-	unixServer   *http.Server
+	mu            sync.Mutex
+	pairMu        sync.Mutex
+	pairTimes     map[string][]time.Time
+	wsClients     map[*wsClient]bool
+	wsValidation  time.Duration
+	allowShutdown bool
+	stop          chan struct{}
+	stopOnce      sync.Once
+	httpServer    *http.Server
+	unixServer    *http.Server
 }
 
 func NewServer(opts Options) (*Server, error) {
@@ -115,14 +116,15 @@ func NewServer(opts Options) (*Server, error) {
 		go push.Send(title, body)
 	}
 	return &Server{
-		DataDir:   dataDir,
-		Options:   opts,
-		State:     NewStateStore(dataDir),
-		Runtime:   engine,
-		Push:      push,
-		WebDir:    opts.WebDir,
-		wsClients: map[*wsClient]bool{},
-		stop:      make(chan struct{}),
+		DataDir:       dataDir,
+		Options:       opts,
+		State:         NewStateStore(dataDir),
+		Runtime:       engine,
+		Push:          push,
+		WebDir:        opts.WebDir,
+		wsClients:     map[*wsClient]bool{},
+		allowShutdown: true,
+		stop:          make(chan struct{}),
 	}, nil
 }
 
@@ -507,6 +509,10 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if !s.allowShutdown {
+		writeError(w, http.StatusForbidden, "shutdown is only allowed for a background serve daemon")
+		return
+	}
 	writeJSON(w, map[string]bool{"stopping": true})
 	go func() {
 		time.Sleep(50 * time.Millisecond)

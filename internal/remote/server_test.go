@@ -39,8 +39,9 @@ func testServer(t *testing.T) *Server {
 			Mode: "tailscale-serve", HTTPS: true,
 			Hosts: map[string]bool{"localhost": true, "127.0.0.1": true, "tokenpulse.test": true},
 		},
-		wsClients: map[*wsClient]bool{},
-		stop:      make(chan struct{}),
+		wsClients:     map[*wsClient]bool{},
+		allowShutdown: true,
+		stop:          make(chan struct{}),
 	}
 	return server
 }

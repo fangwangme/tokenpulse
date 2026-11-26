@@ -8,46 +8,43 @@ Keeper. The TUI stays a full client of the same data.
 ## Serve
 
 `tokenpulse serve [--port <n>] [--https-port <n>] [--no-tailscale] [--lan]
-[--web-dir <dir>]`
+[--web-dir <dir>] [--quiet]`
 
-- **Single instance.** `serve` holds an exclusive lock file in the data
-  directory for its lifetime. A second `serve` exits with status 1 and
-  `tokenpulse serve is already running (pid <pid>)`.
-- **Refresh ownership.** While `serve` runs it is the only process that scans
-  usage, fetches quota, schedules Keeper pings and fires quota-recovery
-  notifications. It refreshes once at start, then every
-  `display.auto_refresh_secs`; with that setting at 0 it uses 300 seconds,
-  because a server that never refreshes has no purpose. The TUI without
-  `serve` uses the same 300-second fallback and starts its scan after the first
-  frame. On start `serve` reads the persisted usage and quota caches before the
-  first refresh, so a phone or CLI sees the last known values immediately.
-  Scans and fetches run off the request path; `/api/usage*` and `/api/quota`
-  never call a provider.
-- **Requested refresh** (`POST /api/refresh`, the TUI's `r`) runs the requested
-  work and waits for it, so the read that follows sees the new cache. It never
-  moves the periodic timer. Each target (usage, quota) has a 60-second
-  cooldown: a second request inside that window returns `200` with
-  `accepted:false`, `throttled:true` and the previous cache timestamps instead
-  of starting another scan or fetch.
-- **Config.** Settings and Keeper writes from the phone and from the TUI go
-  through `serve`, which applies them at once. `serve` also re-reads
-  `config.toml` before every scheduled refresh, so an edit made with
-  `tokenpulse config set` or by hand applies from the next refresh.
-- **Updates.** After every refresh, settings write, Keeper execution or reprice,
-  `serve` notifies connected clients (WebSocket and the local socket) and
-  clears the report cache (`usage-report.md` "Caching"). A quota recovery is
-  also sent as its own event, so the TUI can show its recovery toast.
-- Logging goes to the existing rotating log file, never stdout once the startup
-  banner is printed.
+- **Single runtime lock.** Every runtime host (`serve` or an in-process TUI)
+  holds an OS-level `flock` on `<data dir>/runtime.lock` for its lifetime. A
+  second `serve` exits with status 1; a second TUI attaches over the local
+  Unix socket.
+- **Refresh ownership.** The runtime host is the sole writer that scans usage,
+  fetches quota, schedules Keeper pings, and fires quota-recovery alerts.
+  `serve` refreshes immediately on start, then every `display.auto_refresh_secs`
+  (falling back to 300 seconds when set to 0). On start it warms its usage and
+  quota caches from disk so clients see cached data immediately. Scans and
+  fetches never run on HTTP request paths; `/api/usage*` and `/api/quota` read
+  only the cache.
+- **Requested refresh** (`POST /api/refresh` or TUI `r`) runs the requested
+  work and waits for it so the next read sees fresh data without resetting the
+  periodic timer. Each target (`usage`, `quota`) has a 60-second cooldown: a
+  second request inside that window returns `200` with `accepted:false`,
+  `throttled:true`, and the cached timestamps.
+- **Config.** Settings and Keeper writes from the phone and TUI are serialized
+  through the runtime and saved atomically to `config.toml`. The runtime also
+  re-reads `config.toml` before each scheduled refresh, so manual or CLI edits
+  take effect on the next cycle.
+- **Updates.** After every refresh, settings write, Keeper run, or reprice,
+  the runtime publishes an event to connected WebSocket and local clients and
+  clears the report cache (`usage-report.md` "Caching"). Quota recovery emits
+  its own event so the TUI can display a toast.
+- Logging writes to the daily rotating log file, never stdout after the startup
+  banner (`--quiet` suppresses the banner for background launches).
 
 ## Local control
 
-`serve` also listens on a Unix socket `serve.sock` in the data directory,
-created with mode 0600. It speaks the same API as HTTP without token auth: the
-file permission is the authorization, and only the computer's user can reach
-it. The TUI and CLI commands (`reprice`, `remote status`) use it to find a
-running `serve`; a socket that refuses connections is a stale file and is
-replaced at start.
+Both `serve` and an in-process TUI runtime listen on `<data dir>/serve.sock`
+(mode 0600). The socket speaks the same API without token auth — OS file
+permissions are the trust boundary — plus local-only `GET /api/config`,
+`POST /api/reprice`, and `POST /api/shutdown`. A second TUI and CLI commands
+(`reprice`, `remote status`) attach through it; a stale socket that refuses
+connections is replaced on start.
 
 A Unix socket path is limited by the kernel (107 bytes on Linux, 103 on macOS).
 When `<data dir>/serve.sock` does not fit, `serve` creates a private `0700`
@@ -59,16 +56,17 @@ The TUI and CLI resolve the path with the same rule, so a long
 
 ## Desktop TUI
 
-- At start, and on every refresh tick, the TUI checks the local socket. With
-  `serve` running the TUI does not scan, fetch quota, schedule Keeper pings or
-  fire desktop notifications; it reads the databases, reloads when `serve`
-  reports a new `scannedAt` or quota `fetchedAt`, shows the recovery toast
-  when `serve` reports a recovery, and `r` sends a requested refresh.
-- Settings-tab and Keeper-tab changes, and Keeper pings, go through `serve`
-  while it runs, so `serve` applies them at once and the per-key in-flight
-  lock holds across both.
-- Without `serve`, the TUI owns refreshing, notifications and config writes
-  exactly as before.
+- The TUI is a thin frontend over `runtime.Client`. On start, if `runtime.lock`
+  is already held, it attaches over `serve.sock`; otherwise it starts an
+  in-process runtime (also listening on `serve.sock` without opening a TCP
+  port).
+- All Usage, Quota, Keeper, and Settings views read from the runtime and
+  subscribe to live events; `r`, settings edits, and Keeper pings send commands
+  to the runtime.
+- Settings includes a **Web remote** toggle that starts or stops a detached
+  background `tokenpulse serve --quiet` (or reports when `systemd`/`launchd`
+  manages it). If a detached `serve` stops while the TUI is open, the TUI
+  automatically falls back to an in-process runtime once `runtime.lock` frees.
 
 ## HTTP API
 
@@ -80,7 +78,7 @@ conflicting in-flight action, 429 rate limited.
 | :--- | :--- | :--- |
 | POST | `/api/pair` | body `{ token }`: exchanges the remote token for a session cookie (Authentication); the only unauthenticated API call |
 | GET | `/api/state` | `version`, `scannedAt`, quota `fetchedAt`, `pricesAvailable`, enabled `agents`, `settings` (the phone-editable values), `keeperEngine` (boolean: the Keeper master switch) |
-| GET | `/api/status` | `running`, `scannedAt`, `fetchedAt`; answers immediately, without waiting for a scan |
+| GET | `/api/status` | `running`, `scannedAt`, `fetchedAt`, `managedBy`, `webUrl`, `webError`; answers immediately without waiting for a scan |
 | GET | `/api/usage?preset=&from=&to=&agents=` | the report of `usage-report.md` |
 | GET | `/api/usage/day?date=&agents=` | the day detail |
 | GET | `/api/usage/model?model=&from=&to=&agents=` | the model detail |

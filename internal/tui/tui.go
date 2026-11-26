@@ -824,6 +824,11 @@ func (m *model) toggleWebRemote() tea.Cmd {
 		m.toastAt = time.Now()
 		return nil
 	}
+	if m.client.IsRemote() && m.rtStatus.ManagedBy == "standalone" {
+		m.toast = "Attached to local TUI; toggle Web remote from that session"
+		m.toastAt = time.Now()
+		return nil
+	}
 	m.webBusy = true
 	opts := m.opts
 	wasRemote := m.client.IsRemote()
@@ -996,11 +1001,15 @@ func (m *model) renderHeader(width int) string {
 	}
 	modeBadge := s.dim.Render(" ○ local")
 	if m.client != nil && m.client.IsRemote() {
-		label := " ● web"
-		if m.rtStatus.ManagedBy == "systemd" || m.rtStatus.ManagedBy == "launchd" {
-			label = " ● " + m.rtStatus.ManagedBy
+		if m.rtStatus.ManagedBy == "standalone" {
+			modeBadge = s.dim.Render(" ● local (attached)")
+		} else {
+			label := " ● web"
+			if m.rtStatus.ManagedBy == "systemd" || m.rtStatus.ManagedBy == "launchd" {
+				label = " ● " + m.rtStatus.ManagedBy
+			}
+			modeBadge = s.badgeOn.Render(label)
 		}
-		modeBadge = s.badgeOn.Render(label)
 	}
 	title := s.title.Render("TokenPulse "+version.String()) + modeBadge
 	tabBar := strings.Join(tabs, " ")
@@ -1411,6 +1420,8 @@ func (m *model) renderSettings(width int) string {
 		webLabel = "switching…"
 	} else if m.rtStatus.ManagedBy == "systemd" || m.rtStatus.ManagedBy == "launchd" {
 		webLabel = fmt.Sprintf("managed by %s (%s)", m.rtStatus.ManagedBy, m.rtStatus.WebURL)
+	} else if m.client != nil && m.client.IsRemote() && m.rtStatus.ManagedBy == "standalone" {
+		webLabel = "attached to local TUI"
 	} else if m.client != nil && m.client.IsRemote() {
 		webLabel = fmt.Sprintf("ON (%s)  (enter stops)", m.rtStatus.WebURL)
 	}

@@ -32,6 +32,9 @@ func newInProcess(opts Options, lock *rt.Lock, initialRefresh, autoRefresh bool)
 		return nil, err
 	}
 	stopSocket, sockErr := remote.StartLocalSocket(engine, opts.DataDir)
+	if sockErr != nil {
+		engine.SetWebState("", "local socket unavailable: "+sockErr.Error())
+	}
 	engine.WarmCache()
 	engine.Start(rt.StartOptions{InitialRefresh: initialRefresh, AutoRefresh: autoRefresh})
 	client := rt.NewInProcessClient(engine, lock)

@@ -21,13 +21,13 @@ under `TOKENPULSE_ENV=test`).
 | `--raw`, `--date <YYYY-MM-DD>` | Raw model usage for a date (default today); `--date` requires `--raw` |
 | `-h`, `--help`, `-V`, `--version` | Help and version |
 
-A run reads the ledger first. If `serve` is running and its cache is ready,
-the command uses that scan instead of scanning again; `--no-scan` always reads
-the cache. Without serve, the command scans before reading unless `--no-scan`
-is set. `--since` narrows both the parse window and the output.
-`--refresh-days` only reparses the range, but the output starts at its first
-day. Explicit `--refresh-days`, `--refresh-pricing` and `--rebuild-all` always
-scan.
+A run reads the ledger first. If another runtime (`serve` or an in-process TUI)
+holds `runtime.lock`, normal CLI reads reuse its cached ledger (`mode=ro`) or
+request a refresh over `serve.sock`; `--no-scan` always reads the cache and
+never starts a scan or background refresh loop. Explicit write flags
+(`--refresh-days`, `--refresh-pricing`, `--rebuild-all`) acquire `runtime.lock`
+and exit with an error if another instance already holds it. `reprice` forwards
+to `serve.sock` when a runtime is running, or acquires `runtime.lock` directly.
 
 ## Commands
 

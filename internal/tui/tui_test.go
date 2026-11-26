@@ -127,6 +127,29 @@ func TestInProcessAttachExposesLocalSocketForSecondClient(t *testing.T) {
 	if _, err := remote.NewLocalClient(dir).Status(); err != nil {
 		t.Fatalf("local socket status: %v", err)
 	}
+
+	// Shutdown over the in-process socket must be refused (403) so the second
+	// TUI cannot stop the first TUI's runtime.
+	if err := remote.NewLocalClient(dir).Shutdown(); err == nil {
+		t.Fatal("in-process local socket allowed /api/shutdown")
+	}
+
+	// Second TUI's Web remote toggle must not stop the first TUI, and its
+	// header/settings must show attached-local state rather than web ON.
+	m2 := newModel(opts, second)
+	if cmd := m2.toggleWebRemote(); cmd != nil {
+		t.Fatal("second TUI toggleWebRemote returned a command for attached standalone host")
+	}
+	if !strings.Contains(m2.renderHeader(100), "local (attached)") {
+		t.Fatalf("header = %q, want local (attached)", m2.renderHeader(100))
+	}
+	if !strings.Contains(m2.renderSettings(100), "attached to local TUI") {
+		t.Fatalf("settings = %q, want attached to local TUI", m2.renderSettings(100))
+	}
+	// First TUI's runtime must still answer normally.
+	if _, err := first.Status(); err != nil {
+		t.Fatalf("first runtime broken after second TUI toggle: %v", err)
+	}
 }
 
 func TestWebToggleResubscribesAndFetchesConfig(t *testing.T) {

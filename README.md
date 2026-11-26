@@ -312,9 +312,9 @@ same tailnet; the web app can be added to the home screen. Default ports are
   reset-token` invalidates every phone session.
 - `tokenpulse service install` installs a systemd user unit on Linux (or a
   launchd agent on macOS) that runs `serve` and restarts it on failure.
-- Exactly one `serve` owns refreshing. A running TUI reads its data and sends
-  settings, Keeper pings and `r` requests through `serve` instead of scanning
-  itself.
+- One runtime owns refreshing behind `runtime.lock`. You can also toggle
+  **Web remote** directly from the TUI Settings tab to start or stop a
+  background `serve` without leaving the dashboard.
 
 ## Project Structure
 
