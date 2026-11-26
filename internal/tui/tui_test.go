@@ -50,19 +50,9 @@ func TestTruncateHandlesNonPositiveWidth(t *testing.T) {
 	}
 }
 
-func TestKeeperCheckMsgDoesNotReschedule(t *testing.T) {
+func TestRenderQuotaIncludesPaceAndReset(t *testing.T) {
 	cfg := config.Default()
-	cfg.Keeper.Enabled = true
-	m := &model{opts: Options{Config: cfg}}
-	_, cmd := m.Update(keeperCheckMsg{})
-	if cmd != nil {
-		t.Fatal("keeperCheckMsg returned a command; must not reschedule keeper loop")
-	}
-}
-
-func TestRenderQuotaIncludesPace(t *testing.T) {
-	cfg := config.Default()
-	resets := time.Now().Add(2 * time.Hour)
+	resets := time.Now().Add(2*time.Hour + 15*time.Minute)
 	periodMs := int64(5 * 3600 * 1000)
 	m := &model{
 		opts: Options{Config: cfg},
@@ -78,7 +68,16 @@ func TestRenderQuotaIncludesPace(t *testing.T) {
 		}},
 	}
 	out := m.renderQuota(100)
-	if !strings.Contains(out, "ahead") {
-		t.Fatalf("renderQuota omitted pace text:\n%s", out)
+	if !strings.Contains(out, "ahead") || !strings.Contains(out, "resets in") {
+		t.Fatalf("renderQuota missing pace or reset:\n%s", out)
+	}
+}
+
+func TestRenderSettingsIncludesWebRemote(t *testing.T) {
+	cfg := config.Default()
+	m := &model{opts: Options{Config: cfg}}
+	out := m.renderSettings(100)
+	if !strings.Contains(out, "Web remote") {
+		t.Fatalf("renderSettings omitted Web remote row:\n%s", out)
 	}
 }

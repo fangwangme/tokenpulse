@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.0] - 2026-11-26
 
 ### Added
+- **Unified runtime & thin TUI client**: `internal/runtime` owns scanning, quota refreshes, Keeper scheduling, and an event bus behind an OS `flock` (`runtime.lock`). Both the TUI and `serve` sit on the same runtime boundary, and TUI Settings includes a `Web remote` toggle that starts or stops a background `serve` daemon (or shows when systemd/launchd manages it).
 - **Remote mode**: `tokenpulse serve` runs scanning, quota refreshes, the Keeper and quota-recovery notifications, and serves a mobile PWA over Tailscale Serve HTTPS (LAN on explicit opt-in) with fragment pairing, hashed session cookies, a strict typed settings allowlist, Keeper control and Web Push for quota recovery. The Usage, Quota and Settings pages follow the reference mobile design component by component, under a bottom Usage/Quota/Keeper/Settings tab bar. `tokenpulse service install` installs it as a systemd user unit (launchd on macOS); `tokenpulse remote reset-token|url|status` manages pairing.
 - **One usage report** shared by the TUI and the phone: range presets, custom ranges, period and today-to-the-minute comparison, three heatmap layouts, day and model detail, agent filters and a Token/Cost switch.
 - **New pricing**: official-provider-first exact-key catalog selection, price periods, an `unpriced` ledger flag, and `tokenpulse reprice` with a dry run, fingerprint guard and 0600 backup.

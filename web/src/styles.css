@@ -682,13 +682,18 @@ svg.i.sm { width: 16px; height: 16px; }
 .bottom-nav button {
   border: 0; background: transparent; color: var(--muted);
   display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 5px 0;
-  min-height: 48px;
+  min-height: 48px; transition: color .15s ease, transform .1s ease;
 }
+.bottom-nav button:active { transform: scale(.94); }
 .bottom-nav button svg.i { width: 21px; height: 21px; }
 .bottom-nav button em { font-style: normal; font-size: 10.5px; }
 .bottom-nav button.active { color: var(--accent); }
+.bottom-nav button.active svg.i {
+  background: var(--accentbg); border-radius: 12px; padding: 2px 12px; width: 45px; height: 25px;
+}
 .settings { padding-bottom: calc(92px + env(safe-area-inset-bottom)); }
 @media (min-width: 720px) {
+  .scroll > div, .settings { max-width: 680px; margin-left: auto; margin-right: auto; }
   .bottom-nav { width: 520px; margin: 0 auto; border-radius: 20px 20px 0 0; border: 1px solid var(--line); border-bottom: 0; }
 }
 /* A bottom sheet owns the screen while it is open, including the tab bar. */

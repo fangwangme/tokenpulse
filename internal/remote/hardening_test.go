@@ -275,3 +275,45 @@ func TestHostAcceptedCaseInsensitiveAndLocalServeTarget(t *testing.T) {
 		t.Error("non-loopback or wrong-port target must not match")
 	}
 }
+
+func TestSocketClientPatchSettingsAndShutdown(t *testing.T) {
+	dir := t.TempDir()
+	server := testServer(t)
+	server.DataDir = dir
+	server.Runtime.SetWebState("http://localhost:14120/", "")
+	socket := filepath.Join(dir, "serve.sock")
+	listener, err := server.listenLocalSocket(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go server.serveUnix(listener)
+
+	local, err := WaitForSocket(dir, 2*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForSocket: %v", err)
+	}
+	client := NewSocketClient(local)
+	status, err := client.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.WebURL != "http://localhost:14120/" || status.ManagedBy != "daemon" {
+		t.Fatalf("status = %+v", status)
+	}
+	cfg, err := client.PatchSettings(map[string]any{"display.theme": "dark"})
+	if err != nil {
+		t.Fatalf("PatchSettings: %v", err)
+	}
+	if cfg.Display.Theme != "dark" {
+		t.Fatalf("theme = %q", cfg.Display.Theme)
+	}
+	if err := local.Shutdown(); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case <-server.stop:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop after /api/shutdown")
+	}
+}

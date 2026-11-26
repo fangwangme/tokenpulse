@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,6 +17,7 @@ import (
 	"github.com/fangwangme/tokenpulse/internal/quota"
 	"github.com/fangwangme/tokenpulse/internal/remote"
 	"github.com/fangwangme/tokenpulse/internal/report"
+	rt "github.com/fangwangme/tokenpulse/internal/runtime"
 	"github.com/fangwangme/tokenpulse/internal/scan"
 	"github.com/fangwangme/tokenpulse/internal/version"
 )
@@ -81,60 +81,56 @@ type model struct {
 	snapshots   []provider.QuotaSnapshot
 	quotaErrors map[string]string
 	quotaCursor int
-	exhausted   map[string]bool
 
 	keeperCursor int
 	keeperLog    []keeper.ExecutionRecord
-	engine       *keeper.Engine
 
 	settingsCursor int
 	providerCursor int
 
-	serveMode   bool
-	client      *remote.LocalClient
-	state       *remote.StateInfo
-	events      chan string
-	lastScanned int64
-	lastFetched int64
-	loading     bool
-	autoTick    int
-
-	eventStop chan struct{}
-	eventMu   sync.Mutex
-	eventConn interface{ Close() error }
+	client      rt.Client
+	rtStatus    rt.StatusSnapshot
+	eventCh     <-chan rt.Event
+	eventCancel func()
+	webBusy     bool
 }
 
-type stateMsg struct {
-	state *remote.StateInfo
-	err   error
-}
-type scanMsg struct {
-	err error
-}
-type quotaMsg struct {
-	results []fetchResult
-}
-type fetchResult struct {
-	Provider string
-	Snapshot *provider.QuotaSnapshot
-	Err      string
-}
 type toastMsg struct{ text string }
-type wsMsg struct{ payload string }
-type tickMsg struct{}
-type keeperTickMsg struct{}
-type keeperCheckMsg struct{ records []keeper.ExecutionRecord }
+type eventMsg struct{ event rt.Event }
+type quotaViewMsg struct{ view rt.QuotaView }
+type keeperLogMsg struct{ records []keeper.ExecutionRecord }
+type configMsg struct{ cfg config.Config }
+type statusMsg struct {
+	status rt.StatusSnapshot
+	err    error
+}
+type webToggleMsg struct {
+	client rt.Client
+	status rt.StatusSnapshot
+	toast  string
+	err    error
+}
 
 func Run(opts Options) error {
-	m := newModel(opts)
+	client, err := attachClient(opts)
+	if err != nil {
+		return err
+	}
+	m := newModel(opts, client)
 	program := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	_, err := program.Run()
-	m.stopEvents()
+	_, err = program.Run()
+	m.closeClient()
 	return err
 }
 
-func newModel(opts Options) *model {
+func newModel(opts Options, client rt.Client) *model {
 	cfg := opts.Config
+	if client != nil {
+		if loaded, err := client.Config(); err == nil {
+			cfg = loaded
+		}
+	}
+	opts.Config = cfg
 	agents := map[string]bool{}
 	for _, agent := range report.AllAgents {
 		agents[agent] = true
@@ -144,47 +140,80 @@ func newModel(opts Options) *model {
 	}
 	m := &model{
 		opts: opts, agents: agents, theme: 1, preset: "today", listMode: 0, focus: 1,
-		exhausted: map[string]bool{}, quotaErrors: map[string]string{},
-		events: make(chan string, 8),
+		quotaErrors: map[string]string{}, client: client,
 	}
 	if opts.Since != nil {
 		m.preset = "custom"
 		m.from = opts.Since.Format("2006-01-02")
 		m.to = time.Now().Format("2006-01-02")
 	}
-	m.engine = keeper.NewEngine(cfg.Keeper, opts.ConfigManager.KeeperStatePath())
-	m.keeperLog = m.engine.History.Recent(20)
-	m.loadReport()
-	m.loadCachedQuota()
+	if client != nil {
+		if status, err := client.Status(); err == nil {
+			m.rtStatus = status
+		}
+		m.loadReport()
+		m.loadQuota()
+		m.loadKeeperLog()
+	}
 	return m
 }
 
-type clientQuota struct {
-	Providers []struct {
-		Provider string                  `json:"provider"`
-		Enabled  bool                    `json:"enabled"`
-		Snapshot *provider.QuotaSnapshot `json:"snapshot"`
-		Error    *struct {
-			Message string    `json:"message"`
-			At      time.Time `json:"at"`
-		} `json:"error"`
-	} `json:"providers"`
+func (m *model) closeClient() {
+	if m.eventCancel != nil {
+		m.eventCancel()
+		m.eventCancel = nil
+		m.eventCh = nil
+	}
+	if m.client != nil {
+		_ = m.client.Close()
+		m.client = nil
+	}
 }
 
-func (m *model) loadCachedQuota() {
-	for _, snapshot := range cachedQuotas(m.opts.DataDir, m.opts.Config) {
-		m.upsertSnapshot(snapshot)
+func (m *model) loadQuota() {
+	if m.client == nil {
+		return
+	}
+	view, err := m.client.Quota()
+	if err != nil {
+		return
+	}
+	m.applyQuotaView(view)
+}
+
+func (m *model) applyQuotaView(view rt.QuotaView) {
+	m.snapshots = nil
+	m.quotaErrors = map[string]string{}
+	for _, entry := range view.Providers {
+		if entry.Error != nil && entry.Error.Message != "" {
+			m.quotaErrors[entry.Provider] = entry.Error.Message
+		}
+		if entry.Snapshot != nil {
+			m.upsertSnapshot(*entry.Snapshot)
+		}
+	}
+}
+
+func (m *model) loadKeeperLog() {
+	if m.client == nil {
+		return
+	}
+	if records, err := m.client.KeeperRecords(20); err == nil {
+		m.keeperLog = records
 	}
 }
 
 func (m *model) loadReport() {
 	m.reportErr = ""
+	if m.client == nil {
+		return
+	}
 	from, to, err := m.resolveRange()
 	if err != nil {
 		m.reportErr = err.Error()
 		return
 	}
-	value, err := m.opts.Scanner.Report.Report(report.Params{
+	value, err := m.client.Usage(report.Params{
 		Preset: m.preset, From: from, To: to, Agents: m.selectedAgents(),
 	})
 	if err != nil {
@@ -192,7 +221,9 @@ func (m *model) loadReport() {
 		return
 	}
 	m.report = value
-	m.selectedRow = 0
+	if m.selectedRow < 0 {
+		m.selectedRow = 0
+	}
 }
 
 func (m *model) resolveRange() (string, string, error) {
@@ -221,38 +252,51 @@ func (m *model) selectedAgents() []string {
 	return agents
 }
 
-func (m *model) Init() tea.Cmd {
-	if m.detectServe() {
-		return tea.Batch(m.pollState(), m.pollQuota(), m.readWS())
+func (m *model) subscribeEvents() tea.Cmd {
+	if m.eventCancel != nil {
+		m.eventCancel()
+		m.eventCancel = nil
+		m.eventCh = nil
 	}
-	cmds := []tea.Cmd{m.keeperTickCmd()}
-	if m.opts.Config.Display.AutoRefreshSecs > 0 {
-		cmds = append(cmds, m.tickCmd())
+	if m.client == nil {
+		return nil
 	}
-	if !m.opts.NoScan {
-		cmds = append(cmds, m.scanCmd())
+	ch, cancel, err := m.client.Subscribe()
+	if err != nil {
+		return nil
 	}
-	if len(m.snapshots) == 0 {
-		cmds = append(cmds, m.quotaCmd())
-	}
-	return tea.Batch(cmds...)
+	m.eventCh = ch
+	m.eventCancel = cancel
+	return m.nextEventCmd()
 }
 
-func (m *model) detectServe() bool {
-	client := remote.NewLocalClient(m.opts.DataDir)
-	state, err := client.State()
-	if err != nil {
-		m.serveMode = false
-		m.client = nil
-		return false
+func (m *model) nextEventCmd() tea.Cmd {
+	ch := m.eventCh
+	if ch == nil {
+		return nil
 	}
-	m.serveMode = true
-	m.client = client
-	m.state = state
-	m.lastScanned = state.ScannedAt
-	m.lastFetched = state.FetchedAt
-	m.startEventReader()
-	return true
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return eventMsg{event: ev}
+	}
+}
+
+func (m *model) statusPollCmd() tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+		status, err := client.Status()
+		return statusMsg{status: status, err: err}
+	})
+}
+
+func (m *model) Init() tea.Cmd {
+	return tea.Batch(m.subscribeEvents(), m.statusPollCmd())
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -262,110 +306,117 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
-	case stateMsg:
+	case statusMsg:
 		if msg.err != nil {
-			if m.serveMode {
-				m.serveMode = false
-				m.client = nil
-				m.stopEvents()
-				return m, tea.Batch(m.scanCmd(), m.quotaCmd(), m.tickCmd(), m.keeperTickCmd())
+			if m.client != nil && m.client.IsRemote() {
+				m.status = "Background serve unreachable; retrying…"
 			}
-			return m, nil
+			return m, m.statusPollCmd()
 		}
-		if !m.serveMode {
-			m.detectServe()
-		}
-		if msg.state != nil {
-			m.state = msg.state
-			if msg.state.ScannedAt != m.lastScanned {
-				m.lastScanned = msg.state.ScannedAt
-				m.loadReport()
-			}
-			if msg.state.FetchedAt != m.lastFetched {
-				m.lastFetched = msg.state.FetchedAt
-				return m, m.pollQuota()
-			}
-		}
-		return m, m.pollState()
-	case scanMsg:
-		m.loading = false
-		if msg.err != nil {
-			m.status = "Refresh failed: " + msg.err.Error()
-		} else {
+		prevScanned := m.rtStatus.ScannedAt
+		prevFetched := m.rtStatus.FetchedAt
+		m.rtStatus = msg.status
+		if msg.status.ScannedAt != prevScanned {
 			m.loadReport()
-			m.status = "Refresh complete"
 		}
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.statusPollCmd())
+		if msg.status.FetchedAt != prevFetched {
+			cmds = append(cmds, m.fetchQuotaCmd())
+		}
+		return m, tea.Batch(cmds...)
+	case eventMsg:
+		cmd := m.handleEvent(msg.event)
+		return m, tea.Batch(cmd, m.nextEventCmd())
+	case quotaViewMsg:
+		m.applyQuotaView(msg.view)
 		return m, nil
-	case quotaMsg:
-		for _, result := range msg.results {
-			if result.Err != "" {
-				m.quotaErrors[result.Provider] = result.Err
-			} else {
-				delete(m.quotaErrors, result.Provider)
-			}
-			if result.Snapshot != nil {
-				m.upsertSnapshot(*result.Snapshot)
-			}
-		}
+	case keeperLogMsg:
+		m.keeperLog = msg.records
 		return m, nil
-	case tickMsg:
-		if m.serveMode {
-			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return tickMsg{} })
-		}
-		cfg := m.opts.Config
-		m.detectServe()
-		if m.serveMode {
-			return m, m.pollState()
-		}
-		interval := time.Duration(cfg.Display.AutoRefreshSecs) * time.Second
-		if interval <= 0 {
+	case configMsg:
+		m.opts.Config = msg.cfg
+		return m, nil
+	case webToggleMsg:
+		m.webBusy = false
+		if msg.err != nil {
+			m.toast = "Web toggle failed: " + msg.err.Error()
+			m.toastAt = time.Now()
 			return m, nil
 		}
-		if m.opts.NoScan {
-			return m, tea.Tick(interval, func(time.Time) tea.Msg { return tickMsg{} })
-		}
-		m.loading = true
-		cmds := []tea.Cmd{m.scanCmd(), m.quotaCmd(), tea.Tick(interval, func(time.Time) tea.Msg { return tickMsg{} })}
-		return m, tea.Batch(cmds...)
-	case keeperTickMsg:
-		cmds := []tea.Cmd{m.keeperTickCmd()}
-		if !m.serveMode && m.opts.Config.Keeper.Enabled {
-			cmds = append(cmds, m.keeperCheckCmd())
-		}
-		return m, tea.Batch(cmds...)
-	case keeperCheckMsg:
-		if len(msg.records) > 0 {
-			m.keeperLog = msg.records
-		}
-		return m, nil
+		m.client = msg.client
+		m.rtStatus = msg.status
+		m.toast = msg.toast
+		m.toastAt = time.Now()
+		m.loadReport()
+		m.loadQuota()
+		m.loadKeeperLog()
+		return m, tea.Batch(m.subscribeEvents(), m.statusPollCmd())
 	case toastMsg:
 		m.toast = msg.text
 		m.toastAt = time.Now()
 		return m, nil
-	case wsMsg:
-		cmd := m.handleEvent(msg.payload)
-		return m, tea.Batch(cmd, m.readWS())
 	}
 	return m, nil
 }
 
-func (m *model) handleEvent(payload string) tea.Cmd {
-	switch {
-	case strings.Contains(payload, "usage_updated"):
+func (m *model) fetchQuotaCmd() tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		view, err := client.Quota()
+		if err != nil {
+			return nil
+		}
+		return quotaViewMsg{view: view}
+	}
+}
+
+func (m *model) fetchKeeperLogCmd() tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		records, err := client.KeeperRecords(20)
+		if err != nil {
+			return nil
+		}
+		return keeperLogMsg{records: records}
+	}
+}
+
+func (m *model) fetchConfigCmd() tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		cfg, err := client.Config()
+		if err != nil {
+			return nil
+		}
+		return configMsg{cfg: cfg}
+	}
+}
+
+func (m *model) handleEvent(ev rt.Event) tea.Cmd {
+	switch ev.Type {
+	case "usage_updated":
 		m.loadReport()
 		return nil
-	case strings.Contains(payload, "quota_updated"):
-		return m.pollQuota()
-	case strings.Contains(payload, "quota_recovered"):
+	case "quota_updated":
+		return m.fetchQuotaCmd()
+	case "quota_recovered":
 		m.toast = "A quota window was restored"
 		m.toastAt = time.Now()
-		m.loadReport()
-	case strings.Contains(payload, "keeper_updated"):
-		m.keeperLog = m.engine.History.Recent(20)
-	case strings.Contains(payload, "settings_updated"):
-		if cfg, err := m.opts.ConfigManager.Load(); err == nil {
-			m.opts.Config = cfg
-		}
+		return m.fetchQuotaCmd()
+	case "keeper_updated":
+		return m.fetchKeeperLogCmd()
+	case "settings_updated":
+		return m.fetchConfigCmd()
 	}
 	return nil
 }
@@ -377,7 +428,6 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	switch key {
 	case "ctrl+c", "q":
-		m.stopEvents()
 		return m, tea.Quit
 	case "tab":
 		m.tab = (m.tab + 1) % tabCount
@@ -540,9 +590,12 @@ func mustDate(value string) time.Time {
 }
 
 func (m *model) openDetail() {
+	if m.client == nil {
+		return
+	}
 	if len(m.report.Days) > 0 && m.report.Range.From != m.report.Range.To && m.listMode == 0 {
 		day := m.report.Days[m.selectedRow]
-		detail, err := m.opts.Scanner.Report.Day(day.Date, m.selectedAgents())
+		detail, err := m.client.UsageDay(day.Date, m.selectedAgents())
 		if err == nil {
 			m.detail, m.detailKind = detail, detailDay
 		}
@@ -555,7 +608,7 @@ func (m *model) openDetail() {
 		}
 		model := m.report.Models[index]
 		from, to := m.report.Range.From, m.report.Range.To
-		detail, err := m.opts.Scanner.Report.Model(model.Model, from, to, m.selectedAgents())
+		detail, err := m.client.UsageModel(model.Model, from, to, m.selectedAgents())
 		if err == nil {
 			m.detail, m.detailKind = detail, detailModel
 		}
@@ -633,85 +686,33 @@ func (m *model) handleKeeperKey(key string) (tea.Model, tea.Cmd) {
 			m.keeperCursor++
 		}
 	case "e":
-		cfg.Keeper.Enabled = !cfg.Keeper.Enabled
-		m.saveConfig(cfg)
-		if m.serveMode {
-			return m, m.patchSettings(map[string]any{"keeper.enabled": cfg.Keeper.Enabled})
-		}
+		return m, m.patchSettings(map[string]any{"keeper.enabled": !cfg.Keeper.Enabled})
 	case "enter", " ":
 		agent := keeper.Agents[m.keeperCursor]
-		if m.serveMode {
-			var entry config.AgentKeeperConfig
-			key := "keeper.agents." + agent + ".session_keeper_enabled"
-			if cfg.Keeper.Agents[agent].SessionKeeperEnabled {
-				entry = cfg.Keeper.Agents[agent]
-				entry.SessionKeeperEnabled = false
-				cfg.Keeper.Agents[agent] = entry
-				m.saveConfig(cfg)
-				return m, m.patchSettings(map[string]any{key: false})
-			}
-			entry = cfg.Keeper.Agents[agent]
-			entry.SessionKeeperEnabled = true
-			cfg.Keeper.Agents[agent] = entry
-			m.saveConfig(cfg)
-			return m, m.patchSettings(map[string]any{key: true})
-		}
-		state, err := m.opts.ConfigManager.ToggleAgentSessionKeeper(agent)
-		if err != nil {
-			m.status = err.Error()
-			return m, nil
-		}
-		entry := cfg.Keeper.Agents[agent]
-		entry.SessionKeeperEnabled = state
-		cfg.Keeper.Agents[agent] = entry
-		m.opts.Config = cfg
-		if m.engine != nil {
-			m.engine.UpdateConfig(cfg.Keeper)
-		}
+		next := !cfg.Keeper.Agents[agent].SessionKeeperEnabled
+		return m, m.patchSettings(map[string]any{"keeper.agents." + agent + ".session_keeper_enabled": next})
 	case "w":
 		agent := keeper.Agents[m.keeperCursor]
-		if m.serveMode {
-			entry := cfg.Keeper.Agents[agent]
-			entry.WeeklyKeeperEnabled = !entry.WeeklyKeeperEnabled
-			cfg.Keeper.Agents[agent] = entry
-			m.saveConfig(cfg)
-			return m, m.patchSettings(map[string]any{"keeper.agents." + agent + ".weekly_keeper_enabled": entry.WeeklyKeeperEnabled})
-		}
-		state, err := m.opts.ConfigManager.ToggleAgentWeeklyKeeper(agent)
-		if err != nil {
-			m.status = err.Error()
-			return m, nil
-		}
-		entry := cfg.Keeper.Agents[agent]
-		entry.WeeklyKeeperEnabled = state
-		cfg.Keeper.Agents[agent] = entry
-		m.opts.Config = cfg
-		if m.engine != nil {
-			m.engine.UpdateConfig(cfg.Keeper)
-		}
+		next := !cfg.Keeper.Agents[agent].WeeklyKeeperEnabled
+		return m, m.patchSettings(map[string]any{"keeper.agents." + agent + ".weekly_keeper_enabled": next})
 	case "p":
+		if m.client == nil {
+			return m, nil
+		}
 		agent := keeper.Agents[m.keeperCursor]
-		if m.serveMode {
-			if err := m.client.Post("/api/keeper/ping", map[string]any{"agent": agent}, nil); err != nil {
-				m.status = err.Error()
+		client := m.client
+		return m, func() tea.Msg {
+			if err := client.KeeperPing(agent, ""); err != nil {
+				return toastMsg{"Ping failed: " + err.Error()}
 			}
-			return m, nil
+			return toastMsg{"Ping sent to " + agent}
 		}
-		request, err := m.engine.Manual(agent, "")
-		if err != nil {
-			m.status = err.Error()
-			return m, nil
-		}
-		go func() {
-			record := m.engine.Execute(request)
-			m.engine.Finish(request, record)
-		}()
 	}
 	return m, nil
 }
 
 func (m *model) handleSettingsKey(key string) (tea.Model, tea.Cmd) {
-	const rows = 12
+	const rows = 13
 	switch key {
 	case "up", "k":
 		if m.settingsCursor > 0 {
@@ -732,17 +733,16 @@ func (m *model) changeSetting() tea.Cmd {
 	var update map[string]any
 	switch m.settingsCursor {
 	case 0:
-		cfg.Display.Theme = cfg.Display.Theme.Next()
+		update = map[string]any{"display.theme": string(cfg.Display.Theme.Next())}
 	case 1:
+		next := config.QuotaUsed
 		if cfg.Display.QuotaDisplayMode == config.QuotaUsed {
-			cfg.Display.QuotaDisplayMode = config.QuotaRemaining
-		} else {
-			cfg.Display.QuotaDisplayMode = config.QuotaUsed
+			next = config.QuotaRemaining
 		}
-		update = map[string]any{"display.quota_display_mode": string(cfg.Display.QuotaDisplayMode)}
+		update = map[string]any{"display.quota_display_mode": string(next)}
 	case 2:
 		options := []uint32{0, 60, 120, 300, 600, 900}
-		if m.serveMode {
+		if m.client != nil && m.client.IsRemote() {
 			options = []uint32{60, 120, 300, 600, 900}
 		}
 		next := uint32(300)
@@ -752,23 +752,17 @@ func (m *model) changeSetting() tea.Cmd {
 				break
 			}
 		}
-		cfg.Display.AutoRefreshSecs = next
 		update = map[string]any{"display.auto_refresh_secs": int(next)}
 	case 3:
-		cfg.Display.AccountDisplay = cfg.Display.AccountDisplay.Next()
-		update = map[string]any{"display.account_display": string(cfg.Display.AccountDisplay)}
+		update = map[string]any{"display.account_display": string(cfg.Display.AccountDisplay.Next())}
 	case 4:
-		cfg.Display.ShowEmptyProviders = !cfg.Display.ShowEmptyProviders
-		update = map[string]any{"display.show_empty_providers": cfg.Display.ShowEmptyProviders}
+		update = map[string]any{"display.show_empty_providers": !cfg.Display.ShowEmptyProviders}
 	case 5:
-		cfg.Display.RefreshQuota = !cfg.Display.RefreshQuota
-		update = map[string]any{"display.refresh_quota": cfg.Display.RefreshQuota}
+		update = map[string]any{"display.refresh_quota": !cfg.Display.RefreshQuota}
 	case 6:
-		cfg.Display.ScanAntigravity = !cfg.Display.ScanAntigravity
-		update = map[string]any{"display.scan_antigravity": cfg.Display.ScanAntigravity}
+		update = map[string]any{"display.scan_antigravity": !cfg.Display.ScanAntigravity}
 	case 7:
-		cfg.Display.NotificationLevel = cfg.Display.NotificationLevel.Next()
-		update = map[string]any{"display.notification_level": string(cfg.Display.NotificationLevel)}
+		update = map[string]any{"display.notification_level": string(cfg.Display.NotificationLevel.Next())}
 	case 8:
 		sounds := []string{"chime", "Hero", "Glass", "Submarine", "none"}
 		next := "chime"
@@ -778,43 +772,75 @@ func (m *model) changeSetting() tea.Cmd {
 				break
 			}
 		}
-		cfg.Display.NotificationSound = next
 		update = map[string]any{"display.notification_sound": next}
 		notification.PlayAlertSound(next)
 	case 9:
-		cfg.Keeper.Enabled = !cfg.Keeper.Enabled
-		update = map[string]any{"keeper.enabled": cfg.Keeper.Enabled}
+		update = map[string]any{"keeper.enabled": !cfg.Keeper.Enabled}
 	case 10:
-		cfg.Keeper.SetAntigravityAllGroups(!cfg.Keeper.AntigravityAllGroups())
-		update = map[string]any{"keeper.agents.antigravity.weekly_all_groups": cfg.Keeper.AntigravityAllGroups()}
+		update = map[string]any{"keeper.agents.agy.weekly_all_groups": !cfg.Keeper.AntigravityAllGroups()}
 	case 11:
 		ids := []string{"claude", "codex", "antigravity"}
 		id := ids[m.providerCursor%len(ids)]
 		m.providerCursor = (m.providerCursor + 1) % len(ids)
-		provider := cfg.Providers[id]
-		provider.Enabled = !provider.Enabled
-		cfg.Providers[id] = provider
-		update = map[string]any{"providers." + id + ".enabled": provider.Enabled}
+		update = map[string]any{"providers." + id + ".enabled": !cfg.Providers[id].Enabled}
+	case 12:
+		return m.toggleWebRemote()
 	}
-	m.saveConfig(cfg)
-	if m.serveMode && update != nil {
+	if update != nil {
 		return m.patchSettings(update)
 	}
 	return nil
 }
 
-func (m *model) saveConfig(cfg config.Config) {
-	if m.serveMode {
-		m.opts.Config = cfg
-		return
+func (m *model) toggleWebRemote() tea.Cmd {
+	if m.webBusy || m.client == nil {
+		return nil
 	}
-	if err := m.opts.ConfigManager.Save(&cfg); err != nil {
-		m.status = err.Error()
-		return
+	if m.rtStatus.ManagedBy == "systemd" || m.rtStatus.ManagedBy == "launchd" {
+		m.toast = "Web remote is managed by " + m.rtStatus.ManagedBy + "; use `tokenpulse service`"
+		m.toastAt = time.Now()
+		return nil
 	}
-	m.opts.Config = cfg
-	if m.engine != nil {
-		m.engine.UpdateConfig(cfg.Keeper)
+	m.webBusy = true
+	opts := m.opts
+	wasRemote := m.client.IsRemote()
+	prevClient := m.client
+	if m.eventCancel != nil {
+		m.eventCancel()
+		m.eventCancel = nil
+		m.eventCh = nil
+	}
+	return func() tea.Msg {
+		if wasRemote {
+			lock, err := stopDaemonAndAcquire(opts.DataDir)
+			if err != nil {
+				return webToggleMsg{err: err}
+			}
+			next, err := newInProcess(opts, lock, false)
+			if err != nil {
+				return webToggleMsg{err: err}
+			}
+			status, _ := next.Status()
+			return webToggleMsg{client: next, status: status, toast: "Web remote stopped"}
+		}
+		_ = prevClient.Close()
+		local, err := startDetachedServe(opts.DataDir)
+		if err != nil {
+			if lock, lerr := rt.AcquireLock(opts.DataDir); lerr == nil {
+				if fallback, ferr := newInProcess(opts, lock, false); ferr == nil {
+					st, _ := fallback.Status()
+					return webToggleMsg{client: fallback, status: st, err: err}
+				}
+			}
+			return webToggleMsg{err: err}
+		}
+		next := remote.NewSocketClient(local)
+		status, _ := next.Status()
+		msg := "Web remote started"
+		if status.WebURL != "" {
+			msg = "Web remote: " + status.WebURL
+		}
+		return webToggleMsg{client: next, status: status, toast: msg}
 	}
 }
 
@@ -833,217 +859,34 @@ func (m *model) patchSettings(update map[string]any) tea.Cmd {
 			normalized[key] = value
 		}
 	}
-	update = normalized
 	client := m.client
 	return func() tea.Msg {
-		if err := client.Patch("/api/settings", update, nil); err != nil {
+		cfg, err := client.PatchSettings(normalized)
+		if err != nil {
 			return toastMsg{"Settings failed: " + err.Error()}
 		}
-		return toastMsg{"Settings applied"}
+		return configMsg{cfg: cfg}
 	}
 }
 
 func (m *model) refresh() tea.Cmd {
-	if m.serveMode && m.client != nil {
-		client := m.client
-		return func() tea.Msg {
-			var result struct {
-				Accepted   bool `json:"accepted"`
-				Throttled  bool `json:"throttled"`
-				RetryAfter int  `json:"retryAfter"`
-			}
-			if err := client.Post("/api/refresh", map[string]any{"usage": true, "quota": true}, &result); err != nil {
-				return toastMsg{err.Error()}
-			}
-			if result.Throttled {
-				return toastMsg{fmt.Sprintf("Showing cache; retry in %ds", result.RetryAfter)}
-			}
-			return toastMsg{"Refresh complete"}
-		}
+	if m.client == nil {
+		return nil
 	}
-	m.loading = true
-	return tea.Batch(m.scanCmd(), m.quotaCmd())
-}
-
-// ── commands ──
-
-func (m *model) scanCmd() tea.Cmd {
-	scanner := m.opts.Scanner
-	cfg := m.opts.Config
-	return func() tea.Msg {
-		err := scanner.Run(scan.Options{
-			Providers: scan.ProvidersFromConfig(cfg), ScanAntigravity: cfg.Display.ScanAntigravity,
-			RefreshPricing: m.opts.RefreshPricing,
-		})
-		return scanMsg{err}
-	}
-}
-
-func (m *model) quotaCmd() tea.Cmd {
-	dataDir := m.opts.DataDir
-	cfg := m.opts.Config
-	return func() tea.Msg {
-		if !cfg.Display.RefreshQuota {
-			return quotaMsg{}
-		}
-		results := fetchQuotas(dataDir, cfg)
-		return quotaMsg{results}
-	}
-}
-
-func (m *model) tickCmd() tea.Cmd {
-	interval := time.Duration(m.opts.Config.Display.AutoRefreshSecs) * time.Second
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
-	return tea.Tick(interval, func(time.Time) tea.Msg { return tickMsg{} })
-}
-
-func (m *model) keeperTickCmd() tea.Cmd {
-	interval := time.Duration(m.opts.Config.Keeper.CheckIntervalSecs) * time.Second
-	if interval < 10*time.Second {
-		interval = 10 * time.Second
-	}
-	return tea.Tick(interval, func(time.Time) tea.Msg { return keeperTickMsg{} })
-}
-
-func (m *model) pollState() tea.Cmd {
 	client := m.client
-	if client == nil {
-		return nil
-	}
-	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-		state, err := client.State()
-		return stateMsg{state, err}
-	})
-}
-
-func (m *model) pollQuota() tea.Cmd {
-	client := m.client
-	if client == nil {
-		return nil
-	}
 	return func() tea.Msg {
-		var payload clientQuota
-		if err := client.Get("/api/quota", &payload); err != nil {
-			return quotaMsg{}
+		result, err := client.Refresh(true, true)
+		if err != nil {
+			return toastMsg{"Refresh failed: " + err.Error()}
 		}
-		var results []fetchResult
-		for _, entry := range payload.Providers {
-			name := entry.Provider
-			if name == "agy" {
-				name = "antigravity"
-			}
-			if entry.Snapshot != nil {
-				snapshot := *entry.Snapshot
-				if snapshot.Provider == "agy" {
-					snapshot.Provider = "antigravity"
-				}
-				entry.Snapshot = &snapshot
-			}
-			result := fetchResult{Provider: name, Snapshot: entry.Snapshot}
-			if entry.Error != nil {
-				result.Err = entry.Error.Message
-			}
-			results = append(results, result)
+		if result.Throttled && !result.Accepted {
+			return toastMsg{fmt.Sprintf("Showing cache; retry in %ds", result.RetryAfter)}
 		}
-		return quotaMsg{results}
+		return toastMsg{"Refresh complete"}
 	}
-}
-
-func (m *model) readWS() tea.Cmd {
-	if !m.serveMode || m.client == nil {
-		return nil
-	}
-	events := m.events
-	if events == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		payload, ok := <-events
-		if !ok {
-			return nil
-		}
-		return wsMsg{payload}
-	}
-}
-
-func (m *model) stopEvents() {
-	if m.eventStop != nil {
-		close(m.eventStop)
-		m.eventStop = nil
-	}
-	m.eventMu.Lock()
-	if m.eventConn != nil {
-		_ = m.eventConn.Close()
-		m.eventConn = nil
-	}
-	m.eventMu.Unlock()
-}
-
-func (m *model) startEventReader() {
-	client := m.client
-	if client == nil {
-		return
-	}
-	// A reconnect replaces the previous reader instead of adding another one.
-	m.stopEvents()
-	stop := make(chan struct{})
-	m.eventStop = stop
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			conn, err := client.WebSocket()
-			if err != nil {
-				select {
-				case <-stop:
-					return
-				case <-time.After(2 * time.Second):
-					continue
-				}
-			}
-			m.eventMu.Lock()
-			select {
-			case <-stop:
-				m.eventMu.Unlock()
-				conn.Close()
-				return
-			default:
-			}
-			m.eventConn = conn
-			m.eventMu.Unlock()
-			for {
-				_, data, err := conn.ReadMessage()
-				if err != nil {
-					break
-				}
-				select {
-				case m.events <- string(data):
-				default:
-				}
-			}
-			m.eventMu.Lock()
-			if m.eventConn == conn {
-				m.eventConn = nil
-			}
-			m.eventMu.Unlock()
-			conn.Close()
-			select {
-			case <-stop:
-				return
-			case <-time.After(2 * time.Second):
-			}
-		}
-	}()
 }
 
 func (m *model) upsertSnapshot(snapshot provider.QuotaSnapshot) {
-	key := snapshot.Provider + ":" + windowKey(snapshot.Windows)
-	_ = key
 	for i := range m.snapshots {
 		if m.snapshots[i].Provider == snapshot.Provider {
 			m.snapshots[i] = snapshot
@@ -1054,14 +897,6 @@ func (m *model) upsertSnapshot(snapshot provider.QuotaSnapshot) {
 	sort.SliceStable(m.snapshots, func(i, j int) bool {
 		return providerOrder(m.snapshots[i].Provider) < providerOrder(m.snapshots[j].Provider)
 	})
-}
-
-func windowKey(windows []provider.RateWindow) string {
-	var parts []string
-	for _, window := range windows {
-		parts = append(parts, window.Label)
-	}
-	return strings.Join(parts, "|")
 }
 
 func providerOrder(provider string) int {
@@ -1075,41 +910,6 @@ func providerOrder(provider string) int {
 	default:
 		return 3
 	}
-}
-
-func cachedQuotas(dataDir string, cfg config.Config) []provider.QuotaSnapshot {
-	store := quota.NewCache(dataDir)
-	var out []provider.QuotaSnapshot
-	for _, id := range cfg.EnabledQuotaProviders([]string{"claude", "codex", "antigravity"}) {
-		if cached, err := store.LoadAny(id); err == nil && cached != nil {
-			out = append(out, cached.Snapshot)
-		}
-	}
-	sort.SliceStable(out, func(i, j int) bool { return providerOrder(out[i].Provider) < providerOrder(out[j].Provider) })
-	return out
-}
-
-func fetchQuotas(dataDir string, cfg config.Config) []fetchResult {
-	var fetchers []quota.Fetcher
-	for _, id := range cfg.EnabledQuotaProviders([]string{"claude", "codex", "antigravity"}) {
-		switch id {
-		case "claude":
-			fetchers = append(fetchers, quota.NewClaudeFetcher(cfg.Display.AccountDisplay.ShowsAccount()))
-		case "codex":
-			fetchers = append(fetchers, quota.NewCodexFetcher())
-		case "antigravity":
-			fetchers = append(fetchers, quota.NewAntigravityFetcher())
-		}
-	}
-	var out []fetchResult
-	for _, result := range quota.FetchAll(dataDir, fetchers) {
-		entry := fetchResult{Provider: result.Provider, Snapshot: result.Snapshot}
-		if result.Err != nil {
-			entry.Err = result.Err.Error()
-		}
-		out = append(out, entry)
-	}
-	return out
 }
 
 // ── view ──
@@ -1145,8 +945,16 @@ func (m *model) View() string {
 		b.WriteString(m.styles().toast.Render(m.toast))
 	}
 	b.WriteString("\n")
-	b.WriteString(m.renderFooter(width))
-	return b.String()
+	body := b.String()
+	footer := m.renderFooter(width)
+	if m.height > 0 {
+		bodyLines := strings.Count(body, "\n") + 1
+		footerLines := strings.Count(footer, "\n") + 1
+		if pad := m.height - bodyLines - footerLines; pad > 0 {
+			body += strings.Repeat("\n", pad)
+		}
+	}
+	return body + "\n" + footer
 }
 
 func (m *model) styles() styles {
@@ -1163,13 +971,22 @@ func (m *model) renderHeader(width int) string {
 		}
 		tabs = append(tabs, style.Render(" "+name+" "))
 	}
-	title := s.title.Render("TokenPulse " + version.String())
+	modeBadge := s.dim.Render(" ○ local")
+	if m.client != nil && m.client.IsRemote() {
+		label := " ● web"
+		if m.rtStatus.ManagedBy == "systemd" || m.rtStatus.ManagedBy == "launchd" {
+			label = " ● " + m.rtStatus.ManagedBy
+		}
+		modeBadge = s.badgeOn.Render(label)
+	}
+	title := s.title.Render("TokenPulse "+version.String()) + modeBadge
 	tabBar := strings.Join(tabs, " ")
 	gap := width - lipgloss.Width(title) - lipgloss.Width(tabBar) - 2
 	if gap < 1 {
 		gap = 1
 	}
-	return title + strings.Repeat(" ", gap) + tabBar
+	rule := s.rule.Render(strings.Repeat("─", max(width, 20)))
+	return title + strings.Repeat(" ", gap) + tabBar + "\n" + rule
 }
 
 func (m *model) renderUsage(width int) string {
@@ -1423,6 +1240,9 @@ func (m *model) renderRow(index int, label, detail string, cost float64, tokens 
 	}
 	line := fmt.Sprintf("%s %-34s %-28s %8s %10s  %s", marker,
 		truncate(label, 34), truncate(detail, 28), formatCost(cost), formatInt(tokens), bar)
+	if index == m.selectedRow {
+		return s.selected.Render(line) + "\n"
+	}
 	return labelStyle.Render(line) + "\n"
 }
 
@@ -1461,7 +1281,13 @@ func (m *model) renderQuota(width int) string {
 			if text := computePace(window); text != "" {
 				pace = "  " + text
 			}
-			fmt.Fprintf(&b, "  %-20s %s %5.1f%%%s\n", truncate(window.Label, 20), level.Render(bar), percent, pace)
+			reset := ""
+			if window.ResetsAt != nil {
+				if rem := time.Until(*window.ResetsAt); rem > 0 {
+					reset = "  " + s.dim.Render("resets in "+formatDurationShort(rem))
+				}
+			}
+			fmt.Fprintf(&b, "  %-20s %s %5.1f%%%s%s\n", truncate(window.Label, 20), level.Render(bar), percent, pace, reset)
 		}
 		if snapshot.ExtraUsage != nil {
 			limit := ""
@@ -1508,19 +1334,26 @@ func (m *model) renderKeeper(width int) string {
 	s := m.styles()
 	cfg := m.opts.Config
 	var b strings.Builder
-	engine := "off"
-	if cfg.Keeper.Enabled {
-		engine = "on"
+	badge := func(on bool) string {
+		if on {
+			return s.badgeOn.Render("[ON]")
+		}
+		return s.badgeOff.Render("[OFF]")
 	}
-	b.WriteString(fmt.Sprintf("Keeper engine: %s  (e toggles)\n\n", engine))
+	b.WriteString(fmt.Sprintf("Keeper engine: %s  %s\n\n", badge(cfg.Keeper.Enabled), s.dim.Render("(e toggles)")))
 	for i, agent := range keeper.Agents {
 		entry := cfg.Keeper.Agents[agent]
 		marker := " "
 		if i == m.keeperCursor {
 			marker = ">"
 		}
-		fmt.Fprintf(&b, "%s %-12s 5h=%v weekly=%v at %s\n", marker, agent,
-			entry.SessionKeeperEnabled, entry.WeeklyKeeperEnabled, entry.DailyWakeupTime)
+		row := fmt.Sprintf("%s %-12s  5h %s  weekly %s  at %s", marker, agent,
+			badge(entry.SessionKeeperEnabled), badge(entry.WeeklyKeeperEnabled), entry.DailyWakeupTime)
+		if i == m.keeperCursor {
+			b.WriteString(s.selected.Render(row) + "\n")
+		} else {
+			b.WriteString(row + "\n")
+		}
 	}
 	b.WriteString("\n")
 	b.WriteString(s.dim.Render("Recent executions") + "\n")
@@ -1544,19 +1377,34 @@ func (m *model) renderKeeper(width int) string {
 func (m *model) renderSettings(width int) string {
 	s := m.styles()
 	cfg := m.opts.Config
+	onOff := func(v bool) string {
+		if v {
+			return "ON"
+		}
+		return "OFF"
+	}
+	webLabel := "OFF (enter starts background serve)"
+	if m.webBusy {
+		webLabel = "switching…"
+	} else if m.rtStatus.ManagedBy == "systemd" || m.rtStatus.ManagedBy == "launchd" {
+		webLabel = fmt.Sprintf("managed by %s (%s)", m.rtStatus.ManagedBy, m.rtStatus.WebURL)
+	} else if m.client != nil && m.client.IsRemote() {
+		webLabel = fmt.Sprintf("ON (%s)  (enter stops)", m.rtStatus.WebURL)
+	}
 	rows := []string{
-		fmt.Sprintf("Theme: %s", cfg.Display.Theme),
-		fmt.Sprintf("Quota display: %s", cfg.Display.QuotaDisplayMode),
-		fmt.Sprintf("Auto refresh: %ds", cfg.Display.AutoRefreshSecs),
-		fmt.Sprintf("Account display: %s", cfg.Display.AccountDisplay),
-		fmt.Sprintf("Show empty providers: %v", cfg.Display.ShowEmptyProviders),
-		fmt.Sprintf("Refresh quota: %v", cfg.Display.RefreshQuota),
-		fmt.Sprintf("Scan Antigravity: %v", cfg.Display.ScanAntigravity),
-		fmt.Sprintf("Notification level: %s", cfg.Display.NotificationLevel),
-		fmt.Sprintf("Notification sound: %s", cfg.Display.NotificationSound),
-		fmt.Sprintf("Keeper engine: %v", cfg.Keeper.Enabled),
-		fmt.Sprintf("Antigravity groups: %s", cfg.Keeper.AntigravityGroupsLabel()),
-		"Quota providers (enter cycles): " + enabledProviderLabel(cfg),
+		fmt.Sprintf("%-26s %s", "Theme", cfg.Display.Theme),
+		fmt.Sprintf("%-26s %s", "Quota display", cfg.Display.QuotaDisplayMode),
+		fmt.Sprintf("%-26s %ds", "Auto refresh", cfg.Display.AutoRefreshSecs),
+		fmt.Sprintf("%-26s %s", "Account display", cfg.Display.AccountDisplay),
+		fmt.Sprintf("%-26s %s", "Show empty providers", onOff(cfg.Display.ShowEmptyProviders)),
+		fmt.Sprintf("%-26s %s", "Refresh quota", onOff(cfg.Display.RefreshQuota)),
+		fmt.Sprintf("%-26s %s", "Scan Antigravity", onOff(cfg.Display.ScanAntigravity)),
+		fmt.Sprintf("%-26s %s", "Notification level", cfg.Display.NotificationLevel),
+		fmt.Sprintf("%-26s %s", "Notification sound", cfg.Display.NotificationSound),
+		fmt.Sprintf("%-26s %s", "Keeper engine", onOff(cfg.Keeper.Enabled)),
+		fmt.Sprintf("%-26s %s", "Antigravity groups", cfg.Keeper.AntigravityGroupsLabel()),
+		fmt.Sprintf("%-26s %s", "Quota providers (cycles)", enabledProviderLabel(cfg)),
+		fmt.Sprintf("%-26s %s", "Web remote", webLabel),
 	}
 	var b strings.Builder
 	for i, row := range rows {
@@ -1672,31 +1520,42 @@ func sparkRune(tokens, max int64) string {
 	return string(levels[level])
 }
 
-func (m *model) keeperCheckCmd() tea.Cmd {
-	engine := m.engine
-	snapshots := append([]provider.QuotaSnapshot(nil), m.snapshots...)
-	return func() tea.Msg {
-		var requests []keeper.Request
-		requests = append(requests, engine.CheckScheduled(snapshots, time.Now())...)
-		requests = append(requests, engine.CheckQuota(snapshots, time.Now())...)
-		for _, request := range requests {
-			record := engine.Execute(request)
-			engine.Finish(request, record)
-		}
-		return keeperCheckMsg{records: engine.History.Recent(20)}
-	}
-}
-
 func (m *model) renderFooter(width int) string {
 	s := m.styles()
-	help := "tab switch · r refresh · b theme · q quit"
-	if m.tab == tabUsage {
-		help = "1-6 range · m metric · v list · enter detail · f heatmap · [ ] shift · " + help
+	common := "tab switch · r refresh · b theme · q quit"
+	var help string
+	switch m.tab {
+	case tabUsage:
+		help = "1-6 range · m metric · v list · enter detail · f heatmap · [ ] shift · s agents · " + common
+	case tabQuota:
+		help = "↑/↓ provider · " + common
+	case tabKeeper:
+		help = "e engine · enter 5h · w weekly · p ping · " + common
+	case tabSettings:
+		help = "↑/↓ move · enter change · " + common
+	default:
+		help = common
 	}
 	if m.status != "" {
-		return s.dim.Render(truncate(m.status, width-2)) + "\n" + s.dim.Render(help)
+		return s.dim.Render(truncate(m.status, width-2)) + "\n" + s.dim.Render(truncate(help, width-2))
 	}
-	return s.dim.Render(help)
+	return s.dim.Render(truncate(help, width-2))
+}
+
+func formatDurationShort(d time.Duration) string {
+	if d < time.Minute {
+		return "<1m"
+	}
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	mins := int(d.Minutes()) % 60
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh", days, hours)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	}
+	return fmt.Sprintf("%dm", mins)
 }
 
 // ── formatting ──

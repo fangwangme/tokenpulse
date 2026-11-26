@@ -46,6 +46,12 @@ func Install() error {
 	}
 	configPath := os.Getenv("TOKENPULSE_CONFIG_PATH")
 	environment := os.Getenv("TOKENPULSE_ENV")
+	// Stop any detached serve holding runtime.lock before starting the managed unit.
+	if local := remote.NewLocalClient(dataDir); local != nil {
+		if st, err := local.Status(); err == nil && st.ManagedBy == "daemon" {
+			_ = local.Shutdown()
+		}
+	}
 	switch runtime.GOOS {
 	case "linux":
 		path, err := unitPath()
@@ -105,6 +111,7 @@ func systemdUnit(executable, dataDir, configPath, environment string) string {
 	write("TOKENPULSE_DATA_DIR", dataDir)
 	write("TOKENPULSE_CONFIG_PATH", configPath)
 	write("TOKENPULSE_ENV", environment)
+	write("TOKENPULSE_MANAGED_BY", "systemd")
 	return fmt.Sprintf(`[Unit]
 Description=TokenPulse remote server
 After=network-online.target
@@ -139,6 +146,7 @@ func launchdPlist(executable, dataDir, configPath, environment string) string {
 	write("TOKENPULSE_DATA_DIR", dataDir)
 	write("TOKENPULSE_CONFIG_PATH", configPath)
 	write("TOKENPULSE_ENV", environment)
+	write("TOKENPULSE_MANAGED_BY", "launchd")
 	logDir := escaped(filepath.Join(dataDir, "log"))
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

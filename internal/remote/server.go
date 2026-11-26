@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -13,11 +14,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -25,12 +24,11 @@ import (
 
 	"github.com/fangwangme/tokenpulse/internal/config"
 	"github.com/fangwangme/tokenpulse/internal/keeper"
-	"github.com/fangwangme/tokenpulse/internal/notification"
 	"github.com/fangwangme/tokenpulse/internal/paths"
-	"github.com/fangwangme/tokenpulse/internal/pricing"
 	"github.com/fangwangme/tokenpulse/internal/provider"
 	"github.com/fangwangme/tokenpulse/internal/quota"
 	"github.com/fangwangme/tokenpulse/internal/report"
+	rt "github.com/fangwangme/tokenpulse/internal/runtime"
 	"github.com/fangwangme/tokenpulse/internal/scan"
 	"github.com/fangwangme/tokenpulse/internal/version"
 	"github.com/fangwangme/tokenpulse/web"
@@ -42,11 +40,8 @@ type Options struct {
 	NoTailscale bool
 	LAN         bool
 	WebDir      string
-}
-
-type quotaError struct {
-	Message string    `json:"message"`
-	At      time.Time `json:"at"`
+	ManagedBy   string
+	Quiet       bool
 }
 
 type Server struct {
@@ -54,44 +49,20 @@ type Server struct {
 	Options Options
 	Access  Access
 	State   *StateStore
-	Config  *config.Manager
-	Scanner *scan.Scanner
-	Report  *report.Service
-	Pricing *pricing.Service
-	Cache   *quota.Cache
-	Keeper  *keeper.Engine
+	Runtime *rt.Runtime
 	Push    *pushStore
 	WebDir  string
 
-	mu               sync.Mutex
-	pairMu           sync.Mutex
-	pairTimes        map[string][]time.Time
-	snapshots        map[string]provider.QuotaSnapshot
-	quotaErrors      map[string]quotaError
-	lastScannedAt    int64
-	lastFetchedAt    time.Time
-	lastUsageRefresh time.Time
-	lastQuotaRefresh time.Time
-	lastManualUsage  time.Time
-	lastManualQuota  time.Time
-	exhausted        map[string]bool
-	running          bool
-	firstScan        chan struct{}
-	firstOnce        sync.Once
-	wsClients        map[*wsClient]bool
-	wsValidation     time.Duration
-	stop             chan struct{}
-	wake             chan struct{}
-	refreshMu        sync.Mutex
-	logger           *log.Logger
+	mu           sync.Mutex
+	pairMu       sync.Mutex
+	pairTimes    map[string][]time.Time
+	wsClients    map[*wsClient]bool
+	wsValidation time.Duration
+	stop         chan struct{}
+	stopOnce     sync.Once
+	httpServer   *http.Server
+	unixServer   *http.Server
 }
-
-type refreshFlags struct {
-	usage bool
-	quota bool
-}
-
-const manualRefreshInterval = 60 * time.Second
 
 func NewServer(opts Options) (*Server, error) {
 	dataDir, err := paths.DataDir()
@@ -99,8 +70,6 @@ func NewServer(opts Options) (*Server, error) {
 		return nil, err
 	}
 	if version.IsTest() {
-		// A test run never binds or configures the production ports, even if
-		// a caller passed the production value explicitly.
 		if opts.Port == 0 || opts.Port == 4120 {
 			opts.Port = 14120
 		}
@@ -118,10 +87,6 @@ func NewServer(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := manager.Load()
-	if err != nil {
-		return nil, err
-	}
 	scanner, err := scan.New(dataDir)
 	if err != nil {
 		return nil, err
@@ -130,32 +95,48 @@ func NewServer(opts Options) (*Server, error) {
 	_ = os.MkdirAll(logDir, 0o755)
 	logFile, _ := os.OpenFile(filepath.Join(logDir, "tokenpulse-"+time.Now().Format("2006-01-02")+".log"),
 		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	server := &Server{
-		DataDir: dataDir, Options: opts, State: NewStateStore(dataDir), Config: manager,
-		Scanner: scanner, Report: scanner.Report, Pricing: scanner.Pricing,
-		Cache: quota.NewCache(dataDir), Keeper: keeper.NewEngine(cfg.Keeper, manager.KeeperStatePath()),
-		Push: newPushStore(dataDir), WebDir: opts.WebDir,
-		snapshots: map[string]provider.QuotaSnapshot{}, quotaErrors: map[string]quotaError{},
-		exhausted: map[string]bool{},
-		firstScan: make(chan struct{}), wsClients: map[*wsClient]bool{},
-		stop: make(chan struct{}), wake: make(chan struct{}, 1),
-	}
+	var logger *log.Logger
 	if logFile != nil {
-		server.logger = log.New(logFile, "", log.LstdFlags)
+		logger = log.New(logFile, "", log.LstdFlags)
 	}
-	return server, nil
+	managedBy := opts.ManagedBy
+	if managedBy == "" {
+		managedBy = os.Getenv("TOKENPULSE_MANAGED_BY")
+	}
+	if managedBy == "" {
+		managedBy = "daemon"
+	}
+	engine, err := rt.New(dataDir, manager, scanner, managedBy, logger)
+	if err != nil {
+		return nil, err
+	}
+	push := newPushStore(dataDir)
+	engine.OnQuotaRecovery = func(title, body string) {
+		go push.Send(title, body)
+	}
+	return &Server{
+		DataDir:   dataDir,
+		Options:   opts,
+		State:     NewStateStore(dataDir),
+		Runtime:   engine,
+		Push:      push,
+		WebDir:    opts.WebDir,
+		wsClients: map[*wsClient]bool{},
+		stop:      make(chan struct{}),
+	}, nil
 }
 
-// Run starts the server and blocks until the process is stopped.
+// Run starts the server and blocks until stopped.
 func (s *Server) Run() error {
 	if _, err := s.State.Load(); err != nil {
 		return err
 	}
-	release, err := s.acquireLock()
+	lock, err := rt.AcquireLock(s.DataDir)
 	if err != nil {
 		return err
 	}
-	defer release()
+	defer lock.Release()
+
 	socketPath, err := SocketPath(s.DataDir)
 	if err != nil {
 		return err
@@ -171,25 +152,72 @@ func (s *Server) Run() error {
 	_ = os.WriteFile(filepath.Join(s.DataDir, "serve.url"), []byte(s.Access.URL), 0o600)
 	listener, err := net.Listen("tcp", net.JoinHostPort(s.Access.BindHost, strconv.Itoa(s.Options.Port)))
 	if err != nil {
+		s.Runtime.SetWebState("", err.Error())
 		return err
 	}
 	defer listener.Close()
+	s.Runtime.SetWebState(s.Access.URL, "")
 
 	token, err := s.State.Token()
 	if err != nil {
 		return err
 	}
-	s.printBanner(token)
-	s.warmCache()
-	go s.refreshLoop()
-	go s.serveUnix(socket)
+	if !s.Options.Quiet {
+		s.printBanner(token)
+	}
 
-	server := &http.Server{
+	events, unsubscribe := s.Runtime.Events.Subscribe()
+	defer unsubscribe()
+	go s.forwardEvents(events)
+
+	s.Runtime.WarmCache()
+	s.Runtime.Start(true)
+	defer s.Runtime.Stop()
+
+	httpSrv := &http.Server{
 		Handler:           s.rootHandler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	return server.Serve(listener)
+	s.mu.Lock()
+	s.httpServer = httpSrv
+	s.mu.Unlock()
+
+	go s.serveUnix(socket)
+
+	err = httpSrv.Serve(listener)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func (s *Server) serveUnix(listener net.Listener) {
+	unixSrv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.handle(w, r, true)
+		}),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+	s.mu.Lock()
+	s.unixServer = unixSrv
+	s.mu.Unlock()
+	_ = unixSrv.Serve(listener)
+}
+
+func (s *Server) forwardEvents(events <-chan rt.Event) {
+	for {
+		select {
+		case <-s.stop:
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			s.broadcast(ev.Type, ev.Data)
+		}
+	}
 }
 
 func (s *Server) printBanner(token string) {
@@ -203,38 +231,6 @@ func (s *Server) printBanner(token string) {
 	if code, err := qrcode.New(urlWithToken, qrcode.Medium); err == nil {
 		fmt.Println(code.ToSmallString(false))
 	}
-}
-
-func (s *Server) acquireLock() (func(), error) {
-	path := filepath.Join(s.DataDir, "serve.lock")
-	if err := os.MkdirAll(s.DataDir, 0o755); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		if !errors.Is(err, os.ErrExist) {
-			return nil, err
-		}
-		pid := 0
-		if content, readErr := os.ReadFile(path); readErr == nil {
-			pid, _ = strconv.Atoi(strings.TrimSpace(string(content)))
-		}
-		if pid > 0 {
-			if process, findErr := os.FindProcess(pid); findErr == nil {
-				if signalErr := process.Signal(syscall.Signal(0)); signalErr == nil {
-					return nil, fmt.Errorf("tokenpulse serve is already running (pid %d)", pid)
-				}
-			}
-		}
-		_ = os.Remove(path)
-		file, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err != nil {
-			return nil, err
-		}
-	}
-	_, _ = fmt.Fprintf(file, "%d\n", os.Getpid())
-	file.Close()
-	return func() { _ = os.Remove(path) }, nil
 }
 
 func (s *Server) listenLocalSocket(path string) (net.Listener, error) {
@@ -252,17 +248,6 @@ func (s *Server) listenLocalSocket(path string) (net.Listener, error) {
 		return nil, err
 	}
 	return listener, nil
-}
-
-func (s *Server) serveUnix(listener net.Listener) {
-	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			s.handle(w, r, true)
-		}),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-	}
-	_ = server.Serve(listener)
 }
 
 func (s *Server) rootHandler() http.Handler {
@@ -295,8 +280,15 @@ func (s *Server) hostAccepted(host string) bool {
 func (s *Server) handle(w http.ResponseWriter, r *http.Request, local bool) {
 	if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/ws" {
 		if local {
-			if r.Method == http.MethodPost && r.URL.Path == "/api/reprice" {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/api/reprice":
 				s.handleReprice(w, r)
+				return
+			case r.Method == http.MethodPost && r.URL.Path == "/api/shutdown":
+				s.handleShutdown(w, r)
+				return
+			case r.Method == http.MethodGet && r.URL.Path == "/api/config":
+				s.handleConfigGet(w, r)
 				return
 			}
 			s.route(w, r, true)
@@ -374,7 +366,6 @@ func (s *Server) originAccepted(r *http.Request) bool {
 	return originHost == requestHost && originPort == requestPort && s.hostAccepted(originHost)
 }
 
-// expectedScheme is the browser-facing scheme serve was configured for.
 func (s *Server) expectedScheme() string {
 	if s.Access.URL != "" {
 		if parsed, err := url.Parse(s.Access.URL); err == nil && parsed.Scheme != "" {
@@ -427,7 +418,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request, local bool) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/settings":
 		s.handleSettingsGet(w, r)
 	case r.Method == http.MethodPatch && r.URL.Path == "/api/settings":
-		s.handleSettingsPatch(w, r)
+		s.handleSettingsPatch(w, r, local)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/keeper":
 		s.handleKeeperGet(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/keeper/ping":
@@ -456,83 +447,45 @@ func writeJSON(w http.ResponseWriter, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func (s *Server) waitFirstScan() {
-	s.mu.Lock()
-	scanned := s.lastScannedAt
-	s.mu.Unlock()
-	if scanned > 0 {
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.Runtime.Status())
+}
+
+func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.Runtime.Config.Load()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	select {
-	case <-s.firstScan:
-	case <-time.After(2 * time.Minute):
-	}
+	writeJSON(w, cfg)
 }
 
-// warmCache makes the server answer from the last persisted state before the
-// first background refresh finishes.
-func (s *Server) warmCache() {
-	if scanned, err := s.Report.ScannedAtValue(); err == nil && scanned > 0 {
-		s.mu.Lock()
-		s.lastScannedAt = scanned
-		s.mu.Unlock()
-	}
-	for _, id := range quota.ProviderIDs {
-		cached, err := s.Cache.LoadAny(id)
-		if err != nil || cached == nil {
-			continue
-		}
-		snapshot := cached.Snapshot
-		quota.Normalize(&snapshot)
-		s.mu.Lock()
-		s.snapshots[id] = snapshot
-		if snapshot.FetchedAt.After(s.lastFetchedAt) {
-			s.lastFetchedAt = snapshot.FetchedAt
-		}
-		s.mu.Unlock()
-	}
-}
-
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	payload := map[string]any{
-		"running":   s.running,
-		"scannedAt": s.lastScannedAt,
-		"fetchedAt": fetchedAtMs(s.lastFetchedAt),
-	}
-	s.mu.Unlock()
-	writeJSON(w, payload)
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]bool{"stopping": true})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		s.Shutdown()
+	}()
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	cfg, _ := s.Config.Load()
+	cfg, _ := s.Runtime.Config.Load()
 	agents := append([]string(nil), report.AllAgents...)
 	if !cfg.Display.ScanAntigravity {
 		agents = remove(agents, "antigravity")
 	}
-	s.mu.Lock()
-	scannedAt := s.lastScannedAt
-	fetchedAt := s.lastFetchedAt
-	s.mu.Unlock()
+	status := s.Runtime.Status()
 	writeJSON(w, map[string]any{
 		"version":         version.String(),
-		"scannedAt":       scannedAt,
-		"fetchedAt":       fetchedAtMs(fetchedAt),
-		"pricesAvailable": s.Pricing.Available(),
+		"scannedAt":       status.ScannedAt,
+		"fetchedAt":       status.FetchedAt,
+		"pricesAvailable": s.Runtime.Pricing.Available(),
 		"agents":          apiAgentNames(agents),
 		"settings":        currentSettings(cfg),
 		"keeperEngine":    cfg.Keeper.Enabled,
 	})
 }
 
-func fetchedAtMs(value time.Time) int64 {
-	if value.IsZero() {
-		return 0
-	}
-	return value.UnixMilli()
-}
-
-// apiAgentName is the name phones see: Antigravity is agy everywhere in the API.
 func apiAgentName(name string) string {
 	if name == "antigravity" {
 		return "agy"
@@ -571,8 +524,7 @@ func apiAgents(raw string) ([]string, error) {
 	}
 	var out []string
 	for _, agent := range strings.Split(raw, ",") {
-		agent = strings.TrimSpace(agent)
-		agent = internalAgentName(agent)
+		agent = internalAgentName(strings.TrimSpace(agent))
 		if agent == "" {
 			continue
 		}
@@ -585,13 +537,13 @@ func apiAgents(raw string) ([]string, error) {
 }
 
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
-	s.waitFirstScan()
+	s.Runtime.WaitFirstScan(2 * time.Minute)
 	agents, err := apiAgents(r.URL.Query().Get("agents"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	value, err := s.Report.Report(report.Params{
+	value, err := s.Runtime.Usage(report.Params{
 		Preset: r.URL.Query().Get("preset"), From: r.URL.Query().Get("from"),
 		To: r.URL.Query().Get("to"), Agents: agents,
 	})
@@ -599,7 +551,6 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	value.PricesAvailable = s.Pricing.Available()
 	for i := range value.Models {
 		value.Models[i].Agents = apiAgentNames(value.Models[i].Agents)
 	}
@@ -607,13 +558,13 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDay(w http.ResponseWriter, r *http.Request) {
-	s.waitFirstScan()
+	s.Runtime.WaitFirstScan(2 * time.Minute)
 	agents, err := apiAgents(r.URL.Query().Get("agents"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	value, err := s.Report.Day(r.URL.Query().Get("date"), agents)
+	value, err := s.Runtime.UsageDay(r.URL.Query().Get("date"), agents)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -625,13 +576,13 @@ func (s *Server) handleDay(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
-	s.waitFirstScan()
+	s.Runtime.WaitFirstScan(2 * time.Minute)
 	agents, err := apiAgents(r.URL.Query().Get("agents"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	value, err := s.Report.Model(r.URL.Query().Get("model"), r.URL.Query().Get("from"), r.URL.Query().Get("to"), agents)
+	value, err := s.Runtime.UsageModel(r.URL.Query().Get("model"), r.URL.Query().Get("from"), r.URL.Query().Get("to"), agents)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -643,44 +594,16 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
-	cfg, _ := s.Config.Load()
-	enabled := map[string]bool{}
-	for _, id := range cfg.EnabledQuotaProviders(quota.ProviderIDs) {
-		enabled[id] = true
-	}
-	s.mu.Lock()
-	snapshots := map[string]provider.QuotaSnapshot{}
-	for id, snapshot := range s.snapshots {
-		snapshots[id] = snapshot
-	}
-	failures := map[string]quotaError{}
-	for id, failure := range s.quotaErrors {
-		failures[id] = failure
-	}
-	fetchedAt := s.lastFetchedAt
-	s.mu.Unlock()
-	type providerView struct {
-		Provider string                  `json:"provider"`
-		Enabled  bool                    `json:"enabled"`
-		Snapshot *provider.QuotaSnapshot `json:"snapshot"`
-		Error    *quotaError             `json:"error"`
-	}
-	providers := make([]providerView, 0, len(quota.ProviderIDs))
-	for _, id := range quota.ProviderIDs {
-		view := providerView{Provider: apiAgentName(id), Enabled: enabled[id]}
-		if snapshot, ok := snapshots[id]; ok {
-			copy := snapshot
-			quota.Normalize(&copy)
+	view := s.Runtime.Quota()
+	for i := range view.Providers {
+		view.Providers[i].Provider = apiAgentName(view.Providers[i].Provider)
+		if view.Providers[i].Snapshot != nil {
+			copy := *view.Providers[i].Snapshot
 			copy.Provider = apiAgentName(copy.Provider)
-			view.Snapshot = &copy
+			view.Providers[i].Snapshot = &copy
 		}
-		if failure, ok := failures[id]; ok {
-			copy := failure
-			view.Error = &copy
-		}
-		providers = append(providers, view)
 	}
-	writeJSON(w, map[string]any{"providers": providers, "fetchedAt": fetchedAtMs(fetchedAt)})
+	writeJSON(w, view)
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
@@ -696,277 +619,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if body.Quota != nil {
 		quotaWanted = *body.Quota
 	}
-	now := time.Now()
-	s.mu.Lock()
-	lastUsage := s.lastManualUsage
-	if s.lastUsageRefresh.After(lastUsage) {
-		lastUsage = s.lastUsageRefresh
-	}
-	lastQuota := s.lastManualQuota
-	if s.lastQuotaRefresh.After(lastQuota) {
-		lastQuota = s.lastQuotaRefresh
-	}
-	allowUsage, allowQuota, retryAfter := refreshGate(now, lastUsage, lastQuota, usage, quotaWanted)
-	if allowUsage {
-		s.lastManualUsage = now
-	}
-	if allowQuota {
-		s.lastManualQuota = now
-	}
-	scannedAt := s.lastScannedAt
-	fetchedAt := s.lastFetchedAt
-	s.mu.Unlock()
-
-	accepted := allowUsage || allowQuota
-	if accepted {
-		// Wait for the refresh so the GET that follows reads the new cache.
-		s.refresh(refreshFlags{usage: allowUsage, quota: allowQuota}, now)
-		// Start the cooldown when the refresh finishes, not when it starts, so
-		// a slow scan cannot be followed by another refresh immediately.
-		done := time.Now()
-		s.mu.Lock()
-		if allowUsage {
-			s.lastManualUsage = done
-		}
-		if allowQuota {
-			s.lastManualQuota = done
-		}
-		scannedAt = s.lastScannedAt
-		fetchedAt = s.lastFetchedAt
-		s.mu.Unlock()
-	}
-	writeJSON(w, map[string]any{
-		"accepted":   accepted,
-		"throttled":  (usage && !allowUsage) || (quotaWanted && !allowQuota),
-		"retryAfter": retryAfter,
-		"scannedAt":  scannedAt,
-		"fetchedAt":  fetchedAtMs(fetchedAt),
-	})
-}
-
-// refreshGate allows one manual refresh per target per minute. When it is
-// denied, callers keep serving the previous cache instead of failing.
-func refreshGate(now, lastUsage, lastQuota time.Time, usage, quotaWanted bool) (bool, bool, int) {
-	allowUsage := usage && (lastUsage.IsZero() || now.Sub(lastUsage) >= manualRefreshInterval)
-	allowQuota := quotaWanted && (lastQuota.IsZero() || now.Sub(lastQuota) >= manualRefreshInterval)
-	retry := 0
-	if usage && !allowUsage {
-		retry = max(retry, secondsUntil(lastUsage.Add(manualRefreshInterval), now))
-	}
-	if quotaWanted && !allowQuota {
-		retry = max(retry, secondsUntil(lastQuota.Add(manualRefreshInterval), now))
-	}
-	return allowUsage, allowQuota, retry
-}
-
-func secondsUntil(deadline, now time.Time) int {
-	seconds := int(deadline.Sub(now).Seconds())
-	if float64(seconds) < deadline.Sub(now).Seconds() {
-		seconds++
-	}
-	return max(seconds, 1)
-}
-
-func (s *Server) refreshLoop() {
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-s.stop:
-			return
-		case <-s.wake:
-			timer.Reset(s.refreshInterval())
-			continue
-		case <-timer.C:
-			s.refresh(refreshFlags{usage: true, quota: true}, time.Now())
-		}
-		timer.Reset(s.refreshInterval())
-	}
-}
-
-func (s *Server) refreshInterval() time.Duration {
-	cfg, err := s.Config.Load()
-	if err == nil && cfg.Display.AutoRefreshSecs > 0 {
-		return time.Duration(cfg.Display.AutoRefreshSecs) * time.Second
-	}
-	return 300 * time.Second
-}
-
-// refresh serializes background and manual work, and skips a target when a
-// refresh for it already finished after the request arrived.
-func (s *Server) refresh(flags refreshFlags, requested time.Time) {
-	s.refreshMu.Lock()
-	defer s.refreshMu.Unlock()
-	s.mu.Lock()
-	if flags.usage && (s.lastUsageRefresh.After(requested) || time.Since(s.lastUsageRefresh) < manualRefreshInterval) {
-		flags.usage = false
-	}
-	if flags.quota && (s.lastQuotaRefresh.After(requested) || time.Since(s.lastQuotaRefresh) < manualRefreshInterval) {
-		flags.quota = false
-	}
-	s.mu.Unlock()
-	if flags.usage || flags.quota {
-		s.doRefresh(flags)
-	}
-}
-
-func (s *Server) doRefresh(flags refreshFlags) {
-	s.mu.Lock()
-	s.running = true
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-	}()
-	if flags.usage {
-		defer s.firstOnce.Do(func() { close(s.firstScan) })
-	}
-
-	cfg, err := s.Config.Load()
-	if err != nil {
-		cfg = config.Default()
-	}
-	s.Keeper.UpdateConfig(cfg.Keeper)
-	if s.logger != nil {
-		s.logger.Printf("refresh start usage=%v quota=%v", flags.usage, flags.quota)
-	}
-	var wg sync.WaitGroup
-	if flags.usage {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() {
-				s.mu.Lock()
-				s.lastUsageRefresh = time.Now()
-				s.mu.Unlock()
-			}()
-			if err := s.Scanner.Run(scan.Options{
-				Providers: scan.ProvidersFromConfig(cfg), ScanAntigravity: cfg.Display.ScanAntigravity,
-			}); err != nil {
-				if s.logger != nil {
-					s.logger.Printf("usage refresh failed: %v", err)
-				}
-				return
-			}
-			if scanned, err := s.Report.ScannedAtValue(); err == nil {
-				s.mu.Lock()
-				s.lastScannedAt = scanned
-				s.mu.Unlock()
-				s.broadcast("usage_updated", map[string]any{"scannedAt": scanned})
-			}
-		}()
-	}
-	if flags.quota && cfg.Display.RefreshQuota {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() {
-				s.mu.Lock()
-				s.lastQuotaRefresh = time.Now()
-				s.mu.Unlock()
-			}()
-			results := quota.FetchAll(s.DataDir, fetchersFor(cfg))
-			s.applyQuotaResults(results)
-		}()
-	}
-	wg.Wait()
-	if flags.usage {
-		// A scan parses every source into memory at once. Return the freed
-		// pages now instead of waiting for OS memory pressure.
-		debug.FreeOSMemory()
-	}
-
-	s.mu.Lock()
-	snapshots := make([]provider.QuotaSnapshot, 0, len(s.snapshots))
-	for _, snapshot := range s.snapshots {
-		snapshots = append(snapshots, snapshot)
-	}
-	s.mu.Unlock()
-	for _, request := range s.Keeper.CheckScheduled(snapshots, time.Now()) {
-		s.startKeeper(request)
-	}
-	for _, request := range s.Keeper.CheckQuota(snapshots, time.Now()) {
-		s.startKeeper(request)
-	}
-	if s.logger != nil {
-		s.logger.Printf("refresh complete")
-	}
-}
-
-func fetchersFor(cfg config.Config) []quota.Fetcher {
-	var fetchers []quota.Fetcher
-	for _, id := range cfg.EnabledQuotaProviders(quota.ProviderIDs) {
-		switch id {
-		case "claude":
-			fetchers = append(fetchers, quota.NewClaudeFetcher(cfg.Display.AccountDisplay.ShowsAccount()))
-		case "codex":
-			fetchers = append(fetchers, quota.NewCodexFetcher())
-		case "antigravity":
-			fetchers = append(fetchers, quota.NewAntigravityFetcher())
-		}
-	}
-	return fetchers
-}
-
-func (s *Server) applyQuotaResults(results []quota.FetchResult) {
-	s.mu.Lock()
-	var recoveries []notification.Recovery
-	for _, result := range results {
-		if result.Snapshot != nil {
-			s.snapshots[result.Provider] = *result.Snapshot
-			delete(s.quotaErrors, result.Provider)
-			for _, window := range result.Snapshot.Windows {
-				key := result.Provider + ":" + window.ID
-				if window.UsedPercent >= 100 {
-					s.exhausted[key] = true
-				} else if s.exhausted[key] {
-					delete(s.exhausted, key)
-					recoveries = append(recoveries, notification.Recovery{
-						Provider: result.Provider, WindowLabel: window.Label,
-						RemainingPercent: maxFloat(100-window.UsedPercent, 0),
-					})
-				}
-			}
-		}
-		if result.Err != nil {
-			s.quotaErrors[result.Provider] = quotaError{Message: result.Err.Error(), At: result.FetchedAt}
-		}
-	}
-	if len(results) > 0 {
-		s.lastFetchedAt = time.Now().UTC()
-	}
-	fetchedAt := s.lastFetchedAt
-	s.mu.Unlock()
-	for _, recovery := range recoveries {
-		s.broadcast("quota_recovered", map[string]any{
-			"provider": recovery.Provider, "window": recovery.WindowLabel,
-			"remaining": recovery.RemainingPercent,
-		})
-	}
-	if len(recoveries) > 0 {
-		cfg, _ := s.Config.Load()
-		if cfg.Display.NotificationLevel != config.NotificationOff {
-			notification.NotifyQuotaRestored(cfg.Display.NotificationLevel, cfg.Display.NotificationSound, recoveries)
-			go s.Push.Send("TokenPulse", notification.Summarize(recoveries))
-		}
-	}
-	s.broadcast("quota_updated", map[string]any{"fetchedAt": fetchedAtMs(fetchedAt)})
-}
-
-func maxFloat(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func (s *Server) startKeeper(request keeper.Request) {
-	go func() {
-		record := s.Keeper.Execute(request)
-		s.Keeper.Finish(request, record)
-		s.broadcast("keeper_updated", map[string]any{"agent": record.Agent})
-	}()
+	writeJSON(w, s.Runtime.RequestRefresh(usage, quotaWanted))
 }
 
 func (s *Server) handleReprice(w http.ResponseWriter, r *http.Request) {
@@ -979,31 +632,16 @@ func (s *Server) handleReprice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if body.Apply && !body.Yes {
-		writeError(w, http.StatusBadRequest, "--apply requires --yes")
-		return
-	}
-	if err := s.Pricing.Load(false); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	report, err := s.Pricing.Reprice(body.Apply, body.Expect)
+	rep, err := s.Runtime.Reprice(body.Apply, body.Yes, body.Expect)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.Report.Clear()
-	if scanned, err := s.Report.ScannedAtValue(); err == nil {
-		s.mu.Lock()
-		s.lastScannedAt = scanned
-		s.mu.Unlock()
-		s.broadcast("usage_updated", map[string]any{"scannedAt": scanned})
-	}
-	writeJSON(w, report)
+	writeJSON(w, rep)
 }
 
 func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.Config.Load()
+	cfg, err := s.Runtime.Config.Load()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1011,42 +649,55 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, settingsView(currentSettings(cfg)))
 }
 
-func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request, local bool) {
 	var updates map[string]json.RawMessage
 	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&updates); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	snapshot, err := ApplySettings(s.Config, updates)
+	var snapshot SettingsSnapshot
+	var err error
+	if local {
+		cfg, loadErr := s.Runtime.Config.Load()
+		if loadErr != nil {
+			writeError(w, http.StatusInternalServerError, loadErr.Error())
+			return
+		}
+		for key, raw := range updates {
+			if applyErr := rt.ApplyLocalSetting(&cfg, key, decodeValue(raw)); applyErr != nil {
+				writeError(w, http.StatusBadRequest, applyErr.Error())
+				return
+			}
+		}
+		if saveErr := s.Runtime.Config.Save(&cfg); saveErr != nil {
+			writeError(w, http.StatusInternalServerError, saveErr.Error())
+			return
+		}
+		snapshot = currentSettings(cfg)
+		_, intervalChanged := updates["display.auto_refresh_secs"]
+		s.Runtime.NotifySettingsUpdated(cfg, intervalChanged)
+		writeJSON(w, settingsView(snapshot))
+		return
+	}
+	snapshot, err = ApplySettings(s.Runtime.Config, updates)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if cfg, err := s.Config.Load(); err == nil {
-		s.Keeper.UpdateConfig(cfg.Keeper)
+	if cfg, err := s.Runtime.Config.Load(); err == nil {
+		_, intervalChanged := updates["display.auto_refresh_secs"]
+		s.Runtime.NotifySettingsUpdated(cfg, intervalChanged)
 	}
-	if _, ok := updates["display.auto_refresh_secs"]; ok {
-		select {
-		case s.wake <- struct{}{}:
-		default:
-		}
-	}
-	s.broadcast("settings_updated", map[string]any{})
 	writeJSON(w, settingsView(snapshot))
 }
 
 func (s *Server) handleKeeperGet(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.Config.Load()
+	cfg, err := s.Runtime.Config.Load()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.mu.Lock()
-	snapshots := make([]provider.QuotaSnapshot, 0, len(s.snapshots))
-	for _, snapshot := range s.snapshots {
-		snapshots = append(snapshots, snapshot)
-	}
-	s.mu.Unlock()
+	snapshots := s.Runtime.KeeperSnapshots()
 	home, _ := os.UserHomeDir()
 	type targetView struct {
 		Key       string     `json:"key"`
@@ -1070,10 +721,10 @@ func (s *Server) handleKeeperGet(w http.ResponseWriter, r *http.Request) {
 			WeeklyKeeperEnabled:  agent.WeeklyKeeperEnabled,
 			DailyWakeupTime:      agent.DailyWakeupTime,
 			WeeklyAllGroups:      agent.WeeklyAllGroups,
-			Running:              s.Keeper.InFlight(id),
+			Running:              s.Runtime.Keeper.InFlight(id),
 		}
 		for _, target := range keeper.WeeklyTargets(id, snapshot, agent.WeeklyAllGroups) {
-			last, ok := s.Keeper.WeeklyTriggered(target.Key)
+			last, ok := s.Runtime.Keeper.WeeklyTriggered(target.Key)
 			var lastPtr *time.Time
 			if ok {
 				lastPtr = &last
@@ -1097,7 +748,7 @@ func (s *Server) handleKeeperGet(w http.ResponseWriter, r *http.Request) {
 		Reply   string    `json:"reply"`
 	}
 	executions := []executionView{}
-	for _, record := range s.Keeper.History.Recent(20) {
+	for _, record := range s.Runtime.KeeperRecords(20) {
 		reply := record.OutputSnippet
 		if home != "" {
 			reply = strings.ReplaceAll(reply, home, "~")
@@ -1148,12 +799,10 @@ func (s *Server) handleKeeperPing(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "only Antigravity has quota groups")
 			return
 		}
-		s.mu.Lock()
-		snapshot, ok := s.snapshots["antigravity"]
-		s.mu.Unlock()
+		snapshot := findSnapshot(s.Runtime.KeeperSnapshots(), "antigravity")
 		found := false
-		if ok {
-			for _, group := range keeper.WeeklyGroups(&snapshot) {
+		if snapshot != nil {
+			for _, group := range keeper.WeeklyGroups(snapshot) {
 				if group == body.Group {
 					found = true
 				}
@@ -1164,12 +813,11 @@ func (s *Server) handleKeeperPing(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	request, err := s.Keeper.Manual(body.Agent, body.Group)
-	if err != nil {
+	if _, err := s.Runtime.TriggerKeeperPing(body.Agent, body.Group); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	s.startKeeper(request)
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]bool{"accepted": true})
 }
@@ -1189,6 +837,7 @@ func (s *Server) handlePushAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid push subscription")
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]bool{"stored": true})
 }
@@ -1205,7 +854,7 @@ func (s *Server) handlePushDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]bool{"removed": true})
+	writeJSON(w, map[string]bool{"removed": true})
 }
 
 func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
@@ -1235,7 +884,7 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode, MaxAge: 400 * 24 * 60 * 60, Secure: s.Access.HTTPS,
 	}
 	http.SetCookie(w, cookie)
-	_ = json.NewEncoder(w).Encode(map[string]bool{"paired": true})
+	writeJSON(w, map[string]bool{"paired": true})
 }
 
 func (s *Server) pairAllowed(r *http.Request) bool {
@@ -1265,8 +914,6 @@ func (s *Server) pairAllowed(r *http.Request) bool {
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
-// defaultWSValidation is how often a remote socket re-checks its session, so
-// `remote reset-token` closes phones without restarting serve.
 const defaultWSValidation = 15 * time.Second
 
 type wsClient struct {
@@ -1326,7 +973,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request, local bool) {
 		}
 	}()
 	if local {
-		<-readDone
+		select {
+		case <-readDone:
+		case <-s.stop:
+		}
 		return
 	}
 	interval := s.wsValidation
@@ -1377,6 +1027,11 @@ func (s *Server) broadcast(event string, data any) {
 }
 
 func (s *Server) serveWeb(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/assets/") {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/sw.js" {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
 	if s.WebDir != "" {
 		dir := s.WebDir
 		path := filepath.Join(dir, filepath.Clean("/"+r.URL.Path))
@@ -1408,11 +1063,27 @@ func (s *Server) serveWeb(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-// Shutdown stops the background loop.
+// Shutdown stops HTTP/Unix listeners and the underlying runtime cleanly.
 func (s *Server) Shutdown() {
-	select {
-	case <-s.stop:
-	default:
+	s.stopOnce.Do(func() {
 		close(s.stop)
-	}
+		if s.Runtime != nil {
+			s.Runtime.Stop()
+		}
+		s.mu.Lock()
+		httpSrv := s.httpServer
+		unixSrv := s.unixServer
+		s.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if httpSrv != nil {
+			_ = httpSrv.Shutdown(ctx)
+		}
+		if unixSrv != nil {
+			_ = unixSrv.Shutdown(ctx)
+		}
+	})
 }
+
+// Keep unused import check satisfied if quota is referenced via Runtime.
+var _ = quota.ProviderIDs

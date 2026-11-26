@@ -13,10 +13,8 @@ import (
 	"time"
 
 	"github.com/fangwangme/tokenpulse/internal/config"
-	"github.com/fangwangme/tokenpulse/internal/keeper"
-	"github.com/fangwangme/tokenpulse/internal/pricing"
-	"github.com/fangwangme/tokenpulse/internal/provider"
-	"github.com/fangwangme/tokenpulse/internal/report"
+	rt "github.com/fangwangme/tokenpulse/internal/runtime"
+	"github.com/fangwangme/tokenpulse/internal/scan"
 	"github.com/fangwangme/tokenpulse/internal/usage"
 )
 
@@ -24,27 +22,25 @@ func testServer(t *testing.T) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	manager := config.NewWithPath(filepath.Join(dir, "config.toml"))
-	cfg, err := manager.Load()
+	scanner, err := scan.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := rt.New(dir, manager, scanner, "daemon", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := &Server{
 		DataDir: dir,
-		Config:  manager,
 		State:   NewStateStore(dir),
+		Runtime: engine,
+		Push:    newPushStore(dir),
 		Access: Access{
 			Mode: "tailscale-serve", HTTPS: true,
 			Hosts: map[string]bool{"localhost": true, "127.0.0.1": true, "tokenpulse.test": true},
 		},
-		Keeper:      keeper.NewEngine(cfg.Keeper, manager.KeeperStatePath()),
-		Report:      report.NewService(filepath.Join(dir, "usage.db")),
-		Pricing:     pricing.NewService(dir, filepath.Join(dir, "usage.db")),
-		snapshots:   map[string]provider.QuotaSnapshot{},
-		quotaErrors: map[string]quotaError{},
-		exhausted:   map[string]bool{},
-		firstScan:   make(chan struct{}),
-		wsClients:   map[*wsClient]bool{},
-		stop:        make(chan struct{}),
+		wsClients: map[*wsClient]bool{},
+		stop:      make(chan struct{}),
 	}
 	return server
 }
@@ -158,7 +154,7 @@ func TestOriginAndHostChecks(t *testing.T) {
 func TestSettingsWhitelist(t *testing.T) {
 	server := testServer(t)
 	cookie := pair(t, server)
-	path := server.Config.Path
+	path := server.Runtime.Config.Path
 
 	send := func(body string) *httptest.ResponseRecorder {
 		r := request(http.MethodPatch, "https://tokenpulse.test/api/settings", body)
@@ -200,7 +196,7 @@ func TestSettingsWhitelist(t *testing.T) {
 	if _, ok := response.Settings["providers.agy.enabled"]; !ok {
 		t.Fatal("response keys must use agy")
 	}
-	cfg, err := server.Config.Load()
+	cfg, err := server.Runtime.Config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,9 +230,9 @@ func TestKeeperPingValidation(t *testing.T) {
 // Protects remote.md "HTTP API": the wire names Antigravity agy on output.
 func TestAPIAgentNames(t *testing.T) {
 	server := testServer(t)
-	close(server.firstScan)
+	server.Runtime.MarkScanned(1, time.Now())
 	token, _ := server.State.Token()
-	store := usage.NewStore(server.Report.DBPath)
+	store := usage.NewStore(server.Runtime.Report.DBPath)
 	db, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
@@ -296,22 +292,22 @@ func TestAPIAgentNames(t *testing.T) {
 
 func TestRefreshGateAllowsOneManualRefreshPerMinute(t *testing.T) {
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
-	allowUsage, allowQuota, retry := refreshGate(now, time.Time{}, time.Time{}, true, true)
+	allowUsage, allowQuota, retry := rt.RefreshGate(now, time.Time{}, time.Time{}, true, true)
 	if !allowUsage || !allowQuota || retry != 0 {
 		t.Fatalf("first refresh = %v %v %d", allowUsage, allowQuota, retry)
 	}
 
-	allowUsage, allowQuota, retry = refreshGate(now.Add(10*time.Second), now, now, true, true)
+	allowUsage, allowQuota, retry = rt.RefreshGate(now.Add(10*time.Second), now, now, true, true)
 	if allowUsage || allowQuota || retry != 50 {
 		t.Fatalf("throttled refresh = %v %v %d", allowUsage, allowQuota, retry)
 	}
 
-	allowUsage, allowQuota, _ = refreshGate(now.Add(59*time.Second), now, now, true, false)
+	allowUsage, allowQuota, _ = rt.RefreshGate(now.Add(59*time.Second), now, now, true, false)
 	if allowUsage || allowQuota {
 		t.Fatal("quota was not requested but still allowed")
 	}
 
-	allowUsage, _, _ = refreshGate(now.Add(time.Minute), now, now, true, false)
+	allowUsage, _, _ = rt.RefreshGate(now.Add(time.Minute), now, now, true, false)
 	if !allowUsage {
 		t.Fatal("refresh exactly one minute later should be allowed")
 	}
@@ -319,8 +315,7 @@ func TestRefreshGateAllowsOneManualRefreshPerMinute(t *testing.T) {
 
 func TestStatusAnswersBeforeFirstScan(t *testing.T) {
 	server := testServer(t)
-	server.lastScannedAt = 123
-	server.lastFetchedAt = time.Unix(456, 0)
+	server.Runtime.MarkScanned(123, time.Unix(456, 0))
 	token, err := server.State.Token()
 	if err != nil {
 		t.Fatal(err)

@@ -13,6 +13,10 @@ type styles struct {
 	danger   lipgloss.Style
 	error    lipgloss.Style
 	toast    lipgloss.Style
+	cost     lipgloss.Style
+	badgeOn  lipgloss.Style
+	badgeOff lipgloss.Style
+	rule     lipgloss.Style
 	heat     [6]lipgloss.Style
 
 	companyAnthropic lipgloss.Style
@@ -49,6 +53,10 @@ func stylesFor(theme int) styles {
 		danger:           lipgloss.NewStyle().Foreground(fg("203", "160")),
 		error:            lipgloss.NewStyle().Foreground(fg("203", "160")).Bold(true),
 		toast:            lipgloss.NewStyle().Bold(true).Foreground(fg("16", "231")).Background(fg("42", "34")),
+		cost:             lipgloss.NewStyle().Bold(true).Foreground(fg("220", "136")),
+		badgeOn:          lipgloss.NewStyle().Bold(true).Foreground(fg("42", "28")),
+		badgeOff:         lipgloss.NewStyle().Foreground(fg("244", "245")),
+		rule:             lipgloss.NewStyle().Foreground(fg("238", "251")),
 		heat:             heat,
 		companyAnthropic: lipgloss.NewStyle().Foreground(fg("209", "166")),
 		companyOpenAI:    lipgloss.NewStyle().Foreground(fg("114", "28")),

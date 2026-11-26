@@ -21,13 +21,14 @@ import (
 func runServe(args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	var port, httpsPort int
-	var noTailscale, lan bool
+	var noTailscale, lan, quiet bool
 	var webDir string
 	flags.IntVar(&port, "port", 0, "local HTTP port (default 4120)")
 	flags.IntVar(&httpsPort, "https-port", 0, "Tailscale Serve HTTPS port (default 8444)")
 	flags.BoolVar(&noTailscale, "no-tailscale", false, "listen on localhost only, without Tailscale")
 	flags.BoolVar(&lan, "lan", false, "listen on the LAN over unencrypted HTTP")
 	flags.StringVar(&webDir, "web-dir", "", "serve the web app from this directory instead of the embedded build")
+	flags.BoolVar(&quiet, "quiet", false, "suppress the startup banner and QR code")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -38,11 +39,13 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg, err := manager.Load(); err == nil && cfg.Display.AutoRefreshSecs == 0 {
-		fmt.Println("display.auto_refresh_secs is 0; serve refreshes every 300s")
+	if !quiet {
+		if cfg, err := manager.Load(); err == nil && cfg.Display.AutoRefreshSecs == 0 {
+			fmt.Println("display.auto_refresh_secs is 0; serve refreshes every 300s")
+		}
 	}
 	server, err := remote.NewServer(remote.Options{
-		Port: port, HTTPSPort: httpsPort, NoTailscale: noTailscale, LAN: lan, WebDir: webDir,
+		Port: port, HTTPSPort: httpsPort, NoTailscale: noTailscale, LAN: lan, WebDir: webDir, Quiet: quiet,
 	})
 	if err != nil {
 		return err

@@ -39,9 +39,12 @@ agent session files / APIs
         │           │            │
  internal/report  internal/cli  internal/keeper
         │                        │
-   ┌────┴────┐              internal/remote
-   │         │                   │
-internal/tui └── HTTP/WS + embedded web/
+        └─────────┬──────────────┘
+           internal/runtime   single writer, flock, refresh loop, event bus
+                  │
+        ┌─────────┴──────────┐
+   internal/tui       internal/remote
+  (thin client)   (HTTP/WS + embedded web/)
 ```
 
 - `internal/usage` writes `usage.db`: normalized messages and daily rollups.
@@ -54,16 +57,23 @@ internal/tui └── HTTP/WS + embedded web/
   stores dated price periods, and computes message costs. Stored costs move
   only through `tokenpulse reprice` (`pricing.md`).
 - `internal/scan` prices the catalog, parses the enabled sources, ingests the
-  messages and rebuilds the rollups. `serve` and the TUI call the same scanner.
+  messages and rebuilds the rollups.
 - `internal/report` is the one usage report used by the TUI, the CLI and the
   phone (`usage-report.md`).
-- `internal/remote` serves the PWA, the JSON API and the WebSocket, pairs
-  phones, enforces the settings allowlist, fetches Tailscale state, stores push
-  subscriptions and exposes a local Unix-socket client (`remote.md`).
+- `internal/runtime` is the single logical writer and scheduler for a data
+  directory, guarded by an OS `flock` (`runtime.lock`). It owns scanning,
+  quota refreshes, the 60-second manual cooldown, Keeper scheduling, and an
+  event bus. Both `internal/tui` and `internal/remote` consume it through the
+  same `runtime.Client` / `*runtime.Runtime` boundary.
+- `internal/remote` is a thin transport layer over `internal/runtime` that
+  serves the PWA, JSON API, WebSocket, pairing, settings allowlist, Tailscale
+  resolution, Web Push, and the local Unix-socket `SocketClient` (`remote.md`).
 - `internal/keeper` schedules the optional agent pings and records them in
   `tokenpulse.db`.
 - `internal/service` installs `serve` as a systemd user unit or launchd agent.
-- `internal/tui` is the terminal dashboard (`tui-usage.md`).
+- `internal/tui` is a thin Bubble Tea frontend over `runtime.Client`
+  (`InProcessClient` locally, or `SocketClient` attached to a background
+  `serve`), including a `Web remote` toggle in Settings (`tui-usage.md`).
 - `internal/cli` implements every command and the text/JSON/CSV output
   (`cli.md`).
 
@@ -105,6 +115,7 @@ tokenpulse/
 │   ├── quota/                    # read-only fetchers and cache
 │   ├── remote/                   # serve, auth, API, Tailscale, push, client
 │   ├── report/                   # shared usage report queries
+│   ├── runtime/                  # single-writer runtime, flock, event bus, Client
 │   ├── scan/                     # refresh orchestration
 │   ├── service/                  # systemd/launchd install
 │   ├── summary/                  # 0.6-compatible JSON/text summary
