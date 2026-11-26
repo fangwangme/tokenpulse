@@ -1,5 +1,5 @@
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import { navigate, state } from "../store";
+import { navigate, setting, state } from "../store";
 import { fetchQuota } from "../api";
 import { QUOTA_PROVIDER_KEYS as ORDERED_PROVIDERS, scanIntervalToMs } from "../shared/defaults";
 import { quotaLevel, quotaPace } from "../shared/quota";
@@ -105,12 +105,18 @@ export function QuotaPage() {
     return list.length > 0 ? list : (ORDERED_PROVIDERS as readonly (typeof ORDERED_PROVIDERS)[number][]);
   };
 
+  const showEmptyProviders = () => setting("display.show_empty_providers", false);
+
   const enabledProviders = () => {
     const list: typeof state.quotaSnapshots = [];
     for (const key of ORDERED_PROVIDERS) {
       if (state.quotaProviders[key] === false) continue;
       const found = state.quotaSnapshots.find((s) => s.provider === key);
-      if (found) list.push(found);
+      if (found) {
+        list.push(found);
+      } else if (showEmptyProviders()) {
+        list.push({ provider: key, enabled: true, snapshot: null, error: null });
+      }
     }
     return list;
   };
@@ -120,40 +126,30 @@ export function QuotaPage() {
 
   return (
     <div class="page">
-      {/* Shared Header */}
-      <div class="hdr">
-        <div style={{ width: "44px" }} />
-        <div class="ht">
-          <div class="t">{t("quota.title")}</div>
-          <div class="s">
-            {state.quotaEnabled
-              ? (isLoading()
-                ? (refreshing() ? t("quota.refreshing") : t("quota.loading"))
-                : state.quotaUpdated
-                ? t("quota.refreshedAt", { time: formatTime(state.quotaUpdated) })
-                : "")
-              : ""}
-          </div>
-        </div>
-        <Show when={state.quotaEnabled} fallback={<div style={{ width: "38px" }} />}>
-          <button class="cbtn" aria-label={t("app.reload")} onClick={doRefresh}>
-            <span
-              style={{
-                display: "inline-flex",
-                "align-items": "center",
-                "justify-content": "center",
-                animation: isLoading() ? "sp .8s linear infinite" : "none",
-              }}
-            >
-              <Icon name="refresh" />
-            </span>
-          </button>
-        </Show>
-      </div>
-
       <div class="scroll">
         <div style={{ padding: "0 16px calc(104px + env(safe-area-inset-bottom))" }}>
           <Show when={state.quotaEnabled} fallback={<FeatureDisabledNotice message={t("quota.disabledNotice")} />}>
+          <div class="statusbar">
+            <div class="s">
+              {isLoading()
+                ? (refreshing() ? t("quota.refreshing") : t("quota.loading"))
+                : state.quotaUpdated
+                ? t("quota.refreshedAt", { time: formatTime(state.quotaUpdated) })
+                : ""}
+            </div>
+            <button class="cbtn" aria-label={t("app.reload")} onClick={doRefresh}>
+              <span
+                style={{
+                  display: "inline-flex",
+                  "align-items": "center",
+                  "justify-content": "center",
+                  animation: isLoading() ? "sp .8s linear infinite" : "none",
+                }}
+              >
+                <Icon name="refresh" />
+              </span>
+            </button>
+          </div>
 
           {/* Skeleton Template when loading without data */}
           <Show when={showSkeleton()}>
@@ -281,7 +277,7 @@ export function QuotaPage() {
                     </Show>
 
                     {/* Card */}
-                    <Show when={p.snapshot}>
+                    <Show when={p.snapshot || showEmptyProviders()}>
                       <div
                         style={{
                           background: "var(--surface)",
@@ -319,6 +315,12 @@ export function QuotaPage() {
                             <Show when={state.accountDisplay === "full" && p.snapshot?.account}>
                               <span>{p.snapshot?.plan ? " · " : ""}{p.snapshot?.account}</span>
                             </Show>
+                          </div>
+                        </Show>
+
+                        <Show when={!p.snapshot || (p.snapshot.windows?.length ?? 0) === 0}>
+                          <div style={{ padding: "12px 0 6px", color: "var(--faint)", "font-size": "12.5px" }}>
+                            {t("quota.emptyProvider")}
                           </div>
                         </Show>
 

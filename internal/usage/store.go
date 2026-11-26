@@ -28,15 +28,28 @@ type CostFunc func(canonicalModel, providerID, date string, tokens provider.Toke
 
 // Store is the usage ledger.
 type Store struct {
-	Path string
+	Path     string
+	readOnly bool
 }
 
 func NewStore(path string) *Store { return &Store{Path: path} }
+
+// NewReadOnlyStore reads an existing ledger without migrations or journal
+// changes, so a report never waits behind a running scan.
+func NewReadOnlyStore(path string) *Store { return &Store{Path: path, readOnly: true} }
 
 var schemaMu sync.Mutex
 var schemaDone = map[string]bool{}
 
 func (s *Store) Open() (*sql.DB, error) {
+	if s.readOnly {
+		db, err := sql.Open("sqlite", "file:"+s.Path+"?mode=ro&_pragma=busy_timeout(5000)")
+		if err != nil {
+			return nil, err
+		}
+		db.SetMaxOpenConns(1)
+		return db, nil
+	}
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
 		return nil, err
 	}
@@ -1194,13 +1207,29 @@ func (s *Store) LoadModelSummaries(from, to *time.Time, sources []string) ([]str
 		return nil, err
 	}
 	defer db.Close()
-	query := `SELECT canonical_model_id, provider_id, source, session_id,
-        SUM(cost_usd), SUM(total_tokens), COUNT(*), SUM(input_tokens), SUM(output_tokens),
-        SUM(cache_read_tokens), SUM(cache_write_tokens)
+	// Antigravity runtimes can record the same message key more than once.
+	// Rank within the canonical source and keep one row, like the ingest-time
+	// cross-client collapse does; other sources keep every client row.
+	query := `WITH filtered AS (
+        SELECT rowid, canonical_model_id, provider_id, session_id, cost_usd, total_tokens,
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, client, message_key,
+            ` + canonicalSourceSQL + ` AS canonical_source
         FROM usage_messages WHERE 1=1`
 	args := []any{}
 	query, args = appendRangeAndSources(query, args, from, to, sources)
-	query += " GROUP BY canonical_model_id, provider_id, source, session_id"
+	query += `), ranked AS (
+        SELECT filtered.*, ROW_NUMBER() OVER (
+            PARTITION BY canonical_source, message_key
+            ORDER BY total_tokens DESC, client ASC, rowid ASC
+        ) AS rn
+        FROM filtered
+    ), deduped AS (
+        SELECT * FROM ranked WHERE canonical_source <> 'antigravity' OR rn = 1
+    )
+    SELECT canonical_model_id, provider_id, canonical_source, session_id,
+        SUM(cost_usd), SUM(total_tokens), COUNT(*), SUM(input_tokens), SUM(output_tokens),
+        SUM(cache_read_tokens), SUM(cache_write_tokens)
+    FROM deduped GROUP BY canonical_model_id, provider_id, canonical_source, session_id`
 	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err

@@ -70,7 +70,27 @@ jobs:
         run: go test ./...
 
       - name: Build and smoke test
+        env:
+          CGO_ENABLED: "0"
         run: |
           go build -o .local/tokenpulse .
           ./.local/tokenpulse --version
           ./.local/tokenpulse --help >/dev/null
+
+  race:
+    name: Race Detector
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test with the race detector
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race ./...

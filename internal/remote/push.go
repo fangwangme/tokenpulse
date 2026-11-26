@@ -7,12 +7,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
+
+var pushHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 type pushStore struct {
 	mu            sync.Mutex
@@ -111,12 +115,14 @@ func (p *pushStore) Add(subscription json.RawMessage) error {
 	if json.Unmarshal(subscription, &parsed) != nil || parsed.Endpoint == "" {
 		return errors.New("invalid push subscription")
 	}
-	for _, existing := range p.subscriptions {
+	for index, existing := range p.subscriptions {
 		var candidate struct {
 			Endpoint string `json:"endpoint"`
 		}
 		if json.Unmarshal(existing, &candidate) == nil && candidate.Endpoint == parsed.Endpoint {
-			return nil
+			// Browsers rotate the endpoint's auth/p256dh keys in place.
+			p.subscriptions[index] = subscription
+			return p.saveLocked()
 		}
 	}
 	p.subscriptions = append(p.subscriptions, subscription)
@@ -143,7 +149,13 @@ func (p *pushStore) Remove(endpoint string) error {
 	return p.saveLocked()
 }
 
-// Send delivers one push; 404/410 drops the subscription.
+func pushPayload(title, body string) []byte {
+	payload, _ := json.Marshal(map[string]string{"title": title, "body": body})
+	return payload
+}
+
+// Send delivers one push; 404/410 drops the subscription. Callers run it in a
+// goroutine so a slow push service cannot hold the refresh lock.
 func (p *pushStore) Send(title, body string) {
 	p.mu.Lock()
 	if err := p.loadLocked(); err != nil {
@@ -154,12 +166,14 @@ func (p *pushStore) Send(title, body string) {
 	subscriptions := append([]json.RawMessage(nil), p.subscriptions...)
 	p.mu.Unlock()
 
+	payload := pushPayload(title, body)
 	for _, raw := range subscriptions {
 		subscription := &webpush.Subscription{}
 		if json.Unmarshal(raw, subscription) != nil {
 			continue
 		}
-		resp, err := webpush.SendNotification([]byte(body), subscription, &webpush.Options{
+		resp, err := webpush.SendNotification(payload, subscription, &webpush.Options{
+			HTTPClient:      pushHTTPClient,
 			Subscriber:      "mailto:tokenpulse@localhost",
 			VAPIDPublicKey:  keys.PublicKey,
 			VAPIDPrivateKey: keys.PrivateKey,

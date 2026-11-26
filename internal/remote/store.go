@@ -7,10 +7,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+)
+
+const (
+	sessionTTL  = 400 * 24 * time.Hour
+	maxSessions = 20
 )
 
 // Pairing state lives in remote.json with mode 0600.
@@ -57,11 +63,15 @@ func (s *StateStore) loadLocked() (State, error) {
 	content, err := os.ReadFile(s.Path)
 	if err == nil {
 		var state State
-		if json.Unmarshal(content, &state) == nil && state.Token != "" {
-			return state, nil
+		if err := json.Unmarshal(content, &state); err != nil {
+			return State{}, fmt.Errorf("remote state is corrupt: %w", err)
 		}
+		if state.Token == "" {
+			return State{}, errors.New("remote state has no token")
+		}
+		return state, nil
 	}
-	if !errors.Is(err, os.ErrNotExist) && err != nil {
+	if !errors.Is(err, os.ErrNotExist) {
 		return State{}, err
 	}
 	token, err := randomToken(16)
@@ -76,14 +86,43 @@ func (s *StateStore) loadLocked() (State, error) {
 }
 
 func (s *StateStore) saveLocked(state State) error {
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
+	directory := filepath.Dir(s.Path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.Path, data, 0o600)
+	temporary, err := os.CreateTemp(directory, ".remote-*.tmp")
+	if err != nil {
+		return err
+	}
+	name := temporary.Name()
+	defer os.Remove(name)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, s.Path); err != nil {
+		return err
+	}
+	if directoryFile, err := os.Open(directory); err == nil {
+		_ = directoryFile.Sync()
+		_ = directoryFile.Close()
+	}
+	return nil
 }
 
 // Token returns the remote token.
@@ -118,7 +157,17 @@ func (s *StateStore) CreateSession() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	state.Sessions = append(state.Sessions, Session{Hash: hashToken(token), CreatedAt: time.Now().UTC()})
+	now := time.Now().UTC()
+	active := make([]Session, 0, len(state.Sessions)+1)
+	for _, session := range state.Sessions {
+		if now.Sub(session.CreatedAt) < sessionTTL {
+			active = append(active, session)
+		}
+	}
+	if len(active) >= maxSessions {
+		active = active[len(active)-maxSessions+1:]
+	}
+	state.Sessions = append(active, Session{Hash: hashToken(token), CreatedAt: now})
 	if err := s.saveLocked(state); err != nil {
 		return "", err
 	}
@@ -136,8 +185,9 @@ func (s *StateStore) ValidSession(token string) bool {
 		return false
 	}
 	hash := hashToken(token)
+	now := time.Now().UTC()
 	for _, session := range state.Sessions {
-		if session.Hash == hash {
+		if session.Hash == hash && now.Sub(session.CreatedAt) < sessionTTL {
 			return true
 		}
 	}

@@ -93,13 +93,15 @@ forks; Antigravity CLI databases, Language Server cache and alias learning).
 ## Data directory and test runs
 
 - `TOKENPULSE_DATA_DIR` replaces `~/.local/share/tokenpulse` as the directory
-  of every data file, lock, socket and log. `TOKENPULSE_CONFIG_PATH` still
-  overrides the config file alone.
+  of every data file, lock, socket and log. The directory is created with mode
+  `0700`, and an existing directory is tightened to `0700` on first use.
+  `TOKENPULSE_CONFIG_PATH` still overrides the config file alone.
 - `TOKENPULSE_ENV=test` marks a test run: the version is shown as
   `<version> (test)` everywhere it appears (`--version`, the TUI, `/api/state`,
-  the phone header), `serve` defaults to ports `14120`/`18444`, and a test run
-  refuses to start when `TOKENPULSE_DATA_DIR` is not set, so it can never use
-  the production data directory or the production Tailscale Serve port.
+  the phone header), `serve` defaults to ports `14120`/`18444`, a test run
+  refuses to start when `TOKENPULSE_DATA_DIR` is not set, and
+  `tokenpulse service install` refuses to install a unit from a test run, so it
+  can never bake the test data directory or ports into a production service.
 
 ## Build and distribution
 

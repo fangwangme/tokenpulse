@@ -1,13 +1,11 @@
 import { createEffect, createSignal, For, on, onMount, Show } from "solid-js";
 import { loadQuota, patchSettings, request, getPushKey, addPushSubscription, removePushSubscription } from "../api";
-import { saveAccent, saveLocale, saveTheme, setting, showToast, state } from "../store";
-import { ACCENTS } from "../themes";
-import { ACCENT_NAMES, QUOTA_PROVIDER_KEYS } from "../shared/defaults";
+import { saveLocale, saveTheme, setting, showToast, state } from "../store";
+import { QUOTA_PROVIDER_KEYS } from "../shared/defaults";
 import { formatYMD, type UsagePreset } from "../shared/usage";
 import { fmtCost } from "./UsagePage";
 import { Icon } from "./ui";
 import { LOCALES, setLocale, t, type LocalePref } from "../i18n";
-import { resolveMode } from "../themes";
 import type { ThemeMode, UsageGetPayload } from "../types";
 
 const MODES: Array<[ThemeMode, "settings.followSystem" | "settings.light" | "settings.dark"]> = [
@@ -16,7 +14,7 @@ const MODES: Array<[ThemeMode, "settings.followSystem" | "settings.light" | "set
   ["dark", "settings.dark"],
 ];
 
-const SCAN_SECONDS = [0, 60, 120, 300, 600, 900];
+const SCAN_SECONDS = [60, 120, 300, 600, 900];
 const LEVELS = ["off", "in_app", "terminal", "system"];
 const SOUNDS = ["chime", "Hero", "Glass", "Submarine", "none"];
 
@@ -33,6 +31,7 @@ export function SettingsPage() {
   const [usageSummary, setUsageSummary] = createSignal("—");
   const [push, setPush] = createSignal<"unsupported" | "loading" | "on" | "off">("loading");
   const [pushBusy, setPushBusy] = createSignal(false);
+  const [standalone, setStandalone] = createSignal(false);
 
   const update = async (key: string, value: unknown) => {
     try {
@@ -43,6 +42,10 @@ export function SettingsPage() {
   };
 
   const value = <T,>(key: string, fallback: T): T => setting<T>(key, fallback);
+  const scanSeconds = () => {
+    const seconds = Number(value("display.auto_refresh_secs", 300));
+    return seconds > 0 ? seconds : 300;
+  };
 
   const [quotaRequested, setQuotaRequested] = createSignal(false);
   createEffect(() => {
@@ -94,6 +97,7 @@ export function SettingsPage() {
   };
 
   onMount(() => {
+    setStandalone(document.documentElement.dataset.mode === "standalone");
     if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
       setPush("unsupported");
       return;
@@ -140,15 +144,8 @@ export function SettingsPage() {
 
   return (
     <div class="page">
-      <div class="hdr">
-        <div style={{ width: "44px" }} />
-        <div class="ht">
-          <div class="t">{t("settings.title")}</div>
-        </div>
-        <div style={{ width: "44px" }} />
-      </div>
       <div class="scroll">
-        <div class="settings">
+        <div class="settings" style={{ "padding-top": "calc(8px + env(safe-area-inset-top))" }}>
           <div class="sec">{t("settings.appearance")}</div>
           <div class="seg">
             <For each={MODES}>
@@ -158,22 +155,6 @@ export function SettingsPage() {
                 </button>
               )}
             </For>
-          </div>
-          <div class="li" style={{ "justify-content": "space-between", "align-items": "center" }}>
-            <div class="tx">{t("settings.accent")}</div>
-            <div class="sw">
-              <For each={ACCENT_NAMES}>
-                {(accent) => (
-                  <button
-                    class={state.accent === accent ? "on" : ""}
-                    aria-label={t(`accent.${accent}` as any)}
-                    onClick={() => saveAccent(accent)}
-                  >
-                    <i style={{ background: ACCENTS[accent][resolveMode(state.themeMode)] }} />
-                  </button>
-                )}
-              </For>
-            </div>
           </div>
 
           <div class="sec">{t("settings.language")}</div>
@@ -198,8 +179,24 @@ export function SettingsPage() {
 
           <div class="sec">{t("settings.quotaUsage")}</div>
           <div class="card">
+            <div class="li" style={{ "flex-direction": "column", "align-items": "stretch", gap: "8px" }}>
+              <div class="tx">{t("settings.usageScanInterval")}</div>
+              <div class="seg" style={{ display: "grid", "grid-template-columns": "repeat(5, minmax(0, 1fr))", padding: "2px" }}>
+                <For each={SCAN_SECONDS}>
+                  {(seconds) => (
+                    <button
+                      class={scanSeconds() === seconds ? "on" : ""}
+                      style={{ height: "30px", "font-size": "12px", padding: "0 2px" }}
+                      onClick={() => void update("display.auto_refresh_secs", seconds)}
+                    >
+                      {`${seconds / 60}m`}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
             <button class="li" onClick={() => void update("display.refresh_quota", !value("display.refresh_quota", true))}>
-              <div class="tx">{t("settings.quotaRefresh")}</div>
+              <div class="tx">{t("settings.quotaEnabled")}</div>
               <span class={`tg${value("display.refresh_quota", true) ? "" : " off"}`} />
             </button>
             <button class="li" onClick={() => (state.route = { name: "quota", from: "settings" })}>
@@ -287,22 +284,6 @@ export function SettingsPage() {
               <div class="tx">{t("settings.showEmptyProviders")}</div>
               <span class={`tg${value("display.show_empty_providers", false) ? "" : " off"}`} />
             </button>
-            <div class="li" style={{ "flex-direction": "column", "align-items": "stretch", gap: "8px" }}>
-              <div class="tx">{t("settings.usageScanInterval")}</div>
-              <div class="seg" style={{ display: "grid", "grid-template-columns": "repeat(6, minmax(0, 1fr))", padding: "2px" }}>
-                <For each={SCAN_SECONDS}>
-                  {(seconds) => (
-                    <button
-                      class={Number(value("display.auto_refresh_secs", 900)) === seconds ? "on" : ""}
-                      style={{ height: "30px", "font-size": "12px", padding: "0 2px" }}
-                      onClick={() => void update("display.auto_refresh_secs", seconds)}
-                    >
-                      {seconds === 0 ? t("settings.off") : `${seconds / 60}m`}
-                    </button>
-                  )}
-                </For>
-              </div>
-            </div>
           </div>
           <p class="note">{t("settings.refreshIntervalHint")}</p>
 
@@ -392,10 +373,14 @@ export function SettingsPage() {
               <div class="tx">{t("settings.version")}</div>
               <span class="v">{state.version}</span>
             </div>
-            <div class="li">
-              <div class="tx">{t("settings.install")}</div>
-              <span class="v">{t("settings.installHint")}</span>
-            </div>
+            <Show when={!standalone()}>
+              <div class="li">
+                <div class="tx">
+                  {t("settings.install")}
+                  <small>{t("settings.installHint")}</small>
+                </div>
+              </div>
+            </Show>
           </div>
           <Show when={push() === "unsupported"}>
             <p class="note">{t("settings.pushNotConnected")}</p>

@@ -36,17 +36,27 @@ func SocketPath(dataDir string) (string, error) {
 		return "", err
 	}
 	sum := sha256.Sum256([]byte(absolute))
-	name := "tokenpulse-" + hex.EncodeToString(sum[:16]) + ".sock"
+	name := "tokenpulse-" + hex.EncodeToString(sum[:16])
 	directories := []string{}
 	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
 		directories = append(directories, runtimeDir)
 	}
 	directories = append(directories, os.TempDir())
 	for _, directory := range directories {
-		candidate := filepath.Join(directory, name)
-		if len(candidate) <= unixSocketPathLimit() {
-			return candidate, nil
+		private := filepath.Join(directory, name)
+		candidate := filepath.Join(private, socketName)
+		if len(candidate) > unixSocketPathLimit() {
+			continue
 		}
+		if err := os.MkdirAll(private, 0o700); err != nil {
+			continue
+		}
+		// MkdirAll keeps an existing mode; make the directory private even
+		// when a previous version created it directly in the shared temp dir.
+		if err := os.Chmod(private, 0o700); err != nil {
+			continue
+		}
+		return candidate, nil
 	}
 	return "", errors.New("no directory can hold the serve socket path")
 }

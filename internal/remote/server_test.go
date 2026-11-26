@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 
-	"github.com/gorilla/websocket"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,8 +43,7 @@ func testServer(t *testing.T) *Server {
 		quotaErrors: map[string]quotaError{},
 		exhausted:   map[string]bool{},
 		firstScan:   make(chan struct{}),
-		wsClients:   map[*websocket.Conn]bool{},
-		refreshCh:   make(chan refreshFlags, 1),
+		wsClients:   map[*wsClient]bool{},
 		stop:        make(chan struct{}),
 	}
 	return server
@@ -293,5 +291,53 @@ func TestAPIAgentNames(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("quota API omitted agy")
+	}
+}
+
+func TestRefreshGateAllowsOneManualRefreshPerMinute(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	allowUsage, allowQuota, retry := refreshGate(now, time.Time{}, time.Time{}, true, true)
+	if !allowUsage || !allowQuota || retry != 0 {
+		t.Fatalf("first refresh = %v %v %d", allowUsage, allowQuota, retry)
+	}
+
+	allowUsage, allowQuota, retry = refreshGate(now.Add(10*time.Second), now, now, true, true)
+	if allowUsage || allowQuota || retry != 50 {
+		t.Fatalf("throttled refresh = %v %v %d", allowUsage, allowQuota, retry)
+	}
+
+	allowUsage, allowQuota, _ = refreshGate(now.Add(59*time.Second), now, now, true, false)
+	if allowUsage || allowQuota {
+		t.Fatal("quota was not requested but still allowed")
+	}
+
+	allowUsage, _, _ = refreshGate(now.Add(time.Minute), now, now, true, false)
+	if !allowUsage {
+		t.Fatal("refresh exactly one minute later should be allowed")
+	}
+}
+
+func TestStatusAnswersBeforeFirstScan(t *testing.T) {
+	server := testServer(t)
+	server.lastScannedAt = 123
+	server.lastFetchedAt = time.Unix(456, 0)
+	token, err := server.State.Token()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := request(http.MethodGet, "https://tokenpulse.test/api/status", "")
+	r.Header.Set("Authorization", "Bearer "+token)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- perform(server, r) }()
+	select {
+	case recorder := <-done:
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d %s", recorder.Code, recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), `"scannedAt":123`) {
+			t.Fatalf("body = %s", recorder.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("/api/status waited for the first scan")
 	}
 }

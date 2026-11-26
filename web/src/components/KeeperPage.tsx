@@ -142,17 +142,14 @@ export function KeeperPage() {
 
   return (
     <div class="page">
-      <div class="hdr">
-        <div style={{ width: "44px" }} />
-        <div class="ht">
-          <div class="t">{t("keeper.title")}</div>
-        </div>
-        <button class="cbtn" aria-label={t("app.reload")} onClick={() => void load()}>
-          <Icon name="refresh" />
-        </button>
-      </div>
       <div class="scroll">
         <div class="settings">
+          <div class="statusbar">
+            <div class="s" />
+            <button class="cbtn" aria-label={t("app.reload")} onClick={() => void load()}>
+              <Icon name="refresh" />
+            </button>
+          </div>
           <Show when={error()}>
             <div
               style={{

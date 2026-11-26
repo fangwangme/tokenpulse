@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,26 +63,35 @@ type Server struct {
 	Push    *pushStore
 	WebDir  string
 
-	mu            sync.Mutex
-	snapshots     map[string]provider.QuotaSnapshot
-	quotaErrors   map[string]quotaError
-	lastScannedAt int64
-	lastFetchedAt time.Time
-	exhausted     map[string]bool
-	refreshCh     chan refreshFlags
-	running       bool
-	lastRequested time.Time
-	firstScan     chan struct{}
-	firstOnce     sync.Once
-	wsClients     map[*websocket.Conn]bool
-	stop          chan struct{}
-	logger        *log.Logger
+	mu               sync.Mutex
+	pairMu           sync.Mutex
+	pairTimes        map[string][]time.Time
+	snapshots        map[string]provider.QuotaSnapshot
+	quotaErrors      map[string]quotaError
+	lastScannedAt    int64
+	lastFetchedAt    time.Time
+	lastUsageRefresh time.Time
+	lastQuotaRefresh time.Time
+	lastManualUsage  time.Time
+	lastManualQuota  time.Time
+	exhausted        map[string]bool
+	running          bool
+	firstScan        chan struct{}
+	firstOnce        sync.Once
+	wsClients        map[*wsClient]bool
+	wsValidation     time.Duration
+	stop             chan struct{}
+	wake             chan struct{}
+	refreshMu        sync.Mutex
+	logger           *log.Logger
 }
 
 type refreshFlags struct {
 	usage bool
 	quota bool
 }
+
+const manualRefreshInterval = 60 * time.Second
 
 func NewServer(opts Options) (*Server, error) {
 	dataDir, err := paths.DataDir()
@@ -126,8 +136,9 @@ func NewServer(opts Options) (*Server, error) {
 		Cache: quota.NewCache(dataDir), Keeper: keeper.NewEngine(cfg.Keeper, manager.KeeperStatePath()),
 		Push: newPushStore(dataDir), WebDir: opts.WebDir,
 		snapshots: map[string]provider.QuotaSnapshot{}, quotaErrors: map[string]quotaError{},
-		exhausted: map[string]bool{}, refreshCh: make(chan refreshFlags, 1),
-		firstScan: make(chan struct{}), wsClients: map[*websocket.Conn]bool{}, stop: make(chan struct{}),
+		exhausted: map[string]bool{},
+		firstScan: make(chan struct{}), wsClients: map[*wsClient]bool{},
+		stop: make(chan struct{}), wake: make(chan struct{}, 1),
 	}
 	if logFile != nil {
 		server.logger = log.New(logFile, "", log.LstdFlags)
@@ -169,10 +180,15 @@ func (s *Server) Run() error {
 		return err
 	}
 	s.printBanner(token)
+	s.warmCache()
 	go s.refreshLoop()
 	go s.serveUnix(socket)
 
-	server := &http.Server{Handler: s.rootHandler()}
+	server := &http.Server{
+		Handler:           s.rootHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
 	return server.Serve(listener)
 }
 
@@ -239,9 +255,13 @@ func (s *Server) listenLocalSocket(path string) (net.Listener, error) {
 }
 
 func (s *Server) serveUnix(listener net.Listener) {
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.handle(w, r, true)
-	})}
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.handle(w, r, true)
+		}),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
 	_ = server.Serve(listener)
 }
 
@@ -271,10 +291,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, local bool) {
 				s.handleReprice(w, r)
 				return
 			}
-			s.route(w, r)
+			s.route(w, r, true)
 			return
 		}
 		if r.URL.Path == "/api/pair" {
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
 			s.handlePair(w, r)
 			return
 		}
@@ -286,7 +310,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, local bool) {
 			writeError(w, http.StatusForbidden, "origin rejected")
 			return
 		}
-		s.route(w, r)
+		s.route(w, r, false)
 		return
 	}
 	s.serveWeb(w, r)
@@ -321,20 +345,67 @@ func (s *Server) originAccepted(r *http.Request) bool {
 		return false
 	}
 	parsed, err := url.Parse(origin)
-	if err != nil {
+	if err != nil || parsed.Host == "" {
 		return false
 	}
-	return s.hostAccepted(parsed.Host)
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	if scheme != s.expectedScheme() {
+		return false
+	}
+	originHost, originPort, ok := splitHostPort(parsed.Host, scheme)
+	if !ok {
+		return false
+	}
+	requestHost, requestPort, ok := splitHostPort(r.Host, scheme)
+	if !ok {
+		return false
+	}
+	return originHost == requestHost && originPort == requestPort && s.hostAccepted(originHost)
+}
+
+// expectedScheme is the browser-facing scheme serve was configured for.
+func (s *Server) expectedScheme() string {
+	if s.Access.URL != "" {
+		if parsed, err := url.Parse(s.Access.URL); err == nil && parsed.Scheme != "" {
+			return strings.ToLower(parsed.Scheme)
+		}
+	}
+	if s.Access.HTTPS {
+		return "https"
+	}
+	return "http"
+}
+
+func splitHostPort(hostport, scheme string) (string, string, bool) {
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = strings.Trim(hostport, "[]")
+		port = "80"
+		if scheme == "https" {
+			port = "443"
+		}
+	} else {
+		host = strings.Trim(host, "[]")
+	}
+	if host == "" || port == "" {
+		return "", "", false
+	}
+	return strings.ToLower(strings.TrimSuffix(host, ".")), port, true
 }
 
 func stateChanging(method string) bool {
 	return method == http.MethodPost || method == http.MethodPatch || method == http.MethodDelete
 }
 
-func (s *Server) route(w http.ResponseWriter, r *http.Request) {
+func (s *Server) route(w http.ResponseWriter, r *http.Request, local bool) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/state":
 		s.handleState(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/status":
+		s.handleStatus(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/usage":
 		s.handleUsage(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/usage/day":
@@ -360,7 +431,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodDelete && r.URL.Path == "/api/push/subscription":
 		s.handlePushDelete(w, r)
 	case r.URL.Path == "/ws":
-		s.handleWS(w, r)
+		s.handleWS(w, r, local)
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
@@ -378,14 +449,54 @@ func writeJSON(w http.ResponseWriter, value any) {
 }
 
 func (s *Server) waitFirstScan() {
+	s.mu.Lock()
+	scanned := s.lastScannedAt
+	s.mu.Unlock()
+	if scanned > 0 {
+		return
+	}
 	select {
 	case <-s.firstScan:
 	case <-time.After(2 * time.Minute):
 	}
 }
 
+// warmCache makes the server answer from the last persisted state before the
+// first background refresh finishes.
+func (s *Server) warmCache() {
+	if scanned, err := s.Report.ScannedAtValue(); err == nil && scanned > 0 {
+		s.mu.Lock()
+		s.lastScannedAt = scanned
+		s.mu.Unlock()
+	}
+	for _, id := range quota.ProviderIDs {
+		cached, err := s.Cache.LoadAny(id)
+		if err != nil || cached == nil {
+			continue
+		}
+		snapshot := cached.Snapshot
+		quota.Normalize(&snapshot)
+		s.mu.Lock()
+		s.snapshots[id] = snapshot
+		if snapshot.FetchedAt.After(s.lastFetchedAt) {
+			s.lastFetchedAt = snapshot.FetchedAt
+		}
+		s.mu.Unlock()
+	}
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	payload := map[string]any{
+		"running":   s.running,
+		"scannedAt": s.lastScannedAt,
+		"fetchedAt": fetchedAtMs(s.lastFetchedAt),
+	}
+	s.mu.Unlock()
+	writeJSON(w, payload)
+}
+
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	s.waitFirstScan()
 	cfg, _ := s.Config.Load()
 	agents := append([]string(nil), report.AllAgents...)
 	if !cfg.Display.ScanAntigravity {
@@ -524,7 +635,6 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
-	s.waitFirstScan()
 	cfg, _ := s.Config.Load()
 	enabled := map[string]bool{}
 	for _, id := range cfg.EnabledQuotaProviders(quota.ProviderIDs) {
@@ -578,68 +688,118 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if body.Quota != nil {
 		quotaWanted = *body.Quota
 	}
-	status, retry := s.requestRefresh(usage, quotaWanted, true)
-	if status == http.StatusTooManyRequests {
-		w.Header().Set("Retry-After", strconv.Itoa(retry))
-		writeError(w, status, "refresh rate limited")
-		return
+	now := time.Now()
+	s.mu.Lock()
+	lastUsage := s.lastManualUsage
+	if s.lastUsageRefresh.After(lastUsage) {
+		lastUsage = s.lastUsageRefresh
 	}
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]bool{"accepted": true})
+	lastQuota := s.lastManualQuota
+	if s.lastQuotaRefresh.After(lastQuota) {
+		lastQuota = s.lastQuotaRefresh
+	}
+	allowUsage, allowQuota, retryAfter := refreshGate(now, lastUsage, lastQuota, usage, quotaWanted)
+	if allowUsage {
+		s.lastManualUsage = now
+	}
+	if allowQuota {
+		s.lastManualQuota = now
+	}
+	scannedAt := s.lastScannedAt
+	fetchedAt := s.lastFetchedAt
+	s.mu.Unlock()
+
+	accepted := allowUsage || allowQuota
+	if accepted {
+		// Wait for the refresh so the GET that follows reads the new cache.
+		s.refresh(refreshFlags{usage: allowUsage, quota: allowQuota}, now)
+		// Start the cooldown when the refresh finishes, not when it starts, so
+		// a slow scan cannot be followed by another refresh immediately.
+		done := time.Now()
+		s.mu.Lock()
+		if allowUsage {
+			s.lastManualUsage = done
+		}
+		if allowQuota {
+			s.lastManualQuota = done
+		}
+		scannedAt = s.lastScannedAt
+		fetchedAt = s.lastFetchedAt
+		s.mu.Unlock()
+	}
+	writeJSON(w, map[string]any{
+		"accepted":   accepted,
+		"throttled":  (usage && !allowUsage) || (quotaWanted && !allowQuota),
+		"retryAfter": retryAfter,
+		"scannedAt":  scannedAt,
+		"fetchedAt":  fetchedAtMs(fetchedAt),
+	})
 }
 
-func (s *Server) requestRefresh(usage, quotaWanted, requested bool) (int, int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now()
-	if requested {
-		if !s.lastRequested.IsZero() && now.Sub(s.lastRequested) < 10*time.Second {
-			return http.StatusTooManyRequests, int((10*time.Second - now.Sub(s.lastRequested)).Seconds()) + 1
-		}
-		s.lastRequested = now
+// refreshGate allows one manual refresh per target per minute. When it is
+// denied, callers keep serving the previous cache instead of failing.
+func refreshGate(now, lastUsage, lastQuota time.Time, usage, quotaWanted bool) (bool, bool, int) {
+	allowUsage := usage && (lastUsage.IsZero() || now.Sub(lastUsage) >= manualRefreshInterval)
+	allowQuota := quotaWanted && (lastQuota.IsZero() || now.Sub(lastQuota) >= manualRefreshInterval)
+	retry := 0
+	if usage && !allowUsage {
+		retry = max(retry, secondsUntil(lastUsage.Add(manualRefreshInterval), now))
 	}
-	if s.running {
-		return http.StatusAccepted, 0
+	if quotaWanted && !allowQuota {
+		retry = max(retry, secondsUntil(lastQuota.Add(manualRefreshInterval), now))
 	}
-	select {
-	case s.refreshCh <- refreshFlags{usage: usage, quota: quotaWanted}:
-	default:
+	return allowUsage, allowQuota, retry
+}
+
+func secondsUntil(deadline, now time.Time) int {
+	seconds := int(deadline.Sub(now).Seconds())
+	if float64(seconds) < deadline.Sub(now).Seconds() {
+		seconds++
 	}
-	return http.StatusAccepted, 0
+	return max(seconds, 1)
 }
 
 func (s *Server) refreshLoop() {
-	flags := refreshFlags{usage: true, quota: true}
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
 		select {
 		case <-s.stop:
 			return
+		case <-s.wake:
+			timer.Reset(s.refreshInterval())
+			continue
 		case <-timer.C:
-			flags = refreshFlags{usage: true, quota: true}
-		case requested := <-s.refreshCh:
-			flags = requested
+			s.refresh(refreshFlags{usage: true, quota: true}, time.Now())
 		}
-		s.doRefresh(flags)
-		cfg, err := s.Config.Load()
-		interval := 300 * time.Second
-		if err == nil {
-			if cfg.Display.AutoRefreshSecs > 0 {
-				interval = time.Duration(cfg.Display.AutoRefreshSecs) * time.Second
-			} else if err := s.logAutoRefreshZero(); err != nil {
-				// startup already printed the reason
-			}
-		}
-		timer.Reset(interval)
+		timer.Reset(s.refreshInterval())
 	}
 }
 
-func (s *Server) logAutoRefreshZero() error {
-	if s.logger != nil {
-		s.logger.Printf("display.auto_refresh_secs is 0; serve refreshes every 300s")
+func (s *Server) refreshInterval() time.Duration {
+	cfg, err := s.Config.Load()
+	if err == nil && cfg.Display.AutoRefreshSecs > 0 {
+		return time.Duration(cfg.Display.AutoRefreshSecs) * time.Second
 	}
-	return nil
+	return 300 * time.Second
+}
+
+// refresh serializes background and manual work, and skips a target when a
+// refresh for it already finished after the request arrived.
+func (s *Server) refresh(flags refreshFlags, requested time.Time) {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	s.mu.Lock()
+	if flags.usage && (s.lastUsageRefresh.After(requested) || time.Since(s.lastUsageRefresh) < manualRefreshInterval) {
+		flags.usage = false
+	}
+	if flags.quota && (s.lastQuotaRefresh.After(requested) || time.Since(s.lastQuotaRefresh) < manualRefreshInterval) {
+		flags.quota = false
+	}
+	s.mu.Unlock()
+	if flags.usage || flags.quota {
+		s.doRefresh(flags)
+	}
 }
 
 func (s *Server) doRefresh(flags refreshFlags) {
@@ -650,8 +810,10 @@ func (s *Server) doRefresh(flags refreshFlags) {
 		s.mu.Lock()
 		s.running = false
 		s.mu.Unlock()
-		s.firstOnce.Do(func() { close(s.firstScan) })
 	}()
+	if flags.usage {
+		defer s.firstOnce.Do(func() { close(s.firstScan) })
+	}
 
 	cfg, err := s.Config.Load()
 	if err != nil {
@@ -666,6 +828,11 @@ func (s *Server) doRefresh(flags refreshFlags) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				s.mu.Lock()
+				s.lastUsageRefresh = time.Now()
+				s.mu.Unlock()
+			}()
 			if err := s.Scanner.Run(scan.Options{
 				Providers: scan.ProvidersFromConfig(cfg), ScanAntigravity: cfg.Display.ScanAntigravity,
 			}); err != nil {
@@ -686,11 +853,21 @@ func (s *Server) doRefresh(flags refreshFlags) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				s.mu.Lock()
+				s.lastQuotaRefresh = time.Now()
+				s.mu.Unlock()
+			}()
 			results := quota.FetchAll(s.DataDir, fetchersFor(cfg))
 			s.applyQuotaResults(results)
 		}()
 	}
 	wg.Wait()
+	if flags.usage {
+		// A scan parses every source into memory at once. Return the freed
+		// pages now instead of waiting for OS memory pressure.
+		debug.FreeOSMemory()
+	}
 
 	s.mu.Lock()
 	snapshots := make([]provider.QuotaSnapshot, 0, len(s.snapshots))
@@ -763,7 +940,7 @@ func (s *Server) applyQuotaResults(results []quota.FetchResult) {
 		cfg, _ := s.Config.Load()
 		if cfg.Display.NotificationLevel != config.NotificationOff {
 			notification.NotifyQuotaRestored(cfg.Display.NotificationLevel, cfg.Display.NotificationSound, recoveries)
-			s.Push.Send("TokenPulse", notification.Summarize(recoveries))
+			go s.Push.Send("TokenPulse", notification.Summarize(recoveries))
 		}
 	}
 	s.broadcast("quota_updated", map[string]any{"fetchedAt": fetchedAtMs(fetchedAt)})
@@ -840,7 +1017,12 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	if cfg, err := s.Config.Load(); err == nil {
 		s.Keeper.UpdateConfig(cfg.Keeper)
 	}
-	s.Report.Clear()
+	if _, ok := updates["display.auto_refresh_secs"]; ok {
+		select {
+		case s.wake <- struct{}{}:
+		default:
+		}
+	}
 	s.broadcast("settings_updated", map[string]any{})
 	writeJSON(w, settingsView(snapshot))
 }
@@ -883,7 +1065,7 @@ func (s *Server) handleKeeperGet(w http.ResponseWriter, r *http.Request) {
 			Running:              s.Keeper.InFlight(id),
 		}
 		for _, target := range keeper.WeeklyTargets(id, snapshot, agent.WeeklyAllGroups) {
-			last, ok := s.Keeper.State.WeeklyTriggered[target.Key]
+			last, ok := s.Keeper.WeeklyTriggered(target.Key)
 			var lastPtr *time.Time
 			if ok {
 				lastPtr = &last
@@ -1048,56 +1230,113 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]bool{"paired": true})
 }
 
-var pairAttempts = struct {
-	sync.Mutex
-	times []time.Time
-}{}
-
 func (s *Server) pairAllowed(r *http.Request) bool {
+	address := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(address); err == nil {
+		address = host
+	}
 	now := time.Now()
-	pairAttempts.Lock()
-	defer pairAttempts.Unlock()
-	kept := pairAttempts.times[:0]
-	for _, at := range pairAttempts.times {
+	s.pairMu.Lock()
+	defer s.pairMu.Unlock()
+	if s.pairTimes == nil {
+		s.pairTimes = map[string][]time.Time{}
+	}
+	kept := s.pairTimes[address][:0]
+	for _, at := range s.pairTimes[address] {
 		if now.Sub(at) < time.Minute {
 			kept = append(kept, at)
 		}
 	}
-	pairAttempts.times = kept
-	if len(pairAttempts.times) >= 10 {
+	if len(kept) >= 10 {
+		s.pairTimes[address] = kept
 		return false
 	}
-	pairAttempts.times = append(pairAttempts.times, now)
+	s.pairTimes[address] = append(kept, now)
 	return true
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
-func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("Authorization") != "" {
-		writeError(w, http.StatusUnauthorized, "websocket requires a session cookie")
-		return
+// defaultWSValidation is how often a remote socket re-checks its session, so
+// `remote reset-token` closes phones without restarting serve.
+const defaultWSValidation = 15 * time.Second
+
+type wsClient struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (c *wsClient) write(payload []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
 	}
-	if !s.originAccepted(r) {
-		writeError(w, http.StatusForbidden, "origin rejected")
-		return
+	return c.conn.WriteMessage(websocket.TextMessage, payload)
+}
+
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request, local bool) {
+	session := ""
+	if !local {
+		if r.Header.Get("Authorization") != "" {
+			writeError(w, http.StatusUnauthorized, "websocket requires a session cookie")
+			return
+		}
+		if !s.originAccepted(r) {
+			writeError(w, http.StatusForbidden, "origin rejected")
+			return
+		}
+		cookie, err := r.Cookie("tokenpulse_session")
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthenticated")
+			return
+		}
+		session = cookie.Value
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
+	client := &wsClient{conn: conn}
 	s.mu.Lock()
-	s.wsClients[conn] = true
+	s.wsClients[client] = true
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		delete(s.wsClients, conn)
+		delete(s.wsClients, client)
 		s.mu.Unlock()
 		conn.Close()
 	}()
+
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	if local {
+		<-readDone
+		return
+	}
+	interval := s.wsValidation
+	if interval <= 0 {
+		interval = defaultWSValidation
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		select {
+		case <-readDone:
 			return
+		case <-s.stop:
+			return
+		case <-ticker.C:
+			if !s.State.ValidSession(session) {
+				return
+			}
 		}
 	}
 }
@@ -1105,13 +1344,27 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) broadcast(event string, data any) {
 	payload, _ := json.Marshal(map[string]any{"type": event, "data": data})
 	s.mu.Lock()
-	clients := make([]*websocket.Conn, 0, len(s.wsClients))
+	clients := make([]*wsClient, 0, len(s.wsClients))
 	for client := range s.wsClients {
 		clients = append(clients, client)
 	}
 	s.mu.Unlock()
+	var failed []*wsClient
 	for _, client := range clients {
-		_ = client.WriteMessage(websocket.TextMessage, payload)
+		if err := client.write(payload); err != nil {
+			failed = append(failed, client)
+		}
+	}
+	if len(failed) == 0 {
+		return
+	}
+	s.mu.Lock()
+	for _, client := range failed {
+		delete(s.wsClients, client)
+	}
+	s.mu.Unlock()
+	for _, client := range failed {
+		_ = client.conn.Close()
 	}
 }
 

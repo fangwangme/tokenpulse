@@ -406,3 +406,44 @@ func TestModelDetailFields(t *testing.T) {
 		t.Fatalf("detail = %+v", detail)
 	}
 }
+
+// Protects usage-report.md "Model detail": a reversed custom range is padded
+// and queried with the normalized dates, not just in the totals.
+func TestModelDetailReversedRangeUsesNormalizedDates(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.Local)
+	service, db, _ := newReport(t, now)
+	insertMessage(t, db, sample("2026-11-20", time.Date(2026, 11, 20, 9, 0, 0, 0, time.Local), "s1", "a", "claude-opus-4-6", 10, 1), 1, false)
+	insertMessage(t, db, sample("2026-11-21", time.Date(2026, 11, 21, 9, 0, 0, 0, time.Local), "s2", "b", "claude-opus-4-6", 10, 1), 1, false)
+	detail, err := service.Model("claude-opus-4-6", "2026-11-22", "2026-11-19", []string{"claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Totals.Tokens != 20 || detail.LastUsed != "2026-11-21" {
+		t.Fatalf("totals=%+v lastUsed=%q", detail.Totals, detail.LastUsed)
+	}
+	if len(detail.Agents) != 1 || detail.Agents[0].Tokens != 20 {
+		t.Fatalf("agents = %+v", detail.Agents)
+	}
+	if len(detail.PerDay) != 4 || detail.PerDay[1].Tokens != 10 || detail.PerDay[2].Tokens != 10 {
+		t.Fatalf("perDay = %+v", detail.PerDay)
+	}
+}
+
+// Protects usage-report.md "Day detail": agent sessions are distinct across
+// that agent's models, not the sum of each model's distinct sessions.
+func TestDayDetailSessionCountSpansModels(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.Local)
+	service, db, _ := newReport(t, now)
+	insertMessage(t, db, sample("2026-11-20", time.Date(2026, 11, 20, 9, 0, 0, 0, time.Local), "shared", "a", "claude-opus-4-6", 10, 1), 1, false)
+	insertMessage(t, db, sample("2026-11-20", time.Date(2026, 11, 20, 10, 0, 0, 0, time.Local), "shared", "b", "claude-sonnet-4-5", 10, 1), 1, false)
+	detail, err := service.Day("2026-11-20", []string{"claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Agents) != 1 || detail.Agents[0].Totals.Sessions != 1 {
+		t.Fatalf("agent sessions = %+v", detail.Agents)
+	}
+	if len(detail.Agents[0].Models) != 2 || detail.Agents[0].Models[0].Totals.Sessions != 1 {
+		t.Fatalf("model sessions = %+v", detail.Agents[0].Models)
+	}
+}

@@ -114,6 +114,22 @@ func (c *LocalClient) State() (*StateInfo, error) {
 	return &state, nil
 }
 
+// StatusInfo is the non-blocking server refresh state.
+type StatusInfo struct {
+	Running   bool  `json:"running"`
+	ScannedAt int64 `json:"scannedAt"`
+	FetchedAt int64 `json:"fetchedAt"`
+}
+
+// Status answers immediately, unlike State which waits for the first scan.
+func (c *LocalClient) Status() (*StatusInfo, error) {
+	var status StatusInfo
+	if err := c.Get("/api/status", &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
 // WebSocket connects to serve's event stream.
 func (c *LocalClient) WebSocket() (*websocket.Conn, error) {
 	if c.err != nil {

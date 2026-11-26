@@ -18,7 +18,7 @@ is never overwritten: `config set`, `enable`, `disable`, the Keeper toggles and
 | `display.show_empty_providers` | false | boolean |
 | `display.theme` | `auto` | `auto`, `dark`, `light` |
 | `display.quota_display_mode` | `remaining` | `used`, `remaining` |
-| `display.auto_refresh_secs` | 300 | 0, 60, 120, 300, 600, 900 (0 = off) |
+| `display.auto_refresh_secs` | 300 | 0, 60, 120, 300, 600, 900 (0 falls back to 300) |
 | `display.account_display` | `full` | `none`, `plan`, `full` |
 | `display.scan_antigravity` | true | boolean |
 | `display.refresh_quota` | true | boolean |

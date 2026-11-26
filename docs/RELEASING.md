@@ -83,24 +83,33 @@ need. Use `Added` / `Changed` / `Fixed` / `Removed` and omit empty ones.
 
 ### Step 3 — Bump the version
 
-Only one place holds it:
+The release version lives in `internal/version/version.go`; keep
+`web/package.json` at the same value so the embedded app reports the release.
+`npm/scripts/build-packages.mjs` reads the Go constant and refuses a tag whose
+version disagrees.
 
 ```bash
-# edit Version in internal/version/version.go
+# edit Version in internal/version/version.go and web/package.json
 go build ./...
 ```
 
-`npm/scripts/build-packages.mjs` reads that constant and refuses a tag whose
-version disagrees.
-
 ### Step 4 — Verify locally
+
+Build the web app first: the Go binary embeds `web/dist`. A plain
+`go build` after checkout embeds the committed "frontend not built" placeholder.
 
 ```bash
 gofmt -l .
 go vet ./...
-go test ./...
-go build -o tokenpulse .
+CGO_ENABLED=0 go test ./...
+CGO_ENABLED=1 go test -race ./...
+(cd web && npm ci && npm run typecheck && npm test && npm run build)
+CGO_ENABLED=0 go build -o tokenpulse .
+./tokenpulse --version
 ```
+
+After verifying the embedded UI, restore `web/dist/index.html` to the tracked
+placeholder before committing; CI rebuilds it for release binaries.
 
 ### Step 5 — Open the PR and merge it
 
@@ -218,7 +227,7 @@ Sources live in `npm/`:
 
 | Path | Role |
 | --- | --- |
-| `npm/launcher/` | Launcher `package.json` template and `bin/tokenpulse.js`. The template's `optionalDependencies` are the authoritative list of platforms we claim to support. |
+| `npm/launcher/` | Launcher `package.json` template and `bin/tokenpulse.js`; published as `@fangwangme/tokenpulse`. The template's `optionalDependencies` are the authoritative list of platforms we claim to support. |
 | `npm/scripts/build-packages.mjs` | Turns the CI build artifacts into ready-to-publish package directories. |
 | `npm/scripts/publish-packages.mjs` | Publishes them in dependency order. |
 

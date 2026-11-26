@@ -15,14 +15,19 @@ under `TOKENPULSE_ENV=test`).
 | `--rebuild-all` | Reparse every source from scratch |
 | `--csv daily\|models` | CSV instead of text or the dashboard; conflicts with `--json` |
 | `--json` | JSON instead of text or the dashboard |
+| `--no-scan` | Read the cached ledger; never start a scan |
 | `--no-tui` | Plain text even on a terminal |
 | `--log` | Write usage timing to `log/usage-YYYY-MM-DD.log` |
 | `--raw`, `--date <YYYY-MM-DD>` | Raw model usage for a date (default today); `--date` requires `--raw` |
 | `-h`, `--help`, `-V`, `--version` | Help and version |
 
-A run ingests first, then reads the ledger. `--since` narrows both the parse
-window and the output. `--refresh-days` only reparses the range, but the output
-starts at its first day.
+A run reads the ledger first. If `serve` is running and its cache is ready,
+the command uses that scan instead of scanning again; `--no-scan` always reads
+the cache. Without serve, the command scans before reading unless `--no-scan`
+is set. `--since` narrows both the parse window and the output.
+`--refresh-days` only reparses the range, but the output starts at its first
+day. Explicit `--refresh-days`, `--refresh-pricing` and `--rebuild-all` always
+scan.
 
 ## Commands
 
@@ -40,8 +45,12 @@ starts at its first day.
   `pricing.md`.
 - `tokenpulse serve ...` — see `remote.md`.
 - `tokenpulse remote reset-token|url|status` — resets the token and sessions;
-  prints the pairing URL and QR; reports the local socket.
+  prints the pairing URL and QR; reports the local socket and a human-readable
+  last-scan time.
 - `tokenpulse service install|uninstall|status` — see `remote.md` "Service".
+
+Every subcommand accepts `-h`/`--help` and prints its own usage instead of the
+root help.
 
 ## Text output
 
@@ -84,8 +93,9 @@ Six decimals for costs.
 ## Raw output
 
 Table columns: Source, Raw / Served Model, Tier / Alias (or `-`), Canonical,
-Total Tkns, Cost USD, Calls, and the In/Out/CR/R breakdown. Rows are grouped by
-agent (total tokens descending), then canonical model, then raw variant. The
+Total Tkns, Cost USD, Calls. The detailed In/Out/CR/R values are in the JSON
+payload, not the text table. Rows are grouped by agent (total tokens
+descending), then canonical model, then raw variant. The
 JSON shape is `{date, total_tokens, total_cost_usd, message_count,
 session_count, models: [...]}` with the raw fields and six-decimal costs.
 `--date` must parse as `YYYY-MM-DD`.

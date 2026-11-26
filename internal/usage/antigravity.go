@@ -13,7 +13,7 @@ import (
 	"github.com/fangwangme/tokenpulse/internal/provider"
 )
 
-const antigravityParserVersion = "antigravity-v7"
+const antigravityParserVersion = "antigravity-v9"
 
 // AntigravityParser reads TokenPulse's Antigravity cache, syncing it from the
 // local conversation databases and (when running) the language servers.
@@ -48,6 +48,7 @@ type antigravityRow struct {
 	pricingDay  string
 	servedModel string
 	modelEnum   string
+	displayName string
 }
 
 func (p *AntigravityParser) Parse(since *time.Time) ([]provider.UnifiedMessage, error) {
@@ -69,11 +70,11 @@ func (p *AntigravityParser) Parse(since *time.Time) ([]provider.UnifiedMessage, 
 
 	query := `SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-       pricing_day, COALESCE(served_model, ''), COALESCE(model_enum, '')
+       pricing_day, COALESCE(served_model, ''), COALESCE(model_enum, ''), COALESCE(display_name, '')
 FROM session_usage`
 	var args []any
 	if since != nil {
-		sinceMs := time.Date(since.Year(), since.Month(), since.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+		sinceMs := midnightMillis(*since, time.Local)
 		query += ` WHERE timestamp >= ?1
    OR (client || ':' || session_id) IN (
        SELECT client || ':' || session_id FROM sessions WHERE synced_at >= ?1
@@ -92,7 +93,8 @@ FROM session_usage`
 		var row antigravityRow
 		if err := rows.Scan(&row.client, &row.modelID, &row.providerID, &row.sessionID, &row.messageKey,
 			&row.timestamp, &row.tokens.Input, &row.tokens.Output, &row.tokens.CacheRead,
-			&row.tokens.CacheWrite, &row.tokens.Reasoning, &row.pricingDay, &row.servedModel, &row.modelEnum); err != nil {
+			&row.tokens.CacheWrite, &row.tokens.Reasoning, &row.pricingDay, &row.servedModel, &row.modelEnum,
+			&row.displayName); err != nil {
 			continue
 		}
 		msg := provider.NewMessage("antigravity", row.modelID, row.providerID, row.sessionID, row.messageKey, row.timestamp, row.tokens)
@@ -215,6 +217,7 @@ CREATE TABLE IF NOT EXISTS session_usage (
     parser_version TEXT NOT NULL,
     model_enum TEXT,
     served_model TEXT,
+    display_name TEXT,
     FOREIGN KEY(session_id, client) REFERENCES sessions(session_id, client) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_session_usage_session_id ON session_usage(session_id);
@@ -223,7 +226,7 @@ CREATE INDEX IF NOT EXISTS idx_session_usage_pricing_day ON session_usage(pricin
 	if err != nil {
 		return err
 	}
-	for _, column := range []string{"model_enum", "served_model"} {
+	for _, column := range []string{"model_enum", "served_model", "display_name"} {
 		var count int
 		_ = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('session_usage') WHERE name = ?1", column).Scan(&count)
 		if count == 0 {
@@ -245,27 +248,51 @@ func (p *AntigravityParser) normalizeCache(aliases map[string]ModelAlias) error 
 	}
 	defer db.Close()
 
-	rows, err := db.Query("SELECT id, model_id, COALESCE(model_enum, ''), COALESCE(served_model, ''), timestamp FROM session_usage")
+	rows, err := db.Query("SELECT id, client, session_id, model_id, COALESCE(model_enum, ''), COALESCE(served_model, ''), COALESCE(display_name, ''), timestamp FROM session_usage")
 	if err != nil {
 		return err
 	}
-	type change struct {
-		id, from, to string
+	type cachedRow struct {
+		id, client, sessionID, modelID, enum, served, display string
+		timestamp                                             int64
 	}
-	var changes []change
+	var cached []cachedRow
 	for rows.Next() {
-		var id, modelID, enum, served string
-		var timestamp int64
-		if err := rows.Scan(&id, &modelID, &enum, &served, &timestamp); err != nil {
+		var row cachedRow
+		if err := rows.Scan(&row.id, &row.client, &row.sessionID, &row.modelID, &row.enum, &row.served, &row.display, &row.timestamp); err != nil {
 			continue
 		}
-		target := ResolveAntigravityModel(enum, served, aliases, p.Releases, provider.LocalDateString(timestamp))
-		if target == modelID || (modelid.IsPseudo(target) && !modelid.IsPseudo(modelID)) {
-			continue
-		}
-		changes = append(changes, change{id: id, from: modelID, to: target})
+		cached = append(cached, row)
 	}
 	rows.Close()
+
+	hintsBySession := map[string]map[string]AntigravityEnumHint{}
+	for _, row := range cached {
+		key := row.client + "\x00" + row.sessionID
+		hints := hintsBySession[key]
+		if hints == nil {
+			hints = map[string]AntigravityEnumHint{}
+			hintsBySession[key] = hints
+		}
+		recordAntigravityEnumHint(hints, row.enum, row.served, row.display)
+	}
+
+	type change struct {
+		id, from, to, served, display string
+	}
+	var changes []change
+	for _, row := range cached {
+		hints := hintsBySession[row.client+"\x00"+row.sessionID]
+		served, display := applyAntigravityEnumHint(hints, row.enum, row.served, row.display)
+		target := ResolveAntigravityModel(row.enum, served, display, aliases, p.Releases, provider.LocalDateString(row.timestamp))
+		if target == row.modelID && served == row.served && display == row.display {
+			continue
+		}
+		if modelid.IsPseudo(target) && !modelid.IsPseudo(row.modelID) {
+			continue
+		}
+		changes = append(changes, change{id: row.id, from: row.modelID, to: target, served: served, display: display})
+	}
 	if len(changes) == 0 {
 		return nil
 	}
@@ -276,8 +303,8 @@ func (p *AntigravityParser) normalizeCache(aliases map[string]ModelAlias) error 
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
 	for _, c := range changes {
-		if _, err := tx.Exec("UPDATE session_usage SET model_id = ?1, provider_id = ?2 WHERE id = ?3",
-			c.to, modelid.DetectProviderFromModel(c.to), c.id); err != nil {
+		if _, err := tx.Exec("UPDATE session_usage SET model_id = ?1, provider_id = ?2, served_model = ?3, display_name = ?4 WHERE id = ?5",
+			c.to, modelid.DetectProviderFromModel(c.to), c.served, c.display, c.id); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE sessions SET model_id = ?1, synced_at = ?2
@@ -417,6 +444,7 @@ type antigravityLocalUsage struct {
 	responseID  string
 	servedModel string
 	modelEnum   string
+	displayName string
 	tokens      provider.TokenBreakdown
 }
 
@@ -427,13 +455,10 @@ func parseGenMetadataUsage(blob []byte) (antigravityLocalUsage, bool) {
 		return antigravityLocalUsage{}, false
 	}
 	totalOutput := protoTokenCount(usage, 3)
-	if totalOutput == 0 {
-		return antigravityLocalUsage{}, false
-	}
 	tokens, ok := normalizeAntigravityTokens(
 		protoTokenCount(usage, 2), totalOutput, protoTokenCount(usage, 10),
 		protoTokenCount(usage, 5), 0, protoTokenCount(usage, 9), true)
-	if !ok {
+	if !ok || tokens.IsEmpty() {
 		return antigravityLocalUsage{}, false
 	}
 	return antigravityLocalUsage{
@@ -441,6 +466,7 @@ func parseGenMetadataUsage(blob []byte) (antigravityLocalUsage, bool) {
 		responseID:  protoString(usage, 11),
 		servedModel: protoString(payload, 19),
 		modelEnum:   protoCustomMetadata(payload, "model_enum"),
+		displayName: protoString(payload, 21),
 		tokens:      tokens,
 	}, true
 }
@@ -574,6 +600,9 @@ func (p *AntigravityParser) sync(since *time.Time) error {
 	if err := syncLocalConversations(db, home, cached, p.RebuildCache, aliases, p.Releases); err != nil {
 		_ = err
 	}
+	// Language-server sync compares against what is stored now, including
+	// the conversations just written above.
+	cached = loadCachedSessions(db)
 	var connections []antigravityConnection
 	if !p.SkipLanguageServers {
 		connections, _ = detectAntigravityConnections()
@@ -585,6 +614,13 @@ func (p *AntigravityParser) sync(since *time.Time) error {
 	dynamic := fetchDynamicModelAliases(connections)
 	aliases = mergeAndSaveAliasHistory(p.CacheRoot, dynamic)
 	return syncLanguageServers(db, home, connections, cached, p.RebuildCache, aliases, p.Releases)
+}
+
+// midnightMillis is the local start of t's day. Usage dates are local, so a
+// UTC boundary would drop or add hours at every non-UTC offset.
+func midnightMillis(t time.Time, location *time.Location) int64 {
+	local := t.In(location)
+	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location).UnixMilli()
 }
 
 func loadCachedSessions(db *sql.DB) map[[2]string][2]*int64 {
@@ -633,6 +669,11 @@ func sessionsWithCurrentUsage(db *sql.DB) map[[2]string]bool {
 func syncLocalConversations(db *sql.DB, home string, cached map[[2]string][2]*int64, rebuild bool, aliases map[string]ModelAlias, releases ReleaseMap) error {
 	alreadyParsed := sessionsWithCurrentUsage(db)
 	now := time.Now().UnixMilli()
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 
 	for _, entry := range antigravityLocalConversationDirs(home) {
 		dir := entry[0].(string)
@@ -671,10 +712,17 @@ func syncLocalConversations(db *sql.DB, home string, cached map[[2]string][2]*in
 			usageRecords := readLocalConversationUsage(conversation)
 			conversation.Close()
 
+			hints := map[string]AntigravityEnumHint{}
+			for _, record := range usageRecords {
+				recordAntigravityEnumHint(hints, record.usage.modelEnum, record.usage.servedModel, record.usage.displayName)
+			}
+
 			type resolved struct {
-				modelID   string
-				timestamp int64
-				usage     antigravityLocalUsage
+				modelID     string
+				timestamp   int64
+				servedModel string
+				displayName string
+				usage       antigravityLocalUsage
 			}
 			var resolvedRecords []resolved
 			var undatableIDs []string
@@ -687,8 +735,9 @@ func syncLocalConversations(db *sql.DB, home string, cached map[[2]string][2]*in
 					continue
 				}
 				date := provider.LocalDateString(*record.timestamp)
-				modelID := ResolveAntigravityModel(record.usage.modelEnum, record.usage.servedModel, aliases, releases, date)
-				resolvedRecords = append(resolvedRecords, resolved{modelID, *record.timestamp, record.usage})
+				served, display := applyAntigravityEnumHint(hints, record.usage.modelEnum, record.usage.servedModel, record.usage.displayName)
+				modelID := ResolveAntigravityModel(record.usage.modelEnum, served, display, aliases, releases, date)
+				resolvedRecords = append(resolvedRecords, resolved{modelID, *record.timestamp, served, display, record.usage})
 			}
 			primary := "unknown"
 			for _, record := range resolvedRecords {
@@ -705,8 +754,8 @@ func syncLocalConversations(db *sql.DB, home string, cached map[[2]string][2]*in
 				summary.TrajectoryID = &trajectoryID
 			}
 			summary.StepCount = &stepCount
-			if err := upsertAntigravitySession(db, sessionID, client, summary, primary, now); err != nil {
-				continue
+			if err := upsertAntigravitySession(tx, sessionID, client, summary, primary, now); err != nil {
+				return err
 			}
 			for index, record := range resolvedRecords {
 				raw := record.usage.responseID
@@ -715,25 +764,25 @@ func syncLocalConversations(db *sql.DB, home string, cached map[[2]string][2]*in
 				}
 				logical := logicalAntigravityKey(sessionID, raw)
 				id := storageAntigravityID(client, logical)
-				if _, err := db.Exec(`INSERT OR REPLACE INTO session_usage (
+				if _, err := tx.Exec(`INSERT OR REPLACE INTO session_usage (
                     id, session_id, client, model_id, provider_id, timestamp, step_index,
                     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                    response_id, pricing_day, parser_version, model_enum, served_model
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    response_id, pricing_day, parser_version, model_enum, served_model, display_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 					id, sessionID, client, record.modelID, modelid.DetectProviderFromModel(record.modelID),
 					record.timestamp, index, record.usage.tokens.Input, record.usage.tokens.Output,
 					record.usage.tokens.CacheRead, record.usage.tokens.CacheWrite, record.usage.tokens.Reasoning,
 					logical, provider.LocalDateString(record.timestamp), antigravityParserVersion,
-					record.usage.modelEnum, record.usage.servedModel); err != nil {
+					record.usage.modelEnum, record.servedModel, record.displayName); err != nil {
 					return err
 				}
 			}
 			for _, id := range undatableIDs {
-				_, _ = db.Exec("DELETE FROM session_usage WHERE id = ?1", id)
+				_, _ = tx.Exec("DELETE FROM session_usage WHERE id = ?1", id)
 			}
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func openConversationDB(path string) (*sql.DB, error) {
@@ -766,7 +815,15 @@ type antigravitySyncSummary struct {
 	MendelExperimentIDs  *string
 }
 
-func upsertAntigravitySession(db *sql.DB, sessionID, client string, summary antigravitySyncSummary, modelID string, syncedAt int64) error {
+// sqlExecer lets the cache writers run inside one transaction instead of
+// committing every row separately. A full Antigravity re-import writes tens of
+// thousands of rows; autocommit made that take minutes on copy-on-write
+// filesystems.
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func upsertAntigravitySession(db sqlExecer, sessionID, client string, summary antigravitySyncSummary, modelID string, syncedAt int64) error {
 	_, err := db.Exec(`INSERT INTO sessions (
         session_id, trajectory_id, client, title, model_id, status, step_count,
         created_time_ms, last_modified_ms, last_user_input_time_ms, project_id,

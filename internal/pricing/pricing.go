@@ -897,6 +897,12 @@ func recomputeModelCosts(db *sql.DB, model string) error {
 	if err != nil {
 		return err
 	}
+	modelPeriods := make([]Period, 0, len(periods))
+	for _, period := range periods {
+		if period.Model == model {
+			modelPeriods = append(modelPeriods, period)
+		}
+	}
 	rows, err := db.Query(`SELECT rowid, date, input_tokens, output_tokens, cache_read_tokens,
         cache_write_tokens, reasoning_tokens, cost_usd, unpriced FROM usage_messages WHERE canonical_model_id = ?1`, model)
 	if err != nil {
@@ -931,7 +937,7 @@ func recomputeModelCosts(db *sql.DB, model string) error {
 	defer tx.Rollback()
 	dates := map[string]bool{}
 	for _, r := range all {
-		period, ok := coveringPeriod(periods, r.date)
+		period, ok := coveringPeriod(modelPeriods, r.date)
 		cost := 0.0
 		unpriced := 1
 		if ok {
@@ -1054,7 +1060,18 @@ func (s *Service) Reprice(apply bool, expect string) (RepriceReport, error) {
 	return report, nil
 }
 
+func (s *Service) catalogSnapshot() map[string]Price {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	catalog := make(map[string]Price, len(s.Catalog))
+	for model, price := range s.Catalog {
+		catalog[model] = price
+	}
+	return catalog
+}
+
 func (s *Service) computeReprice() (RepriceReport, error) {
+	catalog := s.catalogSnapshot()
 	db, err := sql.Open("sqlite", "file:"+s.UsageDB+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return RepriceReport{}, err
@@ -1076,7 +1093,7 @@ func (s *Service) computeReprice() (RepriceReport, error) {
 			return RepriceReport{}, err
 		}
 		row := ModelReprice{Model: model, Messages: messages, Tokens: tokens, CurrentCost: current}
-		if price, ok := s.Catalog[model]; ok {
+		if price, ok := catalog[model]; ok {
 			period := Period{Input: price.Input, Output: price.Output, CacheRead: price.CacheRead, CacheWrite: price.CacheWrite}
 			row.NewCost = period.Cost(provider.TokenBreakdown{Input: input, Output: output, CacheRead: cacheRead, CacheWrite: cacheWrite, Reasoning: reasoning})
 			row.Tier, row.Source = price.Tier, price.Source
@@ -1095,6 +1112,7 @@ func (s *Service) computeReprice() (RepriceReport, error) {
 }
 
 func (s *Service) applyReprice(db *sql.DB) error {
+	catalog := s.catalogSnapshot()
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -1103,7 +1121,7 @@ func (s *Service) applyReprice(db *sql.DB) error {
 	if _, err := tx.Exec("DELETE FROM model_price_periods"); err != nil {
 		return err
 	}
-	for model, price := range s.Catalog {
+	for model, price := range catalog {
 		if _, err := tx.Exec(`INSERT INTO model_price_periods
             (model, effective_from, effective_to, input_rate, output_rate, cache_read_rate, cache_write_rate, tier, source)
             VALUES (?1, '0000-01-01', NULL, ?2, ?3, ?4, ?5, ?6, ?7)`,
@@ -1133,7 +1151,7 @@ func (s *Service) applyReprice(db *sql.DB) error {
 	rows.Close()
 	dates := map[string]bool{}
 	for _, r := range all {
-		price, ok := s.Catalog[r.model]
+		price, ok := catalog[r.model]
 		cost := 0.0
 		unpriced := 1
 		if ok {

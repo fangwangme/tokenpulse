@@ -17,16 +17,18 @@ Keeper. The TUI stays a full client of the same data.
   usage, fetches quota, schedules Keeper pings and fires quota-recovery
   notifications. It refreshes once at start, then every
   `display.auto_refresh_secs`; with that setting at 0 it uses 300 seconds,
-  because a server that never refreshes has no purpose, and says so at start.
-  The TUI without `serve` keeps 0 meaning no automatic refresh. Scans and fetches run
-  off the request path, so a long first scan never delays a request; a report
-  request that arrives before the first scan since start completes waits for
-  it.
-- **Requested refresh** (`POST /api/refresh`, the TUI's `r`) joins a refresh
-  already running and never moves the timer. The phone's Usage page refreshes
-  usage only, its Quota page quota only; the TUI's `r` refreshes both. Requests less than 10 seconds
-  after the previous requested refresh are refused with 429 and
-  `Retry-After`.
+  because a server that never refreshes has no purpose. The TUI without
+  `serve` uses the same 300-second fallback and starts its scan after the first
+  frame. On start `serve` reads the persisted usage and quota caches before the
+  first refresh, so a phone or CLI sees the last known values immediately.
+  Scans and fetches run off the request path; `/api/usage*` and `/api/quota`
+  never call a provider.
+- **Requested refresh** (`POST /api/refresh`, the TUI's `r`) runs the requested
+  work and waits for it, so the read that follows sees the new cache. It never
+  moves the periodic timer. Each target (usage, quota) has a 60-second
+  cooldown: a second request inside that window returns `200` with
+  `accepted:false`, `throttled:true` and the previous cache timestamps instead
+  of starting another scan or fetch.
 - **Config.** Settings and Keeper writes from the phone and from the TUI go
   through `serve`, which applies them at once. `serve` also re-reads
   `config.toml` before every scheduled refresh, so an edit made with
@@ -48,10 +50,11 @@ running `serve`; a socket that refuses connections is a stale file and is
 replaced at start.
 
 A Unix socket path is limited by the kernel (107 bytes on Linux, 103 on macOS).
-When `<data dir>/serve.sock` does not fit, `serve` puts the socket in
-`$XDG_RUNTIME_DIR`, or the system temporary directory when that is unset or
-the candidate still does not fit, named `tokenpulse-<hash>.sock` after the
-absolute data directory, still with mode 0600. The TUI and CLI resolve the path with the same rule, so a long
+When `<data dir>/serve.sock` does not fit, `serve` creates a private `0700`
+directory `tokenpulse-<hash>` (hash of the absolute data directory) inside
+`$XDG_RUNTIME_DIR`, or the system temporary directory when that is unset or the
+candidate still does not fit, and puts `serve.sock` inside it with mode 0600.
+The TUI and CLI resolve the path with the same rule, so a long
 `TOKENPULSE_DATA_DIR` changes neither how `serve` starts nor how they find it.
 
 ## Desktop TUI
@@ -77,11 +80,12 @@ conflicting in-flight action, 429 rate limited.
 | :--- | :--- | :--- |
 | POST | `/api/pair` | body `{ token }`: exchanges the remote token for a session cookie (Authentication); the only unauthenticated API call |
 | GET | `/api/state` | `version`, `scannedAt`, quota `fetchedAt`, `pricesAvailable`, enabled `agents`, `settings` (the phone-editable values), `keeperEngine` (boolean: the Keeper master switch) |
+| GET | `/api/status` | `running`, `scannedAt`, `fetchedAt`; answers immediately, without waiting for a scan |
 | GET | `/api/usage?preset=&from=&to=&agents=` | the report of `usage-report.md` |
 | GET | `/api/usage/day?date=&agents=` | the day detail |
 | GET | `/api/usage/model?model=&from=&to=&agents=` | the model detail |
-| GET | `/api/quota` | `{ providers: [{ provider, enabled, snapshot, error: { message, at } \| null }], fetchedAt }`, ordered and shaped per `quota.md` |
-| POST | `/api/refresh` | body `{ usage?: bool, quota?: bool }` (both default true); 202 once the refresh has started or joined |
+| GET | `/api/quota` | `{ providers: [{ provider, enabled, snapshot, error: { message, at } \| null }], fetchedAt }`, ordered and shaped per `quota.md`; always the cache, never a provider call |
+| POST | `/api/refresh` | body `{ usage?: bool, quota?: bool }` (both default true); waits for the work and answers `{ accepted, throttled, retryAfter, scannedAt, fetchedAt }`; inside the 60-second cooldown it answers `200` with `accepted:false` and leaves the cache untouched |
 | GET | `/api/settings` | the phone-editable settings with their allowed values |
 | PATCH | `/api/settings` | partial update of phone-editable settings; answers the new settings |
 | GET | `/api/keeper` | per agent: engine state, daily wakeup and weekly toggles and time, weekly targets with last-fired time, and the newest executions (time, agent, trigger, status, model, reply excerpt) |
@@ -104,16 +108,16 @@ The phone may change exactly these keys, each checked against its own rule:
 | Key | Accepted values |
 | :--- | :--- |
 | `display.quota_display_mode` | `used`, `remaining` |
-| `display.auto_refresh_secs` | 0, 60, 120, 300, 600, 900 |
+| `display.auto_refresh_secs` | 60, 120, 300, 600, 900 |
 | `display.account_display` | the values `config set account_display` accepts |
 | `display.refresh_quota`, `display.scan_antigravity`, `display.show_empty_providers` | boolean |
 | `display.notification_level` | the values `config set notification_level` accepts |
 | `display.notification_sound` | the TUI's fixed sound list |
-| `providers.<id>.enabled` | boolean, for `claude`, `codex`, `antigravity` |
+| `providers.<id>.enabled` | boolean, for `claude`, `codex`, `agy` |
 | `keeper.enabled` (the Keeper master switch) | boolean |
 | `keeper.agents.<agent>.session_keeper_enabled`, `weekly_keeper_enabled` | boolean, for agents the Keeper drives |
 | `keeper.agents.<agent>.daily_wakeup_time` | `HH:MM`, 00:00–23:59 |
-| `keeper.agents.antigravity.weekly_all_groups` | boolean |
+| `keeper.agents.agy.weekly_all_groups` | boolean |
 
 Wakeup time and Antigravity all-groups are new on the phone (the TUI edits
 them only through the config file and a global setting); the rules above are
@@ -178,23 +182,29 @@ and a QR code of it, the access mode, and any recovery command.
   never reaches a request line, a log or a `Referer`. The app reads it, removes
   it from the address bar (`history.replaceState`), and sends it once to
   `POST /api/pair`.
-- `/api/pair` compares in constant time. A match creates a random session
-  token, stores only its SHA-256 hash, and answers with a cookie holding the
-  session token (`HttpOnly`, `SameSite=Strict`, `Path=/`, 400-day lifetime,
-  `Secure` whenever the access mode is HTTPS — Tailscale Serve — whatever the
-  proxy headers say). The remote token itself never appears in a response. A
-  mismatch is 401, and pairing attempts are limited to 10 per minute.
+- `/api/pair` is POST-only, compares in constant time and is limited to 10
+  attempts per minute per remote IP (never globally). A match creates a random
+  session token, stores only its SHA-256 hash, and answers with a cookie holding
+  the session token (`HttpOnly`, `SameSite=Strict`, `Path=/`, 400-day
+  lifetime, `Secure` whenever the access mode is HTTPS — Tailscale Serve —
+  whatever the proxy headers say). The remote token itself never appears in a
+  response; a mismatch is 401. At most 20 sessions are kept and older ones are
+  evicted.
 - `/api/*` and `/ws` need a valid session cookie, or `Authorization: Bearer
   <remote token>` for non-browser clients; otherwise 401. A token in a query
   string is never accepted. The web app shell loads without auth and shows a
   "scan the QR code" page when its first API call is 401.
 - Every state-changing request (POST, PATCH, DELETE) and every WebSocket
-  upgrade authenticated by cookie must carry an `Origin` matching an accepted
-  host; a missing or foreign `Origin` is 403. Only Bearer-authenticated
-  requests may omit `Origin`.
+  upgrade authenticated by cookie must carry an `Origin` whose scheme, host and
+  effective port match the request and an accepted host; a missing or foreign
+  `Origin` is 403. Only Bearer-authenticated requests may omit `Origin`. The
+  local Unix socket is trusted and skips this check.
+- `remote.json` is written with a temp file, fsync and rename. A corrupt file is
+  reported and left untouched instead of silently generating a new token.
 - `tokenpulse remote reset-token` writes a new remote token and deletes every
-  session; existing cookies are 401 at once. `tokenpulse remote url` prints
-  the pairing URL and QR code again.
+  session; existing cookies are 401 at once and live phone sockets close on
+  their next session check. `tokenpulse remote url` prints the pairing URL and
+  QR code again.
 
 ## Web Push
 
@@ -226,9 +236,9 @@ labels, opening at the newest week, drag scrolling and no zoom.
 
 The app shell is the bottom tab bar Usage, Quota, Keeper and Settings, with
 safe-area padding at the bottom and centered at 520 px on wide screens. The bar
-owns page switching, so the reference-design pages carry no top
-`Quota | Usage` switch and no back button; their headers keep the title,
-last-refresh line and refresh button.
+owns page switching, so the pages carry no top `Quota | Usage` switch, no
+back button and no large repeated title; Usage and Quota open with a compact
+scanned/refreshed line and the refresh button inside the scroll area.
 
 The app knows all seven agents (`claude`, `codex`, `copilot`, `gemini`,
 `opencode`, `pi`, `agy`) with a name and color each, and shows those the
@@ -244,7 +254,8 @@ server lists as enabled.
   executions), Settings (the editable settings, theme, language, push).
   Keeper and pairing have no counterpart in the reference design and use the
   same components and tokens.
-- A header shows the page's last refresh time and a refresh button.
+- The page header is the compact status line (last scan/refresh time) and the
+  refresh button, not a second title.
 - Pages update silently on `usage_updated` / `quota_updated`; the socket
   reconnects with backoff, and failed or unloaded data is re-requested once it
   is back. A failed load shows the error with a retry button, never an endless

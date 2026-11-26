@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -234,12 +235,18 @@ type ReleaseMap map[string]string
 
 // ResolveAntigravityModel resolves one generation's model id.
 //
-// A versioned alias wins; an unversioned family resolves by stepDate; the
-// served name and then the raw enum stand in when no alias names the enum.
-func ResolveAntigravityModel(modelEnum, servedModel string, aliases map[string]ModelAlias, releases ReleaseMap, stepDate string) string {
+// The priority mirrors Pigeon's resolver: a concrete enum alias wins; then a
+// non-routing served model; then the display name (the human label is the most
+// specific identity Antigravity reports); then a routing slug family resolved
+// by stepDate; then the raw enum. Display names matter because a routing slug
+// such as "gemini-flash-worker-agy" can belong to a concrete model such as
+// "Gemini 4 Hydrogen (Orchestrator)".
+func ResolveAntigravityModel(modelEnum, servedModel, displayName string, aliases map[string]ModelAlias, releases ReleaseMap, stepDate string) string {
 	enum := strings.TrimSpace(modelEnum)
 	served := strings.TrimSpace(servedModel)
+	display := strings.TrimSpace(displayName)
 
+	// Step 1: concrete static enum alias.
 	if enum != "" {
 		if alias, ok := findAlias(enum, aliases); ok {
 			if family := familyFromLabel(alias.Label); family != "" {
@@ -248,26 +255,181 @@ func ResolveAntigravityModel(modelEnum, servedModel string, aliases map[string]M
 			return formatModelID(alias.ModelID)
 		}
 	}
+
+	// Step 2: non-routing served model. A served value that parses as a
+	// display label falls through to Step 3, as in Pigeon.
 	if served != "" && !modelid.IsPseudo(served) {
+		if familyFromRoutingSlug(served) == "" {
+			if concrete, family := parseAntigravityDisplayName(served); concrete == "" && family == "" {
+				if codename, ok := knownAntigravityCodenames[strings.ToLower(served)]; ok {
+					return formatModelID(codename)
+				}
+				return formatModelID(served)
+			}
+		}
+	}
+
+	// Step 3: display name, explicit or carried in the served value.
+	displaySource := display
+	if displaySource == "" {
+		if concrete, family := parseAntigravityDisplayName(served); concrete != "" || family != "" {
+			displaySource = served
+		}
+	}
+	if displaySource != "" {
+		if concrete, family := parseAntigravityDisplayName(displaySource); concrete != "" {
+			return formatModelID(concrete)
+		} else if family != "" {
+			return resolveFamily(family, releases, stepDate)
+		}
+	}
+
+	// Step 4: routing servedModel family fallback.
+	if served != "" {
 		if family := familyFromRoutingSlug(served); family != "" {
 			return resolveFamily(family, releases, stepDate)
 		}
-		return formatModelID(served)
+		if !modelid.IsPseudo(served) {
+			return formatModelID(served)
+		}
 	}
+
+	// Step 5: raw enum fallback.
 	if enum != "" {
 		if alias, ok := findAlias(enum, aliases); ok {
 			if family := familyFromLabel(alias.Label); family != "" {
 				return resolveFamily(family, releases, stepDate)
 			}
+			return formatModelID(alias.ModelID)
 		}
 		return formatModelID(enum)
 	}
-	if served != "" {
-		if family := familyFromRoutingSlug(served); family != "" {
-			return resolveFamily(family, releases, stepDate)
+	return "unknown"
+}
+
+// knownAntigravityCodenames maps the routing codenames Antigravity writes as
+// served_model to the concrete model Pigeon bills. Keep in sync with Pigeon's
+// model-id.ts.
+var knownAntigravityCodenames = map[string]string{
+	"gemini-3-flash-a":     "gemini-3-5-flash",
+	"gemini-3.8-flash-n":   "gemini-3-8-flash",
+	"gemini-4-argon-trial": "gemini-4-argon",
+}
+
+// AntigravityEnumHint is the concrete identity learned for one model_enum
+// within a session. Some orchestration/worker steps omit both display_name and
+// a non-routing served_model; Pigeon propagates the identity from a sibling
+// step that has the same enum.
+type AntigravityEnumHint struct {
+	ServedModel string
+	DisplayName string
+}
+
+func isAntigravityRoutingModel(model string) bool {
+	return modelid.IsPseudo(model) || familyFromRoutingSlug(model) != ""
+}
+
+func hasConcreteAntigravityIdentity(served, display string) bool {
+	if strings.TrimSpace(display) != "" {
+		return true
+	}
+	served = strings.TrimSpace(served)
+	return served != "" && !isAntigravityRoutingModel(served)
+}
+
+func recordAntigravityEnumHint(hints map[string]AntigravityEnumHint, modelEnum, servedModel, displayName string) {
+	enum := strings.TrimSpace(modelEnum)
+	if enum == "" || !hasConcreteAntigravityIdentity(servedModel, displayName) {
+		return
+	}
+	cleanServed := strings.TrimSpace(servedModel)
+	concreteServed := ""
+	if cleanServed != "" && !isAntigravityRoutingModel(cleanServed) {
+		concreteServed = cleanServed
+	}
+	cleanDisplay := strings.TrimSpace(displayName)
+	prev, ok := hints[enum]
+	if !ok || (prev.DisplayName == "" && cleanDisplay != "") {
+		hints[enum] = AntigravityEnumHint{ServedModel: concreteServed, DisplayName: cleanDisplay}
+	}
+}
+
+func applyAntigravityEnumHint(hints map[string]AntigravityEnumHint, modelEnum, servedModel, displayName string) (string, string) {
+	served := strings.TrimSpace(servedModel)
+	display := strings.TrimSpace(displayName)
+	// A routing slug still names the orchestrator/worker role and must be
+	// resolved by its family and release date. Only a step with neither a
+	// usable served identity nor a display name inherits a sibling's identity.
+	if display != "" || (served != "" && !modelid.IsPseudo(served)) {
+		return served, display
+	}
+	if hint, ok := hints[strings.TrimSpace(modelEnum)]; ok {
+		if hint.ServedModel != "" {
+			served = hint.ServedModel
+		}
+		if hint.DisplayName != "" {
+			display = hint.DisplayName
 		}
 	}
-	return "unknown"
+	return served, display
+}
+
+var (
+	orchestratorDisplayRE = regexp.MustCompile(`(?i)^orchestrator\s*\((.+)\)$`)
+	displayNameVersionRE  = regexp.MustCompile(`(?i)^(?:gemini[\s_-]+)?([a-z][a-z0-9-]*)\s+(\d+(?:[._-]\d+)?)$`)
+	trailingParensRE      = regexp.MustCompile(`(?:\s*\([^)]*\))+\s*$`)
+)
+
+// parseAntigravityDisplayName turns an Antigravity display label into either a
+// concrete model id or an unversioned family. It mirrors the label parsing in
+// Pigeon's model-id.ts.
+func parseAntigravityDisplayName(label string) (concrete, family string) {
+	trimmed := strings.TrimSpace(label)
+	if trimmed == "" {
+		return "", ""
+	}
+	if match := orchestratorDisplayRE.FindStringSubmatch(trimmed); match != nil {
+		inner := strings.TrimSpace(trailingParensRE.ReplaceAllString(match[1], ""))
+		if inner == "" {
+			return "", ""
+		}
+		if strings.ContainsAny(inner, "0123456789") {
+			if versioned := displayNameVersionRE.FindStringSubmatch(inner); versioned != nil {
+				return formatModelID("gemini-" + versioned[2] + "-" + versioned[1]), ""
+			}
+			prefixed := inner
+			if !strings.HasPrefix(strings.ToLower(prefixed), "gemini") {
+				prefixed = "gemini-" + prefixed
+			}
+			return formatModelID(prefixed), ""
+		}
+		return "", displayNameFamily(inner)
+	}
+
+	// Only treat it as a display label when it has a space or parentheses;
+	// slugs such as "gemini-3.8-flash-n" stay served-model names.
+	if !strings.ContainsAny(trimmed, " \t()") {
+		return "", ""
+	}
+	base := strings.TrimSpace(trailingParensRE.ReplaceAllString(trimmed, ""))
+	if base == "" {
+		return "", ""
+	}
+	if strings.ContainsAny(base, "0123456789") {
+		return formatModelID(base), ""
+	}
+	lower := strings.ToLower(base)
+	if strings.HasPrefix(lower, "gemini") || strings.Contains(lower, "orchestrator") {
+		return "", displayNameFamily(base)
+	}
+	return formatModelID(base), ""
+}
+
+func displayNameFamily(label string) string {
+	lower := strings.ToLower(strings.TrimSpace(label))
+	lower = strings.TrimSpace(strings.TrimPrefix(lower, "gemini"))
+	lower = strings.TrimLeft(lower, "-_ ")
+	return formatModelID(lower)
 }
 
 // familyFromLabel returns a family codename when the label names only one and
@@ -375,19 +537,7 @@ func resolveFamily(family string, releases ReleaseMap, stepDate string) string {
 	if len(candidates) == 0 {
 		return formatModelID("gemini-" + family)
 	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].major != candidates[j].major {
-			return candidates[i].major > candidates[j].major
-		}
-		return candidates[i].minor > candidates[j].minor
-	})
-	if stepDate != "" {
-		for _, candidate := range candidates {
-			if candidate.dated && candidate.release <= stepDate {
-				return formatModelID(candidate.model)
-			}
-		}
-	}
+
 	var dated []geminiFamilyModel
 	for _, candidate := range candidates {
 		if candidate.dated {
@@ -395,16 +545,41 @@ func resolveFamily(family string, releases ReleaseMap, stepDate string) string {
 		}
 	}
 	if len(dated) > 0 {
-		earliest := dated[0]
-		for _, candidate := range dated[1:] {
-			if candidate.release < earliest.release ||
-				(candidate.release == earliest.release &&
-					(candidate.major > earliest.major ||
-						(candidate.major == earliest.major && candidate.minor > earliest.minor))) {
-				earliest = candidate
+		var eligible []geminiFamilyModel
+		for _, candidate := range dated {
+			if stepDate != "" && candidate.release > stepDate {
+				continue
 			}
+			eligible = append(eligible, candidate)
 		}
-		return formatModelID(earliest.model)
+		if len(eligible) > 0 {
+			sort.SliceStable(eligible, func(i, j int) bool {
+				if eligible[i].major != eligible[j].major {
+					return eligible[i].major > eligible[j].major
+				}
+				if eligible[i].minor != eligible[j].minor {
+					return eligible[i].minor > eligible[j].minor
+				}
+				return eligible[i].release > eligible[j].release
+			})
+			return formatModelID(eligible[0].model)
+		}
+		sort.SliceStable(dated, func(i, j int) bool {
+			if dated[i].release != dated[j].release {
+				return dated[i].release < dated[j].release
+			}
+			if dated[i].major != dated[j].major {
+				return dated[i].major < dated[j].major
+			}
+			return dated[i].minor < dated[j].minor
+		})
+		return formatModelID(dated[0].model)
 	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].major != candidates[j].major {
+			return candidates[i].major > candidates[j].major
+		}
+		return candidates[i].minor > candidates[j].minor
+	})
 	return formatModelID(candidates[0].model)
 }

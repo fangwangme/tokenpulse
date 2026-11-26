@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -12,6 +13,9 @@ import (
 )
 
 const cacheTTL = 5 * time.Minute
+
+var quotaSchemaMu sync.Mutex
+var quotaSchemaDone = map[string]bool{}
 
 // Cache stores one snapshot per provider and appends observation history.
 type Cache struct {
@@ -30,9 +34,14 @@ func (c *Cache) open() (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureQuotaSchema(db); err != nil {
-		db.Close()
-		return nil, err
+	quotaSchemaMu.Lock()
+	defer quotaSchemaMu.Unlock()
+	if !quotaSchemaDone[c.Path] {
+		if err := ensureQuotaSchema(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+		quotaSchemaDone[c.Path] = true
 	}
 	return db, nil
 }

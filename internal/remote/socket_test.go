@@ -31,8 +31,16 @@ func TestLongDataDirSocketMovesToRuntimeDir(t *testing.T) {
 		t.Fatalf("socket stayed in the long data directory: %s", socket)
 	}
 	tempDir := filepath.Clean(os.TempDir())
-	if directory := filepath.Dir(socket); directory != runtimeDir && directory != tempDir {
-		t.Fatalf("socket directory = %s, want %s or %s", directory, runtimeDir, tempDir)
+	privateDir := filepath.Dir(socket)
+	parent := filepath.Dir(privateDir)
+	if parent != runtimeDir && parent != tempDir {
+		t.Fatalf("socket directory = %s, want a child of %s or %s", privateDir, runtimeDir, tempDir)
+	}
+	if !strings.HasPrefix(filepath.Base(privateDir), "tokenpulse-") {
+		t.Fatalf("socket directory = %s, want a tokenpulse hash directory", privateDir)
+	}
+	if info, err := os.Stat(privateDir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("socket directory mode = %v, want 700", info.Mode().Perm())
 	}
 	if len(socket) > unixSocketPathLimit() {
 		t.Fatalf("socket path is still too long: %s", socket)

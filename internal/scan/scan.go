@@ -30,6 +30,8 @@ type Scanner struct {
 	Store   *usage.Store
 	Pricing *pricing.Service
 	Report  *report.Service
+
+	testParsers []usage.Parser
 }
 
 func New(dataDir string) (*Scanner, error) {
@@ -138,8 +140,8 @@ func (s *Scanner) Run(options Options) error {
 			continue
 		}
 		messages := result.messages
-		if options.RefreshFrom != nil {
-			messages = filterRange(messages, *options.RefreshFrom, *options.RefreshTo)
+		if options.RefreshFrom != nil || options.RefreshTo != nil {
+			messages = filterRange(messages, options.RefreshFrom, options.RefreshTo)
 		}
 		replaceSource := options.RebuildAll || options.RefreshFrom != nil || stale[result.target.parser.Name()] ||
 			(result.target.parser.Name() == "codex" && codexRepair)
@@ -149,6 +151,15 @@ func (s *Scanner) Run(options Options) error {
 		}
 		replaceParsedSessions := replaceSource && preserveMissing && options.RefreshFrom == nil
 		if len(messages) == 0 {
+			// An explicit rebuild or range refresh is authoritative: when the
+			// source yields nothing, its old rows must go. A parser without
+			// session-level replacement is the only case where an empty parse
+			// can be applied; Codex rebuilds keep missing-source sessions.
+			if (options.RebuildAll || options.RefreshFrom != nil) && !replaceParsedSessions {
+				if _, err := s.Store.ReplaceSourceMessages(result.target.parser.Name(), options.RefreshFrom, options.RefreshTo, nil, cost); err != nil {
+					return err
+				}
+			}
 			if recordsRefresh {
 				_ = s.Store.RecordRefreshStarted(result.target.parser.Name(), refreshStarted)
 			}
@@ -190,6 +201,9 @@ func (s *Scanner) Run(options Options) error {
 }
 
 func (s *Scanner) parsers(options Options, releases usage.ReleaseMap) []usage.Parser {
+	if s.testParsers != nil {
+		return s.testParsers
+	}
 	wanted := map[string]bool{}
 	for _, name := range options.Providers {
 		wanted[name] = true
@@ -221,16 +235,20 @@ func (s *Scanner) parsers(options Options, releases usage.ReleaseMap) []usage.Pa
 	return parsers
 }
 
-func filterRange(messages []provider.UnifiedMessage, from, to time.Time) []provider.UnifiedMessage {
-	out := messages[:0]
+func filterRange(messages []provider.UnifiedMessage, from, to *time.Time) []provider.UnifiedMessage {
+	out := make([]provider.UnifiedMessage, 0, len(messages))
 	for _, message := range messages {
 		date, err := time.ParseInLocation("2006-01-02", message.Date, time.Local)
 		if err != nil {
 			continue
 		}
-		if !date.Before(from) && !date.After(to) {
-			out = append(out, message)
+		if from != nil && date.Before(*from) {
+			continue
 		}
+		if to != nil && date.After(*to) {
+			continue
+		}
+		out = append(out, message)
 	}
 	return out
 }

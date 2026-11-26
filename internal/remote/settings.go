@@ -18,7 +18,7 @@ type SettingSpec struct {
 func phoneSettings() map[string]SettingSpec {
 	specs := map[string]SettingSpec{
 		"display.quota_display_mode":          {Allowed: []any{"used", "remaining"}},
-		"display.auto_refresh_secs":           {Allowed: []any{0, 60, 120, 300, 600, 900}},
+		"display.auto_refresh_secs":           {Allowed: []any{60, 120, 300, 600, 900}},
 		"display.account_display":             {Allowed: []any{"none", "plan", "full"}},
 		"display.refresh_quota":               {Allowed: []any{true, false}},
 		"display.scan_antigravity":            {Allowed: []any{true, false}},

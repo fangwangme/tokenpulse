@@ -676,45 +676,35 @@ export function UsagePage() {
 
   return (
     <div class="page">
-      {/* Shared Header */}
-      <div class="hdr">
-        <div style={{ width: "44px" }} />
-        <div class="ht">
-          <div class="t">{t("quota.title")}</div>
-          <div class="s">
-            {state.usageEnabled
-              ? (isLoading()
+      <div class="scroll">
+        <div style={{ padding: "0 16px calc(104px + env(safe-area-inset-bottom))" }}>
+          <Show when={state.usageEnabled} fallback={<FeatureDisabledNotice message={t("usage.disabledNotice")} />}>
+          <div class="statusbar">
+            <div class="s">
+              {isLoading()
                 ? (usageReport() ? t("quota.refreshing") : t("usage.loading"))
                 : usageReport()?.scannedAt
                 ? t("quota.scannedTo", {
                     time: new Date(usageReport()!.scannedAt).toTimeString().slice(0, 8),
                   })
-                : "")
-              : ""}
+                : ""}
+            </div>
+            <button class="cbtn" aria-label={t("app.reload")} onClick={() => void loadUsage(true)}>
+              <span
+                style={{
+                  display: "inline-flex",
+                  "align-items": "center",
+                  "justify-content": "center",
+                  animation: isLoading() ? "sp .8s linear infinite" : "none",
+                }}
+              >
+                <Icon name="refresh" />
+              </span>
+            </button>
           </div>
-        </div>
-        <Show when={state.usageEnabled} fallback={<div style={{ width: "38px" }} />}>
-          <button class="cbtn" aria-label={t("app.reload")} onClick={() => void loadUsage(true)}>
-            <span
-              style={{
-                display: "inline-flex",
-                "align-items": "center",
-                "justify-content": "center",
-                animation: isLoading() ? "sp .8s linear infinite" : "none",
-              }}
-            >
-              <Icon name="refresh" />
-            </span>
-          </button>
-        </Show>
-      </div>
-
-      <div class="scroll">
-        <div style={{ padding: "0 16px calc(104px + env(safe-area-inset-bottom))" }}>
-          <Show when={state.usageEnabled} fallback={<FeatureDisabledNotice message={t("usage.disabledNotice")} />}>
 
           {/* Range Chips */}
-          <div style={{ "margin-top": "12px", display: "flex", gap: "6px", "overflow-x": "auto" }}>
+          <div style={{ "margin-top": "8px", display: "flex", gap: "5px", "flex-wrap": "wrap" }}>
             <For
               each={[
                 { id: "today" as const, label: t("usage.today") },
@@ -747,10 +737,10 @@ export function UsagePage() {
                     style={{
                       flex: "none",
                       height: "34px",
-                      padding: "0 13px",
+                      padding: "0 11px",
                       "border-radius": "17px",
                       font: "inherit",
-                      "font-size": "13.5px",
+                      "font-size": "13px",
                       "font-weight": 550,
                       border: on() ? "1px solid var(--accent)" : "1px solid var(--line2)",
                       background: on() ? "var(--accentbg)" : "var(--surface)",

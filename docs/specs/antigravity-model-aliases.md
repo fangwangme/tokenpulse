@@ -34,7 +34,7 @@ An alias's id comes from its **label**: `Gemini 3.1 Pro (High)` →
 lowercase, no `antigravity-` prefix, `.`/`_`/spaces as single `-`. Variants
 such as `thinking` or `high` stay; `model_id::canonical` folds them (and
 `-tiered`, `preview`) for display, and pricing applies the same spelling rules
-to catalog keys (`docs/model-pricing-mapping.md`). There are no per-model
+to catalog keys (`pricing.md`). There are no per-model
 rules.
 
 ## Unversioned families

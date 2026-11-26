@@ -15,16 +15,30 @@ export function App() {
   let stopped = false;
   let hadConnection = false;
   let attempt = 0;
+  let reconnectTimer: number | undefined;
+
+  const scheduleReconnect = () => {
+    if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+    attempt += 1;
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = undefined;
+      connect();
+    }, Math.min(30000, 1000 * 2 ** Math.min(attempt, 5)));
+  };
 
   const connect = () => {
     if (stopped || socket || state.paired !== true) return;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
     socket.onopen = () => {
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
       state.connected = true;
+      state.everConnected = true;
       attempt = 0;
       if (hadConnection) {
         state.reconnectNonce += 1;
+        showToast(t("common.reconnected"));
         void loadState().catch(() => {});
         void loadQuota().catch(() => {});
       }
@@ -58,8 +72,7 @@ export function App() {
       socket = undefined;
       state.connected = false;
       if (stopped) return;
-      attempt += 1;
-      window.setTimeout(connect, Math.min(30000, 1000 * 2 ** Math.min(attempt, 5)));
+      scheduleReconnect();
     };
   };
 
@@ -95,7 +108,19 @@ export function App() {
     void initialize();
 
     const updateOnline = () => {
-      if (navigator.onLine && state.paired === true) connect();
+      if (!navigator.onLine) {
+        state.connected = false;
+        return;
+      }
+      if (state.paired === true) {
+        if (socket?.readyState === WebSocket.OPEN) {
+          state.connected = true;
+          return;
+        }
+        if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+        connect();
+      }
     };
     const unauthorized = () => {
       state.paired = false;
@@ -105,7 +130,7 @@ export function App() {
       socket = undefined;
     };
     const media = window.matchMedia("(prefers-color-scheme: light)");
-    const themeChanged = () => applyTheme(state.themeMode, state.accent);
+    const themeChanged = () => applyTheme(state.themeMode);
 
     window.addEventListener("online", updateOnline);
     window.addEventListener("offline", updateOnline);
@@ -117,6 +142,8 @@ export function App() {
 
     onCleanup(() => {
       stopped = true;
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
       socket?.close();
       socket = undefined;
       window.removeEventListener("online", updateOnline);
@@ -127,7 +154,7 @@ export function App() {
   });
 
   createEffect(() => {
-    applyTheme(state.themeMode, state.accent);
+    applyTheme(state.themeMode);
   });
 
   createEffect(() => {
@@ -169,6 +196,9 @@ export function App() {
             <SettingsPage />
           </Match>
         </Switch>
+        <Show when={state.everConnected && !state.connected}>
+          <div class="offline-banner">{t("common.offlineCache")}</div>
+        </Show>
         <nav class="bottom-nav">
           <button
             classList={{ active: state.route.name === "usage" }}

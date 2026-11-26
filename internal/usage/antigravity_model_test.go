@@ -25,7 +25,7 @@ func TestUnversionedFamilyResolutionAroundReleaseDates(t *testing.T) {
 		{"gemini-flash-worker-agy", "2020-01-01", "gemini-3-5-flash"},
 	}
 	for _, tc := range cases {
-		if got := ResolveAntigravityModel("", tc.served, nil, releases, tc.date); got != tc.want {
+		if got := ResolveAntigravityModel("", tc.served, "", nil, releases, tc.date); got != tc.want {
 			t.Errorf("%s on %s = %s, want %s", tc.served, tc.date, got, tc.want)
 		}
 	}
@@ -42,7 +42,7 @@ func TestUnversionedFamilyRoutingSlugs(t *testing.T) {
 		"gemini-pro-orchestrator-g1-pro": "gemini-4-argon",
 	}
 	for slug, want := range cases {
-		if got := ResolveAntigravityModel("", slug, nil, releases, "2026-10-01"); got != want {
+		if got := ResolveAntigravityModel("", slug, "", nil, releases, "2026-10-01"); got != want {
 			t.Errorf("%s = %s, want %s", slug, got, want)
 		}
 	}
@@ -67,10 +67,10 @@ func TestUnversionedFamilyFromLabel(t *testing.T) {
 		RawModelID: "MODEL_PLACEHOLDER_M998", Label: "Gemini Flash", Source: "test",
 	}
 	releases := ReleaseMap{"gemini-3-8-flash": "2026-09-01", "gemini-3-9-carbon": "2026-10-01"}
-	if got := ResolveAntigravityModel("MODEL_PLACEHOLDER_M999", "", aliases, releases, "2026-10-02"); got != "gemini-3-9-carbon" {
+	if got := ResolveAntigravityModel("MODEL_PLACEHOLDER_M999", "", "", aliases, releases, "2026-10-02"); got != "gemini-3-9-carbon" {
 		t.Errorf("Carbon label = %s", got)
 	}
-	if got := ResolveAntigravityModel("MODEL_PLACEHOLDER_M998", "", aliases, releases, "2026-10-02"); got != "gemini-3-8-flash" {
+	if got := ResolveAntigravityModel("MODEL_PLACEHOLDER_M998", "", "", aliases, releases, "2026-10-02"); got != "gemini-3-8-flash" {
 		t.Errorf("Flash label = %s", got)
 	}
 }
@@ -79,24 +79,101 @@ func TestUnversionedFamilyFromLabel(t *testing.T) {
 // over the served name, and the served name stands in when no alias exists.
 func TestVersionedAliasAndServedName(t *testing.T) {
 	aliases := seedAliases()
-	if got := ResolveAntigravityModel("MODEL_PLACEHOLDER_M319", "gemini-3.8-flash-n", aliases, nil, "2026-10-02"); got != "gemini-3-8-flash-medium" {
+	if got := ResolveAntigravityModel("MODEL_PLACEHOLDER_M319", "gemini-3.8-flash-n", "", aliases, nil, "2026-10-02"); got != "gemini-3-8-flash-medium" {
 		t.Errorf("versioned alias = %s", got)
 	}
-	if got := ResolveAntigravityModel("MODEL_PLACEHOLDER_UNKNOWN", "gemini-4-hydrogen", aliases, nil, "2026-10-02"); got != "gemini-4-hydrogen" {
+	if got := ResolveAntigravityModel("MODEL_PLACEHOLDER_UNKNOWN", "gemini-4-hydrogen", "", aliases, nil, "2026-10-02"); got != "gemini-4-hydrogen" {
 		t.Errorf("served name = %s", got)
 	}
-	if got := ResolveAntigravityModel("MODEL_PLACEHOLDER_UNKNOWN", "", aliases, nil, "2026-10-02"); got != "model-placeholder-unknown" {
+	if got := ResolveAntigravityModel("MODEL_PLACEHOLDER_UNKNOWN", "", "", aliases, nil, "2026-10-02"); got != "model-placeholder-unknown" {
 		t.Errorf("raw enum = %s", got)
 	}
-	if got := ResolveAntigravityModel("", "gemini-default", aliases, nil, "2026-10-02"); got != "unknown" {
+	if got := ResolveAntigravityModel("", "gemini-default", "", aliases, nil, "2026-10-02"); got != "unknown" {
 		t.Errorf("pseudo served name = %s", got)
+	}
+}
+
+// Protects the Golden Rule: a human display name outranks a routing slug.
+func TestDisplayNameOutranksRoutingSlug(t *testing.T) {
+	releases := ReleaseMap{
+		"gemini-3-8-flash":  "2026-09-01",
+		"gemini-4-hydrogen": "2026-11-01",
+		"gemini-4-carbon":   "2026-06-01",
+	}
+	if got := ResolveAntigravityModel("", "gemini-flash-worker-agy", "Gemini 4 Hydrogen (Orchestrator)", nil, releases, "2026-11-17"); got != "gemini-4-hydrogen" {
+		t.Errorf("hydrogen display name = %s", got)
+	}
+	if got := ResolveAntigravityModel("", "gemini-flash-worker-agy", "Orchestrator (Carbon)", nil, releases, "2026-11-17"); got != "gemini-4-carbon" {
+		t.Errorf("carbon display family = %s", got)
+	}
+	if got := ResolveAntigravityModel("", "gemini-flash-worker-agy", "Gemini 3.8 Flash (High)", nil, nil, "2026-11-17"); got != "gemini-3-8-flash" {
+		t.Errorf("versioned display name = %s", got)
+	}
+	if got := ResolveAntigravityModel("", "gemini-flash-worker-agy", "", nil, releases, "2026-11-17"); got != "gemini-3-8-flash" {
+		t.Errorf("routing fallback = %s", got)
+	}
+}
+
+// Protects the orchestrator/worker rule: a sibling step with the same enum
+// supplies the concrete identity when this step has only the enum.
+func TestAntigravityEnumHintCarriesIdentity(t *testing.T) {
+	hints := map[string]AntigravityEnumHint{}
+	recordAntigravityEnumHint(hints, "MODEL_M500", "gemini-flash-worker-agy", "Orchestrator (Carbon)")
+	served, display := applyAntigravityEnumHint(hints, "MODEL_M500", "", "")
+	if served != "" || display != "Orchestrator (Carbon)" {
+		t.Fatalf("hint = %q / %q", served, display)
+	}
+	releases := ReleaseMap{"gemini-4-carbon": "2026-06-01"}
+	if got := ResolveAntigravityModel("MODEL_M500", served, display, nil, releases, "2026-10-02"); got != "gemini-4-carbon" {
+		t.Errorf("hinted carbon = %s", got)
+	}
+	// A concrete identity on the row itself wins over the session hint.
+	served, display = applyAntigravityEnumHint(hints, "MODEL_M500", "gemini-3.8-flash-n", "")
+	if served != "gemini-3.8-flash-n" || display != "" {
+		t.Fatalf("concrete identity was overridden: %q / %q", served, display)
+	}
+}
+
+// Protects Pigeon's known routing codenames.
+func TestKnownAntigravityCodenames(t *testing.T) {
+	cases := map[string]string{
+		"gemini-3.8-flash-n":   "gemini-3-8-flash",
+		"gemini-3-flash-a":     "gemini-3-5-flash",
+		"gemini-4-argon-trial": "gemini-4-argon",
+	}
+	for served, want := range cases {
+		if got := ResolveAntigravityModel("", served, "", nil, nil, "2026-10-02"); got != want {
+			t.Errorf("%s = %s, want %s", served, got, want)
+		}
+	}
+}
+
+// Protects the release-date intervals for orchestrator/executor families.
+func TestFamilyReleaseIntervals(t *testing.T) {
+	releases := ReleaseMap{
+		"gemini-3-7-flash": "2026-08-13",
+		"gemini-3-8-flash": "2026-09-02",
+	}
+	cases := []struct {
+		date string
+		want string
+	}{
+		{"2026-08-12", "gemini-3-7-flash"}, // before the first release -> earliest
+		{"2026-08-13", "gemini-3-7-flash"},
+		{"2026-09-01", "gemini-3-7-flash"},
+		{"2026-09-02", "gemini-3-8-flash"},
+	}
+	for _, tc := range cases {
+		if got := resolveFamily("flash", releases, tc.date); got != tc.want {
+			t.Errorf("flash on %s = %s, want %s", tc.date, got, tc.want)
+		}
 	}
 }
 
 // Protects antigravity-model-aliases.md "Unversioned families": a family with
 // no catalog entry stays gemini-<family> until one appears.
 func TestFamilyWithoutCatalogEntry(t *testing.T) {
-	if got := ResolveAntigravityModel("", "gemini-neon-worker", nil, ReleaseMap{}, "2026-10-02"); got != "gemini-neon" {
+	if got := ResolveAntigravityModel("", "gemini-neon-worker", "", nil, ReleaseMap{}, "2026-10-02"); got != "gemini-neon" {
 		t.Errorf("missing family = %s", got)
 	}
 }
@@ -108,7 +185,7 @@ func TestFamilyResolutionFallsBackToHighestUndated(t *testing.T) {
 		"gemini-3-5-flash": "",
 		"gemini-3-6-flash": "",
 	}
-	if got := ResolveAntigravityModel("", "gemini-flash-worker", nil, releases, "2026-10-02"); got != "gemini-3-6-flash" {
+	if got := ResolveAntigravityModel("", "gemini-flash-worker", "", nil, releases, "2026-10-02"); got != "gemini-3-6-flash" {
 		t.Errorf("undated family = %s", got)
 	}
 }
@@ -139,6 +216,7 @@ func TestParseGenMetadataUsage(t *testing.T) {
 	usage = append(usage, protoTestMessage(11, []byte("resp"))...)
 	payload := protoTestMessage(4, usage)
 	payload = append(payload, protoTestMessage(19, []byte("gemini-3.8-flash-n"))...)
+	payload = append(payload, protoTestMessage(21, []byte("Gemini 3.8 Flash (High)"))...)
 	pair := protoTestMessage(1, []byte("model_enum"))
 	pair = append(pair, protoTestMessage(2, []byte("MODEL_PLACEHOLDER_M319"))...)
 	payload = append(payload, protoTestMessage(20, pair)...)
@@ -150,10 +228,27 @@ func TestParseGenMetadataUsage(t *testing.T) {
 		t.Fatal("blob did not parse")
 	}
 	if parsed.responseID != "resp" || parsed.servedModel != "gemini-3.8-flash-n" ||
-		parsed.modelEnum != "MODEL_PLACEHOLDER_M319" || parsed.requestUUID != "request-uuid" {
+		parsed.modelEnum != "MODEL_PLACEHOLDER_M319" || parsed.requestUUID != "request-uuid" ||
+		parsed.displayName != "Gemini 3.8 Flash (High)" {
 		t.Fatalf("identities = %+v", parsed)
 	}
 	if parsed.tokens != (provider.TokenBreakdown{Input: 10, Output: 70, CacheRead: 5, Reasoning: 30}) {
+		t.Fatalf("tokens = %+v", parsed.tokens)
+	}
+}
+
+// Protects input-only/cache-only generations: Pigeon counts them, so a zero
+// output must not drop an otherwise non-zero usage record.
+func TestParseGenMetadataUsageInputOnly(t *testing.T) {
+	usage := protoTestVarintField(2, 38_916)
+	payload := protoTestMessage(4, usage)
+	blob := protoTestMessage(1, payload)
+	blob = append(blob, protoTestMessage(4, []byte("request-input-only"))...)
+	parsed, ok := parseGenMetadataUsage(blob)
+	if !ok {
+		t.Fatal("input-only blob did not parse")
+	}
+	if parsed.tokens.Input != 38_916 || parsed.tokens.Output != 0 || parsed.tokens.Total() != 38_916 {
 		t.Fatalf("tokens = %+v", parsed.tokens)
 	}
 }

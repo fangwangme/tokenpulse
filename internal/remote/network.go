@@ -112,31 +112,41 @@ func buildAccess(port, httpsPort int, noTailscale, lan bool) Access {
 			}
 			return Access{Mode: "tailscale-serve", BindHost: "127.0.0.1", URL: url, HTTPS: true, Hosts: hosts}
 		}
-		ip := ""
-		if len(info.IPs) > 0 {
-			ip = info.IPs[0]
-		}
-		return Access{
-			Mode: "tailscale-ip", BindHost: ip, URL: fmt.Sprintf("http://%s:%d/", ip, port), Hosts: hosts,
-			Warning: fmt.Sprintf("Tailscale Serve already maps HTTPS %d to %s; not overwriting it. "+
-				"Run `tailscale serve --bg --https=%d %d` to use HTTPS.", httpsPort, target, httpsPort, port),
-		}
+		return tailscaleIPAccess(info, port, hosts, fmt.Sprintf(
+			"Tailscale Serve already maps HTTPS %d to %s; not overwriting it. "+
+				"Run `tailscale serve --bg --https=%d %d` to use HTTPS.", httpsPort, target, httpsPort, port))
 	}
 	if err := configureServe(httpsPort, port); err != nil {
-		ip := ""
-		if len(info.IPs) > 0 {
-			ip = info.IPs[0]
-		}
-		return Access{
-			Mode: "tailscale-ip", BindHost: ip, URL: fmt.Sprintf("http://%s:%d/", ip, port), Hosts: hosts,
-			Warning: fmt.Sprintf("Tailscale Serve could not be configured: %v. Run `tailscale serve --bg --https=%d %d`.", err, httpsPort, port),
-		}
+		return tailscaleIPAccess(info, port, hosts, fmt.Sprintf(
+			"Tailscale Serve could not be configured: %v. Run `tailscale serve --bg --https=%d %d`.", err, httpsPort, port))
 	}
 	url := fmt.Sprintf("https://%s:%d/", info.DNSName, httpsPort)
 	if httpsPort == 443 {
 		url = fmt.Sprintf("https://%s/", info.DNSName)
 	}
 	return Access{Mode: "tailscale-serve", BindHost: "127.0.0.1", URL: url, HTTPS: true, Hosts: hosts}
+}
+
+// tailscaleIPAccess falls back to the Tailscale IP, but never to a wildcard
+// bind: without an address the server stays on localhost.
+func tailscaleIPAccess(info TailscaleInfo, port int, hosts map[string]bool, warning string) Access {
+	ip := ""
+	for _, candidate := range info.IPs {
+		if strings.TrimSpace(candidate) != "" {
+			ip = strings.TrimSpace(candidate)
+			break
+		}
+	}
+	if ip == "" {
+		return Access{
+			Mode: "local", BindHost: "127.0.0.1", URL: fmt.Sprintf("http://localhost:%d/", port), Hosts: hosts,
+			Warning: warning + " No Tailscale IP is available; listening on localhost only.",
+		}
+	}
+	return Access{
+		Mode: "tailscale-ip", BindHost: ip, URL: fmt.Sprintf("http://%s:%d/", ip, port), Hosts: hosts,
+		Warning: warning,
+	}
 }
 
 func interfaceAddresses() []string {

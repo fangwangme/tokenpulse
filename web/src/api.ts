@@ -1,4 +1,5 @@
-import { state } from "./store";
+import { showToast, state } from "./store";
+import { t } from "./i18n";
 import { secondsToScanInterval } from "./shared/defaults";
 import type {
   QuotaGetPayload,
@@ -149,12 +150,31 @@ export async function loadState(): Promise<void> {
     codex: raw.settings["providers.codex.enabled"] !== false,
     antigravity: raw.settings["providers.agy.enabled"] !== false,
   };
+  state.quotaEnabled = raw.settings["display.refresh_quota"] !== false;
+  state.usageEnabled = true;
   state.configReady = true;
   if (state.paired !== true) state.paired = true;
 }
 
+interface RefreshResult {
+  accepted: boolean;
+  throttled: boolean;
+  retryAfter: number;
+}
+
+async function manualRefresh(flags: { usage: boolean; quota: boolean }): Promise<RefreshResult> {
+  const result = await api<RefreshResult>("/api/refresh", {
+    method: "POST",
+    body: JSON.stringify(flags),
+  });
+  if (result.throttled) {
+    showToast(t("refresh.cached", { secs: Math.max(1, result.retryAfter) }));
+  }
+  return result;
+}
+
 export async function refreshUsage(): Promise<void> {
-  await api("/api/refresh", { method: "POST", body: JSON.stringify({ usage: true, quota: false }) });
+  await manualRefresh({ usage: true, quota: false });
 }
 
 export async function request(message: {
@@ -250,7 +270,7 @@ export async function loadQuota(refresh = false): Promise<void> {
   state.quotaLoading = true;
   try {
     if (refresh) {
-      await api("/api/refresh", { method: "POST", body: JSON.stringify({ usage: false, quota: true }) });
+      await manualRefresh({ usage: false, quota: true });
     }
     const raw = await api<RawQuota>("/api/quota");
     state.quotaSnapshots = mapQuota(raw);
@@ -286,6 +306,7 @@ export async function patchSettings(updates: Record<string, unknown>): Promise<v
     codex: values["providers.codex.enabled"] !== false,
     antigravity: values["providers.agy.enabled"] !== false,
   };
+  state.quotaEnabled = values["display.refresh_quota"] !== false;
   state.keeperEngine = Boolean(values["keeper.enabled"]);
 }
 

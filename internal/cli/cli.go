@@ -2,10 +2,12 @@
 package cli
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,6 +23,7 @@ import (
 	"github.com/fangwangme/tokenpulse/internal/provider"
 	"github.com/fangwangme/tokenpulse/internal/quota"
 	"github.com/fangwangme/tokenpulse/internal/remote"
+	"github.com/fangwangme/tokenpulse/internal/report"
 	"github.com/fangwangme/tokenpulse/internal/scan"
 	"github.com/fangwangme/tokenpulse/internal/summary"
 	"github.com/fangwangme/tokenpulse/internal/tui"
@@ -91,6 +94,7 @@ Options:
       --refresh-days <RANGE>  Refresh one YYYY-MM-DD:YYYY-MM-DD range
       --refresh-pricing       Force a price catalog fetch
       --rebuild-all           Reparse every source from scratch
+      --no-scan               Read the cached ledger without scanning
       --csv <daily|models>    Emit CSV
       --json                  Emit JSON
       --no-tui                Use plain text instead of the interactive dashboard
@@ -100,16 +104,38 @@ Options:
   -V, --version               Print version`)
 }
 
+func printUsageHelp() {
+	fmt.Println(`Usage: tokenpulse usage [OPTIONS]
+
+Inspect the usage ledger. Without --no-scan the command reuses a running
+serve scan or refreshes the ledger first.
+
+Options:
+      --since <DATE>          Only show usage since this date
+      --refresh-days <RANGE>  Refresh one YYYY-MM-DD:YYYY-MM-DD range
+      --refresh-pricing       Force a price catalog fetch
+      --rebuild-all           Reparse every source from scratch
+      --no-scan               Read the cached ledger without scanning
+      --csv <daily|models>    Emit CSV
+      --json                  Emit JSON
+      --no-tui                Use plain text instead of the interactive dashboard
+      --raw                   Show raw model usage
+      --date <DATE>           Date for --raw
+      --log                   Write a performance log line
+  -h, --help                  Print this help`)
+}
+
 func runUsage(args []string, subcommand bool) error {
 	flags := flag.NewFlagSet("usage", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	flags.Usage = printHelp
+	flags.Usage = printUsageHelp
 	var since, refreshDays, csvFormat, rawDate string
-	var refreshPricing, rebuildAll, jsonOut, noTUI, logPerf, raw bool
+	var refreshPricing, rebuildAll, jsonOut, noTUI, noScan, logPerf, raw bool
 	flags.StringVar(&since, "since", "", "")
 	flags.StringVar(&refreshDays, "refresh-days", "", "")
 	flags.BoolVar(&refreshPricing, "refresh-pricing", false, "")
 	flags.BoolVar(&rebuildAll, "rebuild-all", false, "")
+	flags.BoolVar(&noScan, "no-scan", false, "")
 	flags.StringVar(&csvFormat, "csv", "", "")
 	flags.BoolVar(&jsonOut, "json", false, "")
 	flags.BoolVar(&noTUI, "no-tui", false, "")
@@ -130,10 +156,10 @@ func runUsage(args []string, subcommand bool) error {
 	if raw {
 		return runRaw(rawDate, jsonOut)
 	}
-	return runUsageReport(since, refreshDays, csvFormat, refreshPricing, rebuildAll, jsonOut, noTUI, logPerf)
+	return runUsageReport(since, refreshDays, csvFormat, refreshPricing, rebuildAll, jsonOut, noTUI, noScan, logPerf)
 }
 
-func runUsageReport(since, refreshDays, csvFormat string, refreshPricing, rebuildAll, jsonOut, noTUI, logPerf bool) error {
+func runUsageReport(since, refreshDays, csvFormat string, refreshPricing, rebuildAll, jsonOut, noTUI, noScan, logPerf bool) error {
 	started := time.Now()
 	dataDir, err := paths.DataDir()
 	if err != nil {
@@ -176,20 +202,71 @@ func runUsageReport(since, refreshDays, csvFormat string, refreshPricing, rebuil
 	if err != nil {
 		return err
 	}
-	if err := scanner.Run(scan.Options{
-		Since: once(sinceDate), RefreshFrom: from, RefreshTo: to,
-		RefreshPricing: refreshPricing, RebuildAll: rebuildAll,
-		Providers: scan.ProvidersFromConfig(cfg), ScanAntigravity: cfg.Display.ScanAntigravity,
-	}); err != nil {
-		return err
-	}
-	if logPerf {
-		writePerfLog(dataDir, started)
-	}
-
 	outputSince := sinceDate
 	if outputSince == nil {
 		outputSince = from
+	}
+
+	client := remote.NewLocalClient(dataDir)
+	status, statusErr := client.Status()
+	if statusErr == nil && status.ScannedAt == 0 && status.Running && !noScan &&
+		refreshDays == "" && !refreshPricing && !rebuildAll {
+		fmt.Fprintln(os.Stderr, "Waiting for the running serve scan…")
+		deadline := time.Now().Add(2 * time.Minute)
+		for time.Now().Before(deadline) {
+			time.Sleep(500 * time.Millisecond)
+			if current, err := client.Status(); err == nil && current.ScannedAt > 0 {
+				status = current
+				break
+			}
+		}
+	}
+	serveCacheReady := statusErr == nil && status.ScannedAt > 0
+	explicit := refreshDays != "" || refreshPricing || rebuildAll
+	scanNeeded := !noScan && (explicit || !serveCacheReady)
+
+	if !noTUI && interactive() && !jsonOut && csvFormat == "" {
+		if explicit && !noScan {
+			fmt.Fprintln(os.Stderr, "Scanning usage…")
+			if err := scanner.Run(scan.Options{
+				Since: once(sinceDate), RefreshFrom: from, RefreshTo: to,
+				RefreshPricing: refreshPricing, RebuildAll: rebuildAll,
+				Providers: scan.ProvidersFromConfig(cfg), ScanAntigravity: cfg.Display.ScanAntigravity,
+			}); err != nil {
+				return err
+			}
+			if logPerf {
+				writePerfLog(dataDir, started)
+			}
+		}
+		return tui.Run(tui.Options{
+			DataDir: dataDir, Scanner: scanner, Config: cfg, ConfigManager: manager,
+			Since: outputSince, RefreshPricing: refreshPricing, NoScan: noScan || explicit,
+		})
+	}
+
+	if scanNeeded {
+		if !jsonOut {
+			fmt.Fprintln(os.Stderr, "Scanning usage… (--no-scan reads the cached ledger)")
+		}
+		if err := scanner.Run(scan.Options{
+			Since: once(sinceDate), RefreshFrom: from, RefreshTo: to,
+			RefreshPricing: refreshPricing, RebuildAll: rebuildAll,
+			Providers: scan.ProvidersFromConfig(cfg), ScanAntigravity: cfg.Display.ScanAntigravity,
+		}); err != nil {
+			return err
+		}
+		if logPerf {
+			writePerfLog(dataDir, started)
+		}
+	} else {
+		if _, err := os.Stat(filepath.Join(dataDir, "usage.db")); err != nil {
+			return errors.New("no cached usage yet; run tokenpulse once without --no-scan")
+		}
+		// Read the shared ledger without schema or journal writes so a scan
+		// in another process cannot block this command.
+		scanner.Store = usage.NewReadOnlyStore(filepath.Join(dataDir, "usage.db"))
+		scanner.Report = report.NewService(filepath.Join(dataDir, "usage.db"))
 	}
 	store := scanner.Store
 	messageCount, sessionCount, err := store.LoadSummaryCounts(outputSince, nil, scan.ProvidersFromConfig(cfg))
@@ -201,12 +278,6 @@ func runUsageReport(since, refreshDays, csvFormat string, refreshPricing, rebuil
 	}
 	if csvFormat != "" {
 		return outputCSV(store, cfg, csvFormat, outputSince)
-	}
-	if !noTUI && interactive() {
-		return tui.Run(tui.Options{
-			DataDir: dataDir, Scanner: scanner, Config: cfg, ConfigManager: manager,
-			Since: outputSince, RefreshPricing: refreshPricing,
-		})
 	}
 	return outputText(scanner, cfg, messageCount, sessionCount, outputSince)
 }
@@ -317,42 +388,21 @@ func outputJSON(scanner *scan.Scanner, cfg config.Config, messages, sessions int
 	return encoder.Encode(payload)
 }
 
+// currentSnapshots only reads the persisted quota cache; usage reports never
+// call a provider, and a manual refresh is the only thing that does.
 func currentSnapshots(cfg config.Config) []provider.QuotaSnapshot {
 	dataDir, err := paths.DataDir()
 	if err != nil {
 		return nil
 	}
 	var out []provider.QuotaSnapshot
-	if cfg.Display.RefreshQuota {
-		for _, result := range quota.FetchAll(dataDir, buildFetchers(cfg)) {
-			if result.Snapshot != nil {
-				out = append(out, *result.Snapshot)
-			}
-		}
-		return out
-	}
 	cache := quota.NewCache(dataDir)
 	for _, id := range cfg.EnabledQuotaProviders(quota.ProviderIDs) {
-		if cached, err := cache.LoadValid(id, time.Now()); err == nil && cached != nil {
+		if cached, err := cache.LoadAny(id); err == nil && cached != nil {
 			out = append(out, cached.Snapshot)
 		}
 	}
 	return out
-}
-
-func buildFetchers(cfg config.Config) []quota.Fetcher {
-	var fetchers []quota.Fetcher
-	for _, id := range cfg.EnabledQuotaProviders(quota.ProviderIDs) {
-		switch id {
-		case "claude":
-			fetchers = append(fetchers, quota.NewClaudeFetcher(cfg.Display.AccountDisplay.ShowsAccount()))
-		case "codex":
-			fetchers = append(fetchers, quota.NewCodexFetcher())
-		case "antigravity":
-			fetchers = append(fetchers, quota.NewAntigravityFetcher())
-		}
-	}
-	return fetchers
 }
 
 func outputCSV(store *usage.Store, cfg config.Config, format string, since *time.Time) error {
@@ -361,24 +411,54 @@ func outputCSV(store *usage.Store, cfg config.Config, format string, since *time
 		if err != nil {
 			return err
 		}
-		fmt.Println("model,provider,source,tokens,cost_usd,messages,sessions,percent")
-		for _, model := range result.ByModel {
-			fmt.Printf("%s,%s,%s,%d,%.6f,%d,%d,%.2f\n", model.Model, model.Provider, model.Source,
-				model.Tokens, model.Cost, model.MessageCount, model.SessionCount, model.Percent)
-		}
-		return nil
+		return writeModelsCSV(os.Stdout, result.ByModel)
 	}
 	rows, err := store.LoadDailyRows(since, nil, scan.ProvidersFromConfig(cfg))
 	if err != nil {
 		return err
 	}
-	fmt.Println("date,source,total_tokens,cost_usd,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,messages,sessions")
-	for _, row := range rows {
-		fmt.Printf("%s,%s,%d,%.6f,%d,%d,%d,%d,%d,%d\n", row.Date, row.Source, row.TotalTokens,
-			row.CostUSD, row.InputTokens, row.OutputTokens, row.CacheReadTokens, row.CacheWriteTokens,
-			row.MessageCount, row.SessionCount)
+	return writeDailyCSV(os.Stdout, rows)
+}
+
+func writeModelsCSV(w io.Writer, models []summary.Model) error {
+	writer := csv.NewWriter(w)
+	if err := writer.Write([]string{"model", "provider", "source", "tokens", "cost_usd", "messages", "sessions", "percent"}); err != nil {
+		return err
 	}
-	return nil
+	for _, model := range models {
+		record := []string{
+			model.Model, model.Provider, model.Source, strconv.FormatInt(model.Tokens, 10),
+			strconv.FormatFloat(model.Cost, 'f', 6, 64), strconv.Itoa(model.MessageCount),
+			strconv.Itoa(model.SessionCount), strconv.FormatFloat(model.Percent, 'f', 2, 64),
+		}
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
+}
+
+func writeDailyCSV(w io.Writer, rows []usage.DailyUsageRow) error {
+	writer := csv.NewWriter(w)
+	if err := writer.Write([]string{"date", "source", "total_tokens", "cost_usd", "input_tokens", "output_tokens",
+		"cache_read_tokens", "cache_write_tokens", "messages", "sessions"}); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		record := []string{
+			row.Date, row.Source, strconv.FormatInt(row.TotalTokens, 10),
+			strconv.FormatFloat(row.CostUSD, 'f', 6, 64), strconv.FormatInt(row.InputTokens, 10),
+			strconv.FormatInt(row.OutputTokens, 10), strconv.FormatInt(row.CacheReadTokens, 10),
+			strconv.FormatInt(row.CacheWriteTokens, 10), strconv.FormatInt(row.MessageCount, 10),
+			strconv.FormatInt(row.SessionCount, 10),
+		}
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
 }
 
 func buildSummaryFromStore(store *usage.Store, cfg config.Config, since *time.Time) (summary.Summary, error) {
@@ -641,10 +721,10 @@ func runReprice(args []string) error {
 	flags := flag.NewFlagSet("reprice", flag.ContinueOnError)
 	var apply, yes, jsonOut bool
 	var expect string
-	flags.BoolVar(&apply, "apply", false, "")
-	flags.BoolVar(&yes, "yes", false, "")
-	flags.BoolVar(&jsonOut, "json", false, "")
-	flags.StringVar(&expect, "expect", "", "")
+	flags.BoolVar(&apply, "apply", false, "write the recomputed costs to the ledger")
+	flags.BoolVar(&yes, "yes", false, "confirm --apply")
+	flags.BoolVar(&jsonOut, "json", false, "emit JSON")
+	flags.StringVar(&expect, "expect", "", "require this catalog fingerprint")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -709,7 +789,21 @@ func printReprice(result pricing.RepriceReport, jsonOut bool) error {
 }
 
 func scanStore(dataDir string) *usage.Store {
-	return usage.NewStore(filepath.Join(dataDir, "usage.db"))
+	path := filepath.Join(dataDir, "usage.db")
+	if _, err := os.Stat(path); err != nil {
+		return usage.NewStore(path)
+	}
+	return usage.NewReadOnlyStore(path)
+}
+
+func printConfigHelp() {
+	fmt.Println(`Usage: tokenpulse config <show|enable|disable|set|test-notification>
+
+  show                 Print the effective configuration
+  enable <provider>    Enable a quota provider
+  disable <provider>   Disable a quota provider
+  set KEY=VALUE        Change one setting
+  test-notification    Send a sample notification`)
 }
 
 func runConfig(args []string) error {
@@ -717,6 +811,9 @@ func runConfig(args []string) error {
 		return runConfigShow()
 	}
 	switch args[0] {
+	case "-h", "--help", "help":
+		printConfigHelp()
+		return nil
 	case "show":
 		return runConfigShow()
 	case "enable", "disable":
@@ -727,7 +824,10 @@ func runConfig(args []string) error {
 			return fmt.Errorf("Unknown quota provider '%s'. Configurable quota providers: %s. (Usage parsing is not configured here.)",
 				args[1], strings.Join(quota.ProviderIDs, ", "))
 		}
-		manager, _ := config.New()
+		manager, err := config.New()
+		if err != nil {
+			return err
+		}
 		if args[0] == "enable" {
 			if err := manager.EnableProvider(args[1]); err != nil {
 				return err
@@ -965,10 +1065,20 @@ func runTestNotification() error {
 	return nil
 }
 
+func printInitHelp() {
+	fmt.Println(`Usage: tokenpulse init --default
+
+Detect installed providers and write a configuration that enables them.`)
+}
+
 func runInit(args []string) error {
 	useDefaults := false
 	for _, arg := range args {
-		if arg == "--default" {
+		switch arg {
+		case "-h", "--help":
+			printInitHelp()
+			return nil
+		case "--default":
 			useDefaults = true
 		}
 	}
@@ -995,7 +1105,9 @@ func runInit(args []string) error {
 	selected := map[string]bool{}
 	if useDefaults {
 		for name, found := range detected {
-			selected[name] = found
+			if found {
+				selected[name] = true
+			}
 		}
 		if len(selected) == 0 {
 			fmt.Println("No providers detected. All providers will be disabled.")

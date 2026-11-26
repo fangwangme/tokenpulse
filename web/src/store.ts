@@ -1,5 +1,5 @@
 import { createMutable } from "solid-js/store";
-import type { AccentName, QuotaProviderState, Route, ThemeMode } from "./types";
+import type { QuotaProviderState, Route, ThemeMode } from "./types";
 import type { UsageScanInterval } from "./shared/defaults";
 import type { LocalePref } from "./i18n";
 
@@ -37,6 +37,7 @@ interface AppState {
   paired: boolean | null;
   bootError: string;
   connected: boolean;
+  everConnected: boolean;
   configReady: boolean;
   version: string;
   scannedAt: number;
@@ -55,7 +56,6 @@ interface AppState {
   agents: string[];
   keeperEngine: boolean;
   themeMode: ThemeMode;
-  accent: AccentName;
   localePref: LocalePref;
   route: Route;
   reconnectNonce: number;
@@ -69,10 +69,13 @@ function stored<T extends string>(key: string, allowed: readonly T[], fallback: 
   return (allowed as readonly string[]).includes(value ?? "") ? (value as T) : fallback;
 }
 
+if (typeof localStorage !== "undefined") localStorage.removeItem("tokenpulse-accent");
+
 export const state = createMutable<AppState>({
   paired: null,
   bootError: "",
   connected: false,
+  everConnected: false,
   configReady: false,
   version: "",
   scannedAt: 0,
@@ -86,12 +89,11 @@ export const state = createMutable<AppState>({
   quotaDisplay: "remaining",
   accountDisplay: "full",
   quotaShowAccount: true,
-  usageScanInterval: "15m",
+  usageScanInterval: "5m",
   settings: {},
   agents: [],
   keeperEngine: false,
   themeMode: stored("tokenpulse-theme", ["system", "light", "dark"] as const, "system"),
-  accent: stored("tokenpulse-accent", ["blue", "purple", "green", "orange", "pink"] as const, "blue"),
   localePref: stored("tokenpulse-locale", ["system", "en", "zh"] as const, "system"),
   route: { name: "usage" },
   reconnectNonce: 0,
@@ -121,11 +123,6 @@ export function setting<T>(key: string, fallback: T): T {
 export function saveTheme(mode: ThemeMode): void {
   state.themeMode = mode;
   localStorage.setItem("tokenpulse-theme", mode);
-}
-
-export function saveAccent(accent: AccentName): void {
-  state.accent = accent;
-  localStorage.setItem("tokenpulse-accent", accent);
 }
 
 export function saveLocale(pref: LocalePref): void {

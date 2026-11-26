@@ -1,5 +1,4 @@
 export type ThemeMode = "system" | "light" | "dark";
-export type AccentName = "blue" | "purple" | "green" | "orange" | "pink";
 export type QuotaDisplayMode = "remaining" | "used";
 
 export type UsagePreset = "today" | "7d" | "30d" | "year" | "all" | "custom";

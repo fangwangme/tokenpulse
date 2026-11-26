@@ -95,8 +95,12 @@ of an agent's at all.
   by `serve` when it runs (`remote.md`) and by the TUI otherwise. Enabled
   providers fetch in parallel, and a slow provider never blocks the others or
   the usage scan.
-- A requested refresh joins one already running and never moves the timer.
-- Every other read answers from the quota cache and never calls a provider.
+- A requested refresh runs that target and waits for it; each target has a
+  60-second cooldown. A repeat inside the cooldown returns the previous cache
+  without calling a provider, and never moves the periodic timer.
+- Every other read answers from the quota cache and never calls a provider. The
+  cache is warmed from disk on server start, so a restart does not blank the
+  phone.
 - Expected errors are per provider and never fail the whole refresh:
   credentials missing, credentials expired or rejected, network unreachable or
   timed out, an unexpected HTTP status (including 429), a response that cannot

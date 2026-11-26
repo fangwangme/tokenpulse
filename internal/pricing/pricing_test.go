@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -206,26 +207,26 @@ func TestRetryIntervalAfterFailure(t *testing.T) {
 	service := NewService(dir, dir+"/usage.db")
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.Local)
 	service.Now = func() time.Time { return now }
-	calls := 0
+	var calls atomic.Int32
 	service.Fetch = func(url string) ([]byte, error) {
-		calls++
+		calls.Add(1)
 		return nil, errors.New("offline")
 	}
 	if err := service.Load(false); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 2 {
-		t.Fatalf("both catalogs are fetched in parallel: %d", calls)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("both catalogs are fetched in parallel: %d", got)
 	}
 	now = now.Add(5 * time.Minute)
 	_ = service.Load(false)
-	if calls != 2 {
-		t.Fatalf("retried before ten minutes: %d calls", calls)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("retried before ten minutes: %d calls", got)
 	}
 	now = now.Add(6 * time.Minute)
 	_ = service.Load(false)
-	if calls != 4 {
-		t.Fatalf("did not retry after ten minutes: %d calls", calls)
+	if got := calls.Load(); got != 4 {
+		t.Fatalf("did not retry after ten minutes: %d calls", got)
 	}
 }
 
@@ -318,5 +319,39 @@ func TestCatalogCacheRoundTrip(t *testing.T) {
 	var cached cacheFile
 	if json.Unmarshal(data, &cached) != nil || cached.SchemaVersion != cacheSchema {
 		t.Fatal("cache schema version missing")
+	}
+}
+
+// A later price sync must not borrow another model's period when it recomputes
+// one model's history.
+func TestRecomputeModelCostsUsesItsOwnPeriod(t *testing.T) {
+	db := openTestDB(t, t.TempDir()+"/usage.db")
+	for _, entry := range []struct {
+		model string
+		rate  float64
+	}{{"a", 1}, {"b", 10}} {
+		if _, err := db.Exec(`INSERT INTO model_price_periods
+            (model, effective_from, input_rate, output_rate, cache_read_rate, cache_write_rate, tier, source)
+            VALUES (?1, '0000-01-01', ?2, ?2, 0, 0, 'official-global', 'test')`, entry.model, entry.rate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO usage_messages
+        (source, client, provider_id, model_id, canonical_model_id, session_id, message_key,
+         timestamp_ms, date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+         reasoning_tokens, total_tokens, cost_usd, pricing_day, parser_version, served_model, unpriced)
+        VALUES ('claude', 'claude', 'x', 'b', 'b', 's', 'k', 0, '2026-01-01',
+         1000000, 0, 0, 0, 0, 1000000, 0, '2026-01-01', 'v', '', 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := recomputeModelCosts(db, "b"); err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err := db.QueryRow(`SELECT cost_usd FROM usage_messages WHERE canonical_model_id = 'b'`).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 10 {
+		t.Fatalf("cost = %v, want 10 (model b's rate, not model a's)", cost)
 	}
 }

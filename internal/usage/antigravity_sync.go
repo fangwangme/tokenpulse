@@ -261,6 +261,8 @@ func parseLSAddress(address string) (int, string) {
 		scheme, rest = "https", strings.TrimPrefix(trimmed, "https://")
 	} else if strings.HasPrefix(trimmed, "http://") {
 		scheme, rest = "http", strings.TrimPrefix(trimmed, "http://")
+	} else {
+		scheme = "http"
 	}
 	portText := rest
 	if idx := strings.LastIndex(rest, ":"); idx >= 0 {
@@ -798,7 +800,15 @@ func syncLanguageServers(db *sql.DB, home string, connections []antigravityConne
 		}
 		if !obtained {
 			if _, ok := cached[[2]string{client, item.sessionID}]; !ok {
-				_ = upsertAntigravitySession(db, item.sessionID, client, item.summary, "unknown", now)
+				tx, err := db.Begin()
+				if err != nil {
+					return err
+				}
+				if err := upsertAntigravitySession(tx, item.sessionID, client, item.summary, "unknown", now); err == nil {
+					_ = tx.Commit()
+				} else {
+					_ = tx.Rollback()
+				}
 			}
 			continue
 		}
@@ -809,42 +819,68 @@ func syncLanguageServers(db *sql.DB, home string, connections []antigravityConne
 			if inner, ok := meta["chatModel"].(map[string]any); ok {
 				chatModel = inner
 			}
-			resolved := resolveRPCChatModel(chatModel, aliases, releases, providerDateNow())
+			enum, served, display := chatModelIdentity(chatModel)
+			resolved := resolveRPCChatModel(enum, served, display, aliases, releases, providerDateNow())
 			if resolved != "unknown" {
 				primary = resolved
 				break
 			}
 		}
-		if err := upsertAntigravitySession(db, item.sessionID, client, item.summary, primary, now); err != nil {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		if err := upsertAntigravitySession(tx, item.sessionID, client, item.summary, primary, now); err != nil {
+			_ = tx.Rollback()
 			continue
 		}
-		if err := writeRPCSessionUsage(db, home, item.sessionID, client, item.candidates, metadata, aliases, releases); err != nil {
+		if err := writeRPCSessionUsage(tx, home, item.sessionID, client, item.candidates, metadata, aliases, releases); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func resolveRPCChatModel(chatModel map[string]any, aliases map[string]ModelAlias, releases ReleaseMap, fallbackDate string) string {
-	enum, _ := chatModel["model"].(string)
-	served, _ := chatModel["responseModel"].(string)
-	modelID := ResolveAntigravityModel(enum, served, aliases, releases, fallbackDate)
-	if modelid.IsPseudo(modelID) {
-		if label, ok := chatModel["modelDisplayName"].(string); ok {
-			if id, ok := labelToModelID(label); ok {
-				modelID = id
-			}
+func chatModelIdentity(chatModel map[string]any) (enum, served, display string) {
+	enum, _ = chatModel["model"].(string)
+	served, _ = chatModel["responseModel"].(string)
+	display, _ = chatModel["modelDisplayName"].(string)
+	return
+}
+
+func resolveRPCChatModel(enum, served, display string, aliases map[string]ModelAlias, releases ReleaseMap, fallbackDate string) string {
+	modelID := ResolveAntigravityModel(enum, served, display, aliases, releases, fallbackDate)
+	if modelid.IsPseudo(modelID) && strings.TrimSpace(display) != "" {
+		if id, ok := labelToModelID(display); ok {
+			modelID = id
 		}
 	}
 	return modelID
 }
 
-func writeRPCSessionUsage(db *sql.DB, home, sessionID, client string, candidates []antigravityRuntime,
+func writeRPCSessionUsage(db sqlExecer, home, sessionID, client string, candidates []antigravityRuntime,
 	metadata []any, aliases map[string]ModelAlias, releases ReleaseMap) error {
 	for _, runtime := range candidates {
 		if _, err := db.Exec("DELETE FROM session_usage WHERE client = ? AND session_id = ?", runtimeClient(runtime), sessionID); err != nil {
 			return err
 		}
+	}
+	hints := map[string]AntigravityEnumHint{}
+	for _, raw := range metadata {
+		meta, _ := raw.(map[string]any)
+		if meta == nil {
+			continue
+		}
+		chatModel := meta
+		if inner, ok := meta["chatModel"].(map[string]any); ok {
+			chatModel = inner
+		}
+		enum, served, display := chatModelIdentity(chatModel)
+		recordAntigravityEnumHint(hints, enum, served, display)
 	}
 	var localTimestamps map[string]int64
 	for stepIndex, raw := range metadata {
@@ -856,6 +892,8 @@ func writeRPCSessionUsage(db *sql.DB, home, sessionID, client string, candidates
 		if inner, ok := meta["chatModel"].(map[string]any); ok {
 			chatModel = inner
 		}
+		enum, served, display := chatModelIdentity(chatModel)
+		served, display = applyAntigravityEnumHint(hints, enum, served, display)
 		var createdAt *int64
 		if startMeta, ok := chatModel["chatStartMetadata"].(map[string]any); ok {
 			createdAt = parseTimestampValue(startMeta["createdAt"])
@@ -901,7 +939,7 @@ func writeRPCSessionUsage(db *sql.DB, home, sessionID, client string, candidates
 			if timestamp == nil {
 				continue
 			}
-			modelID := resolveRPCChatModel(chatModel, aliases, releases, provider.LocalDateString(*timestamp))
+			modelID := resolveRPCChatModel(enum, served, display, aliases, releases, provider.LocalDateString(*timestamp))
 			rawKey := responseID
 			if rawKey == "" {
 				rawKey = fmt.Sprintf("%d:%s:%d", *timestamp, modelID, stepIndex)
@@ -912,12 +950,13 @@ func writeRPCSessionUsage(db *sql.DB, home, sessionID, client string, candidates
 			if _, err := db.Exec(`INSERT OR REPLACE INTO session_usage (
                 id, session_id, client, model_id, provider_id, timestamp, step_index,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                response_id, pricing_day, parser_version, model_enum, served_model
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                response_id, pricing_day, parser_version, model_enum, served_model, display_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				id, sessionID, client, modelID, modelid.DetectProviderFromModel(modelID),
 				*timestamp, stepIndex, tokens.Input, tokens.Output, tokens.CacheRead, tokens.CacheWrite,
 				tokens.Reasoning, logical, date, antigravityParserVersion,
-				stringField(chatModel, "model"), stringField(chatModel, "responseModel")); err != nil {
+				stringField(chatModel, "model"), served,
+				display); err != nil {
 				return err
 			}
 		}
@@ -1206,6 +1245,11 @@ func parseTimestampValue(value any) *int64 {
 	}
 	if result <= 0 {
 		return nil
+	}
+	// Some caches store Unix seconds. Everything this parser reads is a
+	// millisecond timestamp, so a value before 2001 is seconds.
+	if result < 1_000_000_000_000 {
+		result *= 1000
 	}
 	return &result
 }

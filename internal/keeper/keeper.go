@@ -490,7 +490,11 @@ func (e *Engine) Execute(request Request) ExecutionRecord {
 		if request.Group != "" {
 			model, err = ResolveAntigravityGroupModel(request.Group, request.Groups)
 		} else {
-			model, err = ResolveCheapestModel(request.Agent, filepath.Dir(e.History.Path))
+			directory := e.DataDir
+			if e.History != nil && e.History.Path != "" {
+				directory = filepath.Dir(e.History.Path)
+			}
+			model, err = ResolveCheapestModel(request.Agent, directory)
 		}
 		if err != nil {
 			command := FormatCommand(request.Config.Command, "unresolved", request.Config.Prompt)
@@ -569,7 +573,71 @@ func NewEngine(cfg config.KeeperConfig, statePath string) *Engine {
 	}
 }
 
-func (e *Engine) Persist() { e.State.Save(e.StatePath) }
+func (e *Engine) snapshotLocked() TriggerState {
+	return TriggerState{
+		DailyTriggered:  cloneStringMap(e.State.DailyTriggered),
+		WeeklyTriggered: cloneTimeMap(e.State.WeeklyTriggered),
+		WeeklyFailed:    cloneBoolMap(e.State.WeeklyFailed),
+	}
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if source == nil {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneTimeMap(source map[string]time.Time) map[string]time.Time {
+	if source == nil {
+		return map[string]time.Time{}
+	}
+	out := make(map[string]time.Time, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneBoolMap(source map[string]bool) map[string]bool {
+	if source == nil {
+		return map[string]bool{}
+	}
+	out := make(map[string]bool, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
+func (e *Engine) persistLocked() { e.snapshotLocked().Save(e.StatePath) }
+
+// Persist saves a consistent snapshot of the trigger state.
+func (e *Engine) Persist() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.persistLocked()
+}
+
+// StateSnapshot returns a copy of the trigger maps for readers outside the
+// engine; the engine keeps mutating the originals.
+func (e *Engine) StateSnapshot() TriggerState {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.snapshotLocked()
+}
+
+// WeeklyTriggered reports one weekly target's last fire time.
+func (e *Engine) WeeklyTriggered(key string) (time.Time, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	value, ok := e.State.WeeklyTriggered[key]
+	return value, ok
+}
 
 // UpdateConfig applies a config.toml reload without recreating the engine.
 func (e *Engine) UpdateConfig(cfg config.KeeperConfig) {
@@ -584,18 +652,20 @@ func (e *Engine) InFlight(key string) bool {
 	return e.pings[key]
 }
 
-func (e *Engine) mark(key string, value bool) {
-	e.mu.Lock()
+func (e *Engine) inFlightLocked(key string) bool { return e.pings[key] }
+
+func (e *Engine) markLocked(key string, value bool) {
 	if value {
 		e.pings[key] = true
 	} else {
 		delete(e.pings, key)
 	}
-	e.mu.Unlock()
 }
 
 // CheckScheduled evaluates the daily wakeup and the weekly reset fallback.
 func (e *Engine) CheckScheduled(snapshots []provider.QuotaSnapshot, now time.Time) []Request {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if !e.Config.Enabled {
 		return nil
 	}
@@ -605,13 +675,13 @@ func (e *Engine) CheckScheduled(snapshots []provider.QuotaSnapshot, now time.Tim
 		if !ok {
 			cfg = config.DefaultKeeperAgents()[agent]
 		}
-		if cfg.SessionKeeperEnabled && !e.InFlight(agent) {
+		if cfg.SessionKeeperEnabled && !e.inFlightLocked(agent) {
 			last := e.State.DailyDate(agent, now.Location())
 			if ShouldTriggerDaily(cfg.DailyWakeupTime, last, now) {
 				k := now.Format("2006-01-02")
 				e.State.DailyTriggered[agent] = k
-				e.mark(agent, true)
-				e.Persist()
+				e.markLocked(agent, true)
+				e.persistLocked()
 				requests = append(requests, Request{Agent: agent, Key: agent, Trigger: TriggerDaily, Config: cfg})
 			}
 		}
@@ -624,7 +694,7 @@ func (e *Engine) CheckScheduled(snapshots []provider.QuotaSnapshot, now time.Tim
 			groups = WeeklyGroups(snapshot)
 		}
 		for _, target := range WeeklyTargets(agent, snapshot, cfg.WeeklyAllGroups) {
-			if e.InFlight(target.Key) {
+			if e.inFlightLocked(target.Key) {
 				continue
 			}
 			var group *string
@@ -639,8 +709,8 @@ func (e *Engine) CheckScheduled(snapshots []provider.QuotaSnapshot, now time.Tim
 			}
 			if ShouldTriggerWeekly(resetsAt, lastPtr, now) {
 				e.State.WeeklyTriggered[target.Key] = now
-				e.mark(target.Key, true)
-				e.Persist()
+				e.markLocked(target.Key, true)
+				e.persistLocked()
 				requests = append(requests, Request{
 					Agent: agent, Key: target.Key, Trigger: TriggerWeekly, Config: cfg,
 					Group: target.Group, Groups: groups,
@@ -653,6 +723,8 @@ func (e *Engine) CheckScheduled(snapshots []provider.QuotaSnapshot, now time.Tim
 
 // CheckQuota evaluates the unstarted-window rule after a quota refresh.
 func (e *Engine) CheckQuota(snapshots []provider.QuotaSnapshot, now time.Time) []Request {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if !e.Config.Enabled {
 		return nil
 	}
@@ -672,13 +744,13 @@ func (e *Engine) CheckQuota(snapshots []provider.QuotaSnapshot, now time.Time) [
 		groups := WeeklyGroups(snapshot)
 		for _, target := range IdleWeeklyTargets(agent, snapshot, cfg.WeeklyAllGroups,
 			e.State.WeeklyTriggered, e.State.WeeklyFailed, now) {
-			if e.InFlight(target.Key) {
+			if e.inFlightLocked(target.Key) {
 				continue
 			}
 			e.State.WeeklyTriggered[target.Key] = now
 			e.State.WeeklyFailed[target.Key] = false
-			e.mark(target.Key, true)
-			e.Persist()
+			e.markLocked(target.Key, true)
+			e.persistLocked()
 			requests = append(requests, Request{
 				Agent: agent, Key: target.Key, Trigger: TriggerWeekly, Config: cfg,
 				Group: target.Group, Groups: groups,
@@ -690,7 +762,9 @@ func (e *Engine) CheckQuota(snapshots []provider.QuotaSnapshot, now time.Time) [
 
 // Finish records a ping's outcome and clears its in-flight lock.
 func (e *Engine) Finish(request Request, record ExecutionRecord) {
-	e.mark(request.Key, false)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.markLocked(request.Key, false)
 	if request.Trigger == TriggerWeekly {
 		e.State.WeeklyFailed[request.Key] = !record.Success
 		if !record.Success {
@@ -699,12 +773,14 @@ func (e *Engine) Finish(request Request, record ExecutionRecord) {
 				e.State.WeeklyTriggered[request.Key] = last
 			}
 		}
-		e.Persist()
+		e.persistLocked()
 	}
 }
 
 // Manual builds a manual request for one agent and optional group.
 func (e *Engine) Manual(agent, group string) (Request, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	cfg, ok := e.Config.Agents[agent]
 	if !ok {
 		return Request{}, errors.New("agent is not driven by the Keeper")
@@ -716,10 +792,10 @@ func (e *Engine) Manual(agent, group string) (Request, error) {
 		}
 		key = agent + ":" + group
 	}
-	if e.InFlight(key) {
+	if e.inFlightLocked(key) {
 		return Request{}, errors.New("a ping for this key is already running")
 	}
-	e.mark(key, true)
+	e.markLocked(key, true)
 	return Request{Agent: agent, Key: key, Trigger: TriggerManual, Config: cfg, Group: group}, nil
 }
 

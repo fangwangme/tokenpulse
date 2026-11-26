@@ -16,6 +16,10 @@ import (
 
 const canonicalSourceSQL = "CASE WHEN source IN ('antigravity-cli', 'antigravity-desktop', 'antigravity-ide') THEN 'antigravity' ELSE source END"
 
+// One cached report can hold every day and model in its range, so keep the
+// number small; the phone asks for a handful of ranges, not dozens.
+const reportCacheEntries = 16
+
 // Agents are TokenPulse's names; the HTTP API maps antigravity to agy.
 var AllAgents = []string{"claude", "codex", "copilot", "gemini", "opencode", "pi", "antigravity"}
 
@@ -158,7 +162,7 @@ func (s *Service) cachePut(key string, value any) {
 		s.cache[key] = cacheEntry{value}
 		return
 	}
-	if len(s.order) >= 64 {
+	if len(s.order) >= reportCacheEntries {
 		delete(s.cache, s.order[0])
 		s.order = s.order[1:]
 	}
@@ -632,6 +636,31 @@ func (s *Service) Day(date string, agents []string) (DayDetail, error) {
 	if err := rows.Err(); err != nil {
 		return DayDetail{}, err
 	}
+	sessionQuery := `SELECT ` + canonicalSourceSQL + ` AS agent, COUNT(DISTINCT session_id)
+        FROM usage_messages WHERE date = ?`
+	sessionArgs := []any{date}
+	sessionQuery, sessionArgs = appendAgentFilter(sessionQuery, sessionArgs, agents)
+	sessionQuery += " GROUP BY 1"
+	sessionRows, err := db.Query(sessionQuery, sessionArgs...)
+	if err != nil {
+		return DayDetail{}, err
+	}
+	for sessionRows.Next() {
+		var agent string
+		var sessions int64
+		if err := sessionRows.Scan(&agent, &sessions); err != nil {
+			sessionRows.Close()
+			return DayDetail{}, err
+		}
+		if index, ok := agentIndex[agent]; ok {
+			detail.Agents[index].Totals.Sessions = sessions
+		}
+	}
+	if err := sessionRows.Err(); err != nil {
+		sessionRows.Close()
+		return DayDetail{}, err
+	}
+	sessionRows.Close()
 	sort.SliceStable(detail.Agents, func(i, j int) bool { return detail.Agents[i].Totals.Tokens > detail.Agents[j].Totals.Tokens })
 	return detail, nil
 }
@@ -665,7 +694,7 @@ func (s *Service) Model(model, from, to string, agents []string) (ModelDetail, e
 		return ModelDetail{}, err
 	}
 	query := `SELECT MAX(date) FROM usage_messages WHERE canonical_model_id = ? AND date >= ? AND date <= ?`
-	args := []any{canonical, from, to}
+	args := []any{canonical, formatDate(fromDate), formatDate(toDate)}
 	query, args = appendAgentFilter(query, args, agents)
 	_ = db.QueryRow(query, args...).Scan(&detail.LastUsed)
 
@@ -673,7 +702,7 @@ func (s *Service) Model(model, from, to string, agents []string) (ModelDetail, e
         COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0),
         COALESCE(SUM(cache_write_tokens),0), COUNT(*), COUNT(DISTINCT session_id)
         FROM usage_messages WHERE canonical_model_id = ? AND date >= ? AND date <= ?`
-	agentArgs := []any{canonical, from, to}
+	agentArgs := []any{canonical, formatDate(fromDate), formatDate(toDate)}
 	agentQuery, agentArgs = appendAgentFilter(agentQuery, agentArgs, agents)
 	agentQuery += " GROUP BY 1 ORDER BY SUM(total_tokens) DESC"
 	rows, err := db.Query(agentQuery, agentArgs...)
@@ -694,7 +723,7 @@ func (s *Service) Model(model, from, to string, agents []string) (ModelDetail, e
 	perDay := map[string]ModelPerDay{}
 	dayQuery := `SELECT date, COALESCE(SUM(total_tokens),0), COALESCE(SUM(cost_usd),0)
         FROM usage_messages WHERE canonical_model_id = ? AND date >= ? AND date <= ?`
-	dayArgs := []any{canonical, from, to}
+	dayArgs := []any{canonical, formatDate(fromDate), formatDate(toDate)}
 	dayQuery, dayArgs = appendAgentFilter(dayQuery, dayArgs, agents)
 	dayQuery += " GROUP BY date"
 	dayRows, err := db.Query(dayQuery, dayArgs...)

@@ -1,7 +1,6 @@
-import type { AccentName, ThemeMode } from "./types";
-import type { MessageId } from "./i18n";
+import type { ThemeMode } from "./types";
 
-// Two palettes share one accent; components use the CSS tokens only.
+// Two palettes share one fixed accent; components use the CSS tokens only.
 
 export interface Palette {
   bg: string;
@@ -173,12 +172,9 @@ export const PALETTES: Record<"light" | "dark", Palette> = {
   },
 };
 
-export const ACCENTS: Record<AccentName, { light: string; dark: string; label: MessageId }> = {
-  blue: { light: "#1F6FEB", dark: "#5B9CFF", label: "accent.blue" },
-  purple: { light: "#7445D6", dark: "#A98BFF", label: "accent.purple" },
-  green: { light: "#0F7F6C", dark: "#5FC7B2", label: "accent.green" },
-  orange: { light: "#B85400", dark: "#F0A050", label: "accent.orange" },
-  pink: { light: "#C0306B", dark: "#F07AA8", label: "accent.pink" },
+const ACCENT = {
+  light: "#1F6FEB",
+  dark: "#5B9CFF",
 };
 
 const KEBAB: Record<keyof Palette, string> = {
@@ -247,8 +243,8 @@ function hexToRgb(hex: string): [number, number, number] {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-/** Sets the palette and accent tokens on the document root. */
-export function applyTheme(mode: ThemeMode, accent: AccentName): void {
+/** Sets the palette and the fixed accent tokens on the document root. */
+export function applyTheme(mode: ThemeMode): void {
   if (typeof document === "undefined") return;
   const resolved = resolveMode(mode);
   const root = document.documentElement;
@@ -256,7 +252,7 @@ export function applyTheme(mode: ThemeMode, accent: AccentName): void {
   root.style.colorScheme = resolved;
   const p = PALETTES[resolved];
   for (const key of Object.keys(KEBAB) as Array<keyof Palette>) root.style.setProperty(`--${KEBAB[key]}`, p[key]);
-  const a = ACCENTS[accent][resolved];
+  const a = ACCENT[resolved];
   const [r, g, b] = hexToRgb(a);
   root.style.setProperty("--accent", a);
   root.style.setProperty("--accentbg", `rgba(${r},${g},${b},${resolved === "dark" ? 0.16 : 0.1})`);

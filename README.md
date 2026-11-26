@@ -52,31 +52,18 @@ Requires Go 1.27+:
 go install github.com/fangwangme/tokenpulse@latest
 ```
 
-Or clone and build:
+Or clone and build. Build the phone app first, otherwise the binary embeds
+only the "frontend not built" placeholder:
 
 ```bash
 git clone https://github.com/fangwangme/tokenpulse
-cd tokenpulse
+cd tokenpulse/web && npm ci && npm run build && cd ..
 go build -o tokenpulse .
 ```
 
-## Screenshots
-
-| Overview | Quota |
-|---|---|
-| ![Overview](docs/images/overview.png) | ![Quota](docs/images/quota.png) |
-
-| Models | Daily |
-|---|---|
-| ![Models](docs/images/models.png) | ![Daily](docs/images/daily.png) |
-
-| Keeper | Activity |
-|---|---|
-| ![Keeper](docs/images/keeper.png) | ![Activity](docs/images/activity.png) |
-
-| Settings | |
-|---|---|
-| ![Settings](docs/images/settings.png) | |
+`go install github.com/fangwangme/tokenpulse@latest` cannot run the web build,
+so the installed binary serves the placeholder page. Use a prebuilt binary or
+the npm package for remote mode.
 
 ## Supported Providers
 
@@ -131,14 +118,9 @@ go build -o tokenpulse .
 - **Auto-refresh in TUI** — one interval for both quota and usage
   (0/1/2/5/10/15 min, default 5 min); cycle or toggle in the Settings tab, with
   a countdown shown in the footer
-- **`r` to refresh** — in both quota and usage views without restarting TUI
-- **Stacked bar chart** — continuous daily timeline switchable between token and cost views, preserving zero-usage dates as empty slots
-- **Heatmap** — solid-cell coloring for value levels; GitHub-green palette for
-  cost, Kaggle-blue palette for tokens; five intensity levels at 20/40/60/80%
-  of the visible window peak; theme-invariant backgrounds and borders
-- **Activity heatmap** — mouse-selectable with clickable legend ranges,
-  agent/model drill-down, and scrollable selected-day detail
-- **Models table** — default sorted by tokens (`t`), toggleable to cost (`c`) or date (`d`), with `%` share of the active sort metric and source filter overlay (`s`)
+- **`r` to refresh** — from any TUI tab without restarting it
+- **Usage report** — range presets, comparison, a Token/Cost switch, a
+  heatmap, date/model lists, day and model detail, and an agent filter
 - **Company-aware model coloring** — agent / provider separation in the data
   model
 - **Plain-text mode** — for scripting and remote shells
@@ -153,10 +135,7 @@ go build -o tokenpulse .
 ### First time setup
 
 ```bash
-# Interactive setup wizard — detects installed providers and guides configuration
-tokenpulse init
-
-# Auto-detect and enable found providers, skip prompts
+# Detect installed providers and enable the ones found
 tokenpulse init --default
 ```
 
@@ -176,6 +155,19 @@ tokenpulse --json
 tokenpulse --csv daily
 tokenpulse --csv models
 ```
+
+### TUI keys
+
+- `Tab` / `Shift+Tab` — switch Usage, Quota, Keeper, Settings; `q` / `Ctrl+C` quits.
+- Usage: `1`–`5` presets (`today`, `7d`, `30d`, `year`, `all`), `m` toggles
+  Token/Cost, `v` toggles list/heatmap, `Enter` opens detail, `[` / `]` shifts
+  the range, `s` opens the agent filter, `f` toggles focus, `r` refreshes.
+- Quota: `↑` / `↓` moves the provider.
+- Keeper: `e` toggles the engine, `Enter`/`Space` toggles the session keeper,
+  `w` the weekly keeper, `p` sends a test ping.
+- Settings: `↑` / `↓` moves, `Enter`/`Space` changes the row; the quota-provider
+  row cycles Claude → Codex → Antigravity.
+- `b` cycles the theme; `Esc` closes a detail/filter without quitting.
 
 ### Filters
 
@@ -220,7 +212,7 @@ tokenpulse config set quota_display_mode=used
 tokenpulse config set theme=dark
 
 # Auto-refresh interval in minutes for quota + usage (0 = disabled)
-tokenpulse config set auto_refresh_interval=5
+tokenpulse config set auto_refresh_secs=300
 
 # Show empty providers in the dashboard
 tokenpulse config set show_empty_providers=true
@@ -263,21 +255,22 @@ fix or remove the file, then retry.
 The **Keeper** tab lets you manage scheduled pings and wakeups for Claude Code, Codex, and Google Antigravity to keep sessions warm and trigger cooldown cycles at designated times.
 
 Every ping spends real quota, so the engine ships **disabled**. Turn it on with
-the `keeper_engine` row in the Settings tab, then enable the switches you want
+the `keeper.enabled` row in the Settings tab, then enable the switches you want
 per agent. Wakeup times, prompts, and command templates live in `config.toml`
 under `[keeper]`; Keeper dynamically resolves the cheapest active model for each
 agent (Claude Haiku, Codex Luna, Antigravity Flash-Low) from local catalogs
 at startup and once a day. The tab header shows the exact configuration path.
 
-- **`←` / `→` (or `h` / `l`)** — Switch between dashboard tabs
-- **`↑` / `↓` (or `k` / `j` / `Tab`)** — Select agent card (Claude Code / Codex / Antigravity)
-- **`1` / `d`** — Toggle 5h daily morning wakeup timer (default `10:30`; a missed run is only caught up within 2 hours of it)
-- **`2` / `w`** — Toggle weekly auto-sync (pings every weekly window that has not started yet, so a reset is never missed)
-- **`p`** — Immediately test ping the selected agent
-- **Mouse Wheel** — Scroll the live execution and heartbeat history stream
+- **`Tab` / `Shift+Tab`** — Switch between Usage, Quota, Keeper and Settings.
+- **`↑` / `↓` (or `j` / `k`)** — Move the selection.
+- **`e`** — Toggle the Keeper engine.
+- **`Enter` / `Space`** — Toggle the selected agent's session keeper.
+- **`w`** — Toggle the selected agent's weekly keeper.
+- **`p`** — Immediately test-ping the selected agent.
+- **`r`** — Refresh; **`q`** or **`Ctrl+C`** quits.
 
-The panel shows the newest 50 runs and is restored on launch; the full history
-is kept in `tokenpulse.db`.
+The Keeper panel shows the newest 20 runs and reloads them on launch; the full
+history is kept in `tokenpulse.db`.
 
 ## Data Model
 
@@ -310,8 +303,9 @@ All local state lives under a single directory:
 ```
 
 Set `TOKENPULSE_DATA_DIR` to move this directory, or
-`TOKENPULSE_CONFIG_PATH` to override only the config file. `TOKENPULSE_ENV=test`
-marks a test run and requires `TOKENPULSE_DATA_DIR`.
+`TOKENPULSE_CONFIG_PATH` to override only the config file. The directory is
+created private (`0700`). `TOKENPULSE_ENV=test` marks a test run and requires
+`TOKENPULSE_DATA_DIR`.
 
 `tokenpulse.db` keeps an append-only record of every quota poll (per provider,
 per rate window, per model family) and every Keeper run, for later analysis. It
