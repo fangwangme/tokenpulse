@@ -60,8 +60,8 @@ The TUI and CLI resolve the path with the same rule, so a long
   is already held, it attaches over `serve.sock`; otherwise it starts an
   in-process runtime (also listening on `serve.sock` without opening a TCP
   port).
-- All Usage, Quota, Keeper, and Settings views read from the runtime and
-  subscribe to live events; `r`, settings edits, and Keeper pings send commands
+- All seven views (`tui-usage.md`) read from the runtime and subscribe to
+  live events; `r`, settings edits, and Keeper pings send commands
   to the runtime.
 - Settings includes a **Web remote** toggle that starts or stops a detached
   background `tokenpulse serve --quiet` (or reports when `systemd`/`launchd`
