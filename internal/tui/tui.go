@@ -359,7 +359,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case configMsg:
 		m.opts.Config = msg.cfg
-		return m, nil
+		return m, m.fetchQuotaCmd()
 	case webToggleMsg:
 		m.webBusy = false
 		if msg.clearClient {
@@ -444,7 +444,7 @@ func (m *model) handleEvent(ev rt.Event) tea.Cmd {
 	case "keeper_updated":
 		return m.fetchKeeperLogCmd()
 	case "settings_updated":
-		return tea.Batch(m.fetchConfigCmd(), m.fetchQuotaCmd())
+		return m.fetchConfigCmd()
 	}
 	return nil
 }
