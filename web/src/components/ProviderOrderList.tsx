@@ -16,6 +16,7 @@ export function ProviderOrderList() {
   const [dragging, setDragging] = createSignal<string | null>(null);
   let list: HTMLDivElement | undefined;
   let dragID: string | null = null;
+  let dragPointer: number | null = null;
   let dragStart: string[] = [];
   let dragStartY = 0;
   let moved = false;
@@ -25,9 +26,13 @@ export function ProviderOrderList() {
   });
 
   const saveOrder = async (next: string[], previous: string[]) => {
+    const previousState = [...state.quotaProviderOrder];
+    state.quotaProviderOrder = [...next];
+    setOrder([...next]);
     try {
       await patchSettings({ "display.quota_provider_order": next });
     } catch (error: any) {
+      state.quotaProviderOrder = previousState;
       setOrder(previous);
       showToast(error?.message || t("usage.loadFailed"));
     }
@@ -46,12 +51,12 @@ export function ProviderOrderList() {
   const stopListeners = () => {
     window.removeEventListener("pointermove", onPointerMove);
     window.removeEventListener("pointerup", finish);
-    window.removeEventListener("pointercancel", finish);
+    window.removeEventListener("pointercancel", cancelDrag);
     document.body.classList.remove("reordering");
   };
 
   const onPointerMove = (event: PointerEvent) => {
-    if (!dragID || !list) return;
+    if (!dragID || dragPointer === null || event.pointerId !== dragPointer || !list) return;
     event.preventDefault();
     if (Math.abs(event.clientY - dragStartY) > 4) moved = true;
     const rows = Array.from(list.querySelectorAll<HTMLElement>("[data-provider]"));
@@ -66,20 +71,34 @@ export function ProviderOrderList() {
     moveTo(dragID, target);
   };
 
-  const finish = () => {
+  const finish = (event: PointerEvent) => {
+    if (event.pointerId !== dragPointer) return;
     const id = dragID;
     stopListeners();
     dragID = null;
+    dragPointer = null;
     setDragging(null);
     if (!id || !moved) return;
     const next = order();
     if (!sameOrder(next, dragStart)) void saveOrder(next, dragStart);
   };
 
+  const cancelDrag = (event: PointerEvent) => {
+    if (event.pointerId !== dragPointer) return;
+    const restore = dragStart;
+    stopListeners();
+    dragID = null;
+    dragPointer = null;
+    setDragging(null);
+    if (restore.length) setOrder(restore);
+  };
+
   const startDrag = (event: PointerEvent, id: string) => {
     if (event.button !== 0 || dragID) return;
     event.preventDefault();
+    (event.currentTarget as HTMLElement | null)?.setPointerCapture(event.pointerId);
     dragID = id;
+    dragPointer = event.pointerId;
     dragStart = order();
     dragStartY = event.clientY;
     moved = false;
@@ -87,7 +106,7 @@ export function ProviderOrderList() {
     document.body.classList.add("reordering");
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", finish);
-    window.addEventListener("pointercancel", finish);
+    window.addEventListener("pointercancel", cancelDrag);
   };
 
   const moveBy = (id: string, delta: number) => {
