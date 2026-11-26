@@ -78,6 +78,27 @@ func TestRenderQuotaIncludesPaceAndReset(t *testing.T) {
 	}
 }
 
+func TestApplyQuotaViewHidesDisabledProviders(t *testing.T) {
+	m := &model{}
+	m.applyQuotaView(rt.QuotaView{Providers: []rt.QuotaProviderView{
+		{Provider: "claude", Enabled: true, Snapshot: &provider.QuotaSnapshot{Provider: "claude"}},
+		{Provider: "opencode", Enabled: false, Snapshot: &provider.QuotaSnapshot{Provider: "opencode"}},
+	}})
+	if len(m.snapshots) != 1 || m.snapshots[0].Provider != "claude" {
+		t.Fatalf("snapshots = %+v", m.snapshots)
+	}
+}
+
+func TestApplyQuotaViewShowsEmptyProvidersWhenEnabled(t *testing.T) {
+	cfg := config.Default()
+	cfg.Display.ShowEmptyProviders = true
+	m := &model{opts: Options{Config: cfg}}
+	m.applyQuotaView(rt.QuotaView{Providers: []rt.QuotaProviderView{{Provider: "opencode", Enabled: true}}})
+	if len(m.snapshots) != 1 || m.snapshots[0].Provider != "opencode" || len(m.snapshots[0].Windows) != 0 {
+		t.Fatalf("snapshots = %+v", m.snapshots)
+	}
+}
+
 func TestRenderSettingsIncludesWebRemote(t *testing.T) {
 	cfg := config.Default()
 	m := &model{opts: Options{Config: cfg}}

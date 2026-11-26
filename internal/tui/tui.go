@@ -184,12 +184,18 @@ func (m *model) loadQuota() {
 func (m *model) applyQuotaView(view rt.QuotaView) {
 	m.snapshots = nil
 	m.quotaErrors = map[string]string{}
+	showEmpty := m.opts.Config.Display.ShowEmptyProviders
 	for _, entry := range view.Providers {
+		if !entry.Enabled {
+			continue
+		}
 		if entry.Error != nil && entry.Error.Message != "" {
 			m.quotaErrors[entry.Provider] = entry.Error.Message
 		}
 		if entry.Snapshot != nil {
 			m.upsertSnapshot(*entry.Snapshot)
+		} else if showEmpty {
+			m.snapshots = append(m.snapshots, provider.QuotaSnapshot{Provider: entry.Provider})
 		}
 	}
 }
@@ -438,7 +444,7 @@ func (m *model) handleEvent(ev rt.Event) tea.Cmd {
 	case "keeper_updated":
 		return m.fetchKeeperLogCmd()
 	case "settings_updated":
-		return m.fetchConfigCmd()
+		return tea.Batch(m.fetchConfigCmd(), m.fetchQuotaCmd())
 	}
 	return nil
 }
