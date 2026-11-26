@@ -430,7 +430,7 @@ func currentSnapshots(cfg config.Config) []provider.QuotaSnapshot {
 	}
 	var out []provider.QuotaSnapshot
 	cache := quota.NewCache(dataDir)
-	for _, id := range cfg.EnabledQuotaProviders(quota.ProviderIDs) {
+	for _, id := range cfg.EnabledQuotaProviders(cfg.QuotaProviderOrder(quota.ProviderIDs)) {
 		if cached, err := cache.LoadAny(id); err == nil && cached != nil {
 			out = append(out, cached.Snapshot)
 		}
