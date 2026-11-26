@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +10,9 @@ import (
 
 	"github.com/fangwangme/tokenpulse/internal/config"
 	"github.com/fangwangme/tokenpulse/internal/provider"
+	"github.com/fangwangme/tokenpulse/internal/remote"
+	rt "github.com/fangwangme/tokenpulse/internal/runtime"
+	"github.com/fangwangme/tokenpulse/internal/scan"
 )
 
 // Protects tui-usage.md "Quota": out-of-range provider percentages cannot
@@ -79,5 +84,79 @@ func TestRenderSettingsIncludesWebRemote(t *testing.T) {
 	out := m.renderSettings(100)
 	if !strings.Contains(out, "Web remote") {
 		t.Fatalf("renderSettings omitted Web remote row:\n%s", out)
+	}
+}
+
+func TestInProcessAttachExposesLocalSocketForSecondClient(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TOKENPULSE_ENV", "test")
+	t.Setenv("TOKENPULSE_DATA_DIR", dir)
+	t.Setenv("TOKENPULSE_CONFIG_PATH", filepath.Join(dir, "config.toml"))
+
+	manager, err := config.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := manager.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner, err := scan.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{DataDir: dir, Scanner: scanner, Config: cfg, ConfigManager: manager, NoScan: true}
+	first, err := attachClient(opts)
+	if err != nil {
+		t.Fatalf("first attachClient: %v", err)
+	}
+	defer first.Close()
+	if first.IsRemote() {
+		t.Fatal("first attachClient should be in-process")
+	}
+
+	// Second TUI attaches over the in-process Unix socket.
+	second, err := attachClient(opts)
+	if err != nil {
+		t.Fatalf("second attachClient: %v", err)
+	}
+	defer second.Close()
+	if !second.IsRemote() {
+		t.Fatal("second attachClient should attach as SocketClient")
+	}
+	if _, err := remote.NewLocalClient(dir).Status(); err != nil {
+		t.Fatalf("local socket status: %v", err)
+	}
+}
+
+func TestWebToggleResubscribesAndFetchesConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TOKENPULSE_ENV", "test")
+	t.Setenv("TOKENPULSE_DATA_DIR", dir)
+	t.Setenv("TOKENPULSE_CONFIG_PATH", filepath.Join(dir, "config.toml"))
+
+	manager, _ := config.New()
+	cfg, _ := manager.Load()
+	scanner, _ := scan.New(dir)
+	lock, err := rt.AcquireLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := newInProcess(Options{DataDir: dir, Scanner: scanner, Config: cfg, ConfigManager: manager, NoScan: true}, lock, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	m := newModel(Options{DataDir: dir, Scanner: scanner, Config: cfg, ConfigManager: manager, NoScan: true}, client)
+	// Error path must restore client and resubscribe events.
+	_, cmd := m.Update(webToggleMsg{client: client, err: errors.New("boom")})
+	if cmd == nil || m.eventCh == nil {
+		t.Fatal("webToggleMsg error did not resubscribe events")
+	}
+	// Success path must resubscribe events and schedule config fetch.
+	_, cmd = m.Update(webToggleMsg{client: client, toast: "ok"})
+	if cmd == nil || m.eventCh == nil {
+		t.Fatal("webToggleMsg success did not resubscribe events")
 	}
 }

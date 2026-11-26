@@ -89,13 +89,21 @@ type Runtime struct {
 	webURL           string
 	webError         string
 
-	firstScan chan struct{}
-	firstOnce sync.Once
-	stop      chan struct{}
-	stopOnce  sync.Once
-	startOnce sync.Once
-	wake      chan struct{}
-	refreshMu sync.Mutex
+	firstScan  chan struct{}
+	firstOnce  sync.Once
+	stop       chan struct{}
+	stopOnce   sync.Once
+	startOnce  sync.Once
+	wake       chan struct{}
+	refreshMu  sync.Mutex
+	settingsMu sync.Mutex
+	bgWG       sync.WaitGroup
+}
+
+// StartOptions controls background refresh scheduling when Start is called.
+type StartOptions struct {
+	InitialRefresh bool
+	AutoRefresh    bool
 }
 
 // New constructs a Runtime wired to dataDir. Call WarmCache and Start to begin
@@ -173,18 +181,33 @@ func (r *Runtime) WarmCache() {
 }
 
 // Start launches the background refresh and Keeper loops.
-func (r *Runtime) Start(initialRefresh bool) {
+func (r *Runtime) Start(opts StartOptions) {
 	r.startOnce.Do(func() {
-		go r.refreshLoop(initialRefresh)
-		go r.keeperLoop()
+		if opts.AutoRefresh || opts.InitialRefresh {
+			r.bgWG.Add(1)
+			go func() {
+				defer r.bgWG.Done()
+				r.refreshLoop(opts)
+			}()
+		}
+		r.bgWG.Add(1)
+		go func() {
+			defer r.bgWG.Done()
+			r.keeperLoop()
+		}()
 	})
 }
 
-// Stop terminates the background loops. Safe to call more than once.
+// Stop terminates background loops and waits for any in-flight refresh or
+// Keeper execution to finish before returning, so callers can safely release
+// runtime.lock afterwards.
 func (r *Runtime) Stop() {
 	r.stopOnce.Do(func() {
 		close(r.stop)
 	})
+	r.bgWG.Wait()
+	r.refreshMu.Lock()
+	r.refreshMu.Unlock()
 }
 
 // WaitFirstScan blocks until either a persisted scan exists, the first refresh
@@ -362,6 +385,25 @@ func (r *Runtime) WakeRefreshLoop() {
 	}
 }
 
+// UpdateSettings serializes Load -> mutate -> atomic Save -> notify under
+// settingsMu so concurrent phone and TUI edits cannot clobber each other.
+func (r *Runtime) UpdateSettings(mutate func(*config.Config) error, refreshIntervalChanged bool) (config.Config, error) {
+	r.settingsMu.Lock()
+	defer r.settingsMu.Unlock()
+	cfg, err := r.Config.Load()
+	if err != nil {
+		return config.Config{}, err
+	}
+	if err := mutate(&cfg); err != nil {
+		return config.Config{}, err
+	}
+	if err := r.Config.Save(&cfg); err != nil {
+		return config.Config{}, err
+	}
+	r.NotifySettingsUpdated(cfg, refreshIntervalChanged)
+	return cfg, nil
+}
+
 func (r *Runtime) NotifySettingsUpdated(cfg config.Config, refreshIntervalChanged bool) {
 	if r.Keeper != nil {
 		r.Keeper.UpdateConfig(cfg.Keeper)
@@ -404,11 +446,19 @@ func (r *Runtime) Reprice(apply, yes bool, expect string) (*pricing.RepriceRepor
 	return &rep, nil
 }
 
-func (r *Runtime) refreshLoop(initialRefresh bool) {
-	firstDelay := r.refreshInterval()
-	if initialRefresh {
-		firstDelay = 0
+func (r *Runtime) refreshLoop(opts StartOptions) {
+	if opts.InitialRefresh {
+		select {
+		case <-r.stop:
+			return
+		default:
+		}
+		r.refresh(refreshFlags{usage: true, quota: true}, time.Now())
 	}
+	if !opts.AutoRefresh {
+		return
+	}
+	firstDelay := r.refreshInterval()
 	if firstDelay <= 0 {
 		firstDelay = 24 * time.Hour
 	}
@@ -425,8 +475,7 @@ func (r *Runtime) refreshLoop(initialRefresh bool) {
 			}
 			resetTimer(timer, next)
 		case <-timer.C:
-			if interval := r.refreshInterval(); interval > 0 || initialRefresh {
-				initialRefresh = false
+			if interval := r.refreshInterval(); interval > 0 {
 				r.refresh(refreshFlags{usage: true, quota: true}, time.Now())
 			}
 			next := r.refreshInterval()
@@ -648,7 +697,9 @@ func (r *Runtime) ApplyQuotaResults(results []quota.FetchResult) {
 }
 
 func (r *Runtime) startKeeper(request keeper.Request) {
+	r.bgWG.Add(1)
 	go func() {
+		defer r.bgWG.Done()
 		record := r.Keeper.Execute(request)
 		r.Keeper.Finish(request, record)
 		r.Events.Publish("keeper_updated", map[string]any{"agent": record.Agent})

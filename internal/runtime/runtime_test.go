@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -117,4 +119,145 @@ func TestInProcessClientPatchSettingsAndEvents(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for settings_updated event")
 	}
+}
+
+func TestStartTriggersInitialRefresh(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "xdg"))
+	t.Setenv("TOKENPULSE_ENV", "test")
+	t.Setenv("TOKENPULSE_DATA_DIR", dir)
+	t.Setenv("TOKENPULSE_CONFIG_PATH", filepath.Join(dir, "config.toml"))
+
+	manager, err := config.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Display.RefreshQuota = false
+	cfg.Display.ScanAntigravity = false
+	if err := manager.Save(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	scanner, err := scan.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner.Pricing.Fetch = func(string) ([]byte, error) { return []byte(`{}`), nil }
+	rt, err := New(dir, manager, scanner, "daemon", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.Start(StartOptions{InitialRefresh: true, AutoRefresh: true})
+	defer rt.Stop()
+
+	select {
+	case <-rt.firstScan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start(InitialRefresh: true) did not run initial scan")
+	}
+}
+
+func TestNoScanDoesNotStartRefreshLoop(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TOKENPULSE_ENV", "test")
+	t.Setenv("TOKENPULSE_DATA_DIR", dir)
+	t.Setenv("TOKENPULSE_CONFIG_PATH", filepath.Join(dir, "config.toml"))
+
+	manager, err := config.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner, err := scan.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := New(dir, manager, scanner, "standalone", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.Start(StartOptions{InitialRefresh: false, AutoRefresh: false})
+	defer rt.Stop()
+
+	select {
+	case <-rt.firstScan:
+		t.Fatal("no-scan mode unexpectedly ran a scan")
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestStopWaitsForInFlightRefresh(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TOKENPULSE_ENV", "test")
+	t.Setenv("TOKENPULSE_DATA_DIR", dir)
+	t.Setenv("TOKENPULSE_CONFIG_PATH", filepath.Join(dir, "config.toml"))
+
+	manager, err := config.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner, err := scan.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := New(dir, manager, scanner, "standalone", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an in-flight refresh holding refreshMu.
+	rt.refreshMu.Lock()
+	stopDone := make(chan struct{})
+	go func() {
+		rt.Stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-stopDone:
+		t.Fatal("Stop returned while refreshMu was still held")
+	case <-time.After(80 * time.Millisecond):
+	}
+	rt.refreshMu.Unlock()
+
+	select {
+	case <-stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return after in-flight refresh finished")
+	}
+}
+
+func TestCrossProcessLockContention(t *testing.T) {
+	dir := t.TempDir()
+	lock, err := AcquireLock(dir)
+	if err != nil {
+		t.Fatalf("AcquireLock: %v", err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestLockHelperProcess")
+	cmd.Env = append(os.Environ(), "TOKENPULSE_LOCK_HELPER_DIR="+dir)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("child process unexpectedly acquired lock: %s", out)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatal(err)
+	}
+	cmd2 := exec.Command(os.Args[0], "-test.run=TestLockHelperProcess")
+	cmd2.Env = append(os.Environ(), "TOKENPULSE_LOCK_HELPER_DIR="+dir)
+	if out, err := cmd2.CombinedOutput(); err != nil {
+		t.Fatalf("child process failed to acquire released lock: %v (%s)", err, out)
+	}
+}
+
+func TestLockHelperProcess(t *testing.T) {
+	dir := os.Getenv("TOKENPULSE_LOCK_HELPER_DIR")
+	if dir == "" {
+		return
+	}
+	lock, err := AcquireLock(dir)
+	if err != nil {
+		os.Exit(2)
+	}
+	_ = lock.Release()
 }

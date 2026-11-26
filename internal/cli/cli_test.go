@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"encoding/csv"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	rt "github.com/fangwangme/tokenpulse/internal/runtime"
 	"github.com/fangwangme/tokenpulse/internal/summary"
 	"github.com/fangwangme/tokenpulse/internal/usage"
 )
@@ -70,5 +72,25 @@ func TestSubcommandHelp(t *testing.T) {
 		if err := run([]string{"--help"}); err != nil {
 			t.Errorf("%s --help: %v", name, err)
 		}
+	}
+}
+
+func TestCLIWriteRefusedWhenRuntimeLockHeld(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TOKENPULSE_ENV", "test")
+	t.Setenv("TOKENPULSE_DATA_DIR", dir)
+	t.Setenv("TOKENPULSE_CONFIG_PATH", filepath.Join(dir, "config.toml"))
+
+	lock, err := rt.AcquireLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+
+	if err := runUsage([]string{"--no-tui", "--rebuild-all"}, true); err == nil || !strings.Contains(err.Error(), "another TokenPulse instance") {
+		t.Fatalf("rebuild-all while locked = %v, want lock refusal", err)
+	}
+	if err := runReprice([]string{}); err == nil || !strings.Contains(err.Error(), "another TokenPulse instance") {
+		t.Fatalf("reprice while locked = %v, want lock refusal", err)
 	}
 }

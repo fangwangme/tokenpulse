@@ -22,16 +22,21 @@ func attachClient(opts Options) (rt.Client, error) {
 		}
 		return nil, err
 	}
-	return newInProcess(opts, lock, !opts.NoScan)
+	return newInProcess(opts, lock, !opts.NoScan, !opts.NoScan)
 }
 
-func newInProcess(opts Options, lock *rt.Lock, initialRefresh bool) (rt.Client, error) {
+func newInProcess(opts Options, lock *rt.Lock, initialRefresh, autoRefresh bool) (rt.Client, error) {
 	engine, err := rt.New(opts.DataDir, opts.ConfigManager, opts.Scanner, "standalone", nil)
 	if err != nil {
 		_ = lock.Release()
 		return nil, err
 	}
+	stopSocket, sockErr := remote.StartLocalSocket(engine, opts.DataDir)
 	engine.WarmCache()
-	engine.Start(initialRefresh)
-	return rt.NewInProcessClient(engine, lock), nil
+	engine.Start(rt.StartOptions{InitialRefresh: initialRefresh, AutoRefresh: autoRefresh})
+	client := rt.NewInProcessClient(engine, lock)
+	if sockErr == nil {
+		client.OnClose = stopSocket
+	}
+	return client, nil
 }

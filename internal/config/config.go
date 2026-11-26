@@ -339,7 +339,38 @@ func (m *Manager) Save(cfg *Config) error {
 	if err := enc.Encode(cfg); err != nil {
 		return err
 	}
-	return os.WriteFile(m.Path, []byte(b.String()), 0o644)
+	dir := filepath.Dir(m.Path)
+	tmp, err := os.CreateTemp(dir, ".config-*.toml.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.WriteString(b.String()); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, m.Path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
 func (m *Manager) EnableProvider(provider string) error {

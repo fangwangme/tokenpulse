@@ -24,6 +24,7 @@ import (
 	"github.com/fangwangme/tokenpulse/internal/quota"
 	"github.com/fangwangme/tokenpulse/internal/remote"
 	"github.com/fangwangme/tokenpulse/internal/report"
+	rt "github.com/fangwangme/tokenpulse/internal/runtime"
 	"github.com/fangwangme/tokenpulse/internal/scan"
 	"github.com/fangwangme/tokenpulse/internal/summary"
 	"github.com/fangwangme/tokenpulse/internal/tui"
@@ -228,13 +229,22 @@ func runUsageReport(since, refreshDays, csvFormat string, refreshPricing, rebuil
 
 	if !noTUI && interactive() && !jsonOut && csvFormat == "" {
 		if explicit && !noScan {
+			lock, err := rt.AcquireLock(dataDir)
+			if err != nil {
+				if errors.Is(err, rt.ErrLocked) {
+					return errors.New("another TokenPulse instance owns this data directory; close it or stop serve before running --rebuild-all/--refresh-days/--refresh-pricing")
+				}
+				return err
+			}
 			fmt.Fprintln(os.Stderr, "Scanning usage…")
-			if err := scanner.Run(scan.Options{
+			scanErr := scanner.Run(scan.Options{
 				Since: once(sinceDate), RefreshFrom: from, RefreshTo: to,
 				RefreshPricing: refreshPricing, RebuildAll: rebuildAll,
 				Providers: scan.ProvidersFromConfig(cfg), ScanAntigravity: cfg.Display.ScanAntigravity,
-			}); err != nil {
-				return err
+			})
+			_ = lock.Release()
+			if scanErr != nil {
+				return scanErr
 			}
 			if logPerf {
 				writePerfLog(dataDir, started)
@@ -247,20 +257,42 @@ func runUsageReport(since, refreshDays, csvFormat string, refreshPricing, rebuil
 	}
 
 	if scanNeeded {
-		if !jsonOut {
-			fmt.Fprintln(os.Stderr, "Scanning usage… (--no-scan reads the cached ledger)")
+		lock, lockErr := rt.AcquireLock(dataDir)
+		if lockErr != nil {
+			if errors.Is(lockErr, rt.ErrLocked) {
+				if explicit {
+					return errors.New("another TokenPulse instance owns this data directory; close it or stop serve before running --rebuild-all/--refresh-days/--refresh-pricing")
+				}
+				// Another runtime holds the lock; delegate refresh via socket if
+				// available, then read the ledger read-only.
+				if _, err := client.Status(); err == nil {
+					_ = client.Post("/api/refresh", map[string]bool{"usage": true, "quota": false}, nil)
+					scanNeeded = false
+				} else {
+					return errors.New("another TokenPulse instance is running; use --no-scan to read cached data")
+				}
+			} else {
+				return lockErr
+			}
 		}
-		if err := scanner.Run(scan.Options{
-			Since: once(sinceDate), RefreshFrom: from, RefreshTo: to,
-			RefreshPricing: refreshPricing, RebuildAll: rebuildAll,
-			Providers: scan.ProvidersFromConfig(cfg), ScanAntigravity: cfg.Display.ScanAntigravity,
-		}); err != nil {
-			return err
+		if scanNeeded {
+			defer lock.Release()
+			if !jsonOut {
+				fmt.Fprintln(os.Stderr, "Scanning usage… (--no-scan reads the cached ledger)")
+			}
+			if err := scanner.Run(scan.Options{
+				Since: once(sinceDate), RefreshFrom: from, RefreshTo: to,
+				RefreshPricing: refreshPricing, RebuildAll: rebuildAll,
+				Providers: scan.ProvidersFromConfig(cfg), ScanAntigravity: cfg.Display.ScanAntigravity,
+			}); err != nil {
+				return err
+			}
+			if logPerf {
+				writePerfLog(dataDir, started)
+			}
 		}
-		if logPerf {
-			writePerfLog(dataDir, started)
-		}
-	} else {
+	}
+	if !scanNeeded {
 		if _, err := os.Stat(filepath.Join(dataDir, "usage.db")); err != nil {
 			return errors.New("no cached usage yet; run tokenpulse once without --no-scan")
 		}
@@ -743,7 +775,7 @@ func runReprice(args []string) error {
 		return err
 	}
 	client := remote.NewLocalClient(dataDir)
-	if _, err := client.State(); err == nil {
+	if _, err := client.Status(); err == nil {
 		var result pricing.RepriceReport
 		body := map[string]any{"apply": apply, "yes": yes, "expect": expect}
 		if err := client.Post("/api/reprice", body, &result); err != nil {
@@ -751,6 +783,14 @@ func runReprice(args []string) error {
 		}
 		return printReprice(result, jsonOut)
 	}
+	lock, err := rt.AcquireLock(dataDir)
+	if err != nil {
+		if errors.Is(err, rt.ErrLocked) {
+			return errors.New("another TokenPulse instance owns this data directory; close it or stop serve before running reprice")
+		}
+		return err
+	}
+	defer lock.Release()
 	// Reprice reads a ledger written by 0.6.x too; opening the store applies
 	// the forward schema migration before any cost is computed.
 	store := usage.NewStore(filepath.Join(dataDir, "usage.db"))

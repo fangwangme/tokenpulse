@@ -28,9 +28,12 @@ type Client interface {
 }
 
 // InProcessClient talks directly to a *Runtime hosted in the same process.
+// Optional OnClose runs before Stop/Lock.Release (e.g. closing a local Unix
+// control socket).
 type InProcessClient struct {
 	Runtime *Runtime
 	Lock    *Lock
+	OnClose func()
 }
 
 func NewInProcessClient(rt *Runtime, lock *Lock) *InProcessClient {
@@ -70,24 +73,15 @@ func (c *InProcessClient) Refresh(usage, quota bool) (RefreshResult, error) {
 }
 
 func (c *InProcessClient) PatchSettings(updates map[string]any) (config.Config, error) {
-	cfg, err := c.Runtime.Config.Load()
-	if err != nil {
-		return config.Config{}, err
-	}
-	intervalChanged := false
-	for key, value := range updates {
-		if key == "display.auto_refresh_secs" {
-			intervalChanged = true
+	_, intervalChanged := updates["display.auto_refresh_secs"]
+	return c.Runtime.UpdateSettings(func(cfg *config.Config) error {
+		for key, value := range updates {
+			if err := ApplyLocalSetting(cfg, key, value); err != nil {
+				return err
+			}
 		}
-		if err := ApplyLocalSetting(&cfg, key, value); err != nil {
-			return config.Config{}, err
-		}
-	}
-	if err := c.Runtime.Config.Save(&cfg); err != nil {
-		return config.Config{}, err
-	}
-	c.Runtime.NotifySettingsUpdated(cfg, intervalChanged)
-	return cfg, nil
+		return nil
+	}, intervalChanged)
 }
 
 func (c *InProcessClient) KeeperPing(agent, group string) error {
@@ -103,6 +97,9 @@ func (c *InProcessClient) Subscribe() (<-chan Event, func(), error) {
 func (c *InProcessClient) IsRemote() bool { return false }
 
 func (c *InProcessClient) Close() error {
+	if c.OnClose != nil {
+		c.OnClose()
+	}
 	if c.Runtime != nil {
 		c.Runtime.Stop()
 	}

@@ -105,10 +105,11 @@ type statusMsg struct {
 	err    error
 }
 type webToggleMsg struct {
-	client rt.Client
-	status rt.StatusSnapshot
-	toast  string
-	err    error
+	client      rt.Client
+	status      rt.StatusSnapshot
+	toast       string
+	err         error
+	clearClient bool
 }
 
 func Run(opts Options) error {
@@ -308,10 +309,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	case statusMsg:
 		if msg.err != nil {
-			if m.client != nil && m.client.IsRemote() {
+			if m.client != nil && m.client.IsRemote() && !m.webBusy {
+				// If the background serve stopped or crashed, fall back to an
+				// in-process runtime once runtime.lock becomes available.
+				if lock, err := rt.AcquireLock(m.opts.DataDir); err == nil {
+					if localClient, err := newInProcess(m.opts, lock, false, !m.opts.NoScan); err == nil {
+						m.client = localClient
+						if st, err := localClient.Status(); err == nil {
+							m.rtStatus = st
+						}
+						m.status = ""
+						m.toast = "Background serve stopped; switched to local mode"
+						m.toastAt = time.Now()
+						return m, tea.Batch(m.subscribeEvents(), m.statusPollCmd(), m.fetchConfigCmd())
+					}
+				}
 				m.status = "Background serve unreachable; retrying…"
 			}
 			return m, m.statusPollCmd()
+		}
+		if m.status == "Background serve unreachable; retrying…" {
+			m.status = ""
 		}
 		prevScanned := m.rtStatus.ScannedAt
 		prevFetched := m.rtStatus.FetchedAt
@@ -339,19 +357,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case webToggleMsg:
 		m.webBusy = false
+		if msg.clearClient {
+			m.client = nil
+		}
+		if msg.client != nil {
+			m.client = msg.client
+			m.rtStatus = msg.status
+		}
 		if msg.err != nil {
 			m.toast = "Web toggle failed: " + msg.err.Error()
 			m.toastAt = time.Now()
-			return m, nil
+			return m, tea.Batch(m.subscribeEvents(), m.statusPollCmd())
 		}
-		m.client = msg.client
-		m.rtStatus = msg.status
 		m.toast = msg.toast
 		m.toastAt = time.Now()
 		m.loadReport()
 		m.loadQuota()
 		m.loadKeeperLog()
-		return m, tea.Batch(m.subscribeEvents(), m.statusPollCmd())
+		return m, tea.Batch(m.subscribeEvents(), m.statusPollCmd(), m.fetchConfigCmd())
 	case toastMsg:
 		m.toast = msg.text
 		m.toastAt = time.Now()
@@ -814,9 +837,9 @@ func (m *model) toggleWebRemote() tea.Cmd {
 		if wasRemote {
 			lock, err := stopDaemonAndAcquire(opts.DataDir)
 			if err != nil {
-				return webToggleMsg{err: err}
+				return webToggleMsg{client: prevClient, err: err}
 			}
-			next, err := newInProcess(opts, lock, false)
+			next, err := newInProcess(opts, lock, false, !opts.NoScan)
 			if err != nil {
 				return webToggleMsg{err: err}
 			}
@@ -827,12 +850,12 @@ func (m *model) toggleWebRemote() tea.Cmd {
 		local, err := startDetachedServe(opts.DataDir)
 		if err != nil {
 			if lock, lerr := rt.AcquireLock(opts.DataDir); lerr == nil {
-				if fallback, ferr := newInProcess(opts, lock, false); ferr == nil {
+				if fallback, ferr := newInProcess(opts, lock, false, !opts.NoScan); ferr == nil {
 					st, _ := fallback.Status()
 					return webToggleMsg{client: fallback, status: st, err: err}
 				}
 			}
-			return webToggleMsg{err: err}
+			return webToggleMsg{clearClient: true, err: err}
 		}
 		next := remote.NewSocketClient(local)
 		status, _ := next.Status()

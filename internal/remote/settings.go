@@ -104,18 +104,17 @@ func settingsView(snapshot SettingsSnapshot) settingsResponse {
 	return out
 }
 
-// ApplySettings validates every entry before writing anything. It returns the
-// new snapshot.
-func ApplySettings(manager *config.Manager, updates map[string]json.RawMessage) (SettingsSnapshot, error) {
+type settingChange struct {
+	key   string
+	value any
+}
+
+func validatePhoneUpdates(updates map[string]json.RawMessage) ([]settingChange, error) {
 	if updates == nil {
 		return nil, fmt.Errorf("no settings given")
 	}
 	specs := phoneSettings()
-	type change struct {
-		key   string
-		value any
-	}
-	var changes []change
+	var changes []settingChange
 	for key, raw := range updates {
 		for _, suffix := range rejectSuffixes {
 			if strings.HasSuffix(key, suffix) {
@@ -130,7 +129,17 @@ func ApplySettings(manager *config.Manager, updates map[string]json.RawMessage) 
 		if !allowed(spec, value) {
 			return nil, fmt.Errorf("invalid value for %s", key)
 		}
-		changes = append(changes, change{key, value})
+		changes = append(changes, settingChange{key, value})
+	}
+	return changes, nil
+}
+
+// ApplySettings validates every entry before writing anything. It returns the
+// new snapshot.
+func ApplySettings(manager *config.Manager, updates map[string]json.RawMessage) (SettingsSnapshot, error) {
+	changes, err := validatePhoneUpdates(updates)
+	if err != nil {
+		return nil, err
 	}
 	cfg, err := manager.Load()
 	if err != nil {

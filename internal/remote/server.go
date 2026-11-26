@@ -171,7 +171,7 @@ func (s *Server) Run() error {
 	go s.forwardEvents(events)
 
 	s.Runtime.WarmCache()
-	s.Runtime.Start(true)
+	s.Runtime.Start(rt.StartOptions{InitialRefresh: true, AutoRefresh: true})
 	defer s.Runtime.Stop()
 
 	httpSrv := &http.Server{
@@ -190,6 +190,52 @@ func (s *Server) Run() error {
 		return nil
 	}
 	return err
+}
+
+// StartLocalSocket exposes an in-process *runtime.Runtime over the data
+// directory's local Unix socket (without opening any TCP port) so a second TUI
+// or CLI command can attach cleanly.
+func StartLocalSocket(engine *rt.Runtime, dataDir string) (func(), error) {
+	srv := &Server{
+		DataDir:   dataDir,
+		State:     NewStateStore(dataDir),
+		Runtime:   engine,
+		Push:      newPushStore(dataDir),
+		wsClients: map[*wsClient]bool{},
+		stop:      make(chan struct{}),
+	}
+	socketPath, err := SocketPath(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	listener, err := srv.listenLocalSocket(socketPath)
+	if err != nil {
+		return nil, err
+	}
+	events, unsubscribe := engine.Events.Subscribe()
+	go srv.forwardEvents(events)
+	go srv.serveUnix(listener)
+
+	var once sync.Once
+	stopFn := func() {
+		once.Do(func() {
+			unsubscribe()
+			srv.stopOnce.Do(func() {
+				close(srv.stop)
+				srv.mu.Lock()
+				unixSrv := srv.unixServer
+				srv.mu.Unlock()
+				if unixSrv != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = unixSrv.Shutdown(ctx)
+					cancel()
+				}
+			})
+			_ = listener.Close()
+			_ = os.Remove(socketPath)
+		})
+	}
+	return stopFn, nil
 }
 
 func (s *Server) serveUnix(listener net.Listener) {
@@ -655,40 +701,41 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request, loc
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	var snapshot SettingsSnapshot
-	var err error
+	_, intervalChanged := updates["display.auto_refresh_secs"]
 	if local {
-		cfg, loadErr := s.Runtime.Config.Load()
-		if loadErr != nil {
-			writeError(w, http.StatusInternalServerError, loadErr.Error())
-			return
-		}
-		for key, raw := range updates {
-			if applyErr := rt.ApplyLocalSetting(&cfg, key, decodeValue(raw)); applyErr != nil {
-				writeError(w, http.StatusBadRequest, applyErr.Error())
-				return
+		cfg, err := s.Runtime.UpdateSettings(func(cfg *config.Config) error {
+			for key, raw := range updates {
+				if err := rt.ApplyLocalSetting(cfg, key, decodeValue(raw)); err != nil {
+					return err
+				}
 			}
-		}
-		if saveErr := s.Runtime.Config.Save(&cfg); saveErr != nil {
-			writeError(w, http.StatusInternalServerError, saveErr.Error())
+			return nil
+		}, intervalChanged)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		snapshot = currentSettings(cfg)
-		_, intervalChanged := updates["display.auto_refresh_secs"]
-		s.Runtime.NotifySettingsUpdated(cfg, intervalChanged)
-		writeJSON(w, settingsView(snapshot))
+		writeJSON(w, settingsView(currentSettings(cfg)))
 		return
 	}
-	snapshot, err = ApplySettings(s.Runtime.Config, updates)
+	changes, err := validatePhoneUpdates(updates)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if cfg, err := s.Runtime.Config.Load(); err == nil {
-		_, intervalChanged := updates["display.auto_refresh_secs"]
-		s.Runtime.NotifySettingsUpdated(cfg, intervalChanged)
+	cfg, err := s.Runtime.UpdateSettings(func(cfg *config.Config) error {
+		for _, ch := range changes {
+			if err := applyOne(cfg, ch.key, ch.value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, intervalChanged)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	writeJSON(w, settingsView(snapshot))
+	writeJSON(w, settingsView(currentSettings(cfg)))
 }
 
 func (s *Server) handleKeeperGet(w http.ResponseWriter, r *http.Request) {

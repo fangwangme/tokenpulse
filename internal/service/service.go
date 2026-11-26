@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/fangwangme/tokenpulse/internal/paths"
 	"github.com/fangwangme/tokenpulse/internal/remote"
+	rt "github.com/fangwangme/tokenpulse/internal/runtime"
 	"github.com/fangwangme/tokenpulse/internal/version"
 )
 
@@ -46,10 +48,12 @@ func Install() error {
 	}
 	configPath := os.Getenv("TOKENPULSE_CONFIG_PATH")
 	environment := os.Getenv("TOKENPULSE_ENV")
-	// Stop any detached serve holding runtime.lock before starting the managed unit.
+	// Stop any detached serve holding runtime.lock and wait until the lock is
+	// released before starting the managed unit.
 	if local := remote.NewLocalClient(dataDir); local != nil {
 		if st, err := local.Status(); err == nil && st.ManagedBy == "daemon" {
 			_ = local.Shutdown()
+			waitForLockRelease(dataDir, 5*time.Second)
 		}
 	}
 	switch runtime.GOOS {
@@ -230,4 +234,15 @@ func Status() error {
 
 func currentUID() string {
 	return fmt.Sprintf("%d", os.Getuid())
+}
+
+func waitForLockRelease(dataDir string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if lock, err := rt.AcquireLock(dataDir); err == nil {
+			_ = lock.Release()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
