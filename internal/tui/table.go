@@ -129,9 +129,18 @@ func normalizeScroll(offset, selected, visible, total int) int {
 	return clampInt(offset, 0, max(total-visible, 0))
 }
 
+// tableRows splits the body's data rows and the single scroll-hint row when
+// the rows overflow; a table that fits keeps every row and no hint.
+func tableRows(total, available int) (visible int, showHint bool) {
+	if total > available && available > 1 {
+		return available - 1, true
+	}
+	return available, false
+}
+
 func scrollHint(offset, visible, total int) string {
-	if total <= visible || visible == 0 {
-		return formatIntCommas(int64(total)) + " models"
+	if total <= visible {
+		return ""
 	}
 	up, down := " ", " "
 	if offset > 0 {

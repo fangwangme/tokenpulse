@@ -146,15 +146,15 @@ func (m *model) drawOverviewChart(c *canvas, area rect) {
 	legendY := inner.y + inner.h - 1
 
 	chartWidth := chartArea.w - (chartYAxisWidth + 1)
-	data := m.chartSeries(max(chartWidth, 1))
-	days := len(data)
-	// Each day gets an equal slot across the full width; slots of 3+ columns
-	// keep one blank column so neighbouring bars stay distinguishable.
-	barWidth := max(chartWidth/max(days, 1), 1)
-	fillWidth := barWidth
-	if barWidth >= 3 {
-		fillWidth = barWidth - 1
+	barWidth := 2
+	switch {
+	case chartWidth >= 140:
+		barWidth = 4
+	case chartWidth >= 80:
+		barWidth = 3
 	}
+	data := m.chartSeries(max(chartWidth/barWidth, 1))
+	days := len(data)
 	metricName := "Token Usage"
 	if m.overviewMetric == metricCost {
 		metricName = "Cost Usage"
@@ -240,12 +240,12 @@ func (m *model) drawOverviewChart(c *canvas, area rect) {
 		}
 		for row := 0; row < fullRows; row++ {
 			y := chartArea.y + chartHeight - 1 - row
-			c.set(barX, y, strings.Repeat("█", fillWidth), fgStyle(dominantBandColor(ranges, row*8, row*8+8)))
+			c.set(barX, y, strings.Repeat("█", barWidth), fgStyle(dominantBandColor(ranges, row*8, row*8+8)))
 		}
 		if partial > 0 && fullRows < chartHeight {
 			y := chartArea.y + chartHeight - 1 - fullRows
 			blocks := []rune("▁▂▃▄▅▆▇█")
-			c.set(barX, y, strings.Repeat(string(blocks[partial-1]), fillWidth), fgStyle(dominantBandColor(ranges, fullRows*8, fullRows*8+partial)))
+			c.set(barX, y, strings.Repeat(string(blocks[partial-1]), barWidth), fgStyle(dominantBandColor(ranges, fullRows*8, fullRows*8+partial)))
 		}
 	}
 
@@ -467,15 +467,11 @@ func (m *model) drawTopModels(c *canvas, area rect) {
 	models := m.overviewModels()
 	totalRows := len(models)
 	inner := area.inner()
-	hintSpace := 1
-	if inner.h <= 2 {
-		hintSpace = 0
-	}
-	dataRows := max(inner.h-1-hintSpace, 0)
+	visible, showHint := tableRows(totalRows, max(inner.h-1, 0))
 	selected := clampInt(m.overviewSel, 0, max(totalRows-1, 0))
-	offset := normalizeScroll(m.overviewOff, selected, dataRows, totalRows)
+	offset := normalizeScroll(m.overviewOff, selected, visible, totalRows)
 	m.overviewOff = offset
-	title := fmt.Sprintf(" Top Models (%d) %s ", totalRows, scrollHintWindow(offset, dataRows, totalRows))
+	title := fmt.Sprintf(" Top Models (%d) %s ", totalRows, scrollHintWindow(offset, visible, totalRows))
 	c.box(area.x, area.y, area.w, area.h, title, boldStyle(theme.accentSoft), fgStyle(theme.border))
 	if inner.h <= 0 {
 		return
@@ -504,7 +500,7 @@ func (m *model) drawTopModels(c *canvas, area rect) {
 	x += costWidth + 1
 	c.setClip(x, inner.y, inner.right(), padLeft("%", pctWidth), boldStyle(theme.dim))
 
-	for index := 0; index < dataRows; index++ {
+	for index := 0; index < visible; index++ {
 		rowIndex := offset + index
 		if rowIndex >= totalRows {
 			break
@@ -531,11 +527,11 @@ func (m *model) drawTopModels(c *canvas, area rect) {
 		x += costWidth + 1
 		c.setClip(x, y, inner.right(), padLeft(fmt.Sprintf("%.2f%%", modelShare(entry, shareTotal, shareField)), pctWidth), style(theme.dim, selectedRow))
 	}
-	if hintSpace == 1 {
-		drawn := min(dataRows, max(totalRows-offset, 0))
+	if showHint {
+		drawn := min(visible, max(totalRows-offset, 0))
 		hintY := inner.y + 1 + drawn
 		if hintY < inner.bottom() {
-			c.set(inner.x, hintY, truncate(scrollHint(offset, dataRows, totalRows), inner.w), fgStyle(theme.dim))
+			c.set(inner.x, hintY, truncate(scrollHint(offset, visible, totalRows), inner.w), fgStyle(theme.dim))
 		}
 	}
 }

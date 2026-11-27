@@ -144,6 +144,7 @@ type model struct {
 	activityLoaded     bool
 	activityLoadedDate string
 	activitySel        string
+	activityLegend     int
 
 	activityDetail      *report.DayDetail
 	activityDetailDate  string
@@ -276,6 +277,7 @@ func newModel(opts Options, client rt.Client) *model {
 		overviewMetric: metricTokens,
 		dailyMetric:    metricTokens,
 		activityMetric: metricTokens,
+		activityLegend: -1,
 		quotaErrors:    map[string]string{},
 	}
 	if opts.Since != nil {
@@ -905,7 +907,11 @@ func (m *model) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		m.setStatus(msg.err.Error(), 2)
 		return m, nil
 	}
+	previousFrom, previousTo := m.activity.Range.From, m.activity.Range.To
 	m.activity = msg.value
+	if m.activity.Range.From != previousFrom || m.activity.Range.To != previousTo {
+		m.activityLegend = -1
+	}
 	m.activityErr = ""
 	m.activityLoaded = true
 	m.activityLoadedDate = dateString(startOfToday())
@@ -1451,6 +1457,10 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.tab == tabActivity {
+		if level, ok := m.heatmapLegendAt(body, msg.X, msg.Y); ok {
+			m.activityLegend = level
+			return m, nil
+		}
 		if date, ok := m.heatmapDateAt(body, msg.X, msg.Y); ok {
 			m.activitySel = date
 			m.activityDetailOff = 0
@@ -1775,7 +1785,7 @@ func (m *model) helpLine() string {
 	case tabDaily:
 		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  ↵ detail  n today  c/t/d sort (%s %s)  v metric (%s)  s filter  ? help", sortLabel(m.sortField), sortDirection(m.sortAsc), metricLabel(m.dailyMetric))
 	case tabActivity:
-		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ day  [/] scroll  n today  t/c metric (%s)  s filter  ? help", metricLabel(m.activityMetric))
+		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  n today  t/c metric (%s)  s filter  ? help", metricLabel(m.activityMetric))
 	case tabQuota:
 		return " q quit  r refresh  ←→ tab  ? help"
 	case tabKeeper:
