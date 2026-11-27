@@ -155,20 +155,27 @@ See `cli.md`, `config.md`, `pricing.md` and `remote.md` for the full rules.
 
 ## TUI
 
-The dashboard has four tabs: `Usage`, `Quota`, `Keeper`, `Settings`.
+The dashboard restores the 0.6.16 seven-tab layout over `runtime.Client`:
+`Overview`, `Models`, `Daily`, `Activity`, `Quota`, `Keeper`, `Settings`.
 
-- **Usage**: range presets `1-6`, Token/Cost switch (`m`), dates/models list
-  toggle (`v`), heatmap/list focus toggle (`f`), row movement (`↑/↓` or `j/k`),
-  detail (`Enter`), range shift (`[`/`]`), agent filter (`s`), refresh (`r`),
-  theme (`b`), quit (`q`).
-- **Quota**: provider cards with bars, reset time and pace; `↑/↓` moves the
-  provider cursor.
-- **Keeper**: per-agent switches and history; `e` toggles the engine.
-- **Settings**: `↑/↓` moves, `Enter`/`Space` changes the selected row.
+- **Overview / Models / Daily**: share one range (`1`–`6` presets, default
+  `30d`, `[`/`]` shift, `n` today) and the global agent filter (`s`). Overview
+  shows KPIs, a stacked company bar chart (`t`/`c`), and Top Models; Models and
+  Daily are sortable tables (`c`/`t`/`d`) with detail popups (`Enter`), and
+  Daily adds the vs-7-days column (`v`).
+- **Activity**: fixed one-year Monday-start heatmap (`t`/`c`), period overview,
+  and selected-day breakdown (`↑`/`↓`, `n`, `[`/`]`).
+- **Quota**: multi-column provider cards in `display.quota_provider_order` with
+  gauges, pace, reset times, extra usage, and banked resets.
+- **Keeper**: engine toggle (`e`), agent cards (`↑`/`↓`/`Tab`, `1`/`d` 5h,
+  `2`/`w` weekly, `p` manual ping), and live execution stream.
+- **Settings**: `↑`/`↓` moves, `Enter`/`Space` changes the selected row,
+  `J`/`K` reorders quota providers, plus the `Web remote` toggle.
 
-A running `serve` owns scanning and Keeper execution; the standalone TUI runs
-the Keeper scheduler itself. The phone and TUI share the same report queries
-and service status.
+See [`specs/tui-usage.md`](specs/tui-usage.md) and
+[`modules/tui.md`](modules/tui.md) for full details. A running `serve` owns
+scanning and Keeper execution; the standalone TUI runs the runtime in-process.
+The phone and TUI share the same report queries and service status.
 
 ---
 

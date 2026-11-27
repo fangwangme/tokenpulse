@@ -10,6 +10,14 @@ JSON, and CSV outputs also built in.
   <img src="docs/images/mobile-quota.png" width="360" alt="TokenPulse mobile quota">
 </p>
 
+<p>
+  <img src="docs/images/tui-overview.png" width="728" alt="TokenPulse TUI Overview with model detail popup">
+</p>
+
+<p>
+  <img src="docs/images/tui-quota.png" width="728" alt="TokenPulse TUI Quota provider cards">
+</p>
+
 *Screenshots use synthetic demo data rather than a real account.*
 
 ## Features

@@ -1,7 +1,8 @@
 # Usage Report
 
 The usage report is the one reading of the usage ledger that every surface
-shares: the TUI Usage page (`tui-usage.md`) and the phone app (`remote.md`).
+shares: the TUI Overview, Models and Daily pages (`tui-usage.md`) and the phone
+app (`remote.md`).
 Both show the same numbers for the same range, agents and time, because both
 call the same report functions.
 

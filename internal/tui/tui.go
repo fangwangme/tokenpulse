@@ -6,19 +6,15 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/fangwangme/tokenpulse/internal/config"
-	money "github.com/fangwangme/tokenpulse/internal/format"
 	"github.com/fangwangme/tokenpulse/internal/keeper"
-	"github.com/fangwangme/tokenpulse/internal/notification"
 	"github.com/fangwangme/tokenpulse/internal/provider"
 	"github.com/fangwangme/tokenpulse/internal/quota"
 	"github.com/fangwangme/tokenpulse/internal/remote"
 	"github.com/fangwangme/tokenpulse/internal/report"
 	rt "github.com/fangwangme/tokenpulse/internal/runtime"
 	"github.com/fangwangme/tokenpulse/internal/scan"
-	"github.com/fangwangme/tokenpulse/internal/version"
 )
 
 type Options struct {
@@ -32,75 +28,192 @@ type Options struct {
 }
 
 const (
-	tabUsage = iota
+	tabOverview = iota
+	tabModels
+	tabDaily
+	tabActivity
 	tabQuota
 	tabKeeper
 	tabSettings
 	tabCount
 )
 
-var tabNames = []string{"Usage", "Quota", "Keeper", "Settings"}
+var tabNames = []string{"Overview", "Models", "Daily", "Activity", "Quota", "Keeper", "Settings"}
 
-type detailKind int
+var presets = []string{"today", "7d", "30d", "year", "all", "custom"}
 
 const (
-	detailNone detailKind = iota
-	detailDay
-	detailModel
+	metricTokens = iota
+	metricCost
 )
 
+const (
+	sortDate = iota
+	sortCost
+	sortTokens
+)
+
+type recoveryState struct {
+	provider  string
+	window    string
+	remaining float64
+	started   time.Time
+}
+
+func (r *recoveryState) active() bool {
+	return r != nil && time.Since(r.started) < 5*time.Second
+}
+
+func (r *recoveryState) pulse() bool {
+	return r != nil && time.Since(r.started) < 2500*time.Millisecond
+}
+
 type model struct {
-	opts    Options
-	width   int
-	height  int
-	tab     int
-	theme   int
-	toast   string
-	toastAt time.Time
-	status  string
+	opts   Options
+	client rt.Client
+	cfg    config.Config
 
-	preset    string
-	from      string
-	to        string
-	agents    map[string]bool
-	metric    int
-	listMode  int
-	focus     int
-	report    report.Report
-	reportErr string
+	width, height int
+	tab           int
+	themeOverride int
 
-	selectedRow int
-	selectedDay string
-
-	detail       any
-	detailKind   detailKind
-	showFilter   bool
-	filterCursor int
-
-	snapshots   []provider.QuotaSnapshot
-	quotaErrors map[string]string
-	quotaCursor int
-
-	keeperCursor int
-	keeperLog    []keeper.ExecutionRecord
-
-	settingsCursor int
-	providerCursor int
-
-	client      rt.Client
 	rtStatus    rt.StatusSnapshot
 	eventCh     <-chan rt.Event
 	eventCancel func()
 	webBusy     bool
+
+	status      string
+	statusLevel int
+	statusAt    time.Time
+	toast       string
+	toastAt     time.Time
+	refreshedAt time.Time
+	recovery    *recoveryState
+
+	preset     string
+	basePreset string
+	from, to   string
+
+	agents       map[string]bool
+	filterOpen   bool
+	filterCursor int
+	showHelp     bool
+
+	customOpen   bool
+	customField  int
+	customFrom   string
+	customTo     string
+	customErr    string
+	dailyToToday bool
+
+	report        report.Report
+	reportErr     string
+	reportKey     string
+	reportLoading bool
+	reportLoaded  bool
+
+	company        companyData
+	companyKey     string
+	companyLoading bool
+	companyPending int
+	companyErr     bool
+	companySeq     int
+	epoch          int
+
+	prior        report.Report
+	priorKey     string
+	priorLoading bool
+	priorLoaded  bool
+
+	overviewMetric int
+	dailyMetric    int
+	activityMetric int
+	sortField      int
+	sortAsc        bool
+
+	overviewSel, overviewOff int
+	modelsSel, modelsOff     int
+	dailySel, dailyOff       int
+
+	modelDetail  *report.ModelDetail
+	dayDetail    *report.DayDetail
+	detailScroll int
+	detailSeq    int
+
+	activity        report.Report
+	activityErr     string
+	activityKey     string
+	activityLoading bool
+	activityLoaded  bool
+	activitySel     string
+
+	activityDetail      *report.DayDetail
+	activityDetailDate  string
+	activityDetailError string
+	activityDetailLoad  bool
+	activityDetailOff   int
+
+	snapshots    []provider.QuotaSnapshot
+	quotaErrors  map[string]string
+	quotaLoaded  bool
+	quotaLoading bool
+
+	keeperLog     []keeper.ExecutionRecord
+	keeperLoading bool
+	keeperLoaded  bool
+	keeperCursor  int
+
+	settingsCursor int
 }
 
-type toastMsg struct{ text string }
+type companyData struct {
+	tokens map[string]map[string]int64
+	cost   map[string]map[string]float64
+}
+
+func (c *companyData) empty() bool { return len(c.tokens) == 0 && len(c.cost) == 0 }
+
+func (c *companyData) add(detail report.ModelDetail) {
+	company := detail.Company
+	if company != "anthropic" && company != "openai" && company != "google" {
+		return
+	}
+	if c.tokens == nil {
+		c.tokens = map[string]map[string]int64{}
+		c.cost = map[string]map[string]float64{}
+	}
+	if c.tokens[company] == nil {
+		c.tokens[company] = map[string]int64{}
+		c.cost[company] = map[string]float64{}
+	}
+	for _, day := range detail.PerDay {
+		c.tokens[company][day.Date] += day.Tokens
+		c.cost[company][day.Date] += day.Cost
+	}
+}
+
 type eventMsg struct{ event rt.Event }
-type quotaViewMsg struct{ view rt.QuotaView }
-type keeperLogMsg struct{ records []keeper.ExecutionRecord }
-type configMsg struct{ cfg config.Config }
+type quotaViewMsg struct {
+	view rt.QuotaView
+	err  error
+}
+type keeperLogMsg struct {
+	records []keeper.ExecutionRecord
+	err     error
+}
+type configMsg struct {
+	cfg     config.Config
+	err     error
+	message string
+}
 type statusMsg struct {
 	status rt.StatusSnapshot
+	err    error
+}
+type toastMsg struct{ text string }
+type recoveryTickMsg struct{}
+type refreshMsg struct {
+	result rt.RefreshResult
 	err    error
 }
 type webToggleMsg struct {
@@ -109,6 +222,42 @@ type webToggleMsg struct {
 	toast       string
 	err         error
 	clearClient bool
+}
+
+type reportMsg struct {
+	key   string
+	value report.Report
+	err   error
+}
+type priorMsg struct {
+	key   string
+	value report.Report
+	err   error
+}
+type activityMsg struct {
+	key   string
+	value report.Report
+	err   error
+}
+type modelDetailMsg struct {
+	key     string
+	purpose string
+	seq     int
+	value   report.ModelDetail
+	err     error
+}
+type dayDetailMsg struct {
+	key   string
+	date  string
+	seq   int
+	value report.DayDetail
+	err   error
+}
+type activityDayMsg struct {
+	epoch int
+	date  string
+	value report.DayDetail
+	err   error
 }
 
 func Run(opts Options) error {
@@ -125,12 +274,6 @@ func Run(opts Options) error {
 
 func newModel(opts Options, client rt.Client) *model {
 	cfg := opts.Config
-	if client != nil {
-		if loaded, err := client.Config(); err == nil {
-			cfg = loaded
-		}
-	}
-	opts.Config = cfg
 	agents := map[string]bool{}
 	for _, agent := range report.AllAgents {
 		agents[agent] = true
@@ -139,23 +282,40 @@ func newModel(opts Options, client rt.Client) *model {
 		agents["antigravity"] = false
 	}
 	m := &model{
-		opts: opts, agents: agents, theme: 1, preset: "today", listMode: 0, focus: 1,
-		quotaErrors: map[string]string{}, client: client,
+		opts:           opts,
+		client:         client,
+		cfg:            cfg,
+		themeOverride:  -1,
+		agents:         agents,
+		preset:         "30d",
+		basePreset:     "30d",
+		sortField:      sortTokens,
+		overviewMetric: metricTokens,
+		dailyMetric:    metricTokens,
+		activityMetric: metricTokens,
+		quotaErrors:    map[string]string{},
 	}
 	if opts.Since != nil {
 		m.preset = "custom"
+		m.basePreset = "custom"
 		m.from = opts.Since.Format("2006-01-02")
-		m.to = time.Now().Format("2006-01-02")
+		m.to = dateString(startOfToday())
 	}
 	if client != nil {
 		if status, err := client.Status(); err == nil {
 			m.rtStatus = status
 		}
-		m.loadReport()
-		m.loadQuota()
-		m.loadKeeperLog()
 	}
 	return m
+}
+
+// configValue keeps the model usable when a test constructs it directly with
+// only Options.Config set.
+func (m *model) configValue() config.Config {
+	if m.cfg.Version == 0 && m.opts.Config.Version != 0 {
+		return m.opts.Config
+	}
+	return m.cfg
 }
 
 func (m *model) closeClient() {
@@ -170,23 +330,256 @@ func (m *model) closeClient() {
 	}
 }
 
-func (m *model) loadQuota() {
+func (m *model) theme() tuiTheme { return resolveTheme(m.cfg, m.themeOverride) }
+
+func (m *model) setStatus(text string, level int) {
+	m.status = text
+	m.statusLevel = level
+	m.statusAt = time.Now()
+}
+
+func (m *model) setToast(text string) {
+	m.toast = text
+	m.toastAt = time.Now()
+}
+
+func (m *model) selectedAgents() []string {
+	var agents []string
+	for _, agent := range report.AllAgents {
+		if m.agents[agent] {
+			agents = append(agents, agent)
+		}
+	}
+	return agents
+}
+
+func (m *model) agentCount() int {
+	count := 0
+	for _, selected := range m.agents {
+		if selected {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *model) rangeKey() string {
+	parts := m.selectedAgents()
+	return fmt.Sprintf("%s|%s|%s|%s|%d", m.preset, m.from, m.to, strings.Join(parts, ","), m.epoch)
+}
+
+func (m *model) rangeParams() report.Params {
+	params := report.Params{Preset: m.preset, Agents: m.selectedAgents()}
+	if m.preset == "custom" {
+		params.From = m.from
+		params.To = m.to
+	}
+	return params
+}
+
+func (m *model) loadReportCmd() tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	key := m.rangeKey()
+	params := m.rangeParams()
+	m.reportKey = key
+	m.reportLoading = true
+	return func() tea.Msg {
+		value, err := client.Usage(params)
+		return reportMsg{key: key, value: value, err: err}
+	}
+}
+
+func (m *model) ensureReport() tea.Cmd {
 	if m.client == nil {
-		return
+		return nil
 	}
-	view, err := m.client.Quota()
+	key := m.rangeKey()
+	if m.reportKey == key && (m.reportLoaded || m.reportLoading) {
+		return nil
+	}
+	return m.loadReportCmd()
+}
+
+func (m *model) ensurePrior() tea.Cmd {
+	if m.client == nil || !m.reportLoaded || m.report.FirstDay == nil {
+		return nil
+	}
+	key := m.rangeKey()
+	if m.priorKey == key && (m.priorLoaded || m.priorLoading) {
+		return nil
+	}
+	from, err := parseDate(m.report.Range.From)
 	if err != nil {
-		return
+		return nil
 	}
-	m.applyQuotaView(view)
+	start := from.AddDate(0, 0, -7)
+	first, err := parseDate(*m.report.FirstDay)
+	if err != nil {
+		return nil
+	}
+	if start.Before(first) {
+		start = first
+	}
+	end := from.AddDate(0, 0, -1)
+	if start.After(end) {
+		m.priorKey = key
+		m.priorLoaded = true
+		m.prior = report.Report{}
+		return nil
+	}
+	params := report.Params{
+		Preset: "custom",
+		From:   dateString(start),
+		To:     dateString(end),
+		Agents: m.selectedAgents(),
+	}
+	m.priorKey = key
+	m.priorLoading = true
+	client := m.client
+	return func() tea.Msg {
+		value, err := client.Usage(params)
+		return priorMsg{key: key, value: value, err: err}
+	}
+}
+
+func (m *model) activityWindow() (string, string, bool) {
+	today := startOfToday()
+	start := today.AddDate(0, 0, -364)
+	if jan1 := time.Date(today.Year(), 1, 1, 0, 0, 0, 0, time.Local); jan1.Before(start) {
+		start = jan1
+	}
+	if m.reportLoaded && m.report.FirstDay != nil {
+		first, err := parseDate(*m.report.FirstDay)
+		if err == nil && first.After(start) {
+			start = first
+		}
+	} else if !m.reportLoaded {
+		return "", "", false
+	} else {
+		// No data at all: the service rejects a start before today.
+		start = today
+	}
+	return dateString(start), dateString(today), true
+}
+
+func (m *model) activityCacheKey(from, to string) string {
+	return fmt.Sprintf("activity|%s|%s|%s|%d", from, to, strings.Join(m.selectedAgents(), ","), m.epoch)
+}
+
+func (m *model) loadActivityCmd() tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	from, to, ok := m.activityWindow()
+	if !ok {
+		return nil
+	}
+	key := m.activityCacheKey(from, to)
+	params := report.Params{Preset: "custom", From: from, To: to, Agents: m.selectedAgents()}
+	m.activityKey = key
+	m.activityLoading = true
+	return func() tea.Msg {
+		value, err := client.Usage(params)
+		return activityMsg{key: key, value: value, err: err}
+	}
+}
+
+func (m *model) ensureActivity() tea.Cmd {
+	if m.client == nil || !m.reportLoaded {
+		return nil
+	}
+	from, to, ok := m.activityWindow()
+	if !ok {
+		return nil
+	}
+	key := m.activityCacheKey(from, to)
+	if m.activityKey == key && (m.activityLoaded || m.activityLoading) {
+		return nil
+	}
+	return m.loadActivityCmd()
+}
+
+func (m *model) ensureCompany() tea.Cmd {
+	if m.client == nil || !m.reportLoaded || m.report.Range.From == m.report.Range.To {
+		return nil
+	}
+	key := m.rangeKey()
+	if m.companyKey == key && !m.companyErr && (m.companyLoading || !m.company.empty()) {
+		return nil
+	}
+	var cmds []tea.Cmd
+	client := m.client
+	from, to := m.report.Range.From, m.report.Range.To
+	agents := m.selectedAgents()
+	m.company = companyData{}
+	m.companyKey = key
+	m.companyErr = false
+	m.companySeq++
+	seq := m.companySeq
+	for _, entry := range m.report.Models {
+		if entry.Company != "anthropic" && entry.Company != "openai" && entry.Company != "google" {
+			continue
+		}
+		name := entry.Model
+		cmds = append(cmds, func() tea.Msg {
+			value, err := client.UsageModel(name, from, to, agents)
+			return modelDetailMsg{key: key, purpose: "company", seq: seq, value: value, err: err}
+		})
+	}
+	m.companyPending = len(cmds)
+	m.companyLoading = len(cmds) > 0
+	return tea.Batch(cmds...)
+}
+
+func (m *model) ensureActivityDetail() tea.Cmd {
+	if m.client == nil || !m.activityLoaded || m.activitySel == "" {
+		return nil
+	}
+	if m.activityDetailDate == m.activitySel && (m.activityDetailLoad || m.activityDetail != nil) {
+		return nil
+	}
+	client := m.client
+	date := m.activitySel
+	m.activityDetailDate = date
+	m.activityDetailLoad = true
+	m.activityDetail = nil
+	m.activityDetailError = ""
+	agents := m.selectedAgents()
+	epoch := m.epoch
+	return func() tea.Msg {
+		value, err := client.UsageDay(date, agents)
+		return activityDayMsg{epoch: epoch, date: date, value: value, err: err}
+	}
+}
+
+func (m *model) fetchQuotaCmd() tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	m.quotaLoading = true
+	return func() tea.Msg {
+		view, err := client.Quota()
+		return quotaViewMsg{view: view, err: err}
+	}
 }
 
 func (m *model) applyQuotaView(view rt.QuotaView) {
 	m.snapshots = nil
 	m.quotaErrors = map[string]string{}
-	showEmpty := m.opts.Config.Display.ShowEmptyProviders
+	cfg := m.configValue()
+	showEmpty := cfg.Display.ShowEmptyProviders
+	byID := map[string]rt.QuotaProviderView{}
 	for _, entry := range view.Providers {
-		if !entry.Enabled {
+		byID[entry.Provider] = entry
+	}
+	for _, id := range cfg.QuotaProviderOrder(quota.ProviderIDs) {
+		entry, ok := byID[id]
+		if !ok || !entry.Enabled {
 			continue
 		}
 		if entry.Error != nil && entry.Error.Message != "" {
@@ -198,64 +591,31 @@ func (m *model) applyQuotaView(view rt.QuotaView) {
 			m.snapshots = append(m.snapshots, provider.QuotaSnapshot{Provider: entry.Provider})
 		}
 	}
+	m.quotaLoaded = true
+	m.quotaLoading = false
 }
 
-func (m *model) loadKeeperLog() {
-	if m.client == nil {
-		return
+func (m *model) fetchKeeperLogCmd() tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
 	}
-	if records, err := m.client.KeeperRecords(20); err == nil {
-		m.keeperLog = records
-	}
-}
-
-func (m *model) loadReport() {
-	m.reportErr = ""
-	if m.client == nil {
-		return
-	}
-	from, to, err := m.resolveRange()
-	if err != nil {
-		m.reportErr = err.Error()
-		return
-	}
-	value, err := m.client.Usage(report.Params{
-		Preset: m.preset, From: from, To: to, Agents: m.selectedAgents(),
-	})
-	if err != nil {
-		m.reportErr = err.Error()
-		return
-	}
-	m.report = value
-	if m.selectedRow < 0 {
-		m.selectedRow = 0
+	m.keeperLoading = true
+	return func() tea.Msg {
+		records, err := client.KeeperRecords(50)
+		return keeperLogMsg{records: records, err: err}
 	}
 }
 
-func (m *model) resolveRange() (string, string, error) {
-	switch m.preset {
-	case "custom":
-		from, to := m.from, m.to
-		if from == "" {
-			from = time.Now().Format("2006-01-02")
-		}
-		if to == "" {
-			to = time.Now().Format("2006-01-02")
-		}
-		return from, to, nil
-	default:
-		return "", "", nil
+func (m *model) fetchConfigCmd() tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
 	}
-}
-
-func (m *model) selectedAgents() []string {
-	var agents []string
-	for _, agent := range report.AllAgents {
-		if m.agents[agent] {
-			agents = append(agents, agent)
-		}
+	return func() tea.Msg {
+		cfg, err := client.Config()
+		return configMsg{cfg: cfg, err: err}
 	}
-	return agents
 }
 
 func (m *model) subscribeEvents() tea.Cmd {
@@ -302,7 +662,15 @@ func (m *model) statusPollCmd() tea.Cmd {
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.subscribeEvents(), m.statusPollCmd())
+	m.reportLoading = false
+	return tea.Batch(
+		m.subscribeEvents(),
+		m.statusPollCmd(),
+		m.fetchConfigCmd(),
+		m.fetchQuotaCmd(),
+		m.fetchKeeperLogCmd(),
+		m.loadReportCmd(),
+	)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -312,135 +680,166 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	case statusMsg:
-		if msg.err != nil {
-			if m.client != nil && m.client.IsRemote() && !m.webBusy {
-				// If the background serve stopped or crashed, fall back to an
-				// in-process runtime once runtime.lock becomes available.
-				if lock, err := rt.AcquireLock(m.opts.DataDir); err == nil {
-					if localClient, err := newInProcess(m.opts, lock, false, !m.opts.NoScan); err == nil {
-						m.client = localClient
-						if st, err := localClient.Status(); err == nil {
-							m.rtStatus = st
-						}
-						m.status = ""
-						m.toast = "Background serve stopped; switched to local mode"
-						m.toastAt = time.Now()
-						return m, tea.Batch(m.subscribeEvents(), m.statusPollCmd(), m.fetchConfigCmd())
-					}
-				}
-				m.status = "Background serve unreachable; retrying…"
-			}
-			return m, m.statusPollCmd()
-		}
-		if m.status == "Background serve unreachable; retrying…" {
-			m.status = ""
-		}
-		prevScanned := m.rtStatus.ScannedAt
-		prevFetched := m.rtStatus.FetchedAt
-		m.rtStatus = msg.status
-		if msg.status.ScannedAt != prevScanned {
-			m.loadReport()
-		}
-		var cmds []tea.Cmd
-		cmds = append(cmds, m.statusPollCmd())
-		if msg.status.FetchedAt != prevFetched {
-			cmds = append(cmds, m.fetchQuotaCmd())
-		}
-		return m, tea.Batch(cmds...)
+		return m.handleStatus(msg)
 	case eventMsg:
 		cmd := m.handleEvent(msg.event)
 		return m, tea.Batch(cmd, m.nextEventCmd())
+	case reportMsg:
+		return m.handleReport(msg)
+	case priorMsg:
+		if msg.key == m.rangeKey() {
+			m.priorLoading = false
+			if msg.err != nil {
+				m.priorLoaded = false
+				m.prior = report.Report{}
+				m.setStatus(msg.err.Error(), 2)
+			} else {
+				m.priorLoaded = true
+				m.prior = msg.value
+			}
+		}
+		return m, nil
+	case activityMsg:
+		return m.handleActivity(msg)
+	case modelDetailMsg:
+		return m.handleModelDetail(msg)
+	case dayDetailMsg:
+		if msg.key == m.dayDetailKey(msg.date) && msg.seq == m.detailSeq {
+			m.dayDetail = &msg.value
+			m.detailScroll = 0
+		}
+		return m, nil
+	case activityDayMsg:
+		if msg.epoch == m.epoch && msg.date == m.activitySel {
+			m.activityDetailLoad = false
+			if msg.err != nil {
+				m.activityDetail = nil
+				m.activityDetailError = msg.err.Error()
+			} else {
+				m.activityDetail = &msg.value
+				m.activityDetailError = ""
+			}
+		}
+		return m, nil
 	case quotaViewMsg:
-		m.applyQuotaView(msg.view)
+		m.quotaLoading = false
+		if msg.err != nil {
+			m.setStatus("Quota: "+msg.err.Error(), 2)
+		} else {
+			m.applyQuotaView(msg.view)
+		}
 		return m, nil
 	case keeperLogMsg:
-		m.keeperLog = msg.records
+		m.keeperLoading = false
+		if msg.err != nil {
+			m.setStatus("Keeper: "+msg.err.Error(), 2)
+		} else {
+			m.keeperLog = newestFirst(msg.records)
+			m.keeperLoaded = true
+		}
 		return m, nil
 	case configMsg:
-		m.opts.Config = msg.cfg
-		return m, m.fetchQuotaCmd()
-	case webToggleMsg:
-		m.webBusy = false
-		if msg.clearClient {
-			m.client = nil
-		}
-		if msg.client != nil {
-			m.client = msg.client
-			m.rtStatus = msg.status
-		}
 		if msg.err != nil {
-			m.toast = "Web toggle failed: " + msg.err.Error()
-			m.toastAt = time.Now()
-			return m, tea.Batch(m.subscribeEvents(), m.statusPollCmd())
+			m.setStatus("Settings: "+msg.err.Error(), 2)
+			return m, nil
 		}
-		m.toast = msg.toast
-		m.toastAt = time.Now()
-		m.loadReport()
-		m.loadQuota()
-		m.loadKeeperLog()
-		return m, tea.Batch(m.subscribeEvents(), m.statusPollCmd(), m.fetchConfigCmd())
+		m.cfg = msg.cfg
+		m.opts.Config = msg.cfg
+		if msg.message != "" {
+			m.setToast(msg.message + " updated")
+		}
+		return m, m.fetchQuotaCmd()
+	case refreshMsg:
+		return m, m.handleRefresh(msg)
+	case webToggleMsg:
+		return m.handleWebToggle(msg)
 	case toastMsg:
-		m.toast = msg.text
-		m.toastAt = time.Now()
+		m.setToast(msg.text)
+		return m, nil
+	case recoveryTickMsg:
+		if m.recovery != nil && m.recovery.active() {
+			return m, m.recoveryTickCmd()
+		}
 		return m, nil
 	}
 	return m, nil
 }
 
-func (m *model) fetchQuotaCmd() tea.Cmd {
-	client := m.client
-	if client == nil {
-		return nil
+// newestFirst converts the keeper history's old-to-new slice into the display
+// order every page expects.
+func newestFirst(records []keeper.ExecutionRecord) []keeper.ExecutionRecord {
+	out := make([]keeper.ExecutionRecord, len(records))
+	for i := range records {
+		out[len(records)-1-i] = records[i]
 	}
-	return func() tea.Msg {
-		view, err := client.Quota()
-		if err != nil {
-			return nil
-		}
-		return quotaViewMsg{view: view}
-	}
+	return out
 }
 
-func (m *model) fetchKeeperLogCmd() tea.Cmd {
-	client := m.client
-	if client == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		records, err := client.KeeperRecords(20)
-		if err != nil {
-			return nil
+func (m *model) handleStatus(msg statusMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		if m.client != nil && m.client.IsRemote() && !m.webBusy {
+			if lock, err := rt.AcquireLock(m.opts.DataDir); err == nil {
+				if localClient, err := newInProcess(m.opts, lock, false, !m.opts.NoScan); err == nil {
+					m.client = localClient
+					if st, err := localClient.Status(); err == nil {
+						m.rtStatus = st
+					}
+					m.setStatus("", 0)
+					m.setToast("Background serve stopped; switched to local mode")
+					m.invalidateUsage()
+					m.quotaLoaded = false
+					m.keeperLoaded = false
+					return m, tea.Batch(m.subscribeEvents(), m.statusPollCmd(), m.fetchConfigCmd(),
+						m.fetchQuotaCmd(), m.fetchKeeperLogCmd(), m.currentTabCmd())
+				}
+			}
+			m.setStatus("Background serve unreachable; retrying…", 1)
 		}
-		return keeperLogMsg{records: records}
+		return m, m.statusPollCmd()
 	}
-}
-
-func (m *model) fetchConfigCmd() tea.Cmd {
-	client := m.client
-	if client == nil {
-		return nil
+	if strings.HasPrefix(m.status, "Background serve unreachable") {
+		m.setStatus("", 0)
 	}
-	return func() tea.Msg {
-		cfg, err := client.Config()
-		if err != nil {
-			return nil
-		}
-		return configMsg{cfg: cfg}
+	previous := m.rtStatus
+	m.rtStatus = msg.status
+	var cmds []tea.Cmd
+	if msg.status.ScannedAt != previous.ScannedAt {
+		m.refreshedAt = time.Now()
+		m.invalidateUsage()
+		cmds = append(cmds, m.currentTabCmd())
 	}
+	if msg.status.FetchedAt != previous.FetchedAt {
+		cmds = append(cmds, m.fetchQuotaCmd())
+	}
+	cmds = append(cmds, m.statusPollCmd())
+	return m, tea.Batch(cmds...)
 }
 
 func (m *model) handleEvent(ev rt.Event) tea.Cmd {
 	switch ev.Type {
 	case "usage_updated":
-		m.loadReport()
-		return nil
+		m.invalidateUsage()
+		return m.currentTabCmd()
 	case "quota_updated":
 		return m.fetchQuotaCmd()
 	case "quota_recovered":
-		m.toast = "A quota window was restored"
-		m.toastAt = time.Now()
-		return m.fetchQuotaCmd()
+		state := &recoveryState{started: time.Now()}
+		if data, ok := ev.Data.(map[string]any); ok {
+			state.provider, _ = data["provider"].(string)
+			state.window, _ = data["window"].(string)
+			switch value := data["remaining"].(type) {
+			case float64:
+				state.remaining = value
+			case int:
+				state.remaining = float64(value)
+			}
+		}
+		m.recovery = state
+		m.setToast("")
+		return tea.Batch(m.fetchQuotaCmd(), m.recoveryTickCmd())
 	case "keeper_updated":
 		return m.fetchKeeperLogCmd()
 	case "settings_updated":
@@ -449,37 +848,436 @@ func (m *model) handleEvent(ev rt.Event) tea.Cmd {
 	return nil
 }
 
-func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.showFilter {
-		return m.handleFilterKey(msg)
+func (m *model) handleReport(msg reportMsg) (tea.Model, tea.Cmd) {
+	if msg.key != m.rangeKey() {
+		return m, nil
 	}
-	key := msg.String()
-	switch key {
-	case "ctrl+c", "q":
-		return m, tea.Quit
-	case "tab":
-		m.tab = (m.tab + 1) % tabCount
+	m.reportLoading = false
+	if msg.err != nil {
+		m.report = report.Report{}
+		m.reportLoaded = false
+		m.reportErr = msg.err.Error()
+		m.setStatus(msg.err.Error(), 2)
 		return m, nil
-	case "shift+tab":
-		m.tab = (m.tab + tabCount - 1) % tabCount
+	}
+	m.report = msg.value
+	m.reportErr = ""
+	m.reportLoaded = true
+	m.refreshedAt = time.Now()
+	m.overviewSel = clampInt(m.overviewSel, 0, max(len(m.report.Models)-1, 0))
+	m.modelsSel = clampInt(m.modelsSel, 0, max(len(m.report.Models)-1, 0))
+	m.dailySel = clampInt(m.dailySel, 0, max(len(m.report.Days)-1, 0))
+	var cmds []tea.Cmd
+	if m.dailyToToday {
+		m.dailyToToday = false
+		today := dateString(startOfToday())
+		for i, day := range m.sortedDays() {
+			if day.Date == today {
+				m.dailySel = i
+				break
+			}
+		}
+	}
+	switch m.tab {
+	case tabOverview:
+		cmds = append(cmds, m.ensureCompany())
+	case tabDaily:
+		cmds = append(cmds, m.ensurePrior())
+	case tabActivity:
+		cmds = append(cmds, m.ensureActivity())
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m *model) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
+	if msg.key != m.activityKey {
 		return m, nil
-	case "b":
-		m.theme = (m.theme + 1) % 3
+	}
+	m.activityLoading = false
+	if msg.err != nil {
+		m.activityLoaded = false
+		m.activityErr = msg.err.Error()
+		m.setStatus(msg.err.Error(), 2)
 		return m, nil
-	case "r":
-		return m, m.refresh()
-	case "esc":
-		if m.detailKind != detailNone {
-			m.detailKind = detailNone
-			m.detail = nil
+	}
+	m.activity = msg.value
+	m.activityErr = ""
+	m.activityLoaded = true
+	today := dateString(startOfToday())
+	hasToday := false
+	for _, day := range m.activity.Days {
+		if day.Date == today {
+			hasToday = true
+			break
+		}
+	}
+	if m.activitySel == "" || !activityDayExists(m.activity.Days, m.activitySel) {
+		if hasToday {
+			m.activitySel = today
+		} else if len(m.activity.Days) > 0 {
+			m.activitySel = m.activity.Days[0].Date
+		}
+	}
+	return m, m.ensureActivityDetail()
+}
+
+func activityDayExists(days []report.DaySummary, date string) bool {
+	for _, day := range days {
+		if day.Date == date {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) handleModelDetail(msg modelDetailMsg) (tea.Model, tea.Cmd) {
+	if msg.purpose == "company" {
+		if msg.key != m.rangeKey() || msg.seq != m.companySeq {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.companyErr = true
+			m.setStatus("Company: "+msg.err.Error(), 2)
+		} else {
+			m.company.add(msg.value)
+		}
+		if m.companyKey == msg.key {
+			m.companyPending = max(m.companyPending-1, 0)
+			if m.companyPending == 0 {
+				m.companyLoading = false
+			}
 		}
 		return m, nil
 	}
+	if msg.purpose == "detail" {
+		if msg.key != m.rangeKey() || msg.seq != m.detailSeq {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.setStatus("Model: "+msg.err.Error(), 2)
+			return m, nil
+		}
+		m.modelDetail = &msg.value
+		m.detailScroll = 0
+	}
+	return m, nil
+}
+
+func (m *model) handleRefresh(msg refreshMsg) tea.Cmd {
+	if msg.err != nil {
+		m.setStatus("Refresh: "+msg.err.Error(), 2)
+		return nil
+	}
+	if msg.result.Throttled && !msg.result.Accepted {
+		m.setStatus(fmt.Sprintf("Showing cache; retry in %ds", msg.result.RetryAfter), 1)
+		return nil
+	}
+	m.setToast("Refresh complete")
+	m.refreshedAt = time.Now()
+	m.invalidateUsage()
+	return tea.Batch(m.currentTabCmd(), m.fetchQuotaCmd())
+}
+
+func (m *model) handleWebToggle(msg webToggleMsg) (tea.Model, tea.Cmd) {
+	m.webBusy = false
+	if msg.clearClient {
+		m.client = nil
+	}
+	if msg.client != nil {
+		m.client = msg.client
+		m.rtStatus = msg.status
+	}
+	if msg.err != nil {
+		m.setToast("Web toggle failed: " + msg.err.Error())
+		m.invalidateUsage()
+		m.quotaLoaded = false
+		m.keeperLoaded = false
+		return m, tea.Batch(m.subscribeEvents(), m.statusPollCmd(),
+			m.fetchQuotaCmd(), m.fetchKeeperLogCmd(), m.currentTabCmd())
+	}
+	m.setToast(msg.toast)
+	m.invalidateUsage()
+	m.quotaLoaded = false
+	m.keeperLoaded = false
+	return m, tea.Batch(
+		m.subscribeEvents(), m.statusPollCmd(), m.fetchConfigCmd(),
+		m.fetchQuotaCmd(), m.fetchKeeperLogCmd(), m.currentTabCmd(),
+	)
+}
+
+func (m *model) invalidateUsage() {
+	m.reportErr = ""
+	m.reportLoaded = false
+	m.reportKey = ""
+	m.company = companyData{}
+	m.companyKey = ""
+	m.companyLoading = false
+	m.companyPending = 0
+	m.companyErr = false
+	m.companySeq++
+	m.epoch++
+	m.prior = report.Report{}
+	m.priorKey = ""
+	m.priorLoaded = false
+	m.priorLoading = false
+	m.activity = report.Report{}
+	m.activityKey = ""
+	m.activityLoaded = false
+	m.activityLoading = false
+	m.activityDetail = nil
+	m.activityDetailDate = ""
+	m.activityDetailLoad = false
+	m.modelDetail = nil
+	m.dayDetail = nil
+	m.detailSeq++
+}
+
+func (m *model) currentTabCmd() tea.Cmd {
 	switch m.tab {
-	case tabUsage:
-		return m.handleUsageKey(key)
+	case tabOverview:
+		return tea.Batch(m.ensureReport(), m.ensureCompany())
+	case tabModels:
+		return m.ensureReport()
+	case tabDaily:
+		return tea.Batch(m.ensureReport(), m.ensurePrior())
+	case tabActivity:
+		if !m.reportLoaded {
+			return m.ensureReport()
+		}
+		return tea.Batch(m.ensureActivity(), m.ensureActivityDetail())
 	case tabQuota:
-		return m.handleQuotaKey(key)
+		if !m.quotaLoaded {
+			return m.fetchQuotaCmd()
+		}
+	case tabKeeper:
+		if !m.keeperLoaded {
+			return m.fetchKeeperLogCmd()
+		}
+	case tabSettings:
+		return m.fetchConfigCmd()
+	}
+	return nil
+}
+
+func (m *model) switchTab(direction int) {
+	m.tab = (m.tab + direction + tabCount) % tabCount
+	m.overviewSel, m.overviewOff = 0, 0
+	m.modelsSel, m.modelsOff = 0, 0
+	m.dailySel, m.dailyOff = 0, 0
+	m.detailScroll = 0
+	m.activityDetailOff = 0
+	m.modelDetail = nil
+	m.dayDetail = nil
+	m.detailSeq++
+	m.showHelp = false
+}
+
+func (m *model) currentRangeTab() bool {
+	return m.tab == tabOverview || m.tab == tabModels || m.tab == tabDaily
+}
+
+func (m *model) selectPreset(index int) tea.Cmd {
+	preset := presets[index]
+	if preset == "custom" {
+		m.customOpen = true
+		m.customField = 0
+		m.customErr = ""
+		from, to := m.report.Range.From, m.report.Range.To
+		if !m.reportLoaded {
+			now := startOfToday()
+			from = dateString(now.AddDate(0, 0, -29))
+			to = dateString(now)
+		}
+		m.customFrom = from
+		m.customTo = to
+		return nil
+	}
+	m.preset = preset
+	m.basePreset = preset
+	m.from, m.to = "", ""
+	m.invalidateUsage()
+	return m.ensureReport()
+}
+
+func (m *model) shiftRange(direction int) tea.Cmd {
+	if !m.reportLoaded {
+		return nil
+	}
+	from, err1 := parseDate(m.report.Range.From)
+	to, err2 := parseDate(m.report.Range.To)
+	if err1 != nil || err2 != nil {
+		return nil
+	}
+	length := int(to.Sub(from).Hours()/24) + 1
+	shift := direction * length
+	today := startOfToday()
+	newFrom := from.AddDate(0, 0, shift)
+	newTo := to.AddDate(0, 0, shift)
+	if newTo.After(today) {
+		offset := int(newTo.Sub(today).Hours() / 24)
+		newTo = today
+		newFrom = newFrom.AddDate(0, 0, -offset)
+	}
+	if m.report.FirstDay != nil {
+		if first, err := parseDate(*m.report.FirstDay); err == nil && newFrom.Before(first) {
+			newFrom = first
+			newTo = newFrom.AddDate(0, 0, length-1)
+			if newTo.After(today) {
+				newTo = today
+			}
+		}
+	}
+	m.preset = "custom"
+	m.from = dateString(newFrom)
+	m.to = dateString(newTo)
+	m.invalidateUsage()
+	return m.ensureReport()
+}
+
+func (m *model) todayRange() tea.Cmd {
+	preset := m.basePreset
+	if preset == "" || preset == "custom" {
+		preset = "30d"
+	}
+	m.preset = preset
+	m.from, m.to = "", ""
+	m.invalidateUsage()
+	if m.tab == tabDaily {
+		m.dailyToToday = true
+	}
+	return m.ensureReport()
+}
+
+func (m *model) applyCustomRange() tea.Cmd {
+	from, err := parseDate(m.customFrom)
+	if err != nil {
+		m.customErr = "Invalid start date"
+		return nil
+	}
+	to, err := parseDate(m.customTo)
+	if err != nil {
+		m.customErr = "Invalid end date"
+		return nil
+	}
+	if from.After(to) {
+		from, to = to, from
+	}
+	today := startOfToday()
+	if from.After(today) || to.After(today) {
+		m.customErr = "Dates cannot be after today"
+		return nil
+	}
+	if m.report.FirstDay != nil {
+		if first, err := parseDate(*m.report.FirstDay); err == nil && from.Before(first) {
+			m.customErr = "Start cannot be before " + *m.report.FirstDay
+			return nil
+		}
+	}
+	m.customOpen = false
+	m.customErr = ""
+	m.preset = "custom"
+	m.from = dateString(from)
+	m.to = dateString(to)
+	m.invalidateUsage()
+	return m.ensureReport()
+}
+
+func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	if key == "ctrl+c" {
+		return m, tea.Quit
+	}
+	if m.showHelp {
+		m.showHelp = false
+		return m, nil
+	}
+	if m.customOpen {
+		return m.handleCustomKey(msg)
+	}
+	if m.filterOpen {
+		return m.handleFilterKey(msg)
+	}
+	if m.modelDetail != nil || m.dayDetail != nil {
+		switch key {
+		case "q":
+			return m, tea.Quit
+		case "esc":
+			m.modelDetail = nil
+			m.dayDetail = nil
+			m.detailScroll = 0
+			m.detailSeq++
+		case "j", "down":
+			m.detailScroll++
+		case "k", "up":
+			if m.detailScroll > 0 {
+				m.detailScroll--
+			}
+		}
+		return m, nil
+	}
+	switch key {
+	case "q":
+		return m, tea.Quit
+	case "?":
+		m.showHelp = true
+		return m, nil
+	case "b":
+		if m.themeOverride < 0 {
+			m.themeOverride = 1 - m.theme().mode
+		} else {
+			m.themeOverride = 1 - m.themeOverride
+		}
+		return m, nil
+	case "s":
+		m.filterOpen = true
+		m.filterCursor = 0
+		return m, nil
+	case "r":
+		return m, m.refreshCmd()
+	case "esc":
+		return m, nil
+	case "left", "h":
+		m.switchTab(-1)
+		return m, m.currentTabCmd()
+	case "right", "l":
+		m.switchTab(1)
+		return m, m.currentTabCmd()
+	case "tab", "shift+tab":
+		direction := 1
+		if key == "shift+tab" {
+			direction = -1
+		}
+		if m.tab == tabKeeper {
+			m.moveKeeperCursor(direction)
+			return m, nil
+		}
+		m.switchTab(direction)
+		return m, m.currentTabCmd()
+	}
+	if m.currentRangeTab() && len(key) == 1 && key[0] >= '1' && key[0] <= '6' {
+		return m, m.selectPreset(int(key[0] - '1'))
+	}
+	if m.currentRangeTab() {
+		switch key {
+		case "[":
+			return m, m.shiftRange(-1)
+		case "]":
+			return m, m.shiftRange(1)
+		case "n":
+			return m, m.todayRange()
+		}
+	}
+	switch m.tab {
+	case tabOverview:
+		return m.handleOverviewKey(key)
+	case tabModels:
+		return m.handleModelsKey(key)
+	case tabDaily:
+		return m.handleDailyKey(key)
+	case tabActivity:
+		return m.handleActivityKey(key)
+	case tabQuota:
+		return m, nil
 	case tabKeeper:
 		return m.handleKeeperKey(key)
 	case tabSettings:
@@ -488,175 +1286,45 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) handleUsageKey(key string) (tea.Model, tea.Cmd) {
-	presets := []string{"today", "7d", "30d", "year", "all", "custom"}
-	if len(key) == 1 && key[0] >= '1' && key[0] <= '6' {
-		m.preset = presets[int(key[0]-'1')]
-		if m.preset == "custom" {
-			m.showFilter = true
-			m.filterCursor = 0
-		}
-		m.loadReport()
-		return m, nil
-	}
+func (m *model) handleCustomKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
 	switch key {
-	case "m":
-		m.metric = 1 - m.metric
-	case "v":
-		if m.report.Range.From != m.report.Range.To {
-			m.listMode = 1 - m.listMode
-			m.selectedRow = 0
-		}
-	case "n":
-		m.preset = "today"
-		m.loadReport()
-	case "[":
-		m.shiftRange(-1)
-	case "]":
-		m.shiftRange(1)
-	case "f":
-		if m.report.Range.From != m.report.Range.To {
-			m.focus = 1 - m.focus
-		}
-	case "down", "j":
-		m.moveSelection(1)
-	case "up", "k":
-		m.moveSelection(-1)
-	case "left", "h":
-		return m, m.moveDay(-1)
-	case "right", "l":
-		return m, m.moveDay(1)
+	case "esc":
+		m.customOpen = false
+		m.customErr = ""
+	case "tab", "shift+tab":
+		m.customField = 1 - m.customField
 	case "enter":
-		m.openDetail()
-	case "s":
-		m.showFilter = true
-		m.filterCursor = 0
+		return m, m.applyCustomRange()
+	case "backspace":
+		if m.customField == 0 && len(m.customFrom) > 0 {
+			m.customFrom = m.customFrom[:len(m.customFrom)-1]
+		} else if m.customField == 1 && len(m.customTo) > 0 {
+			m.customTo = m.customTo[:len(m.customTo)-1]
+		}
+	default:
+		if len(key) == 1 && (key[0] >= '0' && key[0] <= '9' || key[0] == '-') {
+			if m.customField == 0 && len(m.customFrom) < 10 {
+				m.customFrom += key
+			} else if m.customField == 1 && len(m.customTo) < 10 {
+				m.customTo += key
+			}
+		}
 	}
 	return m, nil
-}
-
-func (m *model) moveSelection(delta int) {
-	rows := len(m.report.Days)
-	if len(m.report.Days) == 0 || (m.report.Range.From == m.report.Range.To) {
-		rows = len(m.report.Models)
-	} else if m.listMode == 1 {
-		rows = len(m.report.Models)
-	}
-	m.selectedRow += delta
-	if m.selectedRow < 0 {
-		m.selectedRow = 0
-	}
-	if rows > 0 && m.selectedRow >= rows {
-		m.selectedRow = rows - 1
-	}
-}
-
-func (m *model) moveDay(delta int) tea.Cmd {
-	if m.report.Range.From == m.report.Range.To || m.report.Layout != "week-columns" && m.report.Layout != "week-rows" {
-		return nil
-	}
-	current := m.report.Range.To
-	if m.selectedDay != "" {
-		current = m.selectedDay
-	}
-	date, err := time.ParseInLocation("2006-01-02", current, time.Local)
-	if err != nil {
-		return nil
-	}
-	date = date.AddDate(0, 0, delta)
-	if date.Format("2006-01-02") < m.report.Range.From {
-		date, _ = time.ParseInLocation("2006-01-02", m.report.Range.From, time.Local)
-	}
-	if date.Format("2006-01-02") > m.report.Range.To {
-		date, _ = time.ParseInLocation("2006-01-02", m.report.Range.To, time.Local)
-	}
-	m.selectedDay = date.Format("2006-01-02")
-	return nil
-}
-
-func (m *model) shiftRange(direction int) {
-	from, to, err := m.resolveRange()
-	if err != nil || m.report.Range.From == "" {
-		return
-	}
-	fromDate, err1 := time.ParseInLocation("2006-01-02", m.report.Range.From, time.Local)
-	toDate, err2 := time.ParseInLocation("2006-01-02", m.report.Range.To, time.Local)
-	if err1 != nil || err2 != nil {
-		return
-	}
-	if from == "" && to == "" {
-		fromDate, _ = time.ParseInLocation("2006-01-02", m.report.Range.From, time.Local)
-		toDate, _ = time.ParseInLocation("2006-01-02", m.report.Range.To, time.Local)
-	}
-	length := int(toDate.Sub(fromDate).Hours()/24) + 1
-	shift := direction * length
-	today := time.Now().Format("2006-01-02")
-	newFrom := fromDate.AddDate(0, 0, shift)
-	newTo := toDate.AddDate(0, 0, shift)
-	if newTo.Format("2006-01-02") > today {
-		offset := int(toDate.AddDate(0, 0, shift).Sub(mustDate(today)).Hours() / 24)
-		newTo = mustDate(today)
-		newFrom = newFrom.AddDate(0, 0, -offset)
-	}
-	first := today
-	if m.report.FirstDay != nil {
-		first = *m.report.FirstDay
-	}
-	if newFrom.Format("2006-01-02") < first {
-		newFrom = mustDate(first)
-		newTo = newFrom.AddDate(0, 0, length-1)
-	}
-	m.preset = "custom"
-	m.from = newFrom.Format("2006-01-02")
-	m.to = newTo.Format("2006-01-02")
-	m.loadReport()
-}
-
-func mustDate(value string) time.Time {
-	date, _ := time.ParseInLocation("2006-01-02", value, time.Local)
-	return date
-}
-
-func (m *model) openDetail() {
-	if m.client == nil {
-		return
-	}
-	if len(m.report.Days) > 0 && m.report.Range.From != m.report.Range.To && m.listMode == 0 {
-		day := m.report.Days[m.selectedRow]
-		detail, err := m.client.UsageDay(day.Date, m.selectedAgents())
-		if err == nil {
-			m.detail, m.detailKind = detail, detailDay
-		}
-		return
-	}
-	if len(m.report.Models) > 0 {
-		index := m.selectedRow
-		if index >= len(m.report.Models) {
-			index = len(m.report.Models) - 1
-		}
-		model := m.report.Models[index]
-		from, to := m.report.Range.From, m.report.Range.To
-		detail, err := m.client.UsageModel(model.Model, from, to, m.selectedAgents())
-		if err == nil {
-			m.detail, m.detailKind = detail, detailModel
-		}
-	}
 }
 
 func (m *model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	switch key {
 	case "esc", "s":
-		m.showFilter = false
-		if m.preset == "custom" && m.from == "" {
-			m.preset = "today"
-		}
+		m.filterOpen = false
 	case "a":
 		for _, agent := range report.AllAgents {
 			m.agents[agent] = true
 		}
-		m.loadReport()
-		m.showFilter = false
+		m.invalidateUsage()
+		return m, m.currentTabCmd()
 	case "up", "k":
 		if m.filterCursor > 0 {
 			m.filterCursor--
@@ -668,156 +1336,100 @@ func (m *model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", " ":
 		agent := report.AllAgents[m.filterCursor]
 		if m.agents[agent] {
-			count := 0
-			for _, selected := range m.agents {
-				if selected {
-					count++
-				}
-			}
-			if count <= 1 {
-				m.status = "At least one agent stays selected"
+			if m.agentCount() <= 1 {
+				m.setStatus("At least one agent stays selected", 1)
 				return m, nil
 			}
 			m.agents[agent] = false
 		} else {
 			m.agents[agent] = true
 		}
-		m.loadReport()
+		m.invalidateUsage()
+		return m, m.currentTabCmd()
 	}
 	return m, nil
 }
 
-func (m *model) handleQuotaKey(key string) (tea.Model, tea.Cmd) {
-	switch key {
-	case "up", "k":
-		if m.quotaCursor > 0 {
-			m.quotaCursor--
-		}
-	case "down", "j":
-		if m.quotaCursor < len(m.snapshots)-1 {
-			m.quotaCursor++
+func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+	if m.showHelp || m.filterOpen || m.customOpen {
+		return m, nil
+	}
+	area := rect{x: 0, y: 0, w: m.frameWidth(), h: m.frameHeight()}
+	headerHeight := min(4, area.h)
+	tabsHeight := min(3, max(area.h-headerHeight, 0))
+	tabs := rect{x: 0, y: headerHeight, w: area.w, h: tabsHeight}
+	if tabs.h <= 0 || msg.Y < tabs.y || msg.Y >= tabs.y+tabs.h {
+		return m, nil
+	}
+	inner := tabs.inner()
+	if msg.X < inner.x || msg.X >= inner.right() {
+		return m, nil
+	}
+	index := -1
+	for i, column := range splitH(inner, tabCount) {
+		if msg.X >= column.x && msg.X < column.right() {
+			index = i
+			break
 		}
 	}
-	return m, nil
+	if index < 0 || index >= tabCount {
+		return m, nil
+	}
+	if index == m.tab {
+		return m, nil
+	}
+	m.switchTab(index - m.tab)
+	return m, m.currentTabCmd()
 }
 
-func (m *model) handleKeeperKey(key string) (tea.Model, tea.Cmd) {
-	cfg := m.opts.Config
-	rows := len(keeper.Agents)
-	switch key {
-	case "up", "k":
-		if m.keeperCursor > 0 {
-			m.keeperCursor--
-		}
-	case "down", "j":
-		if m.keeperCursor < rows-1 {
-			m.keeperCursor++
-		}
-	case "e":
-		return m, m.patchSettings(map[string]any{"keeper.enabled": !cfg.Keeper.Enabled})
-	case "enter", " ":
-		agent := keeper.Agents[m.keeperCursor]
-		next := !cfg.Keeper.Agents[agent].SessionKeeperEnabled
-		return m, m.patchSettings(map[string]any{"keeper.agents." + agent + ".session_keeper_enabled": next})
-	case "w":
-		agent := keeper.Agents[m.keeperCursor]
-		next := !cfg.Keeper.Agents[agent].WeeklyKeeperEnabled
-		return m, m.patchSettings(map[string]any{"keeper.agents." + agent + ".weekly_keeper_enabled": next})
-	case "p":
-		if m.client == nil {
-			return m, nil
-		}
-		agent := keeper.Agents[m.keeperCursor]
-		client := m.client
-		return m, func() tea.Msg {
-			if err := client.KeeperPing(agent, ""); err != nil {
-				return toastMsg{"Ping failed: " + err.Error()}
-			}
-			return toastMsg{"Ping sent to " + agent}
-		}
+func (m *model) recoveryTickCmd() tea.Cmd {
+	if m.recovery == nil {
+		return nil
 	}
-	return m, nil
+	return tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg { return recoveryTickMsg{} })
 }
 
-func (m *model) handleSettingsKey(key string) (tea.Model, tea.Cmd) {
-	const rows = 13
-	switch key {
-	case "up", "k":
-		if m.settingsCursor > 0 {
-			m.settingsCursor--
-		}
-	case "down", "j":
-		if m.settingsCursor < rows-1 {
-			m.settingsCursor++
-		}
-	case "enter", " ":
-		return m, m.changeSetting()
+func (m *model) refreshCmd() tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
 	}
-	return m, nil
+	return func() tea.Msg {
+		result, err := client.Refresh(true, true)
+		return refreshMsg{result: result, err: err}
+	}
 }
 
-func (m *model) changeSetting() tea.Cmd {
-	cfg := m.opts.Config
-	var update map[string]any
-	switch m.settingsCursor {
-	case 0:
-		update = map[string]any{"display.theme": string(cfg.Display.Theme.Next())}
-	case 1:
-		next := config.QuotaUsed
-		if cfg.Display.QuotaDisplayMode == config.QuotaUsed {
-			next = config.QuotaRemaining
-		}
-		update = map[string]any{"display.quota_display_mode": string(next)}
-	case 2:
-		options := []uint32{0, 60, 120, 300, 600, 900}
-		if m.client != nil && m.client.IsRemote() {
-			options = []uint32{60, 120, 300, 600, 900}
-		}
-		next := uint32(900)
-		for i, value := range options {
-			if value == cfg.Display.AutoRefreshSecs {
-				next = options[(i+1)%len(options)]
-				break
-			}
-		}
-		update = map[string]any{"display.auto_refresh_secs": int(next)}
-	case 3:
-		update = map[string]any{"display.account_display": string(cfg.Display.AccountDisplay.Next())}
-	case 4:
-		update = map[string]any{"display.show_empty_providers": !cfg.Display.ShowEmptyProviders}
-	case 5:
-		update = map[string]any{"display.refresh_quota": !cfg.Display.RefreshQuota}
-	case 6:
-		update = map[string]any{"display.scan_antigravity": !cfg.Display.ScanAntigravity}
-	case 7:
-		update = map[string]any{"display.notification_level": string(cfg.Display.NotificationLevel.Next())}
-	case 8:
-		sounds := []string{"chime", "Hero", "Glass", "Submarine", "none"}
-		next := "chime"
-		for i, sound := range sounds {
-			if strings.EqualFold(sound, cfg.Display.NotificationSound) {
-				next = sounds[(i+1)%len(sounds)]
-				break
-			}
-		}
-		update = map[string]any{"display.notification_sound": next}
-		notification.PlayAlertSound(next)
-	case 9:
-		update = map[string]any{"keeper.enabled": !cfg.Keeper.Enabled}
-	case 10:
-		update = map[string]any{"keeper.agents.agy.weekly_all_groups": !cfg.Keeper.AntigravityAllGroups()}
-	case 11:
-		ids := cfg.QuotaProviderOrder(quota.ProviderIDs)
-		id := ids[m.providerCursor%len(ids)]
-		m.providerCursor = (m.providerCursor + 1) % len(ids)
-		update = map[string]any{"providers." + id + ".enabled": !cfg.Providers[id].Enabled}
-	case 12:
-		return m.toggleWebRemote()
+func (m *model) patchSettings(update map[string]any, message string) tea.Cmd {
+	if m.client == nil {
+		return nil
 	}
-	if update != nil {
-		return m.patchSettings(update)
+	normalized := make(map[string]any, len(update))
+	for key, value := range update {
+		switch {
+		case strings.HasPrefix(key, "providers.antigravity."):
+			normalized[strings.Replace(key, "providers.antigravity.", "providers.agy.", 1)] = value
+		case strings.HasPrefix(key, "keeper.agents.antigravity."):
+			normalized[strings.Replace(key, "keeper.agents.antigravity.", "keeper.agents.agy.", 1)] = value
+		default:
+			normalized[key] = value
+		}
 	}
-	return nil
+	client := m.client
+	return func() tea.Msg {
+		cfg, err := client.PatchSettings(normalized)
+		if err != nil {
+			return toastMsg{"Settings failed: " + err.Error()}
+		}
+		return configMsg{cfg: cfg, message: message}
+	}
+}
+
+func (m *model) dayDetailKey(date string) string {
+	return fmt.Sprintf("%s|%d", date, m.epoch)
 }
 
 func (m *model) toggleWebRemote() tea.Cmd {
@@ -825,13 +1437,11 @@ func (m *model) toggleWebRemote() tea.Cmd {
 		return nil
 	}
 	if m.rtStatus.ManagedBy == "systemd" || m.rtStatus.ManagedBy == "launchd" {
-		m.toast = "Web remote is managed by " + m.rtStatus.ManagedBy + "; use `tokenpulse service`"
-		m.toastAt = time.Now()
+		m.setToast("Web remote is managed by " + m.rtStatus.ManagedBy + "; use `tokenpulse service`")
 		return nil
 	}
 	if m.client.IsRemote() && m.rtStatus.ManagedBy == "standalone" {
-		m.toast = "Attached to local TUI; toggle Web remote from that session"
-		m.toastAt = time.Now()
+		m.setToast("Attached to local TUI; toggle Web remote from that session")
 		return nil
 	}
 	m.webBusy = true
@@ -869,792 +1479,351 @@ func (m *model) toggleWebRemote() tea.Cmd {
 		}
 		next := remote.NewSocketClient(local)
 		status, _ := next.Status()
-		msg := "Web remote started"
+		message := "Web remote started"
 		if status.WebURL != "" {
-			msg = "Web remote: " + status.WebURL
+			message = "Web remote: " + status.WebURL
 		}
-		return webToggleMsg{client: next, status: status, toast: msg}
+		return webToggleMsg{client: next, status: status, toast: message}
 	}
 }
 
-func (m *model) patchSettings(update map[string]any) tea.Cmd {
-	if m.client == nil {
-		return nil
+func (m *model) frameWidth() int {
+	if m.width > 0 {
+		return m.width
 	}
-	normalized := make(map[string]any, len(update))
-	for key, value := range update {
-		switch {
-		case strings.HasPrefix(key, "providers.antigravity."):
-			normalized[strings.Replace(key, "providers.antigravity.", "providers.agy.", 1)] = value
-		case strings.HasPrefix(key, "keeper.agents.antigravity."):
-			normalized[strings.Replace(key, "keeper.agents.antigravity.", "keeper.agents.agy.", 1)] = value
-		default:
-			normalized[key] = value
-		}
-	}
-	client := m.client
-	return func() tea.Msg {
-		cfg, err := client.PatchSettings(normalized)
-		if err != nil {
-			return toastMsg{"Settings failed: " + err.Error()}
-		}
-		return configMsg{cfg: cfg}
-	}
+	return 100
 }
 
-func (m *model) refresh() tea.Cmd {
-	if m.client == nil {
-		return nil
-	}
-	client := m.client
-	return func() tea.Msg {
-		result, err := client.Refresh(true, true)
-		if err != nil {
-			return toastMsg{"Refresh failed: " + err.Error()}
-		}
-		if result.Throttled && !result.Accepted {
-			return toastMsg{fmt.Sprintf("Showing cache; retry in %ds", result.RetryAfter)}
-		}
-		return toastMsg{"Refresh complete"}
-	}
-}
-
-// ── view ──
-
-func (m *model) View() string {
-	width := m.width
-	if width == 0 {
-		width = 100
-	}
-	var b strings.Builder
-	b.WriteString(m.renderHeader(width))
-	b.WriteString("\n")
-	switch m.tab {
-	case tabUsage:
-		b.WriteString(m.renderUsage(width))
-	case tabQuota:
-		b.WriteString(m.renderQuota(width))
-	case tabKeeper:
-		b.WriteString(m.renderKeeper(width))
-	case tabSettings:
-		b.WriteString(m.renderSettings(width))
-	}
-	if m.detailKind != detailNone {
-		b.WriteString("\n")
-		b.WriteString(m.renderDetail(width))
-	}
-	if m.showFilter {
-		b.WriteString("\n")
-		b.WriteString(m.renderFilter(width))
-	}
-	if m.toast != "" && time.Since(m.toastAt) < 4*time.Second {
-		b.WriteString("\n")
-		b.WriteString(m.styles().toast.Render(m.toast))
-	}
-	b.WriteString("\n")
-	body := b.String()
-	footer := m.renderFooter(width)
+func (m *model) frameHeight() int {
 	if m.height > 0 {
-		bodyLines := strings.Count(body, "\n") + 1
-		footerLines := strings.Count(footer, "\n") + 1
-		if pad := m.height - bodyLines - footerLines; pad > 0 {
-			body += strings.Repeat("\n", pad)
-		}
+		return m.height
 	}
-	return body + "\n" + footer
+	return 40
 }
 
-func (m *model) styles() styles {
-	return stylesFor(m.theme)
+// View draws the full dashboard frame.
+func (m *model) View() string {
+	width, height := m.frameWidth(), m.frameHeight()
+	c := newCanvas(width, height)
+	area := rect{x: 0, y: 0, w: width, h: height}
+	m.renderDashboard(c, area)
+	return c.render()
 }
 
-func (m *model) renderHeader(width int) string {
-	s := m.styles()
-	var tabs []string
-	for i, name := range tabNames {
-		style := s.dim
-		if i == m.tab {
-			style = s.active
-		}
-		tabs = append(tabs, style.Render(" "+name+" "))
-	}
-	modeBadge := s.dim.Render(" ○ local")
-	if m.client != nil && m.client.IsRemote() {
-		if m.rtStatus.ManagedBy == "standalone" {
-			modeBadge = s.dim.Render(" ● local (attached)")
-		} else {
-			label := " ● web"
-			if m.rtStatus.ManagedBy == "systemd" || m.rtStatus.ManagedBy == "launchd" {
-				label = " ● " + m.rtStatus.ManagedBy
-			}
-			modeBadge = s.badgeOn.Render(label)
-		}
-	}
-	title := s.title.Render("TokenPulse "+version.String()) + modeBadge
-	tabBar := strings.Join(tabs, " ")
-	gap := width - lipgloss.Width(title) - lipgloss.Width(tabBar) - 2
-	if gap < 1 {
-		gap = 1
-	}
-	rule := s.rule.Render(strings.Repeat("─", max(width, 20)))
-	return title + strings.Repeat(" ", gap) + tabBar + "\n" + rule
-}
+func (m *model) renderDashboard(c *canvas, area rect) {
+	headerHeight := min(4, area.h)
+	tabsHeight := min(3, max(area.h-headerHeight, 0))
+	footerHeight := min(3, max(area.h-headerHeight-tabsHeight, 0))
+	bodyHeight := max(area.h-headerHeight-tabsHeight-footerHeight, 0)
+	header := rect{x: 0, y: 0, w: area.w, h: headerHeight}
+	tabs := rect{x: 0, y: headerHeight, w: area.w, h: tabsHeight}
+	body := rect{x: 0, y: headerHeight + tabsHeight, w: area.w, h: bodyHeight}
+	footer := rect{x: 0, y: area.h - footerHeight, w: area.w, h: footerHeight}
 
-func (m *model) renderUsage(width int) string {
-	s := m.styles()
-	var b strings.Builder
-	presets := []string{"today", "7d", "30d", "year", "all", "custom"}
-	var parts []string
-	for i, preset := range presets {
-		label := fmt.Sprintf("%d %s", i+1, preset)
-		if preset == m.preset {
-			parts = append(parts, s.active.Render(label))
-		} else {
-			parts = append(parts, s.dim.Render(label))
-		}
-	}
-	b.WriteString(strings.Join(parts, "  "))
-	fmt.Fprintf(&b, "   %s..%s  scanned %s\n", m.report.Range.From, m.report.Range.To, formatScanned(m.report.ScannedAt))
-	if m.reportErr != "" {
-		b.WriteString(s.error.Render(m.reportErr) + "\n")
-		return b.String()
-	}
-	b.WriteString("\n")
-	totals := m.report.Totals
-	metricCost := formatCost(totals.Cost)
-	metricTokens := formatInt(totals.Tokens)
-	comparison := ""
-	if m.report.Comparison != nil && m.report.Range.From != m.report.Range.To {
-		change := percentChange(float64(totals.Tokens), float64(m.report.Comparison.Totals.Tokens))
-		if m.metric == 1 {
-			change = percentChange(totals.Cost, m.report.Comparison.Totals.Cost)
-		}
-		comparison = fmt.Sprintf("  %s vs %s..%s", change, m.report.Comparison.From, m.report.Comparison.To)
-	}
-	fmt.Fprintf(&b, "Cost %s   Tokens %s   Sessions %s%s\n", metricCost, metricTokens, formatInt(totals.Sessions), comparison)
-	unpriced := false
-	for _, model := range m.report.Models {
-		if model.Unpriced {
-			unpriced = true
-		}
-	}
-	if unpriced {
-		b.WriteString(s.warn.Render("Some models are unpriced; cost is an estimate at public API prices.") + "\n")
-	}
-	b.WriteString("\n")
-	b.WriteString(m.renderHeatmap(width))
-	b.WriteString("\n")
-	b.WriteString(m.renderList(width))
-	return b.String()
-}
+	m.drawHeader(c, header)
+	m.drawTabs(c, tabs)
+	m.drawPage(c, body)
+	m.drawFooter(c, footer)
 
-func (m *model) renderHeatmap(width int) string {
-	if m.report.Range.From == m.report.Range.To {
-		return ""
+	if m.modelDetail != nil {
+		m.drawModelDetail(c, area)
 	}
-	s := m.styles()
-	metric := func(day report.DaySummary) float64 {
-		if m.metric == 1 {
-			return day.Cost
-		}
-		return float64(day.Tokens)
+	if m.dayDetail != nil {
+		m.drawDayDetail(c, area)
 	}
-	var max float64
-	for _, day := range m.report.Days {
-		if value := metric(day); value > max {
-			max = value
+	if m.recovery.active() {
+		m.drawRecoveryToast(c, area)
+		if m.recovery.pulse() {
+			c.tintBorder(textStyle{bg: rgb(6, 78, 59)})
 		}
+	} else if m.toast != "" && time.Since(m.toastAt) < 4*time.Second {
+		m.drawToast(c, area)
 	}
-	byDate := map[string]report.DaySummary{}
-	for _, day := range m.report.Days {
-		byDate[day.Date] = day
+	if m.showHelp {
+		m.drawHelp(c, area)
 	}
-	cell := func(date time.Time, selected bool) string {
-		day, ok := byDate[date.Format("2006-01-02")]
-		level := 0
-		if ok && max > 0 {
-			level = int(metric(day)/max*4) + 1
-			if level > 5 {
-				level = 5
-			}
-		}
-		block := "·"
-		if level > 0 {
-			block = []string{"", "░", "▒", "▓", "█", "█"}[level]
-		}
-		style := s.heat[level]
-		if selected {
-			style = s.selected
-		}
-		return style.Render(block)
-	}
-	var b strings.Builder
-	from := mustDate(m.report.Range.From)
-	to := mustDate(m.report.Range.To)
-	switch m.report.Layout {
-	case "strip":
-		for date := from; !date.After(to); date = date.AddDate(0, 0, 1) {
-			b.WriteString(cell(date, m.selectedDay == date.Format("2006-01-02")))
-		}
-		b.WriteString("  ")
-		for date := from; !date.After(to); date = date.AddDate(0, 0, 1) {
-			b.WriteString(date.Format("Mon")[:2] + " ")
-		}
-	case "week-rows":
-		start := from.AddDate(0, 0, -((int(from.Weekday()) + 6) % 7))
-		end := to.AddDate(0, 0, 6-((int(to.Weekday())+6)%7))
-		for date := start; !date.After(end); date = date.AddDate(0, 0, 1) {
-			if date.Weekday() == time.Monday && !date.Equal(start) {
-				b.WriteString("\n")
-			}
-			if date.Before(from) || date.After(to) {
-				b.WriteString(" ")
-			} else {
-				b.WriteString(cell(date, m.selectedDay == date.Format("2006-01-02")))
-			}
-		}
-	case "week-columns":
-		start := from.AddDate(0, 0, -((int(from.Weekday()) + 6) % 7))
-		end := to.AddDate(0, 0, 6-((int(to.Weekday())+6)%7))
-		columns := int(end.Sub(start).Hours()/24/7) + 1
-		maxColumns := (width - 4) / 2
-		if maxColumns < 1 {
-			maxColumns = 1
-		}
-		first := 0
-		if columns > maxColumns {
-			first = columns - maxColumns
-		}
-		for row := 0; row < 7; row++ {
-			for week := first; week < columns; week++ {
-				date := start.AddDate(0, 0, week*7+row)
-				if date.Before(from) || date.After(to) {
-					b.WriteString("  ")
-				} else {
-					b.WriteString(cell(date, m.selectedDay == date.Format("2006-01-02")) + " ")
-				}
-			}
-			if row < 6 {
-				b.WriteString("\n")
-			}
-		}
-	}
-	b.WriteString("\n")
-	b.WriteString(s.dim.Render("less ░ ▒ ▓ █ more   active " + formatInt(int64(activeDays(m.report.Days))) + " days"))
-	return b.String()
-}
-
-func activeDays(days []report.DaySummary) int { return len(days) }
-
-func (m *model) renderList(width int) string {
-	s := m.styles()
-	var b strings.Builder
-	period := m.report.Range.From != m.report.Range.To
-	if !period || m.listMode == 0 {
-		if !period {
-			b.WriteString(s.dim.Render("Models") + "\n")
-		} else {
-			b.WriteString(s.dim.Render("Dates (v: models)") + "\n")
-		}
-		rows := len(m.report.Models)
-		if period {
-			rows = len(m.report.Days)
-		}
-		if rows == 0 {
-			b.WriteString(s.dim.Render("  no usage in this range") + "\n")
-			return b.String()
-		}
-		max := m.maxRowMetric()
-		for i, day := range m.report.Days {
-			if !period {
-				break
-			}
-			if i >= 20 {
-				break
-			}
-			b.WriteString(m.renderRow(i, day.Date, fmt.Sprintf("%d sessions", day.Sessions), day.Cost, day.Tokens, max, s.text, false))
-		}
-		if !period {
-			for i, model := range m.report.Models {
-				if i >= 20 {
-					break
-				}
-				agents := strings.Join(model.Agents, ",")
-				b.WriteString(m.renderRow(i, model.Model, fmt.Sprintf("%d sessions · %s", model.Sessions, agents),
-					model.Cost, model.Tokens, max, companyColor(model.Company, s), true))
-			}
-		}
-	} else {
-		b.WriteString(s.dim.Render("Models (v: dates)") + "\n")
-		max := m.maxRowMetric()
-		for i, model := range m.report.Models {
-			if i >= 20 {
-				break
-			}
-			agents := strings.Join(model.Agents, ",")
-			b.WriteString(m.renderRow(i, model.Model, fmt.Sprintf("%d sessions · %s", model.Sessions, agents),
-				model.Cost, model.Tokens, max, companyColor(model.Company, s), true))
-		}
-	}
-	return b.String()
-}
-
-func companyColor(company string, s styles) lipgloss.Style {
-	switch company {
-	case "anthropic":
-		return s.companyAnthropic
-	case "openai":
-		return s.companyOpenAI
-	case "google":
-		return s.companyGoogle
-	default:
-		return s.dim
+	if m.filterOpen {
+		m.drawFilter(c, area)
 	}
 }
 
-func (m *model) maxRowMetric() float64 {
-	var max float64
-	for _, day := range m.report.Days {
-		if m.metric == 1 && day.Cost > max {
-			max = day.Cost
-		} else if m.metric == 0 && float64(day.Tokens) > max {
-			max = float64(day.Tokens)
-		}
-	}
-	for _, model := range m.report.Models {
-		if m.metric == 1 && model.Cost > max {
-			max = model.Cost
-		} else if m.metric == 0 && float64(model.Tokens) > max {
-			max = float64(model.Tokens)
-		}
-	}
-	return max
-}
-
-func (m *model) renderRow(index int, label, detail string, cost float64, tokens int64, max float64, labelStyle lipgloss.Style, styled bool) string {
-	s := m.styles()
-	marker := " "
-	if index == m.selectedRow {
-		marker = ">"
-	}
-	value := float64(tokens)
-	if m.metric == 1 {
-		value = cost
-	}
-	bars := 0
-	if max > 0 {
-		bars = int(value / max * 12)
-	}
-	bar := strings.Repeat("▄", bars)
-	if !styled {
-		labelStyle = s.text
-	}
-	line := fmt.Sprintf("%s %-34s %-28s %8s %10s  %s", marker,
-		truncate(label, 34), truncate(detail, 28), formatCost(cost), formatInt(tokens), bar)
-	if index == m.selectedRow {
-		return s.selected.Render(line) + "\n"
-	}
-	return labelStyle.Render(line) + "\n"
-}
-
-func (m *model) renderQuota(width int) string {
-	if len(m.snapshots) == 0 {
-		return m.styles().dim.Render("No quota snapshots. Press r to refresh.")
-	}
-	s := m.styles()
-	var b strings.Builder
-	for i, snapshot := range m.snapshots {
-		style := s.text
-		if i == m.quotaCursor {
-			style = s.selected
-		}
-		plan := ""
-		if m.opts.Config.Display.AccountDisplay.ShowsPlan() && snapshot.Plan != "" {
-			plan = "  " + displayPlan(snapshot.Plan)
-		}
-		account := ""
-		if m.opts.Config.Display.AccountDisplay.ShowsAccount() && snapshot.Account != "" {
-			account = "  " + snapshot.Account
-		}
-		b.WriteString(style.Render(quota.DisplayName(snapshot.Provider)+plan+account) + "\n")
-		if err := m.quotaErrors[snapshot.Provider]; err != "" {
-			b.WriteString(s.error.Render("  "+err) + "\n")
-		}
-		for _, window := range snapshot.Windows {
-			level := levelStyle(window.UsedPercent, s)
-			percent := window.UsedPercent
-			if m.opts.Config.Display.QuotaDisplayMode == config.QuotaRemaining {
-				percent = 100 - percent
-			}
-			bars := barCells(percent)
-			bar := strings.Repeat("█", bars) + strings.Repeat("░", 20-bars)
-			pace := ""
-			if text := computePace(window); text != "" {
-				pace = "  " + text
-			}
-			reset := ""
-			if window.ResetsAt != nil {
-				if rem := time.Until(*window.ResetsAt); rem > 0 {
-					reset = "  " + s.dim.Render("resets in "+formatDurationShort(rem))
-				}
-			}
-			fmt.Fprintf(&b, "  %-20s %s %5.1f%%%s%s\n", truncate(displayWindowLabel(window.Label), 20), level.Render(bar), percent, pace, reset)
-		}
-		if snapshot.ExtraUsage != nil {
-			limit := ""
-			if snapshot.ExtraUsage.Limit != nil {
-				limit = " / " + money.Cost(*snapshot.ExtraUsage.Limit)
-			}
-			fmt.Fprintf(&b, "  Extra usage: %s%s %s\n", money.Cost(snapshot.ExtraUsage.Used), limit, snapshot.ExtraUsage.Currency)
-		}
-		if len(snapshot.RateLimitResetCredits) > 0 {
-			fmt.Fprintf(&b, "  Banked resets: %d available\n", len(snapshot.RateLimitResetCredits))
-		}
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-func displayWindowLabel(label string) string {
-	switch strings.ToLower(strings.TrimSpace(label)) {
-	case "session (5h)", "5h", "5 hours":
-		return "5h"
-	case "weekly (7d)", "weekly":
-		return "Weekly"
-	default:
-		return label
+func (m *model) drawPage(c *canvas, area rect) {
+	switch m.tab {
+	case tabOverview:
+		m.drawOverview(c, area)
+	case tabModels:
+		m.drawModels(c, area)
+	case tabDaily:
+		m.drawDaily(c, area)
+	case tabActivity:
+		m.drawActivity(c, area)
+	case tabQuota:
+		m.drawQuota(c, area)
+	case tabKeeper:
+		m.drawKeeper(c, area)
+	case tabSettings:
+		m.drawSettings(c, area)
 	}
 }
 
-func levelStyle(used float64, s styles) lipgloss.Style {
+func (m *model) drawHeader(c *canvas, area rect) {
+	if area.h < 2 || area.w < 4 {
+		return
+	}
+	theme := m.theme()
+	c.box(area.x, area.y, area.w, area.h, "", textStyle{}, fgStyle(theme.border))
+	inner := area.inner()
+	y := inner.y
+	title := "TokenPulse"
+	c.set(inner.x, y, title, boldStyle(theme.accent))
+	c.set(inner.x+len([]rune(title)), y, " Usage Analytics", boldStyle(theme.fg))
+	badge := ""
 	switch {
-	case used >= 100:
-		return s.danger
-	case used >= 80:
-		return s.warn
-	default:
-		return s.good
+	case m.client != nil && m.client.IsRemote() && m.rtStatus.ManagedBy == "standalone":
+		badge = "● local (attached)"
+	case m.client != nil && m.client.IsRemote():
+		badge = "● web"
+	case m.client != nil:
+		badge = "● local"
+	}
+	if badge != "" {
+		start := max(inner.right()-len([]rune(badge))-1, inner.x)
+		c.set(start, y, badge, fgStyle(theme.dim))
+	}
+	if inner.h < 2 {
+		return
+	}
+	y++
+	rangeText := "—"
+	if m.reportLoaded {
+		rangeText = m.report.Range.From + " → " + m.report.Range.To
+	} else if m.report.FirstDay != nil {
+		rangeText = *m.report.FirstDay + " → " + dateString(startOfToday())
+	}
+	c.set(inner.x, y, "Total Cost ", fgStyle(theme.dim))
+	x := inner.x + len("Total Cost ")
+	cost := formatCost(m.report.Totals.Cost)
+	c.set(x, y, cost, boldStyle(theme.accent))
+	x += len([]rune(cost)) + 2
+	c.set(x, y, "Total Tokens ", fgStyle(theme.dim))
+	x += len("Total Tokens ")
+	tokens := formatIntCommas(m.report.Totals.Tokens)
+	c.set(x, y, tokens, boldStyle(theme.codex))
+	x += len([]rune(tokens)) + 2
+	c.set(x, y, "Data Range ", fgStyle(theme.dim))
+	x += len("Data Range ")
+	c.set(x, y, rangeText, fgStyle(theme.fg))
+	x += len([]rune(rangeText)) + 2
+	if m.agentCount() > 1 {
+		c.set(x, y, "Agents ", fgStyle(theme.dim))
+		x += len("Agents ")
+		c.set(x, y, fmt.Sprintf("%d", m.agentCount()), boldStyle(theme.accentSoft))
 	}
 }
 
-func computePace(window provider.RateWindow) string {
-	pace := quota.ComputePace(window, time.Now())
-	if pace == nil {
-		return ""
+func (m *model) drawTabs(c *canvas, area rect) {
+	if area.h < 2 || area.w < 4 {
+		return
 	}
-	switch pace.Kind {
-	case "ahead":
-		return "ahead"
-	case "behind":
-		return "behind"
-	default:
-		return "on track"
+	theme := m.theme()
+	c.box(area.x, area.y, area.w, area.h, "", textStyle{}, fgStyle(theme.border))
+	inner := area.inner()
+	columns := splitH(inner, tabCount)
+	for index, name := range tabNames {
+		column := columns[index]
+		style := fgStyle(theme.dim)
+		if index == m.tab {
+			style = textStyle{fg: theme.onAccent, bg: theme.accent, bold: true}
+			c.fill(column.x, column.y, column.w, column.h, style)
+		}
+		label := truncate(name, max(column.w-1, 1))
+		start := column.x + max((column.w-len([]rune(label)))/2, 0)
+		c.set(start, column.y, label, style)
 	}
 }
 
-func (m *model) renderKeeper(width int) string {
-	s := m.styles()
-	cfg := m.opts.Config
-	var b strings.Builder
-	badge := func(on bool) string {
-		if on {
-			return s.badgeOn.Render("[ON]")
-		}
-		return s.badgeOff.Render("[OFF]")
+func (m *model) drawFooter(c *canvas, area rect) {
+	if area.h < 1 || area.w < 2 {
+		return
 	}
-	b.WriteString(fmt.Sprintf("Keeper engine: %s  %s\n\n", badge(cfg.Keeper.Enabled), s.dim.Render("(e toggles)")))
-	for i, agent := range keeper.Agents {
-		entry := cfg.Keeper.Agents[agent]
-		marker := " "
-		if i == m.keeperCursor {
-			marker = ">"
+	theme := m.theme()
+	for x := area.x; x < area.right(); x++ {
+		c.set(x, area.y, "─", fgStyle(theme.border))
+	}
+	if area.h < 2 {
+		return
+	}
+	help := m.helpLine()
+	c.set(area.x+1, area.y+1, truncate(help, area.w-2), fgStyle(theme.dim))
+	if area.h >= 3 {
+		info := m.infoLine()
+		available := area.w - 2
+		status := ""
+		statusColor := theme.accent
+		if m.status != "" && time.Since(m.statusAt) < 10*time.Second {
+			status = truncate(m.status, max(area.w/2, 10))
+			if m.statusLevel == 1 {
+				statusColor = theme.gaugeMid
+			} else if m.statusLevel == 2 {
+				statusColor = theme.gaugeHigh
+			}
+			available = max(available-len([]rune(status))-2, 1)
 		}
-		row := fmt.Sprintf("%s %-12s  5h %s  weekly %s  at %s", marker, agent,
-			badge(entry.SessionKeeperEnabled), badge(entry.WeeklyKeeperEnabled), entry.DailyWakeupTime)
-		if i == m.keeperCursor {
-			b.WriteString(s.selected.Render(row) + "\n")
-		} else {
-			b.WriteString(row + "\n")
+		c.set(area.x+1, area.y+2, truncate(info, available), fgStyle(theme.dim))
+		if status != "" {
+			start := area.right() - 1 - len([]rune(status))
+			if start > area.x+1+available {
+				c.set(start, area.y+2, status, boldStyle(statusColor))
+			}
 		}
 	}
-	b.WriteString("\n")
-	b.WriteString(s.dim.Render("Recent executions") + "\n")
-	if len(m.keeperLog) == 0 {
-		b.WriteString(s.dim.Render("  none") + "\n")
+}
+
+func (m *model) helpLine() string {
+	switch m.tab {
+	case tabOverview:
+		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  t/c metric (%s)  s filter  ? help", metricLabel(m.overviewMetric))
+	case tabModels:
+		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  c/t/d sort (%s %s)  s filter  ? help", sortLabel(m.sortField), sortDirection(m.sortAsc))
+	case tabDaily:
+		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  n today  c/t/d sort (%s %s)  v metric (%s)  s filter  ? help", sortLabel(m.sortField), sortDirection(m.sortAsc), metricLabel(m.dailyMetric))
+	case tabActivity:
+		return fmt.Sprintf(" q quit  r refresh  ←→ tab  n today  [/] detail  t/c metric (%s)  s filter  ? help", metricLabel(m.activityMetric))
+	case tabQuota:
+		return " q quit  r refresh  ←→ tab  ? help"
+	case tabKeeper:
+		return " q quit  ↑↓/Tab select  1/d toggle 5h  2/w toggle weekly  p ping now  e engine  ? help"
+	case tabSettings:
+		return " q quit  r refresh  ←→ tab  ↑↓ select  space/enter change  J/K reorder provider  ? help"
 	}
-	for _, record := range m.keeperLog {
-		status := "ok"
-		style := s.good
-		if !record.Success {
-			status = "failed"
-			style = s.error
+	return " q quit"
+}
+
+func (m *model) infoLine() string {
+	rangeText := "Data: —"
+	if m.reportLoaded {
+		rangeText = "Data: " + m.report.Range.From + " → " + m.report.Range.To
+	}
+	refresh := ""
+	at := m.refreshedAt
+	if at.IsZero() && m.report.ScannedAt != 0 {
+		at = time.UnixMilli(m.report.ScannedAt)
+	}
+	if !at.IsZero() {
+		refresh = "Refreshed: " + at.Format("15:04:05")
+	}
+	if seconds := m.cfg.Display.AutoRefreshSecs; seconds > 0 && !at.IsZero() {
+		remaining := int(seconds) - int(time.Since(at).Seconds())
+		if remaining < 0 {
+			remaining = 0
 		}
-		fmt.Fprintf(&b, "  %s %-10s %-8s %-8s %s %s\n", record.Timestamp.Format("01-02 15:04"),
-			record.Agent, record.Trigger.Label(), status, record.Model,
-			style.Render(truncate(record.OutputSnippet, 40)))
+		refresh += fmt.Sprintf("  |  Auto-refresh in: %dm %ds", remaining/60, remaining%60)
 	}
-	return b.String()
+	if refresh == "" {
+		return rangeText
+	}
+	return rangeText + "  |  " + refresh
+}
+
+func metricLabel(metric int) string {
+	if metric == metricCost {
+		return "cost"
+	}
+	return "tokens"
+}
+
+func sortLabel(field int) string {
+	switch field {
+	case sortCost:
+		return "cost"
+	case sortTokens:
+		return "tokens"
+	default:
+		return "date"
+	}
+}
+
+func sortDirection(ascending bool) string {
+	if ascending {
+		return "↑"
+	}
+	return "↓"
+}
+
+func (m *model) drawToast(c *canvas, area rect) {
+	theme := m.theme()
+	width, height := 46, 3
+	box := rect{
+		x: max(area.right()-width-2, area.x),
+		y: max(area.bottom()-height-2, area.y),
+		w: min(width, area.w),
+		h: min(height, area.h),
+	}
+	if box.w < 10 || box.h < 3 {
+		return
+	}
+	c.box(box.x, box.y, box.w, box.h, "", textStyle{}, fgStyle(theme.accent))
+	c.set(box.x+2, box.y+1, truncate(m.toast, box.w-4), fgStyle(theme.fg))
+}
+
+func (m *model) drawRecoveryToast(c *canvas, area rect) {
+	width, height := 46, 5
+	box := rect{
+		x: max(area.right()-width-2, area.x),
+		y: max(area.bottom()-height-2, area.y),
+		w: min(width, area.w),
+		h: min(height, area.h),
+	}
+	if box.w < 10 || box.h < 5 {
+		return
+	}
+	accent := rgb(52, 211, 153)
+	c.box(box.x, box.y, box.w, box.h, " Quota Restored ", boldStyle(accent), fgStyle(accent))
+	icon := []string{"●", "◉", "⦿", "✦"}[int(time.Since(m.recovery.started).Milliseconds()/250)%4]
+	y := box.y + 1
+	line := icon + " "
+	if m.recovery.provider != "" {
+		line += displayAgentName(m.recovery.provider)
+	}
+	if m.recovery.window != "" {
+		line += " (" + m.recovery.window + ")"
+	}
+	c.set(box.x+2, y, truncate(line, box.w-4), boldStyle(accent))
+	ratio := 1 - time.Since(m.recovery.started).Seconds()/5
+	if ratio < 0 {
+		ratio = 0
+	}
+	filled := int(ratio*16 + 0.5)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", 16-filled)
+	remaining := time.Until(m.recovery.started.Add(5 * time.Second)).Seconds()
+	if remaining < 0 {
+		remaining = 0
+	}
+	line2 := fmt.Sprintf("%.0f%% remaining  [%s] %.1fs", m.recovery.remaining, bar, remaining)
+	c.set(box.x+2, y+1, truncate(line2, box.w-4), fgStyle(accent))
+}
+
+// renderHeader keeps the attach test's readable header contract.
+func (m *model) renderHeader(width int) string {
+	c := newCanvas(width, 4)
+	m.drawHeader(c, rect{x: 0, y: 0, w: width, h: 4})
+	return strings.Join(c.lines(), "\n")
 }
 
 func (m *model) renderSettings(width int) string {
-	s := m.styles()
-	cfg := m.opts.Config
-	onOff := func(v bool) string {
-		if v {
-			return "ON"
-		}
-		return "OFF"
-	}
-	webLabel := "OFF (enter starts background serve)"
-	if m.webBusy {
-		webLabel = "switching…"
-	} else if m.rtStatus.ManagedBy == "systemd" || m.rtStatus.ManagedBy == "launchd" {
-		webLabel = fmt.Sprintf("managed by %s (%s)", m.rtStatus.ManagedBy, m.rtStatus.WebURL)
-	} else if m.client != nil && m.client.IsRemote() && m.rtStatus.ManagedBy == "standalone" {
-		webLabel = "attached to local TUI"
-	} else if m.client != nil && m.client.IsRemote() {
-		webLabel = fmt.Sprintf("ON (%s)  (enter stops)", m.rtStatus.WebURL)
-	}
-	rows := []string{
-		fmt.Sprintf("%-26s %s", "Theme", cfg.Display.Theme),
-		fmt.Sprintf("%-26s %s", "Quota display", cfg.Display.QuotaDisplayMode),
-		fmt.Sprintf("%-26s %ds", "Auto refresh", cfg.Display.AutoRefreshSecs),
-		fmt.Sprintf("%-26s %s", "Account display", cfg.Display.AccountDisplay),
-		fmt.Sprintf("%-26s %s", "Show empty providers", onOff(cfg.Display.ShowEmptyProviders)),
-		fmt.Sprintf("%-26s %s", "Refresh quota", onOff(cfg.Display.RefreshQuota)),
-		fmt.Sprintf("%-26s %s", "Scan Antigravity", onOff(cfg.Display.ScanAntigravity)),
-		fmt.Sprintf("%-26s %s", "Notification level", cfg.Display.NotificationLevel),
-		fmt.Sprintf("%-26s %s", "Notification sound", cfg.Display.NotificationSound),
-		fmt.Sprintf("%-26s %s", "Keeper engine", onOff(cfg.Keeper.Enabled)),
-		fmt.Sprintf("%-26s %s", "Antigravity groups", cfg.Keeper.AntigravityGroupsLabel()),
-		fmt.Sprintf("%-26s %s", "Quota providers (cycles)", enabledProviderLabel(cfg)),
-		fmt.Sprintf("%-26s %s", "Web remote", webLabel),
-	}
-	var b strings.Builder
-	for i, row := range rows {
-		marker := " "
-		style := s.text
-		if i == m.settingsCursor {
-			marker = ">"
-			style = s.selected
-		}
-		b.WriteString(style.Render(marker+" "+row) + "\n")
-	}
-	return b.String()
+	c := newCanvas(width, 30)
+	m.drawSettings(c, rect{x: 0, y: 0, w: width, h: 30})
+	return strings.Join(c.lines(), "\n")
 }
 
-func enabledProviderLabel(cfg config.Config) string {
-	var enabled []string
-	for _, id := range cfg.QuotaProviderOrder(quota.ProviderIDs) {
-		if cfg.Providers[id].Enabled {
-			enabled = append(enabled, id)
-		}
-	}
-	return strings.Join(enabled, ",")
+func (m *model) renderQuota(width int) string {
+	c := newCanvas(width, 40)
+	m.drawQuota(c, rect{x: 0, y: 0, w: width, h: 40})
+	return strings.Join(c.lines(), "\n")
 }
 
-func (m *model) renderDetail(width int) string {
-	s := m.styles()
-	var b strings.Builder
-	switch detail := m.detail.(type) {
-	case report.DayDetail:
-		b.WriteString(s.title.Render("Day " + detail.Date))
-		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("cost %s  tokens %s  input %s  output %s  cache read %s  cache write %s  messages %d  sessions %d\n",
-			formatCost(detail.Totals.Cost), formatInt(detail.Totals.Tokens), formatInt(detail.Totals.Input),
-			formatInt(detail.Totals.Output), formatInt(detail.Totals.CacheRead), formatCacheWrite(detail.Totals.CacheWrite),
-			detail.Totals.Messages, detail.Totals.Sessions))
-		for _, agent := range detail.Agents {
-			b.WriteString(fmt.Sprintf("  %-12s %s  %s\n", agent.Agent, formatCost(agent.Totals.Cost), formatInt(agent.Totals.Tokens)))
-			for _, model := range agent.Models {
-				b.WriteString(fmt.Sprintf("    %-34s %s  %s  cache read %s  hit %.2f%%\n", truncate(model.Model, 34),
-					formatCost(model.Cost), formatInt(model.Tokens), formatInt(model.CacheRead), cacheHit(model.Totals)))
-			}
-		}
-	case report.ModelDetail:
-		b.WriteString(s.title.Render(detail.Model + "  " + detail.Company + " · " + m.report.Range.From + ".." + m.report.Range.To))
-		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("cost %s  tokens %s  input %s  output %s  cache read %s  messages %d  last used %s\n",
-			formatCost(detail.Totals.Cost), formatInt(detail.Totals.Tokens), formatInt(detail.Totals.Input),
-			formatInt(detail.Totals.Output), formatInt(detail.Totals.CacheRead), detail.Totals.Messages, detail.LastUsed))
-		for _, agent := range detail.Agents {
-			b.WriteString(fmt.Sprintf("  %-12s %s  %s\n", agent.Agent, formatCost(agent.Cost), formatInt(agent.Tokens)))
-		}
-		if len(detail.PerDay) > 1 {
-			b.WriteString("  ")
-			var max int64
-			for _, day := range detail.PerDay {
-				if day.Tokens > max {
-					max = day.Tokens
-				}
-			}
-			for _, day := range detail.PerDay {
-				b.WriteString(sparkRune(day.Tokens, max))
-			}
-			b.WriteString("\n")
-		}
-	}
-	b.WriteString(s.dim.Render("esc closes"))
-	return b.String()
-}
-
-func (m *model) renderFilter(width int) string {
-	s := m.styles()
-	var b strings.Builder
-	b.WriteString(s.title.Render("Agents") + "  " + s.dim.Render("space toggles · a all · esc closes") + "\n")
-	for i, agent := range report.AllAgents {
-		mark := "[ ]"
-		if m.agents[agent] {
-			mark = "[x]"
-		}
-		style := s.text
-		if i == m.filterCursor {
-			style = s.selected
-		}
-		b.WriteString(style.Render("  "+mark+" "+agent) + "\n")
-	}
-	return b.String()
-}
-
-// barCells clamps a quota percentage to the 20-cell bar, so out-of-range
-// provider data cannot panic strings.Repeat.
-func barCells(percent float64) int {
-	if !(percent > 0) {
-		return 0
-	}
-	if percent > 100 {
-		percent = 100
-	}
-	return int(percent / 100 * 20)
-}
-
-// sparkRune picks one rune, never a byte, for a day's share of the range max.
-func sparkRune(tokens, max int64) string {
-	levels := []rune("▁▂▃▄▅▆▇")
-	if tokens <= 0 || max <= 0 {
-		return " "
-	}
-	level := int(float64(tokens) / float64(max) * float64(len(levels)-1))
-	if level < 0 {
-		level = 0
-	}
-	if level >= len(levels) {
-		level = len(levels) - 1
-	}
-	return string(levels[level])
-}
-
-func (m *model) renderFooter(width int) string {
-	s := m.styles()
-	common := "tab switch · r refresh · b theme · q quit"
-	var help string
-	switch m.tab {
-	case tabUsage:
-		help = "1-6 range · m metric · v list · enter detail · f heatmap · [ ] shift · s agents · " + common
-	case tabQuota:
-		help = "↑/↓ provider · " + common
-	case tabKeeper:
-		help = "e engine · enter 5h · w weekly · p ping · " + common
-	case tabSettings:
-		help = "↑/↓ move · enter change · " + common
-	default:
-		help = common
-	}
-	if m.status != "" {
-		return s.dim.Render(truncate(m.status, width-2)) + "\n" + s.dim.Render(truncate(help, width-2))
-	}
-	return s.dim.Render(truncate(help, width-2))
-}
-
-func formatDurationShort(d time.Duration) string {
-	if d < time.Minute {
-		return "<1m"
-	}
-	days := int(d.Hours()) / 24
-	hours := int(d.Hours()) % 24
-	mins := int(d.Minutes()) % 60
-	if days > 0 {
-		return fmt.Sprintf("%dd %dh", days, hours)
-	}
-	if hours > 0 {
-		return fmt.Sprintf("%dh %dm", hours, mins)
-	}
-	return fmt.Sprintf("%dm", mins)
-}
-
-// ── formatting ──
-
-func formatCost(value float64) string { return money.Cost(value) }
-
-func formatInt(value int64) string {
-	raw := fmt.Sprintf("%d", value)
-	negative := strings.HasPrefix(raw, "-")
-	if negative {
-		raw = raw[1:]
-	}
-	var parts []string
-	for len(raw) > 3 {
-		parts = append([]string{raw[len(raw)-3:]}, parts...)
-		raw = raw[:len(raw)-3]
-	}
-	parts = append([]string{raw}, parts...)
-	out := strings.Join(parts, ",")
-	if negative {
-		return "-" + out
-	}
-	return out
-}
-
-func formatScanned(ms int64) string {
-	if ms == 0 {
-		return "never"
-	}
-	return time.UnixMilli(ms).Format("15:04")
-}
-
-func formatCacheWrite(value int64) string {
-	if value == 0 {
-		return "—"
-	}
-	return formatInt(value)
-}
-
-func cacheHit(totals report.Totals) float64 {
-	if totals.Tokens == 0 {
-		return 0
-	}
-	return float64(totals.CacheRead) / float64(totals.Tokens) * 100
-}
-
-func percentChange(current, previous float64) string {
-	if previous == 0 {
-		if current == 0 {
-			return "0.0%"
-		}
-		return "+100.0%"
-	}
-	change := (current - previous) / previous * 100
-	return fmt.Sprintf("%+.1f%%", change)
-}
-
-func displayPlan(plan string) string {
-	runes := []rune(strings.TrimSpace(plan))
-	if len(runes) == 0 {
-		return ""
-	}
-	return strings.ToUpper(string(runes[0])) + string(runes[1:])
-}
-
-func truncate(value string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	runes := []rune(value)
-	if len(runes) <= width {
-		return value
-	}
-	if width == 1 {
-		return string(runes[:1])
-	}
-	return string(runes[:width-1]) + "…"
+func (m *model) renderKeeper(width int) string {
+	c := newCanvas(width, 40)
+	m.drawKeeper(c, rect{x: 0, y: 0, w: width, h: 40})
+	return strings.Join(c.lines(), "\n")
 }
