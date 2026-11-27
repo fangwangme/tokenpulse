@@ -5,7 +5,7 @@ import "os"
 
 // Version is the release version. npm/scripts/build-packages.mjs reads it
 // from this file, and the release tag must match it.
-const Version = "0.8.0"
+const Version = "0.8.1"
 
 // String is the version as every surface shows it: the TUI header, --version,
 // /api/state and the phone header. A test run is marked so a stray production

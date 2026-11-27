@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-11-27
+
+### Added
+- **Clickable range pills and mouse interactions**: the Overview/Models/Daily range presets (`1 today`..`6 custom`) render as clickable pill buttons and respond to left clicks; Activity supports clicking heatmap cells to select dates and mouse-wheel scrolling in the detail pane; Keeper supports clicking agent cards and mouse-wheel scrolling in the execution log.
+- **Per-day company breakdown in usage reports**: `report.Report.Days` now includes per-company (`anthropic`, `openai`, `google`, `other`) token and cost totals from a single query, and supports days-only requests for the Activity heatmap.
+
+### Changed
+- **Instant Overview chart and Activity heatmap**: Overview renders stacked company bars on the first frame without N+1 `UsageModel` requests; Activity preloads in the background, stays cached across Overview/Models/Daily range changes, and incrementally refreshes only today on `usage_updated`.
+- **Activity and Keeper visual polish**: restored 0.6.16 per-metric, provider, and company colors on Activity and Keeper, two-line model rows (`model + cost` then `T/I/O/CR/CW`) to prevent `CW` truncation, and `Total` / `Average` / `Max` rows in `Range Overview`.
+- **Cleaner Overview KPI and count formatting**: removed the redundant API pricing estimate and unpriced-model disclaimer lines from the TUI Overview KPI (keeping `vs <from> → <to>` on period ranges), and formatted integer counts below 1,000 without `.00` while keeping decimals on currency amounts.
+
+### Fixed
+- **Auto light/dark theme detection and live refresh**: `display.theme = auto` now detects terminal and OS appearance (`TOKENPULSE_THEME`, startup OSC 11, `COLORFGBG`, `TERM_BACKGROUND`, Linux Freedesktop Portal / `gsettings`, macOS `defaults`) and periodically follows OS light/dark switches; improved light-mode contrast for company/metric colors and Quota pace markers.
+
 ## [0.8.0] - 2026-11-27
 
 ### Added
