@@ -166,8 +166,12 @@ function applySettings(values: Record<string, unknown>): void {
   state.quotaEnabled = values["display.refresh_quota"] !== false;
 }
 
-export async function loadState(): Promise<void> {
+let stateInFlight: Promise<void> | null = null;
+
+async function performStateLoad(): Promise<void> {
+  const epoch = state.authEpoch;
   const raw = await api<RawState>("/api/state");
+  if (epoch !== state.authEpoch) return;
   state.version = raw.version;
   state.scannedAt = raw.scannedAt;
   state.usageScannedAt = raw.scannedAt;
@@ -179,6 +183,17 @@ export async function loadState(): Promise<void> {
   state.configReady = true;
   if (state.paired !== true) state.paired = true;
   rememberPairing();
+}
+
+export function loadState(): Promise<void> {
+  if (stateInFlight) return stateInFlight;
+  const run = performStateLoad();
+  stateInFlight = run;
+  const clear = () => {
+    if (stateInFlight === run) stateInFlight = null;
+  };
+  void run.then(clear, clear);
+  return run;
 }
 
 interface RefreshResult {

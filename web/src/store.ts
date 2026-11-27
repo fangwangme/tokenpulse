@@ -61,6 +61,7 @@ interface AppState {
   route: Route;
   reconnectNonce: number;
   keeperNonce: number;
+  authEpoch: number;
   toast: string;
   navHidden: boolean;
 }
@@ -121,6 +122,7 @@ export const state = createMutable<AppState>({
   route: { name: "usage" },
   reconnectNonce: 0,
   keeperNonce: 0,
+  authEpoch: 0,
   toast: "",
   navHidden: false,
 });
@@ -130,6 +132,7 @@ export function rememberPairing(): void {
 }
 
 export function forgetPairing(): void {
+  state.authEpoch += 1;
   writeFlag(PAIRED_KEY, false);
 }
 

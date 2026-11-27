@@ -159,14 +159,17 @@ export function UsagePage() {
   const [metric, setMetric] = createSignal<"tokens" | "cost">("tokens");
   const [group, setGroup] = createSignal<"date" | "model">("date");
   const [activeAgents, setActiveAgents] = createSignal<Set<string>>(new Set(AGENT_KEYS));
-  let agentsTouched = false;
   createEffect(() => {
-    if (!state.configReady || agentsTouched) return;
+    if (!state.configReady) return;
     const enabled = enabledAgentKeys();
     if (enabled.length === 0) return;
     const current = activeAgents();
-    if (current.size === enabled.length && enabled.every((agent) => current.has(agent))) return;
-    setActiveAgents(new Set(enabled));
+    const next = new Set([...current].filter((agent) => enabled.includes(agent)));
+    if (next.size === 0) {
+      for (const agent of enabled) next.add(agent);
+    }
+    if (next.size === current.size && [...next].every((agent) => current.has(agent))) return;
+    setActiveAgents(next);
   });
   const [rowsLimit, setRowsLimit] = createSignal(10);
 
@@ -1886,10 +1889,7 @@ export function UsagePage() {
             <div style={{ display: "flex", "align-items": "center" }}>
               <span style={{ "font-weight": 650, "font-size": "16px", flex: 1 }}>{t("usage.filterTitle")}</span>
               <button
-                onClick={() => {
-                  agentsTouched = true;
-                  setActiveAgents(new Set(enabledAgentKeys()));
-                }}
+                onClick={() => setActiveAgents(new Set(enabledAgentKeys()))}
                 style={{ height: "32px", padding: "0 10px", border: 0, background: "none", color: "var(--accent)", font: "inherit", "font-size": "14px" }}
               >
                 {t("usage.selectAll")}
@@ -1912,7 +1912,6 @@ export function UsagePage() {
                   } else {
                     s.add(ag);
                   }
-                  agentsTouched = true;
                   setActiveAgents(s);
                 };
 
