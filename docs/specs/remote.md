@@ -289,6 +289,20 @@ server lists as enabled.
   the handle saves the order, and the switch saves independently.
 - The page header is the compact status line (last scan/refresh time) and the
   refresh button, not a second title.
+- A phone that has paired before renders the app shell without waiting for the
+  API: a stored pairing marker decides this, the bottom tab bar and the selected
+  page's frame appear before `/api/state` resolves, and the pairing page appears
+  only after a 401 or when no marker exists. The first screen starts
+  `/api/state`, the `today` usage report, and `/api/quota` together instead of
+  waiting for one another. The last successful state, quota snapshot, and
+  `today` usage report are kept in versioned local storage; a later launch
+  renders them first and replaces them when the fresh responses arrive. A
+  stored usage report is used only when its preset and agent set match the
+  requested view, and a 401 clears the marker and every stored first-screen
+  value. A transient failure keeps the shell and the stored values visible
+  instead of returning to pairing. Only the opening `today` view is stored;
+  other ranges and filtered views are not. The service worker remains push-only
+  and caches no API data, and the document carries no pre-rendered shell.
 - Pages update silently on `usage_updated` / `quota_updated`; the socket
   reconnects with backoff, and failed or unloaded data is re-requested once it
   is back. A failed load shows the error with a retry button, never an endless
