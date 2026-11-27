@@ -76,6 +76,7 @@ type model struct {
 	width, height int
 	tab           int
 	themeOverride int
+	autoThemeMode int
 
 	rtStatus    rt.StatusSnapshot
 	eventCh     <-chan rt.Event
@@ -112,13 +113,8 @@ type model struct {
 	reportLoading bool
 	reportLoaded  bool
 
-	company        companyData
-	companyKey     string
-	companyLoading bool
-	companyPending int
-	companyErr     bool
-	companySeq     int
-	epoch          int
+	epoch         int
+	activityEpoch int
 
 	prior        report.Report
 	priorKey     string
@@ -140,12 +136,13 @@ type model struct {
 	detailScroll int
 	detailSeq    int
 
-	activity        report.Report
-	activityErr     string
-	activityKey     string
-	activityLoading bool
-	activityLoaded  bool
-	activitySel     string
+	activity           report.Report
+	activityErr        string
+	activityKey        string
+	activityLoading    bool
+	activityLoaded     bool
+	activityLoadedDate string
+	activitySel        string
 
 	activityDetail      *report.DayDetail
 	activityDetailDate  string
@@ -158,38 +155,13 @@ type model struct {
 	quotaLoaded  bool
 	quotaLoading bool
 
-	keeperLog     []keeper.ExecutionRecord
-	keeperLoading bool
-	keeperLoaded  bool
-	keeperCursor  int
+	keeperLog       []keeper.ExecutionRecord
+	keeperLoading   bool
+	keeperLoaded    bool
+	keeperCursor    int
+	keeperLogScroll int
 
 	settingsCursor int
-}
-
-type companyData struct {
-	tokens map[string]map[string]int64
-	cost   map[string]map[string]float64
-}
-
-func (c *companyData) empty() bool { return len(c.tokens) == 0 && len(c.cost) == 0 }
-
-func (c *companyData) add(detail report.ModelDetail) {
-	company := detail.Company
-	if company != "anthropic" && company != "openai" && company != "google" {
-		return
-	}
-	if c.tokens == nil {
-		c.tokens = map[string]map[string]int64{}
-		c.cost = map[string]map[string]float64{}
-	}
-	if c.tokens[company] == nil {
-		c.tokens[company] = map[string]int64{}
-		c.cost[company] = map[string]float64{}
-	}
-	for _, day := range detail.PerDay {
-		c.tokens[company][day.Date] += day.Tokens
-		c.cost[company][day.Date] += day.Cost
-	}
 }
 
 type eventMsg struct{ event rt.Event }
@@ -207,8 +179,9 @@ type configMsg struct {
 	message string
 }
 type statusMsg struct {
-	status rt.StatusSnapshot
-	err    error
+	status    rt.StatusSnapshot
+	err       error
+	themeMode int
 }
 type toastMsg struct{ text string }
 type recoveryTickMsg struct{}
@@ -259,6 +232,12 @@ type activityDayMsg struct {
 	value report.DayDetail
 	err   error
 }
+type activityTodayMsg struct {
+	epoch int
+	date  string
+	value report.DayDetail
+	err   error
+}
 
 func Run(opts Options) error {
 	client, err := attachClient(opts)
@@ -266,6 +245,7 @@ func Run(opts Options) error {
 		return err
 	}
 	m := newModel(opts, client)
+	m.autoThemeMode = detectStartupThemeMode()
 	program := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = program.Run()
 	m.closeClient()
@@ -286,6 +266,7 @@ func newModel(opts Options, client rt.Client) *model {
 		client:         client,
 		cfg:            cfg,
 		themeOverride:  -1,
+		autoThemeMode:  -1,
 		agents:         agents,
 		preset:         "30d",
 		basePreset:     "30d",
@@ -330,7 +311,9 @@ func (m *model) closeClient() {
 	}
 }
 
-func (m *model) theme() tuiTheme { return resolveTheme(m.cfg, m.themeOverride) }
+func (m *model) theme() tuiTheme {
+	return resolveThemeWithAuto(m.configValue(), m.themeOverride, m.autoThemeMode)
+}
 
 func (m *model) setStatus(text string, level int) {
 	m.status = text
@@ -466,7 +449,7 @@ func (m *model) activityWindow() (string, string, bool) {
 }
 
 func (m *model) activityCacheKey(from, to string) string {
-	return fmt.Sprintf("activity|%s|%s|%s|%d", from, to, strings.Join(m.selectedAgents(), ","), m.epoch)
+	return fmt.Sprintf("activity|%s|%s|%s|%d", from, to, strings.Join(m.selectedAgents(), ","), m.activityEpoch)
 }
 
 func (m *model) loadActivityCmd() tea.Cmd {
@@ -479,7 +462,7 @@ func (m *model) loadActivityCmd() tea.Cmd {
 		return nil
 	}
 	key := m.activityCacheKey(from, to)
-	params := report.Params{Preset: "custom", From: from, To: to, Agents: m.selectedAgents()}
+	params := report.Params{Preset: "custom", From: from, To: to, Agents: m.selectedAgents(), DaysOnly: true}
 	m.activityKey = key
 	m.activityLoading = true
 	return func() tea.Msg {
@@ -503,36 +486,24 @@ func (m *model) ensureActivity() tea.Cmd {
 	return m.loadActivityCmd()
 }
 
-func (m *model) ensureCompany() tea.Cmd {
-	if m.client == nil || !m.reportLoaded || m.report.Range.From == m.report.Range.To {
-		return nil
-	}
-	key := m.rangeKey()
-	if m.companyKey == key && !m.companyErr && (m.companyLoading || !m.company.empty()) {
-		return nil
-	}
-	var cmds []tea.Cmd
+func (m *model) refreshActivityTodayCmd() tea.Cmd {
 	client := m.client
-	from, to := m.report.Range.From, m.report.Range.To
-	agents := m.selectedAgents()
-	m.company = companyData{}
-	m.companyKey = key
-	m.companyErr = false
-	m.companySeq++
-	seq := m.companySeq
-	for _, entry := range m.report.Models {
-		if entry.Company != "anthropic" && entry.Company != "openai" && entry.Company != "google" {
-			continue
-		}
-		name := entry.Model
-		cmds = append(cmds, func() tea.Msg {
-			value, err := client.UsageModel(name, from, to, agents)
-			return modelDetailMsg{key: key, purpose: "company", seq: seq, value: value, err: err}
-		})
+	if client == nil {
+		return nil
 	}
-	m.companyPending = len(cmds)
-	m.companyLoading = len(cmds) > 0
-	return tea.Batch(cmds...)
+	today := dateString(startOfToday())
+	if !m.activityLoaded || m.activityLoadedDate != today {
+		m.activityLoaded = false
+		m.activityKey = ""
+		m.activityEpoch++
+		return m.ensureActivity()
+	}
+	agents := m.selectedAgents()
+	epoch := m.activityEpoch
+	return func() tea.Msg {
+		value, err := client.UsageDay(today, agents)
+		return activityTodayMsg{epoch: epoch, date: today, value: value, err: err}
+	}
 }
 
 func (m *model) ensureActivityDetail() tea.Cmd {
@@ -549,7 +520,7 @@ func (m *model) ensureActivityDetail() tea.Cmd {
 	m.activityDetail = nil
 	m.activityDetailError = ""
 	agents := m.selectedAgents()
-	epoch := m.epoch
+	epoch := m.activityEpoch
 	return func() tea.Msg {
 		value, err := client.UsageDay(date, agents)
 		return activityDayMsg{epoch: epoch, date: date, value: value, err: err}
@@ -655,9 +626,16 @@ func (m *model) statusPollCmd() tea.Cmd {
 	if client == nil {
 		return nil
 	}
+	pollTheme := m.configValue().Display.Theme == config.ThemeAuto && m.themeOverride < 0 && !hasExplicitTermBackground()
 	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
 		status, err := client.Status()
-		return statusMsg{status: status, err: err}
+		themeMode := -1
+		if pollTheme {
+			if mode, ok := detectSystemAppearance(); ok {
+				themeMode = mode
+			}
+		}
+		return statusMsg{status: status, err: err, themeMode: themeMode}
 	})
 }
 
@@ -713,7 +691,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case activityDayMsg:
-		if msg.epoch == m.epoch && msg.date == m.activitySel {
+		if msg.epoch == m.activityEpoch && msg.date == m.activitySel {
 			m.activityDetailLoad = false
 			if msg.err != nil {
 				m.activityDetail = nil
@@ -722,6 +700,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activityDetail = &msg.value
 				m.activityDetailError = ""
 			}
+		}
+		return m, nil
+	case activityTodayMsg:
+		if msg.epoch == m.activityEpoch && msg.err == nil && m.activityLoaded {
+			m.patchActivityDay(msg.date, msg.value)
 		}
 		return m, nil
 	case quotaViewMsg:
@@ -779,6 +762,9 @@ func newestFirst(records []keeper.ExecutionRecord) []keeper.ExecutionRecord {
 }
 
 func (m *model) handleStatus(msg statusMsg) (tea.Model, tea.Cmd) {
+	if msg.themeMode >= 0 && m.themeOverride < 0 && m.configValue().Display.Theme == config.ThemeAuto {
+		m.autoThemeMode = msg.themeMode
+	}
 	if msg.err != nil {
 		if m.client != nil && m.client.IsRemote() && !m.webBusy {
 			if lock, err := rt.AcquireLock(m.opts.DataDir); err == nil {
@@ -808,8 +794,8 @@ func (m *model) handleStatus(msg statusMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	if msg.status.ScannedAt != previous.ScannedAt {
 		m.refreshedAt = time.Now()
-		m.invalidateUsage()
-		cmds = append(cmds, m.currentTabCmd())
+		m.invalidateRangeUsage()
+		cmds = append(cmds, m.currentTabCmd(), m.refreshActivityTodayCmd())
 	}
 	if msg.status.FetchedAt != previous.FetchedAt {
 		cmds = append(cmds, m.fetchQuotaCmd())
@@ -821,8 +807,8 @@ func (m *model) handleStatus(msg statusMsg) (tea.Model, tea.Cmd) {
 func (m *model) handleEvent(ev rt.Event) tea.Cmd {
 	switch ev.Type {
 	case "usage_updated":
-		m.invalidateUsage()
-		return m.currentTabCmd()
+		m.invalidateRangeUsage()
+		return tea.Batch(m.currentTabCmd(), m.refreshActivityTodayCmd())
 	case "quota_updated":
 		return m.fetchQuotaCmd()
 	case "quota_recovered":
@@ -878,13 +864,13 @@ func (m *model) handleReport(msg reportMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	// Preload Activity in the background so switching to the Activity tab is instant.
+	if cmd := m.ensureActivity(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	switch m.tab {
-	case tabOverview:
-		cmds = append(cmds, m.ensureCompany())
 	case tabDaily:
 		cmds = append(cmds, m.ensurePrior())
-	case tabActivity:
-		cmds = append(cmds, m.ensureActivity())
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -903,7 +889,8 @@ func (m *model) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 	m.activity = msg.value
 	m.activityErr = ""
 	m.activityLoaded = true
-	today := dateString(startOfToday())
+	m.activityLoadedDate = dateString(startOfToday())
+	today := m.activityLoadedDate
 	hasToday := false
 	for _, day := range m.activity.Days {
 		if day.Date == today {
@@ -921,6 +908,28 @@ func (m *model) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 	return m, m.ensureActivityDetail()
 }
 
+func (m *model) patchActivityDay(date string, detail report.DayDetail) {
+	updated := report.DaySummary{Date: date, Totals: detail.Totals}
+	replaced := false
+	for i := range m.activity.Days {
+		if m.activity.Days[i].Date == date {
+			m.activity.Days[i] = updated
+			replaced = true
+			break
+		}
+	}
+	if !replaced && detail.Totals.Tokens > 0 {
+		m.activity.Days = append([]report.DaySummary{updated}, m.activity.Days...)
+	}
+	if m.activitySel == date {
+		copyDetail := detail
+		m.activityDetail = &copyDetail
+		m.activityDetailDate = date
+		m.activityDetailLoad = false
+		m.activityDetailError = ""
+	}
+}
+
 func activityDayExists(days []report.DaySummary, date string) bool {
 	for _, day := range days {
 		if day.Date == date {
@@ -931,24 +940,6 @@ func activityDayExists(days []report.DaySummary, date string) bool {
 }
 
 func (m *model) handleModelDetail(msg modelDetailMsg) (tea.Model, tea.Cmd) {
-	if msg.purpose == "company" {
-		if msg.key != m.rangeKey() || msg.seq != m.companySeq {
-			return m, nil
-		}
-		if msg.err != nil {
-			m.companyErr = true
-			m.setStatus("Company: "+msg.err.Error(), 2)
-		} else {
-			m.company.add(msg.value)
-		}
-		if m.companyKey == msg.key {
-			m.companyPending = max(m.companyPending-1, 0)
-			if m.companyPending == 0 {
-				m.companyLoading = false
-			}
-		}
-		return m, nil
-	}
 	if msg.purpose == "detail" {
 		if msg.key != m.rangeKey() || msg.seq != m.detailSeq {
 			return m, nil
@@ -974,8 +965,8 @@ func (m *model) handleRefresh(msg refreshMsg) tea.Cmd {
 	}
 	m.setToast("Refresh complete")
 	m.refreshedAt = time.Now()
-	m.invalidateUsage()
-	return tea.Batch(m.currentTabCmd(), m.fetchQuotaCmd())
+	m.invalidateRangeUsage()
+	return tea.Batch(m.currentTabCmd(), m.refreshActivityTodayCmd(), m.fetchQuotaCmd())
 }
 
 func (m *model) handleWebToggle(msg webToggleMsg) (tea.Model, tea.Cmd) {
@@ -1005,37 +996,37 @@ func (m *model) handleWebToggle(msg webToggleMsg) (tea.Model, tea.Cmd) {
 	)
 }
 
-func (m *model) invalidateUsage() {
+func (m *model) invalidateRangeUsage() {
 	m.reportErr = ""
 	m.reportLoaded = false
 	m.reportKey = ""
-	m.company = companyData{}
-	m.companyKey = ""
-	m.companyLoading = false
-	m.companyPending = 0
-	m.companyErr = false
-	m.companySeq++
 	m.epoch++
 	m.prior = report.Report{}
 	m.priorKey = ""
 	m.priorLoaded = false
 	m.priorLoading = false
-	m.activity = report.Report{}
-	m.activityKey = ""
-	m.activityLoaded = false
-	m.activityLoading = false
-	m.activityDetail = nil
-	m.activityDetailDate = ""
-	m.activityDetailLoad = false
 	m.modelDetail = nil
 	m.dayDetail = nil
 	m.detailSeq++
 }
 
+func (m *model) invalidateUsage() {
+	m.invalidateRangeUsage()
+	m.activityEpoch++
+	m.activity = report.Report{}
+	m.activityKey = ""
+	m.activityLoaded = false
+	m.activityLoading = false
+	m.activityLoadedDate = ""
+	m.activityDetail = nil
+	m.activityDetailDate = ""
+	m.activityDetailLoad = false
+}
+
 func (m *model) currentTabCmd() tea.Cmd {
 	switch m.tab {
 	case tabOverview:
-		return tea.Batch(m.ensureReport(), m.ensureCompany())
+		return m.ensureReport()
 	case tabModels:
 		return m.ensureReport()
 	case tabDaily:
@@ -1095,7 +1086,7 @@ func (m *model) selectPreset(index int) tea.Cmd {
 	m.preset = preset
 	m.basePreset = preset
 	m.from, m.to = "", ""
-	m.invalidateUsage()
+	m.invalidateRangeUsage()
 	return m.ensureReport()
 }
 
@@ -1130,7 +1121,7 @@ func (m *model) shiftRange(direction int) tea.Cmd {
 	m.preset = "custom"
 	m.from = dateString(newFrom)
 	m.to = dateString(newTo)
-	m.invalidateUsage()
+	m.invalidateRangeUsage()
 	return m.ensureReport()
 }
 
@@ -1141,7 +1132,7 @@ func (m *model) todayRange() tea.Cmd {
 	}
 	m.preset = preset
 	m.from, m.to = "", ""
-	m.invalidateUsage()
+	m.invalidateRangeUsage()
 	if m.tab == tabDaily {
 		m.dailyToToday = true
 	}
@@ -1178,7 +1169,7 @@ func (m *model) applyCustomRange() tea.Cmd {
 	m.preset = "custom"
 	m.from = dateString(from)
 	m.to = dateString(to)
-	m.invalidateUsage()
+	m.invalidateRangeUsage()
 	return m.ensureReport()
 }
 
@@ -1351,38 +1342,83 @@ func (m *model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+	if m.showHelp || m.filterOpen || m.customOpen {
 		return m, nil
 	}
-	if m.showHelp || m.filterOpen || m.customOpen {
+	if msg.Button == tea.MouseButtonWheelUp {
+		switch m.tab {
+		case tabActivity:
+			m.activityDetailOff = max(m.activityDetailOff-2, 0)
+		case tabKeeper:
+			m.keeperLogScroll = max(m.keeperLogScroll-2, 0)
+		}
+		return m, nil
+	}
+	if msg.Button == tea.MouseButtonWheelDown {
+		switch m.tab {
+		case tabActivity:
+			m.activityDetailOff += 2
+		case tabKeeper:
+			m.keeperLogScroll += 2
+		}
+		return m, nil
+	}
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
 	}
 	area := rect{x: 0, y: 0, w: m.frameWidth(), h: m.frameHeight()}
 	headerHeight := min(4, area.h)
 	tabsHeight := min(3, max(area.h-headerHeight, 0))
+	footerHeight := min(3, max(area.h-headerHeight-tabsHeight, 0))
+	bodyHeight := max(area.h-headerHeight-tabsHeight-footerHeight, 0)
 	tabs := rect{x: 0, y: headerHeight, w: area.w, h: tabsHeight}
-	if tabs.h <= 0 || msg.Y < tabs.y || msg.Y >= tabs.y+tabs.h {
-		return m, nil
-	}
-	inner := tabs.inner()
-	if msg.X < inner.x || msg.X >= inner.right() {
-		return m, nil
-	}
-	index := -1
-	for i, column := range splitH(inner, tabCount) {
-		if msg.X >= column.x && msg.X < column.right() {
-			index = i
-			break
+	body := rect{x: 0, y: headerHeight + tabsHeight, w: area.w, h: bodyHeight}
+
+	if tabs.h > 0 && msg.Y >= tabs.y && msg.Y < tabs.y+tabs.h {
+		inner := tabs.inner()
+		if msg.X < inner.x || msg.X >= inner.right() {
+			return m, nil
 		}
+		index := -1
+		for i, column := range splitH(inner, tabCount) {
+			if msg.X >= column.x && msg.X < column.right() {
+				index = i
+				break
+			}
+		}
+		if index < 0 || index >= tabCount || index == m.tab {
+			return m, nil
+		}
+		m.switchTab(index - m.tab)
+		return m, m.currentTabCmd()
 	}
-	if index < 0 || index >= tabCount {
+
+	if body.h <= 0 || msg.Y < body.y || msg.Y >= body.bottom() {
 		return m, nil
 	}
-	if index == m.tab {
+	if m.currentRangeTab() && msg.Y == body.y {
+		for _, box := range rangePresetHitboxes(body) {
+			if msg.X >= box.x0 && msg.X < box.x1 {
+				return m, m.selectPreset(box.index)
+			}
+		}
 		return m, nil
 	}
-	m.switchTab(index - m.tab)
-	return m, m.currentTabCmd()
+	if m.tab == tabActivity {
+		if date, ok := m.heatmapDateAt(body, msg.X, msg.Y); ok {
+			m.activitySel = date
+			m.activityDetailOff = 0
+			return m, m.ensureActivityDetail()
+		}
+		return m, nil
+	}
+	if m.tab == tabKeeper {
+		if idx, ok := keeperAgentAt(body, msg.X, msg.Y); ok {
+			m.keeperCursor = idx
+		}
+		return m, nil
+	}
+	return m, nil
 }
 
 func (m *model) recoveryTickCmd() tea.Cmd {

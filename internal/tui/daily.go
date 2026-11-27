@@ -47,7 +47,7 @@ func (m *model) drawDaily(c *canvas, area rect) {
 		cacheWidth = 10
 		cacheRHeader, cacheWHeader = "Cache R", "Cache W"
 	}
-	cacheColor := rgb(251, 146, 60)
+	cacheColor := theme.cacheColor
 
 	values := m.dailyValueMap()
 	dateWidth := 15
@@ -62,7 +62,7 @@ func (m *model) drawDaily(c *canvas, area rect) {
 	if showDetailCols {
 		c.setClip(x, inner.y, inner.right(), padLeft("Input", 10), boldStyle(theme.gemini))
 		x += 11
-		c.setClip(x, inner.y, inner.right(), padLeft("Output", 10), boldStyle(rgb(167, 139, 250)))
+		c.setClip(x, inner.y, inner.right(), padLeft("Output", 10), boldStyle(theme.outputColor))
 		x += 11
 		c.setClip(x, inner.y, inner.right(), padLeft(cacheRHeader, cacheWidth), boldStyle(cacheColor))
 		x += cacheWidth + 1
@@ -122,7 +122,7 @@ func (m *model) drawDaily(c *canvas, area rect) {
 		if showDetailCols {
 			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Input), 10), col(theme.gemini, false))
 			x += 11
-			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Output), 10), col(rgb(167, 139, 250), false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Output), 10), col(theme.outputColor, false))
 			x += 11
 			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.CacheRead), cacheWidth), col(cacheColor, false))
 			x += cacheWidth + 1

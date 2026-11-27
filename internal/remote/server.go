@@ -595,8 +595,11 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	value, err := s.Runtime.Usage(report.Params{
-		Preset: r.URL.Query().Get("preset"), From: r.URL.Query().Get("from"),
-		To: r.URL.Query().Get("to"), Agents: agents,
+		Preset:   r.URL.Query().Get("preset"),
+		From:     r.URL.Query().Get("from"),
+		To:       r.URL.Query().Get("to"),
+		Agents:   agents,
+		DaysOnly: r.URL.Query().Get("daysOnly") == "1",
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

@@ -42,23 +42,14 @@ func (m *model) drawOverview(c *canvas, area rect) {
 		return
 	}
 
-	unpriced := false
-	for _, entry := range m.report.Models {
-		if entry.Unpriced {
-			unpriced = true
-			break
-		}
-	}
-	kpiHeight := 2
-	if unpriced {
-		kpiHeight++
-	}
-	if body.h < 20 {
+	period := m.reportLoaded && m.report.Range.From != m.report.Range.To
+	kpiHeight := 1
+	if period && m.report.Comparison != nil {
 		kpiHeight = 2
 	}
 	kpiHeight = min(kpiHeight, body.h)
 	kpi := rect{x: body.x, y: body.y, w: body.w, h: kpiHeight}
-	m.drawOverviewKPI(c, kpi, unpriced)
+	m.drawOverviewKPI(c, kpi)
 	rest := rect{x: body.x, y: body.y + kpiHeight, w: body.w, h: body.h - kpiHeight}
 	if rest.h <= 0 {
 		return
@@ -82,7 +73,7 @@ func (m *model) drawOverview(c *canvas, area rect) {
 	}
 }
 
-func (m *model) drawOverviewKPI(c *canvas, area rect, unpriced bool) {
+func (m *model) drawOverviewKPI(c *canvas, area rect) {
 	theme := m.theme()
 	if area.h < 1 {
 		return
@@ -135,23 +126,10 @@ func (m *model) drawOverviewKPI(c *canvas, area rect, unpriced bool) {
 		c.set(x, y, change, boldStyle(percentDeltaColor(theme, current, &prior)))
 	}
 
-	if area.h >= 2 {
+	if area.h >= 2 && comparison != nil {
 		y++
-		x := area.x
-		if unpriced && area.h == 2 {
-			notice := "Some models have no pricing data available."
-			c.setClip(x, y, area.right(), notice, fgStyle(theme.gaugeMid))
-			x += len([]rune(notice)) + 2
-		}
-		if comparison != nil {
-			text := "vs " + comparison.From + " → " + comparison.To
-			c.setClip(x, y, area.right(), text, fgStyle(theme.dim))
-			x += len([]rune(text)) + 3
-		}
-		c.setClip(x, y, area.right(), "Est. API pricing (subscriptions not billed by API)", fgStyle(theme.dim))
-	}
-	if unpriced && area.h >= 3 {
-		c.setClip(area.x, area.y+2, area.right(), "Some models have no pricing data available.", fgStyle(theme.gaugeMid))
+		text := "vs " + comparison.From + " → " + comparison.To
+		c.setClip(area.x, y, area.right(), text, fgStyle(theme.dim))
 	}
 }
 
@@ -324,25 +302,20 @@ func (m *model) chartSeries(limit int) []chartDay {
 			total = summary.Cost
 		}
 		entry := chartDay{date: date, total: total}
-		if !m.company.empty() && !m.companyLoading && !m.companyErr {
-			var known float64
-			for _, company := range []string{"anthropic", "openai", "google"} {
-				var value float64
+		if len(summary.Companies) > 0 {
+			for _, company := range []string{"anthropic", "openai", "google", segmentOther} {
+				comp, ok := summary.Companies[company]
+				if !ok {
+					continue
+				}
+				value := float64(comp.Tokens)
 				if m.overviewMetric == metricCost {
-					value = m.company.cost[company][date]
-				} else {
-					value = float64(m.company.tokens[company][date])
+					value = comp.Cost
 				}
 				if value > 0 {
 					entry.segments = append(entry.segments, chartSegment{name: company, value: value})
-					known += value
 				}
 			}
-			others := total - known
-			if others < 0 {
-				others = 0
-			}
-			entry.segments = append(entry.segments, chartSegment{name: segmentOther, value: others})
 		}
 		out = append(out, entry)
 	}

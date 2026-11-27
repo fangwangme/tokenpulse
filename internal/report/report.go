@@ -34,9 +34,15 @@ type Totals struct {
 	Sessions   int64   `json:"sessions"`
 }
 
+type CompanyTotals struct {
+	Tokens int64   `json:"tokens"`
+	Cost   float64 `json:"cost"`
+}
+
 type DaySummary struct {
 	Totals
-	Date string `json:"date"`
+	Date      string                   `json:"date"`
+	Companies map[string]CompanyTotals `json:"companies,omitempty"`
 }
 
 type ModelSummary struct {
@@ -112,10 +118,11 @@ type ModelDetail struct {
 
 // Params is a report request.
 type Params struct {
-	Preset string
-	From   string
-	To     string
-	Agents []string
+	Preset   string
+	From     string
+	To       string
+	Agents   []string
+	DaysOnly bool
 }
 
 // Service answers reports from one ledger.
@@ -341,8 +348,8 @@ func (s *Service) Report(params Params) (Report, error) {
 		return Report{}, err
 	}
 	scannedAt := s.scannedAt()
-	key := fmt.Sprintf("%s|%s|%s|%s|%d|%s|%s", params.Preset, params.From, params.To,
-		strings.Join(agents, ","), scannedAt, formatDate(from), formatDate(to))
+	key := fmt.Sprintf("%s|%s|%s|%s|%d|%s|%s|%t", params.Preset, params.From, params.To,
+		strings.Join(agents, ","), scannedAt, formatDate(from), formatDate(to), params.DaysOnly)
 	if formatDate(to) == s.Now().In(time.Local).Format("2006-01-02") {
 		key += "|" + s.Now().In(time.Local).Format("15:04")
 	}
@@ -356,20 +363,31 @@ func (s *Service) Report(params Params) (Report, error) {
 		ScannedAt: scannedAt,
 		Layout:    layoutFor(from, to),
 	}
-	report.Totals, err = totalsFor(db, agents, from, to, nil)
-	if err != nil {
-		return Report{}, err
-	}
 	report.Days, err = daysFor(db, agents, from, to)
 	if err != nil {
 		return Report{}, err
 	}
-	report.Models, err = modelsFor(db, agents, from, to)
-	if err != nil {
-		return Report{}, err
+	if !params.DaysOnly {
+		report.Totals, err = totalsFor(db, agents, from, to, nil)
+		if err != nil {
+			return Report{}, err
+		}
+		companiesByDay, err := dayCompaniesFor(db, agents, from, to)
+		if err != nil {
+			return Report{}, err
+		}
+		for i := range report.Days {
+			if byCompany := companiesByDay[report.Days[i].Date]; len(byCompany) > 0 {
+				report.Days[i].Companies = byCompany
+			}
+		}
+		report.Models, err = modelsFor(db, agents, from, to)
+		if err != nil {
+			return Report{}, err
+		}
+		report.PricesAvailable = pricesAvailable(db)
+		report.Comparison = comparisonFor(db, agents, from, to, first, s.Now(), params.Preset)
 	}
-	report.PricesAvailable = pricesAvailable(db)
-	report.Comparison = comparisonFor(db, agents, from, to, first, s.Now(), params.Preset)
 	s.cachePut(key, report)
 	return report, nil
 }
@@ -476,6 +494,40 @@ func daysFor(db *sql.DB, agents []string, from, to time.Time) ([]DaySummary, err
 			return nil, err
 		}
 		out = append(out, day)
+	}
+	return out, rows.Err()
+}
+
+func dayCompaniesFor(db *sql.DB, agents []string, from, to time.Time) (map[string]map[string]CompanyTotals, error) {
+	query := `SELECT date, canonical_model_id, COALESCE(SUM(total_tokens),0), COALESCE(SUM(cost_usd),0)
+        FROM usage_messages WHERE date >= ? AND date <= ?`
+	args := []any{formatDate(from), formatDate(to)}
+	query, args = appendAgentFilter(query, args, agents)
+	query += " GROUP BY date, canonical_model_id"
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]map[string]CompanyTotals{}
+	for rows.Next() {
+		var date, model string
+		var tokens int64
+		var cost float64
+		if err := rows.Scan(&date, &model, &tokens, &cost); err != nil {
+			return nil, err
+		}
+		company := modelid.DetectProviderFromModel(model)
+		if company != "anthropic" && company != "openai" && company != "google" {
+			company = "other"
+		}
+		if out[date] == nil {
+			out[date] = map[string]CompanyTotals{}
+		}
+		cur := out[date][company]
+		cur.Tokens += tokens
+		cur.Cost += cost
+		out[date][company] = cur
 	}
 	return out, rows.Err()
 }

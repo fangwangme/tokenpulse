@@ -7,6 +7,24 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+type rangeHitbox struct {
+	index int
+	x0    int
+	x1    int
+}
+
+func rangePresetHitboxes(area rect) []rangeHitbox {
+	boxes := make([]rangeHitbox, 0, len(presets))
+	x := area.x
+	for index, preset := range presets {
+		label := fmt.Sprintf(" %d %s ", index+1, preset)
+		w := len([]rune(label))
+		boxes = append(boxes, rangeHitbox{index: index, x0: x, x1: x + w})
+		x += w + 1
+	}
+	return boxes
+}
+
 func (m *model) drawRangeBar(c *canvas, area rect) int {
 	if area.h <= 0 || area.w <= 0 {
 		return 0
@@ -16,15 +34,21 @@ func (m *model) drawRangeBar(c *canvas, area rect) int {
 	if m.currentRangeTab() {
 		x := area.x
 		for index, preset := range presets {
-			label := fmt.Sprintf("%d %s", index+1, preset)
-			style := fgStyle(theme.dim)
+			key := fmt.Sprintf("%d", index+1)
+			label := fmt.Sprintf(" %s %s ", key, preset)
+			w := len([]rune(label))
 			if preset == m.preset {
-				style = textStyle{fg: theme.onAccent, bg: theme.accent, bold: true}
-				label = " " + label + " "
-				c.fill(x, y, len([]rune(label)), 1, style)
+				style := textStyle{fg: theme.onAccent, bg: theme.accent, bold: true}
+				c.fill(x, y, w, 1, style)
+				c.set(x, y, label, style)
+			} else {
+				pillStyle := textStyle{fg: theme.fg, bg: theme.pillBg}
+				keyStyle := textStyle{fg: theme.accentSoft, bg: theme.pillBg, bold: true}
+				c.fill(x, y, w, 1, pillStyle)
+				c.set(x+1, y, key, keyStyle)
+				c.set(x+1+len(key), y, " "+preset, pillStyle)
 			}
-			c.set(x, y, label, style)
-			x += len([]rune(label)) + 2
+			x += w + 1
 		}
 		from, to := m.report.Range.From, m.report.Range.To
 		if !m.reportLoaded {
@@ -34,7 +58,7 @@ func (m *model) drawRangeBar(c *canvas, area rect) int {
 				from, to = "…", "…"
 			}
 		}
-		x += 2
+		x++
 		dates := from + " → " + to
 		c.set(x, y, dates, fgStyle(theme.fg))
 		x += len([]rune(dates))

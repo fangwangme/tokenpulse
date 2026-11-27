@@ -208,6 +208,9 @@ func (s *SocketClient) Usage(params report.Params) (report.Report, error) {
 	if len(params.Agents) > 0 {
 		q.Set("agents", strings.Join(apiAgentNames(params.Agents), ","))
 	}
+	if params.DaysOnly {
+		q.Set("daysOnly", "1")
+	}
 	var out report.Report
 	if err := s.Local.Get("/api/usage?"+q.Encode(), &out); err != nil {
 		return report.Report{}, err
