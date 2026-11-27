@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"context"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -387,23 +389,25 @@ func TestAutoThemeParsersAndLiveRefresh(t *testing.T) {
 	cfg := config.Default()
 	cfg.Display.Theme = config.ThemeAuto
 	m := newModel(Options{Config: cfg}, nil)
-	m.handleStatus(statusMsg{themeMode: 1})
-	if m.theme().mode != 0 {
-		t.Fatalf("first OS reading overrode the startup (dark) terminal theme")
-	}
-	m.handleStatus(statusMsg{themeMode: 0})
-	m.handleStatus(statusMsg{themeMode: 1})
+	m.handleTheme(themeMsg{mode: 1})
 	if m.theme().mode != 1 {
-		t.Fatalf("OS switch to light did not switch auto theme")
+		t.Fatalf("OS light did not switch auto theme")
 	}
-	// Manual override via 'b' stays pinned even if OS appearance poll arrives.
+	m.handleTheme(themeMsg{mode: 0})
+	if m.theme().mode != 0 {
+		t.Fatalf("OS dark did not switch auto theme")
+	}
+	m.handleTheme(themeMsg{mode: 1})
+	if m.theme().mode != 1 {
+		t.Fatalf("OS switch back to light did not switch auto theme")
+	}
 	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
 	if m.theme().mode != 0 {
 		t.Fatalf("manual 'b' toggle did not flip to dark")
 	}
-	m.handleStatus(statusMsg{themeMode: 1})
+	m.handleTheme(themeMsg{mode: 1})
 	if m.theme().mode != 0 {
-		t.Fatalf("statusMsg overwrote manual 'b' theme override")
+		t.Fatalf("themeMsg overwrote manual 'b' theme override")
 	}
 }
 
@@ -489,5 +493,96 @@ func TestOverviewSmallNonZeroBarRenders(t *testing.T) {
 	out := strings.Join(h.screen(), "\n")
 	if !strings.Contains(out, "▁") {
 		t.Fatalf("tiny non-zero day did not render a 1/8 block:\n%s", out)
+	}
+}
+
+func TestTableRowsAndScrollHint(t *testing.T) {
+	if visible, show := tableRows(5, 10); visible != 10 || show {
+		t.Fatalf("tableRows(5, 10) = (%d, %v), want (10, false)", visible, show)
+	}
+	if visible, show := tableRows(10, 10); visible != 10 || show {
+		t.Fatalf("tableRows(10, 10) = (%d, %v), want (10, false)", visible, show)
+	}
+	if visible, show := tableRows(11, 10); visible != 9 || !show {
+		t.Fatalf("tableRows(11, 10) = (%d, %v), want (9, true)", visible, show)
+	}
+	if visible, show := tableRows(11, 1); visible != 1 || show {
+		t.Fatalf("tableRows(11, 1) = (%d, %v), want (1, false)", visible, show)
+	}
+	if got := scrollHint(0, 5, 5); got != "" {
+		t.Fatalf("scrollHint when all rows fit = %q, want empty", got)
+	}
+	if got := scrollHint(0, 0, 5); got != "" {
+		t.Fatalf("scrollHint with visible=0 = %q, want empty", got)
+	}
+	if got := scrollHint(0, 9, 11); !strings.Contains(got, "↓ scroll 1-9 / 11") {
+		t.Fatalf("scrollHint overflow = %q, want down scroll hint", got)
+	}
+}
+
+func TestActivityLegendClickToggleAndRightBorderClip(t *testing.T) {
+	now := today()
+	h := startTUI(t, newLedger(t, []ledgerRow{
+		{date: now.AddDate(0, 0, -2), model: "claude-sonnet-4-5", tokens: 200_000_000, cost: 20},
+		{date: now, model: "claude-sonnet-4-5", tokens: 500_000_000, cost: 50},
+	}))
+	m := h.m.(*model)
+	m.switchTab(tabActivity - m.tab)
+	h.run(m.currentTabCmd())
+	h.send(tea.WindowSizeMsg{Width: 80, Height: 40})
+
+	body := rect{x: 0, y: 7, w: 80, h: 30}
+	inner := activityHeatArea(body).inner()
+	_, _, fromText, toText, ok := m.heatmapBounds()
+	if !ok {
+		t.Fatal("heatmapBounds returned false")
+	}
+	_, legendX, footerY, ok := heatmapFooterLayout(inner, fromText, toText)
+	if !ok {
+		t.Fatal("heatmapFooterLayout returned false at 80x40")
+	}
+
+	clickX := legendX + 4*2
+	h.send(tea.MouseMsg{X: clickX, Y: footerY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if m.activityLegend != 4 {
+		t.Fatalf("activityLegend = %d, want 4", m.activityLegend)
+	}
+	lines := h.screen()
+	if footerY >= len(lines) {
+		t.Fatalf("footerY=%d out of range (%d lines)", footerY, len(lines))
+	}
+	footerRunes := []rune(lines[footerY])
+	if got := footerRunes[len(footerRunes)-1]; got != '│' {
+		t.Fatalf("legend label overwrote right border: line=%q", lines[footerY])
+	}
+	if !strings.Contains(lines[footerY], "Level 5: 400.00 M - 500.00 M") {
+		t.Fatalf("80-col footer truncated full legend range: line=%q", lines[footerY])
+	}
+
+	h.send(tea.MouseMsg{X: clickX, Y: footerY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if m.activityLegend != -1 {
+		t.Fatalf("second click did not clear activityLegend, got %d", m.activityLegend)
+	}
+
+	h.send(tea.MouseMsg{X: clickX, Y: footerY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	h.key("c")
+	if m.activityLegend != -1 {
+		t.Fatalf("pressing 'c' did not clear activityLegend, got %d", m.activityLegend)
+	}
+}
+
+func TestParseDarwinAppearance(t *testing.T) {
+	if mode, ok := parseDarwinAppearance([]byte("Dark\n"), nil, nil); !ok || mode != 0 {
+		t.Fatalf("Dark = (%d, %v), want (0, true)", mode, ok)
+	}
+	missing := &exec.ExitError{Stderr: []byte("The domain/default pair of (kCFPreferencesAnyApplication, AppleInterfaceStyle) does not exist\n")}
+	if mode, ok := parseDarwinAppearance(nil, missing, nil); !ok || mode != 1 {
+		t.Fatalf("missing key = (%d, %v), want (1, true)", mode, ok)
+	}
+	if _, ok := parseDarwinAppearance(nil, errors.New("exec failed"), nil); ok {
+		t.Fatal("exec failure should return ok=false")
+	}
+	if _, ok := parseDarwinAppearance(nil, missing, context.DeadlineExceeded); ok {
+		t.Fatal("timeout should return ok=false")
 	}
 }

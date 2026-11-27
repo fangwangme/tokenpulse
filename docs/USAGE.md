@@ -87,8 +87,8 @@ clicking a tab):
 
 - **Overview** — KPI row (cost, tokens, sessions, comparison deltas and the
   comparison dates), stacked daily bar chart split by company (`Anthropic`,
-  `OpenAI`, `Google`, `Others`) that fills the chart width, and Top Models
-  table (`Enter` opens model detail).
+  `OpenAI`, `Google`, `Others`) with fixed-width bars that show the newest days
+  that fit, and Top Models table (`Enter` opens model detail).
 - **Models** — full sortable model breakdown (`Tokens`, `Cost`, `Input`,
   `Output`, `Cache R`, `Cache W`, `Hit %`, `%`, `Msgs`, `Last`); `Enter` opens
   model detail.
@@ -128,7 +128,7 @@ clickable) and the global agent filter (`s`).
 | Overview | `t` / `c`, `Enter` | Switch chart & top models to tokens / cost; open selected model detail |
 | Models | `c` / `t` / `d`, `Enter` | Sort by cost / tokens / last used (repeat to reverse); open model detail |
 | Daily | `c` / `t` / `d`, `v`, `Enter` | Sort by cost / tokens / date; toggle vs-7d metric; open day detail |
-| Activity | `↑` / `↓` (`j`/`k`), `n`, `t` / `c`, `[` / `]` | Move selected day; jump to today; tokens/cost heatmap; scroll day detail |
+| Activity | `↑` / `↓` (`j`/`k`), `n`, `t` / `c` | Move selected day; jump to today; tokens/cost heatmap |
 | Keeper | `↑` / `↓` / `Tab`, `1` / `d`, `2` / `w`, `p`, `e` | Select agent card; toggle 5h / weekly keeper; manual ping; toggle engine |
 | Settings | `↑` / `↓` (`j`/`k`), `Space` / `Enter`, `J` / `K` | Move selection; cycle/toggle setting; reorder quota provider down / up |
 
@@ -202,10 +202,10 @@ tokenpulse config set quota_provider_order=opencode,claude,codex,antigravity
 # Quota display mode: "remaining" (default) or "used"
 tokenpulse config set quota_display_mode=used
 
-# Theme: auto, dark, light
-# "auto" picks TOKENPULSE_THEME, then the terminal background at startup, then
-# COLORFGBG / TERM_BACKGROUND, then the OS appearance (Linux portal/gsettings,
-# macOS), and follows later OS light/dark switches while the TUI runs.
+# Theme: auto (default), dark, light
+# "auto" checks TOKENPULSE_THEME, COLORFGBG, TERM_BACKGROUND, OS appearance
+# (Linux portal/gsettings, macOS), and finally the terminal background at
+# startup; OS light/dark switches are picked up on refresh.
 tokenpulse config set theme=dark
 
 # Auto-refresh interval in minutes for quota + usage (0, 1, 2, 5, 10, 15; 0 = disabled)

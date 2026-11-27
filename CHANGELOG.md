@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-11-27
+
+### Added
+- **Activity legend level ranges**: left-clicking a legend block shows `Level N: <low> - <high>` in the heatmap footer for tokens or cost; clicking it again or pressing `t` / `c` clears it.
+
+### Changed
+- **Fixed-width Overview chart bars**: 2, 3, or 4 columns by chart width (`<80` / `80–139` / `140+`), solid with no gap and centred; longer ranges draw the newest days that fit, and the title counts the drawn days.
+- **Activity key hints**: `[` / `]` no longer scroll selected-day details (use the mouse wheel instead), and the help line reads `↑↓ select` like the other pages.
+- **Auto theme prefers OS appearance**: OS appearance now takes precedence over OSC 11 terminal queries so a dark chrome reply cannot override a light desktop, and OS switches are picked up on refresh instead of a 3-second timer; `TOKENPULSE_THEME`, `COLORFGBG`, and `TERM_BACKGROUND` still take precedence.
+
+### Fixed
+- **No `N models` footer**: Models and Overview Top Models omit the footer when every row fits; the `↑`/`↓` scroll hint still appears when rows overflow.
+
 ## [0.8.1] - 2026-11-27
 
 ### Added

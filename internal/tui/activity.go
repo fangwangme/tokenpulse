@@ -12,6 +12,8 @@ import (
 	"github.com/fangwangme/tokenpulse/internal/report"
 )
 
+const heatmapLegendBlocks = 5
+
 type styledSpan struct {
 	text  string
 	style textStyle
@@ -37,12 +39,8 @@ func (m *model) drawActivity(c *canvas, area rect) {
 	if body.h <= 0 {
 		return
 	}
-	heatHeight := min(12, max(body.h/2, 9))
-	if heatHeight > body.h {
-		heatHeight = body.h
-	}
-	heat := rect{x: body.x, y: body.y, w: body.w, h: heatHeight}
-	info := rect{x: body.x, y: body.y + heatHeight, w: body.w, h: body.h - heatHeight}
+	heat := heatmapCardArea(body)
+	info := rect{x: body.x, y: body.y + heat.h, w: body.w, h: body.h - heat.h}
 	m.drawHeatmap(c, heat)
 	if info.h <= 0 {
 		return
@@ -75,17 +73,23 @@ func (m *model) heatmapBounds() (time.Time, time.Time, string, string, bool) {
 	return from, to, fromText, toText, true
 }
 
+func heatmapCardArea(body rect) rect {
+	height := min(12, max(body.h/2, 9))
+	if height > body.h {
+		height = body.h
+	}
+	return rect{x: body.x, y: body.y, w: body.w, h: height}
+}
+
+func activityHeatArea(bodyArea rect) rect {
+	return heatmapCardArea(rect{x: bodyArea.x, y: bodyArea.y + 1, w: bodyArea.w, h: bodyArea.h - 1})
+}
+
 func (m *model) heatmapDateAt(bodyArea rect, col, row int) (string, bool) {
 	if bodyArea.h <= 1 || bodyArea.w <= 0 {
 		return "", false
 	}
-	// Activity range bar is always 1 line.
-	body := rect{x: bodyArea.x, y: bodyArea.y + 1, w: bodyArea.w, h: bodyArea.h - 1}
-	heatHeight := min(12, max(body.h/2, 9))
-	if heatHeight > body.h {
-		heatHeight = body.h
-	}
-	inner := rect{x: body.x, y: body.y, w: body.w, h: heatHeight}.inner()
+	inner := activityHeatArea(bodyArea).inner()
 	if inner.h < 7 || inner.w < 7 {
 		return "", false
 	}
@@ -228,20 +232,81 @@ func (m *model) drawHeatmap(c *canvas, area rect) {
 		}
 	}
 
-	footerY := inner.y + inner.h - 1
-	if footerY > gridY+7 {
-		x := inner.x
-		text := fmt.Sprintf("Date Range  %s → %s    ", fromText, toText)
-		c.set(x, footerY, text, fgStyle(theme.dim))
-		x += len([]rune(text))
-		c.set(x, footerY, "low ", fgStyle(theme.dim))
-		x += 4
+	if text, legendX, footerY, ok := heatmapFooterLayout(inner, fromText, toText); ok {
+		c.setClip(inner.x, footerY, inner.right(), text, fgStyle(theme.dim))
+		x := legendX
 		for _, color := range palette {
-			c.set(x, footerY, "██", textStyle{fg: color, bg: theme.heatmapBg})
+			c.setClip(x, footerY, inner.right(), "██", textStyle{fg: color, bg: theme.heatmapBg})
 			x += 2
 		}
-		c.set(x, footerY, " high", fgStyle(theme.dim))
+		c.setClip(x, footerY, inner.right(), " high", fgStyle(theme.dim))
+		x += len(" high")
+		if m.activityLegend >= 0 && m.activityLegend < heatmapLegendBlocks {
+			low, high := activityLegendRange(m.activityLegend, maxValue, thresholds)
+			gap := "    "
+			if inner.w < 92 {
+				gap = "  "
+			}
+			label := fmt.Sprintf("%sLevel %d: %s - %s", gap, m.activityLegend+1,
+				formatHeatmapValue(low, m.activityMetric), formatHeatmapValue(high, m.activityMetric))
+			c.setClip(x, footerY, inner.right(), label, boldStyle(theme.accent))
+		}
 	}
+}
+
+func heatmapFooterLayout(inner rect, fromText, toText string) (text string, legendX, y int, ok bool) {
+	y = inner.y + inner.h - 1
+	gridY := inner.y
+	if inner.h >= 9 {
+		gridY = inner.y + 1
+	}
+	if y <= gridY+7 {
+		return "", 0, 0, false
+	}
+	if inner.w < 92 {
+		text = fmt.Sprintf("%s → %s  low ", fromText, toText)
+	} else {
+		text = fmt.Sprintf("Date Range  %s → %s    low ", fromText, toText)
+	}
+	return text, inner.x + len([]rune(text)), y, true
+}
+
+func activityLegendRange(level int, maxValue float64, thresholds [4]float64) (float64, float64) {
+	low := 0.0
+	if level > 0 {
+		low = thresholds[level-1]
+	}
+	high := maxValue
+	if level < len(thresholds) {
+		high = thresholds[level]
+	}
+	return low, high
+}
+
+func formatHeatmapValue(value float64, metric int) string {
+	if metric == metricCost {
+		return formatCost(value)
+	}
+	return formatCompact(int64(math.Round(value)))
+}
+
+func (m *model) heatmapLegendAt(bodyArea rect, col, row int) (int, bool) {
+	if bodyArea.h <= 1 || bodyArea.w <= 0 || m.activityErr != "" {
+		return 0, false
+	}
+	inner := activityHeatArea(bodyArea).inner()
+	if inner.h < 7 || inner.w < 7 {
+		return 0, false
+	}
+	_, _, fromText, toText, ok := m.heatmapBounds()
+	if !ok {
+		return 0, false
+	}
+	_, legendX, footerY, ok := heatmapFooterLayout(inner, fromText, toText)
+	if !ok || row != footerY || col < legendX || col >= min(legendX+heatmapLegendBlocks*2, inner.right()) {
+		return 0, false
+	}
+	return (col - legendX) / 2, true
 }
 
 func emptyHeatColor(value, maxValue float64, thresholds [4]float64, palette [5]lipgloss.Color, theme tuiTheme) lipgloss.Color {
@@ -629,8 +694,10 @@ func (m *model) handleActivityKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "t":
 		m.activityMetric = metricTokens
+		m.activityLegend = -1
 	case "c":
 		m.activityMetric = metricCost
+		m.activityLegend = -1
 	case "up", "k":
 		// m.activity.Days is newest-first; earlier dates sit higher on the heatmap.
 		m.moveActivitySelection(1)
@@ -641,12 +708,6 @@ func (m *model) handleActivityKey(key string) (tea.Model, tea.Cmd) {
 	case "n":
 		m.activitySel = dateString(startOfToday())
 		return m, m.ensureActivityDetail()
-	case "[":
-		if m.activityDetailOff > 0 {
-			m.activityDetailOff--
-		}
-	case "]":
-		m.activityDetailOff++
 	}
 	return m, nil
 }

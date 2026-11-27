@@ -207,7 +207,7 @@ func (m *model) drawModels(c *canvas, area rect) {
 		c.setClip(x, inner.y, inner.right(), padLeft("Last"+sortIndicator(m.sortField == sortDate, m.sortAsc), lastWidth), headerStyle(m.sortField == sortDate))
 	}
 
-	visible := max(inner.h-2, 0)
+	visible, showHint := tableRows(len(models), max(inner.h-1, 0))
 	selected := clampInt(m.modelsSel, 0, len(models)-1)
 	offset := normalizeScroll(m.modelsOff, selected, visible, len(models))
 	m.modelsOff = offset
@@ -261,11 +261,12 @@ func (m *model) drawModels(c *canvas, area rect) {
 			c.setClip(x, y, inner.right(), padLeft(last, lastWidth), col(theme.dim, selectedRow))
 		}
 	}
-	hint := scrollHint(offset, visible, len(models))
-	drawn := min(visible, max(len(models)-offset, 0))
-	hintY := inner.y + 1 + drawn
-	if hintY < inner.bottom() {
-		c.set(inner.x, hintY, truncate(hint, inner.w), fgStyle(theme.dim))
+	if showHint {
+		drawn := min(visible, max(len(models)-offset, 0))
+		hintY := inner.y + 1 + drawn
+		if hintY < inner.bottom() {
+			c.set(inner.x, hintY, truncate(scrollHint(offset, visible, len(models)), inner.w), fgStyle(theme.dim))
+		}
 	}
 }
 

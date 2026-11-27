@@ -38,12 +38,12 @@ Theme, table layout and truncation follow `tui-theme.md` and
    its own second line (`usage-report.md` "Comparison"); a single day shows
    none (1-line KPI). The TUI omits the API-pricing estimate and unpriced-model
    disclaimer lines.
-2. **Chart** — the 0.6.16 stacked daily bar chart over the range's days, the
-   newest that fit when the range has more days than the width holds. Each day
-   gets an equal share of the chart width (a share of three or more columns
-   keeps one blank column between bars), with 0.6.16's axis and date ticks. Its title is
-   `Token Usage (N days)` or `Cost Usage (N days)`; `t` and `c` choose the
-   metric.
+2. **Chart** — the 0.6.16 stacked daily bar chart over the range's days, with
+   0.6.16's axis and date ticks. Bars use a fixed width based on chart width
+   (2 columns below 80, 3 for 80–139, 4 from 140), solid with no gap, and
+   centred. Longer ranges draw the newest days that fit rather than thinning
+   bars. Its title is `Token Usage (N days)` or `Cost Usage (N days)`, where N
+   is the number of days drawn; `t` and `c` switch the metric.
    - Each bar is split by company directly from `Report.Days[].Companies`
      (`anthropic`, `openai`, `google`, `other`) returned in the single report
      request, so the chart renders in full company colors on the first frame
@@ -59,6 +59,8 @@ Theme, table layout and truncation follow `tui-theme.md` and
 - The 0.6.16 table with the columns of `tui-table-layout.md`. `c`, `t` and `d`
   sort by cost, tokens and last used; pressing the active key again reverses
   the order.
+- Models and Overview Top models show no footer when every row fits; when rows
+  overflow, the footer shows the `↑`/`↓` scroll hint.
 - `Enter` opens the model detail: the model in its company color,
   `company · range`, totals, last used, per-agent tokens and cost, and in a
   period the per-day bars. `Esc` closes it.
@@ -84,14 +86,20 @@ Theme, table layout and truncation follow `tui-theme.md` and
   earlier, and never before the first data day. It ignores the range.
 - The 0.6.16 Monday-start year heatmap with active days, current and longest
   streak and the legend; `t` and `c` choose the metric.
+- **Legend levels** — left-clicking one of the five legend blocks shows
+  `Level N: <low> - <high>` in the heatmap footer in the current metric
+  (thresholds at 20/40/60/80% of the window's maximum, as in 0.6.16; level 1
+  starts at 0 and level 5 ends at the maximum). Cells are not highlighted.
+  Clicking the active block again, or pressing `t` / `c`, clears the label.
 - **Period overview** — tokens and cost for `Today`, `Week` (Monday of this
   week through today), `Last 7 days` (today − 6 through today), `Month`
   (calendar month to date), `Last 30 days` (today − 29 through today), `Year`
   (calendar year to date), `Total`, `Average`, and `Max`. A short card drops
   the rolling rows first.
-- **Selected day** — `↑`/`↓`/`j`/`k` move the selected day, `n` selects today,
-  `[`/`]` or mouse wheel scroll its details, and left-clicking a heatmap cell
-  selects that date. Activity uses the same calm palette as Models, Daily and
+- **Selected day** — `↑`/`↓`/`j`/`k` move the selected day (`↑` is the
+  earlier day), `n` selects today, the mouse wheel scrolls its details, and
+  left-clicking a heatmap cell selects that date. The help line reads
+  `↑↓ select` like the other pages. Activity uses the same calm palette as Models, Daily and
   Overview: dim labels and column headers, values in the foreground color,
   costs in the cost color, and color identity only on model names (company
   color). `Agent / Model Cost` shows each agent in bold with its cost and total

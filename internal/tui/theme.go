@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -204,29 +205,30 @@ func hasExplicitTermBackground() bool {
 	return v == "light" || v == "dark"
 }
 
-func detectAutoThemeMode() int {
+func detectThemePreference() (int, bool) {
 	if mode, ok := detectEnvThemeOverride(); ok {
-		return mode
+		return mode, true
 	}
 	if mode, ok := parseColorFGBG(os.Getenv("COLORFGBG")); ok {
-		return mode
+		return mode, true
 	}
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("TERM_BACKGROUND"))); v == "light" {
-		return 1
+		return 1, true
 	} else if v == "dark" {
-		return 0
+		return 0, true
 	}
-	if mode, ok := detectSystemAppearance(); ok {
+	return detectSystemAppearance()
+}
+
+func detectAutoThemeMode() int {
+	if mode, ok := detectThemePreference(); ok {
 		return mode
 	}
 	return 0
 }
 
-// detectStartupThemeMode runs once before Bubble Tea takes over stdin so it
-// can query the terminal background safely via lipgloss (OSC 11) when attached
-// to a TTY.
 func detectStartupThemeMode() int {
-	if mode, ok := detectEnvThemeOverride(); ok {
+	if mode, ok := detectThemePreference(); ok {
 		return mode
 	}
 	if isTerminal(os.Stdin) && isTerminal(os.Stdout) {
@@ -235,7 +237,7 @@ func detectStartupThemeMode() int {
 		}
 		return 1
 	}
-	return detectAutoThemeMode()
+	return 0
 }
 
 func isTerminal(f *os.File) bool {
@@ -286,6 +288,23 @@ func parseGsettingsColorScheme(stdout string) (int, bool) {
 	}
 }
 
+func parseDarwinAppearance(stdout []byte, err error, ctxErr error) (int, bool) {
+	if ctxErr != nil {
+		return 0, false
+	}
+	if err == nil {
+		if strings.EqualFold(strings.TrimSpace(string(stdout)), "dark") {
+			return 0, true
+		}
+		return 1, true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && strings.Contains(strings.ToLower(string(exitErr.Stderr)), "does not exist") {
+		return 1, true
+	}
+	return 0, false
+}
+
 // detectSystemAppearance queries the OS appearance without touching stdin,
 // making it safe to call periodically while Bubble Tea owns the terminal.
 func detectSystemAppearance() (int, bool) {
@@ -294,10 +313,7 @@ func detectSystemAppearance() (int, bool) {
 	switch runtime.GOOS {
 	case "darwin":
 		out, err := exec.CommandContext(ctx, "defaults", "read", "-g", "AppleInterfaceStyle").Output()
-		if err == nil && strings.EqualFold(strings.TrimSpace(string(out)), "dark") {
-			return 0, true
-		}
-		return 1, true
+		return parseDarwinAppearance(out, err, ctx.Err())
 	case "linux":
 		out, err := exec.CommandContext(ctx, "busctl", "--user", "--timeout=1", "call",
 			"org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",

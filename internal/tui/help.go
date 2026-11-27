@@ -52,7 +52,6 @@ func (m *model) helpBindings() []keyHelp {
 			keyHelp{"↑↓ / j k", "move the selected day"},
 			keyHelp{"n", "select today"},
 			keyHelp{"t / c", "heatmap metric tokens / cost"},
-			keyHelp{"[ / ]", "scroll the selected day details"},
 		)
 	case tabKeeper:
 		bindings = append(bindings,
