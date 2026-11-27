@@ -1723,13 +1723,13 @@ func (m *model) drawFooter(c *canvas, area rect) {
 func (m *model) helpLine() string {
 	switch m.tab {
 	case tabOverview:
-		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  t/c metric (%s)  s filter  ? help", metricLabel(m.overviewMetric))
+		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  ↵ detail  t/c metric (%s)  s filter  ? help", metricLabel(m.overviewMetric))
 	case tabModels:
-		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  c/t/d sort (%s %s)  s filter  ? help", sortLabel(m.sortField), sortDirection(m.sortAsc))
+		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  ↵ detail  c/t/d sort (%s %s)  s filter  ? help", sortLabel(m.sortField), sortDirection(m.sortAsc))
 	case tabDaily:
-		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  n today  c/t/d sort (%s %s)  v metric (%s)  s filter  ? help", sortLabel(m.sortField), sortDirection(m.sortAsc), metricLabel(m.dailyMetric))
+		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  ↵ detail  n today  c/t/d sort (%s %s)  v metric (%s)  s filter  ? help", sortLabel(m.sortField), sortDirection(m.sortAsc), metricLabel(m.dailyMetric))
 	case tabActivity:
-		return fmt.Sprintf(" q quit  r refresh  ←→ tab  n today  [/] detail  t/c metric (%s)  s filter  ? help", metricLabel(m.activityMetric))
+		return fmt.Sprintf(" q quit  r refresh  ←→ tab  n today  [/] scroll  t/c metric (%s)  s filter  ? help", metricLabel(m.activityMetric))
 	case tabQuota:
 		return " q quit  r refresh  ←→ tab  ? help"
 	case tabKeeper:
