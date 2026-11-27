@@ -67,6 +67,13 @@ socket (`● web`) and stays in sync with the phone; otherwise it runs an
 in-process runtime (`● local`). Pass `--since YYYY-MM-DD` to open on a custom
 range from that date to today, or `--no-scan` to read only the cached ledger.
 
+<p>
+  <img src="images/tui-overview.png" width="728" alt="TokenPulse TUI Overview with model detail popup">
+</p>
+<p>
+  <img src="images/tui-quota.png" width="728" alt="TokenPulse TUI Quota provider cards">
+</p>
+
 ### Tabs
 
 The TUI has seven tabs (switch with `←`/`→`, `h`/`l`, `Tab`/`Shift+Tab`, or by
