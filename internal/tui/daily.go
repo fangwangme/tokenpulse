@@ -47,29 +47,33 @@ func (m *model) drawDaily(c *canvas, area rect) {
 		cacheWidth = 10
 		cacheRHeader, cacheWHeader = "Cache R", "Cache W"
 	}
-	cacheColor := theme.cacheColor
-
 	values := m.dailyValueMap()
 	dateWidth := 15
 	wowWidth := 11
+	headerStyle := func(active bool) textStyle {
+		if active {
+			return boldStyle(theme.accent)
+		}
+		return boldStyle(theme.dim)
+	}
 	x := inner.x
-	c.setClip(x, inner.y, inner.right(), padRight("Date"+sortIndicator(m.sortField == sortDate, m.sortAsc), dateWidth), boldStyle(theme.accentSoft))
+	c.setClip(x, inner.y, inner.right(), padRight("Date"+sortIndicator(m.sortField == sortDate, m.sortAsc), dateWidth), headerStyle(m.sortField == sortDate))
 	x += dateWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft("Tokens"+sortIndicator(m.sortField == sortTokens, m.sortAsc), 10), boldStyle(theme.codex))
+	c.setClip(x, inner.y, inner.right(), padLeft("Tokens"+sortIndicator(m.sortField == sortTokens, m.sortAsc), 10), headerStyle(m.sortField == sortTokens))
 	x += 11
-	c.setClip(x, inner.y, inner.right(), padLeft("Cost"+sortIndicator(m.sortField == sortCost, m.sortAsc), 10), boldStyle(theme.gaugeMid))
+	c.setClip(x, inner.y, inner.right(), padLeft("Cost"+sortIndicator(m.sortField == sortCost, m.sortAsc), 10), headerStyle(m.sortField == sortCost))
 	x += 11
 	if showDetailCols {
-		c.setClip(x, inner.y, inner.right(), padLeft("Input", 10), boldStyle(theme.gemini))
+		c.setClip(x, inner.y, inner.right(), padLeft("Input", 10), boldStyle(theme.dim))
 		x += 11
-		c.setClip(x, inner.y, inner.right(), padLeft("Output", 10), boldStyle(theme.outputColor))
+		c.setClip(x, inner.y, inner.right(), padLeft("Output", 10), boldStyle(theme.dim))
 		x += 11
-		c.setClip(x, inner.y, inner.right(), padLeft(cacheRHeader, cacheWidth), boldStyle(cacheColor))
+		c.setClip(x, inner.y, inner.right(), padLeft(cacheRHeader, cacheWidth), boldStyle(theme.dim))
 		x += cacheWidth + 1
-		c.setClip(x, inner.y, inner.right(), padLeft(cacheWHeader, cacheWidth), boldStyle(cacheColor))
+		c.setClip(x, inner.y, inner.right(), padLeft(cacheWHeader, cacheWidth), boldStyle(theme.dim))
 		x += cacheWidth + 1
 	}
-	c.setClip(x, inner.y, inner.right(), padLeft("Msgs", 8), boldStyle(theme.gemini))
+	c.setClip(x, inner.y, inner.right(), padLeft("Msgs", 8), boldStyle(theme.dim))
 	x += 9
 	if showWow {
 		header := "Token vs 7d"
@@ -113,23 +117,23 @@ func (m *model) drawDaily(c *canvas, area rect) {
 			}
 		}
 		x = inner.x
-		c.setClip(x, y, inner.right(), padRight(dateText, dateWidth), col(theme.accentSoft, isToday))
+		c.setClip(x, y, inner.right(), padRight(dateText, dateWidth), col(theme.fg, isToday || selectedRow))
 		x += dateWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Tokens), 10), col(theme.codex, false))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Tokens), 10), col(theme.fg, selectedRow || m.sortField == sortTokens))
 		x += 11
-		c.setClip(x, y, inner.right(), padLeft(formatCost(day.Cost), 10), col(theme.gaugeMid, false))
+		c.setClip(x, y, inner.right(), padLeft(formatCost(day.Cost), 10), col(theme.costColor, selectedRow || m.sortField == sortCost))
 		x += 11
 		if showDetailCols {
-			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Input), 10), col(theme.gemini, false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Input), 10), col(theme.fg, selectedRow))
 			x += 11
-			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Output), 10), col(theme.outputColor, false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Output), 10), col(theme.fg, selectedRow))
 			x += 11
-			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.CacheRead), cacheWidth), col(cacheColor, false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.CacheRead), cacheWidth), col(theme.fg, selectedRow))
 			x += cacheWidth + 1
-			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.CacheWrite), cacheWidth), col(cacheColor, false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.CacheWrite), cacheWidth), col(theme.fg, selectedRow))
 			x += cacheWidth + 1
 		}
-		c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Messages), 8), col(theme.gemini, false))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Messages), 8), col(theme.dim, selectedRow))
 		x += 9
 		if showWow {
 			priorDate := ""

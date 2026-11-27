@@ -89,7 +89,7 @@ func (m *model) drawOverviewKPI(c *canvas, area rect) {
 	c.set(x, y, "Cost ", fgStyle(theme.dim))
 	x += len("Cost ")
 	cost := formatCost(m.report.Totals.Cost)
-	c.set(x, y, cost, boldStyle(theme.gaugeMid))
+	c.set(x, y, cost, boldStyle(theme.costColor))
 	x += len([]rune(cost))
 	if comparison != nil {
 		prior := comparison.Totals.Cost
@@ -494,15 +494,15 @@ func (m *model) drawTopModels(c *canvas, area rect) {
 	shareTotal := modelShareTotal(models, shareField)
 
 	x := inner.x
-	c.setClip(x, inner.y, inner.right(), padRight(truncate("Model", modelWidth), modelWidth), boldStyle(theme.accentSoft))
+	c.setClip(x, inner.y, inner.right(), padRight(truncate("Model", modelWidth), modelWidth), boldStyle(theme.dim))
 	x += modelWidth + 1
-	c.setClip(x, inner.y, inner.right(), padRight(truncate("Agent", agentWidth), agentWidth), boldStyle(theme.accent))
+	c.setClip(x, inner.y, inner.right(), padRight(truncate("Agent", agentWidth), agentWidth), boldStyle(theme.dim))
 	x += agentWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft("Tokens", tokensWidth), boldStyle(theme.codex))
+	c.setClip(x, inner.y, inner.right(), padLeft("Tokens", tokensWidth), boldStyle(theme.dim))
 	x += tokensWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft("Cost", costWidth), boldStyle(theme.gaugeMid))
+	c.setClip(x, inner.y, inner.right(), padLeft("Cost", costWidth), boldStyle(theme.dim))
 	x += costWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft("%", pctWidth), boldStyle(theme.gemini))
+	c.setClip(x, inner.y, inner.right(), padLeft("%", pctWidth), boldStyle(theme.dim))
 
 	for index := 0; index < dataRows; index++ {
 		rowIndex := offset + index
@@ -523,13 +523,13 @@ func (m *model) drawTopModels(c *canvas, area rect) {
 		x = inner.x
 		c.setClip(x, y, inner.right(), padRight(truncate(entry.Model, modelWidth), modelWidth), style(theme.companyColor(entry.Company), selectedRow))
 		x += modelWidth + 1
-		c.setClip(x, y, inner.right(), padRight(truncate(displaySourceList(entry.Agents), agentWidth), agentWidth), style(theme.accent, selectedRow))
+		c.setClip(x, y, inner.right(), padRight(truncate(displaySourceList(entry.Agents), agentWidth), agentWidth), style(theme.dim, selectedRow))
 		x += agentWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.Tokens), tokensWidth), style(theme.codex, selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.Tokens), tokensWidth), style(theme.fg, selectedRow))
 		x += tokensWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(formatCost(entry.Cost), costWidth), style(theme.gaugeMid, selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(formatCost(entry.Cost), costWidth), style(theme.costColor, selectedRow))
 		x += costWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(fmt.Sprintf("%.2f%%", modelShare(entry, shareTotal, shareField)), pctWidth), style(theme.gemini, selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(fmt.Sprintf("%.2f%%", modelShare(entry, shareTotal, shareField)), pctWidth), style(theme.dim, selectedRow))
 	}
 	if hintSpace == 1 {
 		drawn := min(dataRows, max(totalRows-offset, 0))

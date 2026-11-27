@@ -25,7 +25,7 @@ type tuiTheme struct {
 	mode int // 0 dark, 1 light
 
 	fg, dim, border, accent, accentSoft, onAccent lipgloss.Color
-	pillBg, outputColor, cacheColor               lipgloss.Color
+	pillBg, costColor, outputColor, cacheColor    lipgloss.Color
 
 	claude, codex, opencode, gemini, pi, antigravity, copilot lipgloss.Color
 
@@ -56,6 +56,7 @@ func darkTheme() tuiTheme {
 		accentSoft:  rgb(125, 211, 252),
 		onAccent:    rgb(4, 18, 24),
 		pillBg:      rgb(30, 41, 59),
+		costColor:   rgb(250, 204, 21), // Mobile Web figCost (dark)
 		outputColor: rgb(167, 139, 250),
 		cacheColor:  rgb(251, 146, 60),
 
@@ -94,6 +95,7 @@ func lightTheme() tuiTheme {
 	theme.accentSoft = rgb(3, 105, 161)
 	theme.onAccent = rgb(255, 255, 255)
 	theme.pillBg = rgb(226, 232, 240)
+	theme.costColor = rgb(161, 98, 7) // Mobile Web figCost (light), distinct from Claude terracotta
 	theme.outputColor = rgb(109, 40, 217)
 	theme.cacheColor = rgb(194, 65, 12)
 	theme.claude = rgb(194, 65, 12)

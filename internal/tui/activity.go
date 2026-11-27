@@ -332,7 +332,7 @@ func (m *model) drawActivitySummary(c *canvas, area rect) {
 	if y < inner.bottom() {
 		c.set(inner.x, y, padRight("Period", 12), fgStyle(theme.dim))
 		c.set(inner.x+13, y, padLeft("Tokens", 10), boldStyle(theme.codex))
-		c.set(inner.x+24, y, "Cost", boldStyle(theme.gaugeMid))
+		c.set(inner.x+24, y, "Cost", boldStyle(theme.costColor))
 		y++
 	}
 	for _, row := range overviewRows {
@@ -341,7 +341,7 @@ func (m *model) drawActivitySummary(c *canvas, area rect) {
 		}
 		c.set(inner.x, y, padRight(row.label, 12), fgStyle(theme.dim))
 		c.set(inner.x+13, y, padLeft(formatCompact(row.tokens), 10), fgStyle(theme.codex))
-		c.set(inner.x+24, y, formatCost(row.cost), fgStyle(theme.gaugeMid))
+		c.set(inner.x+24, y, formatCost(row.cost), fgStyle(theme.costColor))
 		y++
 	}
 }
@@ -493,7 +493,7 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 			},
 			{
 				{"Cost ", fgStyle(theme.dim)},
-				{padLeft(formatCost(totals.Cost), 8), fgStyle(theme.gaugeMid)},
+				{padLeft(formatCost(totals.Cost), 8), fgStyle(theme.costColor)},
 				{"  Tokens ", fgStyle(theme.dim)},
 				{padLeft(formatCompact(totals.Tokens), 8), fgStyle(theme.codex)},
 			},
@@ -523,7 +523,7 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 				{"  ", fgStyle(theme.fg)},
 				{activityMetricText(m.activityMetric, totals), boldStyle(theme.fg)},
 				{"  Cost ", fgStyle(theme.dim)},
-				{formatCost(totals.Cost), fgStyle(theme.gaugeMid)},
+				{formatCost(totals.Cost), fgStyle(theme.costColor)},
 			},
 			{
 				{"T ", fgStyle(theme.dim)},
@@ -568,14 +568,14 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 			lines = append(lines, []styledSpan{
 				{padRight(truncate(displayAgentName(agent.Agent), modelWidth), modelWidth), boldStyle(agentColor)},
 				{" ", fgStyle(theme.fg)},
-				{padLeft(formatCost(agent.Totals.Cost), costWidth), boldStyle(theme.gaugeMid)},
+				{padLeft(formatCost(agent.Totals.Cost), costWidth), boldStyle(theme.costColor)},
 			})
 			for _, model := range agent.Models {
 				lines = append(lines, []styledSpan{
 					{"  ", fgStyle(theme.fg)},
 					{padRight(truncate(model.Model, modelWidthInner), modelWidthInner), fgStyle(theme.companyColor(model.Company))},
 					{" ", fgStyle(theme.fg)},
-					{padLeft(formatCost(model.Cost), costWidth), fgStyle(theme.gaugeMid)},
+					{padLeft(formatCost(model.Cost), costWidth), fgStyle(theme.costColor)},
 				})
 				lines = append(lines, []styledSpan{
 					{"    T ", fgStyle(theme.dim)},
