@@ -9,8 +9,6 @@
 - Agent notes, plans, archives, and project status live under `.agents/`
 
 ## Conventions
-- Keep code clean and minimal
-- Follow existing patterns
 - Add a comment only when the reason or constraint is not obvious from the
   code; do not narrate what the code already says, and delete stale comments
 - Ask before making big changes
@@ -50,14 +48,8 @@
 - Run `go vet ./...` and `go test ./...`; the web app is built with Node before
   the binary so the embedded assets are current.
 ## Architecture
-- **Language**: Go 1.27, one static binary; module
-  `github.com/fangwangme/tokenpulse`
-- **CLI/TUI**: Cobra-style command dispatch in `internal/cli`; Bubble Tea +
-  Lip Gloss dashboard in `internal/tui`
 - **Remote**: `tokenpulse serve` in `internal/remote` owns scanning and quota
   refreshes, serves the HTTP API, the local Unix socket and the embedded Solid +
   TypeScript web app in `web/`
-- **Data**: SQLite via modernc.org/sqlite (pure Go) — `usage.db` (ledger and
-  price periods) and `tokenpulse.db` (quota cache + observation history)
 - **Logging**: rotating file under `~/.local/share/tokenpulse/log/`; never
   stdout, which would corrupt the TUI
