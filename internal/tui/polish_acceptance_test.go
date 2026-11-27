@@ -22,7 +22,7 @@ func TestAutoThemeDetectsEnvironmentVariables(t *testing.T) {
 		t.Setenv("TOKENPULSE_THEME", "light")
 		t.Setenv("COLORFGBG", "")
 		t.Setenv("TERM_BACKGROUND", "")
-		if got := resolveTheme(cfg, -1).mode; got != 1 {
+		if got := resolveTheme(cfg, -1, -1).mode; got != 1 {
 			t.Fatalf("mode = %d, want 1 (light)", got)
 		}
 	})
@@ -31,11 +31,11 @@ func TestAutoThemeDetectsEnvironmentVariables(t *testing.T) {
 		t.Setenv("TOKENPULSE_THEME", "")
 		t.Setenv("TERM_BACKGROUND", "")
 		t.Setenv("COLORFGBG", "0;15")
-		if got := resolveTheme(cfg, -1).mode; got != 1 {
+		if got := resolveTheme(cfg, -1, -1).mode; got != 1 {
 			t.Fatalf("COLORFGBG=0;15 mode = %d, want 1 (light)", got)
 		}
 		t.Setenv("COLORFGBG", "15;0")
-		if got := resolveTheme(cfg, -1).mode; got != 0 {
+		if got := resolveTheme(cfg, -1, -1).mode; got != 0 {
 			t.Fatalf("COLORFGBG=15;0 mode = %d, want 0 (dark)", got)
 		}
 	})
@@ -44,7 +44,7 @@ func TestAutoThemeDetectsEnvironmentVariables(t *testing.T) {
 		t.Setenv("TOKENPULSE_THEME", "")
 		t.Setenv("COLORFGBG", "")
 		t.Setenv("TERM_BACKGROUND", "light")
-		if got := resolveTheme(cfg, -1).mode; got != 1 {
+		if got := resolveTheme(cfg, -1, -1).mode; got != 1 {
 			t.Fatalf("TERM_BACKGROUND=light mode = %d, want 1 (light)", got)
 		}
 	})

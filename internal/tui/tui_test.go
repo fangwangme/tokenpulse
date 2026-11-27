@@ -372,12 +372,6 @@ func TestScanAntigravityDisabledExcludesAntigravity(t *testing.T) {
 }
 
 func TestAutoThemeParsersAndLiveRefresh(t *testing.T) {
-	if mode, ok := parseOSC11ThemeResponse([]byte("\x1b]11;rgb:0000/0000/0000\x1b\\")); !ok || mode != 0 {
-		t.Errorf("dark OSC11 = (%d, %v), want (0, true)", mode, ok)
-	}
-	if mode, ok := parseOSC11ThemeResponse([]byte("\x1b]11;rgb:ffff/ffff/ffff\x07")); !ok || mode != 1 {
-		t.Errorf("light OSC11 = (%d, %v), want (1, true)", mode, ok)
-	}
 	if mode, ok := parseBusctlColorScheme("v v u 1\n"); !ok || mode != 0 {
 		t.Errorf("busctl dark = (%d, %v), want (0, true)", mode, ok)
 	}

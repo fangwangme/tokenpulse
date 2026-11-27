@@ -17,7 +17,8 @@ under `TOKENPULSE_ENV=test`).
 | `--json` | JSON instead of text or the dashboard |
 | `--no-scan` | Read the cached ledger; never start a scan |
 | `--no-tui` | Plain text even on a terminal |
-| `--log` | Write usage timing to `log/usage-YYYY-MM-DD.log` |
+| `--log` | Write usage timing to `log/usage-YYYY-MM-DD.log`; also turns on debug mode |
+| `--debug` | Debug mode (same as `TOKENPULSE_DEBUG=1`): per-parser parse/ingest timings to the rotating log in the TUI, to stderr for report output |
 | `--raw`, `--date <YYYY-MM-DD>` | Raw model usage for a date (default today); `--date` requires `--raw` |
 | `-h`, `--help`, `-V`, `--version` | Help and version |
 

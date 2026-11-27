@@ -314,7 +314,7 @@ func (m *model) closeClient() {
 }
 
 func (m *model) theme() tuiTheme {
-	return resolveThemeWithAuto(m.configValue(), m.themeOverride, m.autoThemeMode)
+	return resolveTheme(m.configValue(), m.themeOverride, m.autoThemeMode)
 }
 
 func (m *model) setStatus(text string, level int) {
@@ -689,6 +689,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleModelDetail(msg)
 	case dayDetailMsg:
 		if msg.key == m.dayDetailKey(msg.date) && msg.seq == m.detailSeq {
+			if msg.err != nil {
+				m.setStatus("Day: "+msg.err.Error(), 2)
+				return m, nil
+			}
 			m.dayDetail = &msg.value
 			m.detailScroll = 0
 		}
@@ -1884,29 +1888,4 @@ func (m *model) drawRecoveryToast(c *canvas, area rect) {
 	}
 	line2 := fmt.Sprintf("%.0f%% remaining  [%s] %.1fs", m.recovery.remaining, bar, remaining)
 	c.set(box.x+2, y+1, truncate(line2, box.w-4), fgStyle(accent))
-}
-
-// renderHeader keeps the attach test's readable header contract.
-func (m *model) renderHeader(width int) string {
-	c := newCanvas(width, 4)
-	m.drawHeader(c, rect{x: 0, y: 0, w: width, h: 4})
-	return strings.Join(c.lines(), "\n")
-}
-
-func (m *model) renderSettings(width int) string {
-	c := newCanvas(width, 30)
-	m.drawSettings(c, rect{x: 0, y: 0, w: width, h: 30})
-	return strings.Join(c.lines(), "\n")
-}
-
-func (m *model) renderQuota(width int) string {
-	c := newCanvas(width, 40)
-	m.drawQuota(c, rect{x: 0, y: 0, w: width, h: 40})
-	return strings.Join(c.lines(), "\n")
-}
-
-func (m *model) renderKeeper(width int) string {
-	c := newCanvas(width, 40)
-	m.drawKeeper(c, rect{x: 0, y: 0, w: width, h: 40})
-	return strings.Join(c.lines(), "\n")
 }

@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/fangwangme/tokenpulse/internal/modelid"
-	"github.com/fangwangme/tokenpulse/internal/paths"
 	"github.com/fangwangme/tokenpulse/internal/provider"
 )
 
@@ -396,14 +395,6 @@ func NewService(dataDir, usageDB string) *Service {
 		client:    &http.Client{Timeout: 30 * time.Second},
 		Now:       time.Now,
 	}
-}
-
-func NewDefaultService() (*Service, error) {
-	dir, err := paths.DataDir()
-	if err != nil {
-		return nil, err
-	}
-	return NewService(dir, filepath.Join(dir, "usage.db")), nil
 }
 
 func (s *Service) Available() bool {

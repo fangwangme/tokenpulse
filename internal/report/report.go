@@ -814,12 +814,3 @@ func totalsForModel(db *sql.DB, agents []string, model string, from, to time.Tim
 		&totals.CacheRead, &totals.CacheWrite, &totals.Messages, &totals.Sessions)
 	return totals, err
 }
-
-// CacheHit is cache read ÷ total tokens × 100, two decimals, 0 for no tokens.
-func CacheHit(totals Totals) float64 {
-	if totals.Tokens == 0 {
-		return 0
-	}
-	value := float64(totals.CacheRead) / float64(totals.Tokens) * 100
-	return float64(int64(value*100+0.5)) / 100
-}

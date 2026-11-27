@@ -68,10 +68,16 @@ in-process runtime (`● local`). Pass `--since YYYY-MM-DD` to open on a custom
 range from that date to today, or `--no-scan` to read only the cached ledger.
 
 <p>
-  <img src="images/tui-overview.png" width="728" alt="TokenPulse TUI Overview with model detail popup">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="images/tui-overview-dark.png">
+    <img src="images/tui-overview-light.png" width="728" alt="TokenPulse TUI Overview, 30 days">
+  </picture>
 </p>
 <p>
-  <img src="images/tui-quota.png" width="728" alt="TokenPulse TUI Quota provider cards">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="images/tui-quota-dark.png">
+    <img src="images/tui-quota-light.png" width="728" alt="TokenPulse TUI Quota provider cards">
+  </picture>
 </p>
 
 ### Tabs
@@ -79,10 +85,10 @@ range from that date to today, or `--no-scan` to read only the cached ledger.
 The TUI has seven tabs (switch with `←`/`→`, `h`/`l`, `Tab`/`Shift+Tab`, or by
 clicking a tab):
 
-- **Overview** — KPI row (cost, tokens, sessions, comparison deltas, estimate
-  and unpriced notices), stacked daily bar chart split by company (`Anthropic`,
-  `OpenAI`, `Google`, `Others`), and Top Models table (`Enter` opens model
-  detail).
+- **Overview** — KPI row (cost, tokens, sessions, comparison deltas and the
+  comparison dates), stacked daily bar chart split by company (`Anthropic`,
+  `OpenAI`, `Google`, `Others`) that fills the chart width, and Top Models
+  table (`Enter` opens model detail).
 - **Models** — full sortable model breakdown (`Tokens`, `Cost`, `Input`,
   `Output`, `Cache R`, `Cache W`, `Hit %`, `%`, `Msgs`, `Last`); `Enter` opens
   model detail.
@@ -90,8 +96,9 @@ clicking a tab):
   against 7 days earlier; `Enter` opens day detail (per-agent and per-model
   cost, tokens, `CR`, `CW`, and `Hit %`).
 - **Activity** — fixed one-year Monday-start heatmap with streaks, period
-  overview (`Today`, `Week`, `Month`, `Year`, `Last 7 days`, `Last 30 days`),
-  and selected-day breakdown. Ignores the shared range.
+  overview (`Today`, `Week`, `Last 7 days`, `Month`, `Last 30 days`, `Year`,
+  `Total`, `Average`, `Max`), and selected-day breakdown by agent and model.
+  Ignores the shared range; click a heatmap cell to select that day.
 - **Quota** — multi-column provider cards in `display.quota_provider_order` with
   gauges, pace, reset times, extra usage, and banked reset credits.
 - **Keeper** — engine master switch, per-agent cards (5h wakeup, weekly sync,
@@ -99,8 +106,8 @@ clicking a tab):
 - **Settings** — live config editor (display options, theme, notifications,
   Keeper, **Web remote** start/stop, and quota provider toggles + reordering).
 
-Overview, Models, and Daily share one range bar (default `30d`) and the global
-agent filter (`s`).
+Overview, Models, and Daily share one range bar (default `30d`, presets are
+clickable) and the global agent filter (`s`).
 
 ### TUI Keybindings
 
@@ -114,6 +121,7 @@ agent filter (`s`).
 | Global | `?` | Toggle per-page keybinding help overlay |
 | Global | `Esc` | Close detail popup, custom range input, filter, or help (never quits) |
 | Global | `q` / `Ctrl+C` | Quit |
+| Global | Mouse | Click a tab, a range preset, a heatmap cell or a Keeper card to select it; the wheel scrolls Activity's day detail and Keeper's execution log |
 | Overview, Models, Daily | `1`–`6` | Select range preset (`today`, `7d`, `30d`, `year`, `all`, `custom`) |
 | Overview, Models, Daily | `[` / `]` | Shift range one window earlier / later |
 | Overview, Models, Daily | `n` | Return to preset ending today (on Daily, also select today's row) |
@@ -167,8 +175,11 @@ tokenpulse reprice
 # Full rebuild from scratch
 tokenpulse --rebuild-all
 
-# Write timing diagnostics to a log file
-tokenpulse --log
+# Debug mode: per-parser parse/ingest timings and Antigravity normalization
+# counts. The TUI and `serve` write them to the rotating log; report output
+# (--json / --no-tui / --csv) prints them to stderr. TOKENPULSE_DEBUG=1 turns
+# it on for any command, including `tokenpulse serve`.
+tokenpulse --debug
 ```
 
 > [!IMPORTANT]
@@ -192,7 +203,9 @@ tokenpulse config set quota_provider_order=opencode,claude,codex,antigravity
 tokenpulse config set quota_display_mode=used
 
 # Theme: auto, dark, light
-# "auto" follows the OS appearance and re-checks on each refresh (macOS).
+# "auto" picks TOKENPULSE_THEME, then the terminal background at startup, then
+# COLORFGBG / TERM_BACKGROUND, then the OS appearance (Linux portal/gsettings,
+# macOS), and follows later OS light/dark switches while the TUI runs.
 tokenpulse config set theme=dark
 
 # Auto-refresh interval in minutes for quota + usage (0, 1, 2, 5, 10, 15; 0 = disabled)

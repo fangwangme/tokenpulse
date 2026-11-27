@@ -23,4 +23,4 @@ While running in `auto` mode without a manual override or explicit `TOKENPULSE_T
 
 ## Light-Mode Contrast
 
-In light mode, company colors (`anthropic`, `openai`, `google`, `other`), metric highlight colors (Output, Cache R/W), and Quota pace markers use dark/high-contrast foregrounds against light terminal backgrounds rather than dark-mode pastels or pure white.
+In light mode, company colors (`anthropic`, `openai`, `google`, `other`), the cost color, and Quota pace markers use dark/high-contrast foregrounds against light terminal backgrounds rather than dark-mode pastels or pure white.

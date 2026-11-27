@@ -25,7 +25,7 @@ type tuiTheme struct {
 	mode int // 0 dark, 1 light
 
 	fg, dim, border, accent, accentSoft, onAccent lipgloss.Color
-	pillBg, costColor, outputColor, cacheColor    lipgloss.Color
+	pillBg, costColor                             lipgloss.Color
 
 	claude, codex, opencode, gemini, pi, antigravity, copilot lipgloss.Color
 
@@ -48,17 +48,15 @@ func newTheme(mode int) tuiTheme {
 
 func darkTheme() tuiTheme {
 	return tuiTheme{
-		mode:        0,
-		fg:          rgb(232, 238, 247),
-		dim:         rgb(144, 158, 181),
-		border:      rgb(58, 76, 99),
-		accent:      rgb(45, 212, 191),
-		accentSoft:  rgb(125, 211, 252),
-		onAccent:    rgb(4, 18, 24),
-		pillBg:      rgb(30, 41, 59),
-		costColor:   rgb(250, 204, 21), // Mobile Web figCost (dark)
-		outputColor: rgb(167, 139, 250),
-		cacheColor:  rgb(251, 146, 60),
+		mode:       0,
+		fg:         rgb(232, 238, 247),
+		dim:        rgb(144, 158, 181),
+		border:     rgb(58, 76, 99),
+		accent:     rgb(45, 212, 191),
+		accentSoft: rgb(125, 211, 252),
+		onAccent:   rgb(4, 18, 24),
+		pillBg:     rgb(30, 41, 59),
+		costColor:  rgb(250, 204, 21), // Mobile Web figCost (dark)
 
 		claude:      rgb(251, 146, 60),
 		codex:       rgb(52, 211, 153),
@@ -96,8 +94,6 @@ func lightTheme() tuiTheme {
 	theme.onAccent = rgb(255, 255, 255)
 	theme.pillBg = rgb(226, 232, 240)
 	theme.costColor = rgb(161, 98, 7) // Mobile Web figCost (light), distinct from Claude terracotta
-	theme.outputColor = rgb(109, 40, 217)
-	theme.cacheColor = rgb(194, 65, 12)
 	theme.claude = rgb(194, 65, 12)
 	theme.codex = rgb(4, 120, 87)
 	theme.opencode = rgb(67, 56, 202)
@@ -171,11 +167,7 @@ func (t tuiTheme) gaugeColor(level string, pace string) lipgloss.Color {
 	return t.gaugeLow
 }
 
-func resolveTheme(cfg config.Config, override int) tuiTheme {
-	return resolveThemeWithAuto(cfg, override, -1)
-}
-
-func resolveThemeWithAuto(cfg config.Config, override, autoMode int) tuiTheme {
+func resolveTheme(cfg config.Config, override, autoMode int) tuiTheme {
 	if override >= 0 {
 		return newTheme(override)
 	}
@@ -265,47 +257,6 @@ func parseColorFGBG(value string) (int, bool) {
 		return 0, true
 	}
 	return 1, true
-}
-
-func parseOSC11ThemeResponse(raw []byte) (int, bool) {
-	text := string(raw)
-	idx := strings.Index(text, "rgb:")
-	if idx < 0 {
-		return 0, false
-	}
-	rest := text[idx+4:]
-	if end := strings.IndexAny(rest, "\x07\x1b"); end >= 0 {
-		rest = rest[:end]
-	}
-	parts := strings.Split(rest, "/")
-	if len(parts) != 3 {
-		return 0, false
-	}
-	r, okR := parseOSCColorComponent(parts[0])
-	g, okG := parseOSCColorComponent(parts[1])
-	b, okB := parseOSCColorComponent(parts[2])
-	if !okR || !okG || !okB {
-		return 0, false
-	}
-	// Relative luminance threshold matching 0.6.16 theme.rs.
-	luminance := 0.2126*float64(r) + 0.7152*float64(g) + 0.0722*float64(b)
-	if luminance >= 128 {
-		return 1, true
-	}
-	return 0, true
-}
-
-func parseOSCColorComponent(hex string) (int, bool) {
-	hex = strings.TrimSpace(hex)
-	if len(hex) == 0 || len(hex) > 4 {
-		return 0, false
-	}
-	val, err := strconv.ParseUint(hex, 16, 32)
-	if err != nil {
-		return 0, false
-	}
-	maxVal := (uint64(1) << (uint(len(hex)) * 4)) - 1
-	return int((val*255 + maxVal/2) / maxVal), true
 }
 
 func parseBusctlColorScheme(stdout string) (int, bool) {

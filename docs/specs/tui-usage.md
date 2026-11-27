@@ -74,8 +74,9 @@ Theme, table layout and truncation follow `tui-theme.md` and
   value or zero. The earlier dates come from one extra report whose start is
   never before the first data day.
 - `c`, `t` and `d` sort; `Enter` opens the day detail of the phone (totals, per
-  agent its cost, per model its cost, tokens, cache read, cache write (`—` when
-  0) and cache hit with two decimals). `Esc` closes it.
+  agent its cost and total tokens aligned with the model columns, per model its cost, tokens, cache read, cache write (`—` when
+  0) and cache hit with two decimals); model names use their company color and
+  the rest stays in the shared palette. `Esc` closes it.
 
 ## Activity
 
@@ -90,10 +91,13 @@ Theme, table layout and truncation follow `tui-theme.md` and
   the rolling rows first.
 - **Selected day** — `↑`/`↓`/`j`/`k` move the selected day, `n` selects today,
   `[`/`]` or mouse wheel scroll its details, and left-clicking a heatmap cell
-  selects that date. Left summary metrics use the 0.6.16 per-metric colors;
-  `Agent / Model Cost` renders each agent in its provider color, each model in
-  its company color, and splits each model into two lines (model name + cost on
-  line 1, indented colored `T / I / O / CR / CW` on line 2).
+  selects that date. Activity uses the same calm palette as Models, Daily and
+  Overview: dim labels and column headers, values in the foreground color,
+  costs in the cost color, and color identity only on model names (company
+  color). `Agent / Model Cost` shows each agent in bold with its cost and total
+  tokens (`T`), each model in its
+  company color, and splits each model into two lines (model name + cost on
+  line 1, indented dim `T / I / O / CR / CW` on line 2).
 
 ## Quota
 

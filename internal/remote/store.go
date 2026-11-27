@@ -193,14 +193,3 @@ func (s *StateStore) ValidSession(token string) bool {
 	}
 	return false
 }
-
-func (s *StateStore) DeleteSessions() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	state, err := s.loadLocked()
-	if err != nil {
-		return err
-	}
-	state.Sessions = nil
-	return s.saveLocked(state)
-}

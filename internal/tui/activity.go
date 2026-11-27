@@ -276,7 +276,7 @@ type rangeOverviewRow struct {
 
 func (m *model) drawActivitySummary(c *canvas, area rect) {
 	theme := m.theme()
-	c.box(area.x, area.y, area.w, area.h, " Range Overview ", boldStyle(theme.accentSoft), fgStyle(theme.border))
+	c.box(area.x, area.y, area.w, area.h, " Range Overview ", boldStyle(theme.accent), fgStyle(theme.border))
 	inner := area.inner()
 	if inner.h <= 0 {
 		return
@@ -331,8 +331,8 @@ func (m *model) drawActivitySummary(c *canvas, area rect) {
 	}
 	if y < inner.bottom() {
 		c.set(inner.x, y, padRight("Period", 12), fgStyle(theme.dim))
-		c.set(inner.x+13, y, padLeft("Tokens", 10), boldStyle(theme.codex))
-		c.set(inner.x+24, y, "Cost", boldStyle(theme.costColor))
+		c.set(inner.x+13, y, padLeft("Tokens", 10), boldStyle(theme.dim))
+		c.set(inner.x+24, y, "Cost", boldStyle(theme.dim))
 		y++
 	}
 	for _, row := range overviewRows {
@@ -340,7 +340,7 @@ func (m *model) drawActivitySummary(c *canvas, area rect) {
 			break
 		}
 		c.set(inner.x, y, padRight(row.label, 12), fgStyle(theme.dim))
-		c.set(inner.x+13, y, padLeft(formatCompact(row.tokens), 10), fgStyle(theme.codex))
+		c.set(inner.x+13, y, padLeft(formatCompact(row.tokens), 10), fgStyle(theme.fg))
 		c.set(inner.x+24, y, formatCost(row.cost), fgStyle(theme.costColor))
 		y++
 	}
@@ -453,7 +453,7 @@ func streakValues(days []report.DaySummary, today string) (int, int) {
 
 func (m *model) drawActivityDetail(c *canvas, area rect) {
 	theme := m.theme()
-	c.box(area.x, area.y, area.w, area.h, " Selected Day ", boldStyle(theme.opencode), fgStyle(theme.border))
+	c.box(area.x, area.y, area.w, area.h, " Selected Day ", boldStyle(theme.accent), fgStyle(theme.border))
 	inner := area.inner()
 	if inner.h <= 0 || inner.w <= 0 {
 		return
@@ -487,7 +487,7 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 	if left.w >= 34 && left.h >= 5 {
 		overview = [][]styledSpan{
 			{
-				{m.activitySel, boldStyle(theme.opencode)},
+				{m.activitySel, boldStyle(theme.fg)},
 				{"  ", fgStyle(theme.fg)},
 				{activityMetricText(m.activityMetric, totals), boldStyle(theme.fg)},
 			},
@@ -495,23 +495,23 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 				{"Cost ", fgStyle(theme.dim)},
 				{padLeft(formatCost(totals.Cost), 8), fgStyle(theme.costColor)},
 				{"  Tokens ", fgStyle(theme.dim)},
-				{padLeft(formatCompact(totals.Tokens), 8), fgStyle(theme.codex)},
+				{padLeft(formatCompact(totals.Tokens), 8), fgStyle(theme.fg)},
 			},
 			{
 				{"In   ", fgStyle(theme.dim)},
-				{padLeft(formatCompact(totals.Input), 8), fgStyle(theme.gemini)},
+				{padLeft(formatCompact(totals.Input), 8), fgStyle(theme.fg)},
 				{"  Out    ", fgStyle(theme.dim)},
-				{padLeft(formatCompact(totals.Output), 8), fgStyle(theme.outputColor)},
+				{padLeft(formatCompact(totals.Output), 8), fgStyle(theme.fg)},
 			},
 			{
 				{"CR   ", fgStyle(theme.dim)},
-				{padLeft(formatCompact(totals.CacheRead), 8), fgStyle(theme.cacheColor)},
+				{padLeft(formatCompact(totals.CacheRead), 8), fgStyle(theme.fg)},
 				{"  CW     ", fgStyle(theme.dim)},
-				{padLeft(formatCompact(totals.CacheWrite), 8), fgStyle(theme.cacheColor)},
+				{padLeft(formatCompact(totals.CacheWrite), 8), fgStyle(theme.fg)},
 			},
 			{
 				{"Msgs ", fgStyle(theme.dim)},
-				{padLeft(formatIntCommas(totals.Messages), 8), fgStyle(theme.gemini)},
+				{padLeft(formatIntCommas(totals.Messages), 8), fgStyle(theme.fg)},
 				{"  Sess   ", fgStyle(theme.dim)},
 				{padLeft(formatIntCommas(totals.Sessions), 8), fgStyle(theme.fg)},
 			},
@@ -519,7 +519,7 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 	} else {
 		overview = [][]styledSpan{
 			{
-				{m.activitySel, boldStyle(theme.opencode)},
+				{m.activitySel, boldStyle(theme.fg)},
 				{"  ", fgStyle(theme.fg)},
 				{activityMetricText(m.activityMetric, totals), boldStyle(theme.fg)},
 				{"  Cost ", fgStyle(theme.dim)},
@@ -527,15 +527,15 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 			},
 			{
 				{"T ", fgStyle(theme.dim)},
-				{formatCompact(totals.Tokens), fgStyle(theme.codex)},
+				{formatCompact(totals.Tokens), fgStyle(theme.fg)},
 				{"  In ", fgStyle(theme.dim)},
-				{formatCompact(totals.Input), fgStyle(theme.gemini)},
+				{formatCompact(totals.Input), fgStyle(theme.fg)},
 				{"  Out ", fgStyle(theme.dim)},
-				{formatCompact(totals.Output), fgStyle(theme.outputColor)},
+				{formatCompact(totals.Output), fgStyle(theme.fg)},
 				{"  CR ", fgStyle(theme.dim)},
-				{formatCompact(totals.CacheRead), fgStyle(theme.cacheColor)},
+				{formatCompact(totals.CacheRead), fgStyle(theme.fg)},
 				{"  CW ", fgStyle(theme.dim)},
-				{formatCompact(totals.CacheWrite), fgStyle(theme.cacheColor)},
+				{formatCompact(totals.CacheWrite), fgStyle(theme.fg)},
 			},
 		}
 	}
@@ -554,7 +554,7 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 	}
 
 	var lines [][]styledSpan
-	lines = append(lines, []styledSpan{{"Agent / Model Cost", boldStyle(theme.accentSoft)}})
+	lines = append(lines, []styledSpan{{"Agent / Model Cost", boldStyle(theme.dim)}})
 	costWidth := max(min(10, max(right.w-12, 8)), 8)
 	modelWidth := min(28, max(right.w-costWidth-3, 10))
 	modelWidthInner := max(modelWidth-2, 8)
@@ -564,11 +564,12 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 		lines = append(lines, []styledSpan{{"Loading…", fgStyle(theme.dim)}})
 	} else {
 		for _, agent := range m.activityDetail.Agents {
-			agentColor := theme.providerColor(agent.Agent)
 			lines = append(lines, []styledSpan{
-				{padRight(truncate(displayAgentName(agent.Agent), modelWidth), modelWidth), boldStyle(agentColor)},
+				{padRight(truncate(displayAgentName(agent.Agent), modelWidth), modelWidth), boldStyle(theme.fg)},
 				{" ", fgStyle(theme.fg)},
 				{padLeft(formatCost(agent.Totals.Cost), costWidth), boldStyle(theme.costColor)},
+				{"  T ", fgStyle(theme.dim)},
+				{formatCompact(agent.Totals.Tokens), boldStyle(theme.fg)},
 			})
 			for _, model := range agent.Models {
 				lines = append(lines, []styledSpan{
@@ -579,15 +580,15 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 				})
 				lines = append(lines, []styledSpan{
 					{"    T ", fgStyle(theme.dim)},
-					{padLeft(formatCompact(model.Tokens), 8), fgStyle(theme.codex)},
+					{padLeft(formatCompact(model.Tokens), 8), fgStyle(theme.dim)},
 					{" I ", fgStyle(theme.dim)},
-					{padLeft(formatCompact(model.Input), 8), fgStyle(theme.gemini)},
+					{padLeft(formatCompact(model.Input), 8), fgStyle(theme.dim)},
 					{" O ", fgStyle(theme.dim)},
-					{padLeft(formatCompact(model.Output), 8), fgStyle(theme.outputColor)},
+					{padLeft(formatCompact(model.Output), 8), fgStyle(theme.dim)},
 					{" CR ", fgStyle(theme.dim)},
-					{padLeft(formatCompact(model.CacheRead), 8), fgStyle(theme.cacheColor)},
+					{padLeft(formatCompact(model.CacheRead), 8), fgStyle(theme.dim)},
 					{" CW ", fgStyle(theme.dim)},
-					{padLeft(formatCompact(model.CacheWrite), 8), fgStyle(theme.cacheColor)},
+					{padLeft(formatCompact(model.CacheWrite), 8), fgStyle(theme.dim)},
 				})
 			}
 		}

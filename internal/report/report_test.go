@@ -179,17 +179,6 @@ func TestHeatmapLayoutFollowsRangeLength(t *testing.T) {
 	}
 }
 
-// Protects usage-report.md "Numbers": cache hit rounds to two decimals.
-func TestCacheHit(t *testing.T) {
-	if value := CacheHit(Totals{Tokens: 0}); value != 0 {
-		t.Fatalf("empty totals hit = %v", value)
-	}
-	value := CacheHit(Totals{Tokens: 3, CacheRead: 1})
-	if value != 33.33 {
-		t.Fatalf("cache hit = %v, want 33.33", value)
-	}
-}
-
 // Protects usage-report.md "Numbers": range sessions are not the sum of days.
 func TestSessionsAreDeduplicatedAcrossDays(t *testing.T) {
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.Local)

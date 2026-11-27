@@ -121,7 +121,7 @@ func (s *Scanner) Run(options Options) error {
 	}
 	targets := make([]parseTarget, 0, len(parsers))
 	for _, parser := range parsers {
-		since := options.Since
+		var since *time.Time
 		full := options.RebuildAll || options.RefreshFrom != nil || stale[parser.Name()] ||
 			(parser.Name() == "codex" && codexRepair)
 		var cursorMs *int64
