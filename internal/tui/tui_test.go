@@ -387,23 +387,26 @@ func TestAutoThemeParsersAndLiveRefresh(t *testing.T) {
 	cfg := config.Default()
 	cfg.Display.Theme = config.ThemeAuto
 	m := newModel(Options{Config: cfg}, nil)
-	m.handleStatus(statusMsg{themeMode: 1})
-	if m.theme().mode != 0 {
-		t.Fatalf("first OS reading overrode the startup (dark) terminal theme")
-	}
-	m.handleStatus(statusMsg{themeMode: 0})
-	m.handleStatus(statusMsg{themeMode: 1})
+	m.handleTheme(themeMsg{mode: 1})
 	if m.theme().mode != 1 {
-		t.Fatalf("OS switch to light did not switch auto theme")
+		t.Fatalf("OS light did not switch auto theme")
 	}
-	// Manual override via 'b' stays pinned even if OS appearance poll arrives.
+	m.handleTheme(themeMsg{mode: 0})
+	if m.theme().mode != 0 {
+		t.Fatalf("OS dark did not switch auto theme")
+	}
+	m.handleTheme(themeMsg{mode: 1})
+	if m.theme().mode != 1 {
+		t.Fatalf("OS switch back to light did not switch auto theme")
+	}
+	// Manual override via 'b' stays pinned even if a theme check arrives.
 	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
 	if m.theme().mode != 0 {
 		t.Fatalf("manual 'b' toggle did not flip to dark")
 	}
-	m.handleStatus(statusMsg{themeMode: 1})
+	m.handleTheme(themeMsg{mode: 1})
 	if m.theme().mode != 0 {
-		t.Fatalf("statusMsg overwrote manual 'b' theme override")
+		t.Fatalf("themeMsg overwrote manual 'b' theme override")
 	}
 }
 

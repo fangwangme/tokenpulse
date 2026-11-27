@@ -21,7 +21,7 @@ When `display.theme` is `auto` and no manual `b` override is active, the TUI res
 
 OS appearance wins over the OSC 11 query so a misleading terminal reply cannot override a light desktop. Default to dark if no source is available.
 
-While running in `auto` mode without a manual override or explicit `TOKENPULSE_THEME` / `TERM_BACKGROUND` override, the TUI periodically polls OS appearance (skipping OSC 11). The first reading is only a baseline; the active theme changes when a later reading differs from the previous one, so a startup result from an explicit terminal hint is kept until the OS actually switches.
+While running in `auto` mode without a manual override or explicit `TOKENPULSE_THEME` / `TERM_BACKGROUND` override, the TUI checks OS appearance when the app refreshes: a manual `r` and each auto-refresh scan. A changed reading updates the active theme on the next frame; there is no separate theme timer.
 
 ## Light-Mode Contrast
 

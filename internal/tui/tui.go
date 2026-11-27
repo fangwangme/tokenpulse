@@ -77,7 +77,6 @@ type model struct {
 	tab           int
 	themeOverride int
 	autoThemeMode int
-	osThemeMode   int
 
 	rtStatus    rt.StatusSnapshot
 	eventCh     <-chan rt.Event
@@ -181,10 +180,10 @@ type configMsg struct {
 	message string
 }
 type statusMsg struct {
-	status    rt.StatusSnapshot
-	err       error
-	themeMode int
+	status rt.StatusSnapshot
+	err    error
 }
+type themeMsg struct{ mode int }
 type toastMsg struct{ text string }
 type recoveryTickMsg struct{}
 type refreshMsg struct {
@@ -269,7 +268,6 @@ func newModel(opts Options, client rt.Client) *model {
 		cfg:            cfg,
 		themeOverride:  -1,
 		autoThemeMode:  0,
-		osThemeMode:    -1,
 		agents:         agents,
 		preset:         "30d",
 		basePreset:     "30d",
@@ -631,17 +629,35 @@ func (m *model) statusPollCmd() tea.Cmd {
 	if client == nil {
 		return nil
 	}
-	pollTheme := m.configValue().Display.Theme == config.ThemeAuto && m.themeOverride < 0 && !hasExplicitTermBackground()
 	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
 		status, err := client.Status()
-		themeMode := -1
-		if pollTheme {
-			if mode, ok := detectSystemAppearance(); ok {
-				themeMode = mode
-			}
-		}
-		return statusMsg{status: status, err: err, themeMode: themeMode}
+		return statusMsg{status: status, err: err}
 	})
+}
+
+func (m *model) themeAutoActive() bool {
+	return m.configValue().Display.Theme == config.ThemeAuto &&
+		m.themeOverride < 0 && !hasExplicitTermBackground()
+}
+
+// themeCheckCmd follows the app's refresh: it queries the OS appearance off the
+// update loop, so a changed OS theme applies on the next refresh, not a timer.
+func (m *model) themeCheckCmd() tea.Cmd {
+	if !m.themeAutoActive() {
+		return nil
+	}
+	return func() tea.Msg {
+		if mode, ok := detectSystemAppearance(); ok {
+			return themeMsg{mode: mode}
+		}
+		return nil
+	}
+}
+
+func (m *model) handleTheme(msg themeMsg) {
+	if m.themeAutoActive() {
+		m.autoThemeMode = msg.mode
+	}
 }
 
 func (m *model) Init() tea.Cmd {
@@ -667,6 +683,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouse(msg)
 	case statusMsg:
 		return m.handleStatus(msg)
+	case themeMsg:
+		m.handleTheme(msg)
+		return m, nil
 	case eventMsg:
 		cmd := m.handleEvent(msg.event)
 		return m, tea.Batch(cmd, m.nextEventCmd())
@@ -771,14 +790,6 @@ func newestFirst(records []keeper.ExecutionRecord) []keeper.ExecutionRecord {
 }
 
 func (m *model) handleStatus(msg statusMsg) (tea.Model, tea.Cmd) {
-	if msg.themeMode >= 0 && m.themeOverride < 0 && m.configValue().Display.Theme == config.ThemeAuto {
-		// Follow OS switches only: the first reading is a baseline so a higher-
-		// precedence startup source (OSC 11, COLORFGBG) is not overridden.
-		if m.osThemeMode >= 0 && msg.themeMode != m.osThemeMode {
-			m.autoThemeMode = msg.themeMode
-		}
-		m.osThemeMode = msg.themeMode
-	}
 	if msg.err != nil {
 		if m.client != nil && m.client.IsRemote() && !m.webBusy {
 			if lock, err := rt.AcquireLock(m.opts.DataDir); err == nil {
@@ -809,7 +820,7 @@ func (m *model) handleStatus(msg statusMsg) (tea.Model, tea.Cmd) {
 	if msg.status.ScannedAt != previous.ScannedAt {
 		m.refreshedAt = time.Now()
 		m.refreshRangeUsage()
-		cmds = append(cmds, m.ensureReport(), m.currentTabCmd(), m.refreshActivityTodayCmd())
+		cmds = append(cmds, m.ensureReport(), m.currentTabCmd(), m.refreshActivityTodayCmd(), m.themeCheckCmd())
 	}
 	if msg.status.FetchedAt != previous.FetchedAt {
 		cmds = append(cmds, m.fetchQuotaCmd())
@@ -829,7 +840,7 @@ func (m *model) handleEvent(ev rt.Event) tea.Cmd {
 			m.rtStatus.ScannedAt = scanned
 		}
 		m.refreshRangeUsage()
-		return tea.Batch(m.ensureReport(), m.currentTabCmd(), m.refreshActivityTodayCmd())
+		return tea.Batch(m.ensureReport(), m.currentTabCmd(), m.refreshActivityTodayCmd(), m.themeCheckCmd())
 	case "quota_updated":
 		return m.fetchQuotaCmd()
 	case "quota_recovered":
@@ -980,20 +991,21 @@ func (m *model) handleModelDetail(msg modelDetailMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleRefresh(msg refreshMsg) tea.Cmd {
+	theme := m.themeCheckCmd()
 	if msg.err != nil {
 		m.setStatus("Refresh: "+msg.err.Error(), 2)
-		return nil
+		return theme
 	}
 	if msg.result.Throttled && !msg.result.Accepted {
 		m.setStatus(fmt.Sprintf("Showing cache; retry in %ds", msg.result.RetryAfter), 1)
-		return nil
+		return theme
 	}
 	m.setToast("Refresh complete")
 	m.refreshedAt = time.Now()
 	m.refreshRangeUsage()
 	m.activityKey = ""
 	m.activityDetailDate = ""
-	return tea.Batch(m.ensureReport(), m.currentTabCmd(), m.fetchQuotaCmd())
+	return tea.Batch(m.ensureReport(), m.currentTabCmd(), m.fetchQuotaCmd(), theme)
 }
 
 func (m *model) handleWebToggle(msg webToggleMsg) (tea.Model, tea.Cmd) {

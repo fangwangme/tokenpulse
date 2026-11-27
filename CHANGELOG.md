@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Overview chart bars keep a fixed width**: 2 columns below 80, 3 for 80–139 and 4 from 140, solid with no gap; a range with more days than fit draws the newest days that fit, centred, and the title counts the days drawn.
 - **Activity key hints**: `[` / `]` no longer scroll the selected-day details (the mouse wheel does), and the help line reads `↑↓ select` like the other pages.
-- **Auto theme prefers the OS appearance**: a misleading OSC 11 terminal-background reply no longer overrides a light desktop; explicit `TOKENPULSE_THEME`, `COLORFGBG` and `TERM_BACKGROUND` still take precedence.
+- **Auto theme prefers the OS appearance**: a misleading OSC 11 terminal-background reply no longer overrides a light desktop, and OS switches are picked up on the app's refresh instead of a separate 3-second timer; explicit `TOKENPULSE_THEME`, `COLORFGBG` and `TERM_BACKGROUND` still take precedence.
 
 ### Fixed
 - **No `N models` footer**: Models and Overview Top Models drop the footer when every row fits; the `↑`/`↓` scroll hint still appears when rows overflow.
