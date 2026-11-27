@@ -205,8 +205,6 @@ func hasExplicitTermBackground() bool {
 	return v == "light" || v == "dark"
 }
 
-// detectThemePreference resolves every source that does not need to query the
-// terminal: explicit env vars, COLORFGBG, TERM_BACKGROUND and OS appearance.
 func detectThemePreference() (int, bool) {
 	if mode, ok := detectEnvThemeOverride(); ok {
 		return mode, true
@@ -229,10 +227,6 @@ func detectAutoThemeMode() int {
 	return 0
 }
 
-// detectStartupThemeMode runs once before Bubble Tea takes over stdin so it
-// can query the terminal background safely via lipgloss (OSC 11) when attached
-// to a TTY. OS appearance wins because some terminal hosts answer OSC 11 with
-// their chrome color instead of the visible background.
 func detectStartupThemeMode() int {
 	if mode, ok := detectThemePreference(); ok {
 		return mode

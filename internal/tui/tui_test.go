@@ -401,7 +401,6 @@ func TestAutoThemeParsersAndLiveRefresh(t *testing.T) {
 	if m.theme().mode != 1 {
 		t.Fatalf("OS switch back to light did not switch auto theme")
 	}
-	// Manual override via 'b' stays pinned even if a theme check arrives.
 	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
 	if m.theme().mode != 0 {
 		t.Fatalf("manual 'b' toggle did not flip to dark")
@@ -543,7 +542,6 @@ func TestActivityLegendClickToggleAndRightBorderClip(t *testing.T) {
 		t.Fatal("heatmapFooterLayout returned false at 80x40")
 	}
 
-	// Click level 5 block: selects level 4 (0-indexed) and keeps right box border intact.
 	clickX := legendX + 4*2
 	h.send(tea.MouseMsg{X: clickX, Y: footerY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if m.activityLegend != 4 {
@@ -561,13 +559,11 @@ func TestActivityLegendClickToggleAndRightBorderClip(t *testing.T) {
 		t.Fatalf("80-col footer truncated full legend range: line=%q", lines[footerY])
 	}
 
-	// Clicking the same block toggles it off.
 	h.send(tea.MouseMsg{X: clickX, Y: footerY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if m.activityLegend != -1 {
 		t.Fatalf("second click did not clear activityLegend, got %d", m.activityLegend)
 	}
 
-	// Re-select and verify 'c' clears it.
 	h.send(tea.MouseMsg{X: clickX, Y: footerY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	h.key("c")
 	if m.activityLegend != -1 {

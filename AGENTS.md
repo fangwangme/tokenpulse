@@ -9,8 +9,7 @@
 - Agent notes, plans, archives, and project status live under `.agents/`
 
 ## Conventions
-- Add a comment only when the reason or constraint is not obvious from the
-  code; do not narrate what the code already says, and delete stale comments
+- Do not add comments to code (delete any unnecessary or stale comments when editing)
 - Ask before making big changes
 - User-visible changes directly bump `internal/version/version.go` and record
   their `CHANGELOG.md` section under `## [X.Y.Z] - YYYY-MM-DD` in the same PR,

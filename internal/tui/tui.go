@@ -640,8 +640,6 @@ func (m *model) themeAutoActive() bool {
 		m.themeOverride < 0 && !hasExplicitTermBackground()
 }
 
-// themeCheckCmd follows the app's refresh: it queries the OS appearance off the
-// update loop, so a changed OS theme applies on the next refresh, not a timer.
 func (m *model) themeCheckCmd() tea.Cmd {
 	if !m.themeAutoActive() {
 		return nil

@@ -81,8 +81,6 @@ func heatmapCardArea(body rect) rect {
 	return rect{x: body.x, y: body.y, w: body.w, h: height}
 }
 
-// activityHeatArea derives the heatmap card from the Activity page area,
-// whose first line is the range bar.
 func activityHeatArea(bodyArea rect) rect {
 	return heatmapCardArea(rect{x: bodyArea.x, y: bodyArea.y + 1, w: bodyArea.w, h: bodyArea.h - 1})
 }
@@ -256,8 +254,6 @@ func (m *model) drawHeatmap(c *canvas, area rect) {
 	}
 }
 
-// heatmapFooterLayout returns the footer prefix and the x of its first legend
-// block, so drawing and hit testing use the same geometry.
 func heatmapFooterLayout(inner rect, fromText, toText string) (text string, legendX, y int, ok bool) {
 	y = inner.y + inner.h - 1
 	gridY := inner.y
