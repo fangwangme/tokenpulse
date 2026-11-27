@@ -11,15 +11,17 @@ The TUI uses Bubble Tea and Lip Gloss. To allow host terminal styling (native ba
 
 ## Auto Theme Detection And Refresh
 
-When `display.theme` is `auto` and no manual `b` override is active, the TUI resolves dark or light mode using the 0.6.16 precedence:
+When `display.theme` is `auto` and no manual `b` override is active, the TUI resolves dark or light mode using this precedence:
 
 1. `TOKENPULSE_THEME` (`light` or `dark`, case-insensitive).
-2. Terminal background luminance via an OSC 11 query once at startup when attached to a TTY (never from inside the Bubble Tea event loop or non-TTY sessions).
-3. `COLORFGBG` (ANSI background index: `<= 6` or `8` is dark, otherwise light).
-4. `TERM_BACKGROUND` (`light` or `dark`, case-insensitive).
-5. OS appearance: on Linux, Freedesktop Portal `org.freedesktop.appearance` `color-scheme` via `busctl`, falling back to `gsettings get org.gnome.desktop.interface color-scheme`; on macOS, `defaults read -g AppleInterfaceStyle`. Default to dark if unavailable.
+2. `COLORFGBG` (ANSI background index: `<= 6` or `8` is dark, otherwise light).
+3. `TERM_BACKGROUND` (`light` or `dark`, case-insensitive).
+4. OS appearance: on Linux, Freedesktop Portal `org.freedesktop.appearance` `color-scheme` via `busctl`, falling back to `gsettings get org.gnome.desktop.interface color-scheme`; on macOS, `defaults read -g AppleInterfaceStyle`.
+5. Terminal background luminance via an OSC 11 query once at startup when attached to a TTY (never from inside the Bubble Tea event loop or non-TTY sessions). Some terminal hosts answer with their own chrome color rather than the visible background, so this is only a last-resort fallback.
 
-While running in `auto` mode without a manual override or explicit `TOKENPULSE_THEME` / `TERM_BACKGROUND` override, the TUI periodically polls OS appearance (skipping OSC 11). The first reading is only a baseline; the active theme changes when a later reading differs from the previous one, so a startup result from a higher-precedence source (such as OSC 11 on a dark terminal under a light OS) is kept until the OS actually switches.
+OS appearance wins over the OSC 11 query so a misleading terminal reply cannot override a light desktop. Default to dark if no source is available.
+
+While running in `auto` mode without a manual override or explicit `TOKENPULSE_THEME` / `TERM_BACKGROUND` override, the TUI periodically polls OS appearance (skipping OSC 11). The first reading is only a baseline; the active theme changes when a later reading differs from the previous one, so a startup result from an explicit terminal hint is kept until the OS actually switches.
 
 ## Light-Mode Contrast
 

@@ -204,19 +204,25 @@ func hasExplicitTermBackground() bool {
 	return v == "light" || v == "dark"
 }
 
-func detectAutoThemeMode() int {
+// detectThemePreference resolves every source that does not need to query the
+// terminal: explicit env vars, COLORFGBG, TERM_BACKGROUND and OS appearance.
+func detectThemePreference() (int, bool) {
 	if mode, ok := detectEnvThemeOverride(); ok {
-		return mode
+		return mode, true
 	}
 	if mode, ok := parseColorFGBG(os.Getenv("COLORFGBG")); ok {
-		return mode
+		return mode, true
 	}
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("TERM_BACKGROUND"))); v == "light" {
-		return 1
+		return 1, true
 	} else if v == "dark" {
-		return 0
+		return 0, true
 	}
-	if mode, ok := detectSystemAppearance(); ok {
+	return detectSystemAppearance()
+}
+
+func detectAutoThemeMode() int {
+	if mode, ok := detectThemePreference(); ok {
 		return mode
 	}
 	return 0
@@ -224,9 +230,10 @@ func detectAutoThemeMode() int {
 
 // detectStartupThemeMode runs once before Bubble Tea takes over stdin so it
 // can query the terminal background safely via lipgloss (OSC 11) when attached
-// to a TTY.
+// to a TTY. OS appearance wins because some terminal hosts answer OSC 11 with
+// their chrome color instead of the visible background.
 func detectStartupThemeMode() int {
-	if mode, ok := detectEnvThemeOverride(); ok {
+	if mode, ok := detectThemePreference(); ok {
 		return mode
 	}
 	if isTerminal(os.Stdin) && isTerminal(os.Stdout) {
@@ -235,7 +242,7 @@ func detectStartupThemeMode() int {
 		}
 		return 1
 	}
-	return detectAutoThemeMode()
+	return 0
 }
 
 func isTerminal(f *os.File) bool {
