@@ -235,19 +235,23 @@ func (m *model) drawHeatmap(c *canvas, area rect) {
 	}
 
 	if text, legendX, footerY, ok := heatmapFooterLayout(inner, fromText, toText); ok {
-		c.set(inner.x, footerY, text, fgStyle(theme.dim))
+		c.setClip(inner.x, footerY, inner.right(), text, fgStyle(theme.dim))
 		x := legendX
 		for _, color := range palette {
-			c.set(x, footerY, "██", textStyle{fg: color, bg: theme.heatmapBg})
+			c.setClip(x, footerY, inner.right(), "██", textStyle{fg: color, bg: theme.heatmapBg})
 			x += 2
 		}
-		c.set(x, footerY, " high", fgStyle(theme.dim))
+		c.setClip(x, footerY, inner.right(), " high", fgStyle(theme.dim))
 		x += len(" high")
-		if m.activityLegend >= 0 {
+		if m.activityLegend >= 0 && m.activityLegend < heatmapLegendBlocks {
 			low, high := activityLegendRange(m.activityLegend, maxValue, thresholds)
-			label := fmt.Sprintf("    Level %d: %s - %s", m.activityLegend+1,
+			gap := "    "
+			if inner.w < 92 {
+				gap = "  "
+			}
+			label := fmt.Sprintf("%sLevel %d: %s - %s", gap, m.activityLegend+1,
 				formatHeatmapValue(low, m.activityMetric), formatHeatmapValue(high, m.activityMetric))
-			c.set(x, footerY, label, boldStyle(theme.accent))
+			c.setClip(x, footerY, inner.right(), label, boldStyle(theme.accent))
 		}
 	}
 }
@@ -263,7 +267,11 @@ func heatmapFooterLayout(inner rect, fromText, toText string) (text string, lege
 	if y <= gridY+7 {
 		return "", 0, 0, false
 	}
-	text = fmt.Sprintf("Date Range  %s → %s    low ", fromText, toText)
+	if inner.w < 92 {
+		text = fmt.Sprintf("%s → %s  low ", fromText, toText)
+	} else {
+		text = fmt.Sprintf("Date Range  %s → %s    low ", fromText, toText)
+	}
 	return text, inner.x + len([]rune(text)), y, true
 }
 
@@ -299,7 +307,7 @@ func (m *model) heatmapLegendAt(bodyArea rect, col, row int) (int, bool) {
 		return 0, false
 	}
 	_, legendX, footerY, ok := heatmapFooterLayout(inner, fromText, toText)
-	if !ok || row != footerY || col < legendX || col >= legendX+heatmapLegendBlocks*2 {
+	if !ok || row != footerY || col < legendX || col >= min(legendX+heatmapLegendBlocks*2, inner.right()) {
 		return 0, false
 	}
 	return (col - legendX) / 2, true

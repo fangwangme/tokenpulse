@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -293,6 +294,23 @@ func parseGsettingsColorScheme(stdout string) (int, bool) {
 	}
 }
 
+func parseDarwinAppearance(stdout []byte, err error, ctxErr error) (int, bool) {
+	if ctxErr != nil {
+		return 0, false
+	}
+	if err == nil {
+		if strings.EqualFold(strings.TrimSpace(string(stdout)), "dark") {
+			return 0, true
+		}
+		return 1, true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && strings.Contains(strings.ToLower(string(exitErr.Stderr)), "does not exist") {
+		return 1, true
+	}
+	return 0, false
+}
+
 // detectSystemAppearance queries the OS appearance without touching stdin,
 // making it safe to call periodically while Bubble Tea owns the terminal.
 func detectSystemAppearance() (int, bool) {
@@ -301,10 +319,7 @@ func detectSystemAppearance() (int, bool) {
 	switch runtime.GOOS {
 	case "darwin":
 		out, err := exec.CommandContext(ctx, "defaults", "read", "-g", "AppleInterfaceStyle").Output()
-		if err == nil && strings.EqualFold(strings.TrimSpace(string(out)), "dark") {
-			return 0, true
-		}
-		return 1, true
+		return parseDarwinAppearance(out, err, ctx.Err())
 	case "linux":
 		out, err := exec.CommandContext(ctx, "busctl", "--user", "--timeout=1", "call",
 			"org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",

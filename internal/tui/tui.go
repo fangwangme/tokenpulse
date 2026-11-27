@@ -1470,7 +1470,11 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.tab == tabActivity {
 		if level, ok := m.heatmapLegendAt(body, msg.X, msg.Y); ok {
-			m.activityLegend = level
+			if m.activityLegend == level {
+				m.activityLegend = -1
+			} else {
+				m.activityLegend = level
+			}
 			return m, nil
 		}
 		if date, ok := m.heatmapDateAt(body, msg.X, msg.Y); ok {

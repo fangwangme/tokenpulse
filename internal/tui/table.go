@@ -139,7 +139,7 @@ func tableRows(total, available int) (visible int, showHint bool) {
 }
 
 func scrollHint(offset, visible, total int) string {
-	if total <= visible {
+	if total <= visible || visible <= 0 {
 		return ""
 	}
 	up, down := " ", " "
