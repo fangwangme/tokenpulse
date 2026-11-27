@@ -1,9 +1,14 @@
 package tui
 
 import (
+	"fmt"
+	"sort"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/fangwangme/tokenpulse/internal/report"
 )
 
 func (m *model) drawDaily(c *canvas, area rect) {
@@ -48,30 +53,30 @@ func (m *model) drawDaily(c *canvas, area rect) {
 	dateWidth := 15
 	wowWidth := 11
 	x := inner.x
-	c.set(x, inner.y, padRight("Date"+sortIndicator(m.sortField == sortDate, m.sortAsc), dateWidth), boldStyle(theme.accentSoft))
+	c.setClip(x, inner.y, inner.right(), padRight("Date"+sortIndicator(m.sortField == sortDate, m.sortAsc), dateWidth), boldStyle(theme.accentSoft))
 	x += dateWidth + 1
-	c.set(x, inner.y, padLeft("Tokens"+sortIndicator(m.sortField == sortTokens, m.sortAsc), 10), boldStyle(theme.codex))
+	c.setClip(x, inner.y, inner.right(), padLeft("Tokens"+sortIndicator(m.sortField == sortTokens, m.sortAsc), 10), boldStyle(theme.codex))
 	x += 11
-	c.set(x, inner.y, padLeft("Cost"+sortIndicator(m.sortField == sortCost, m.sortAsc), 10), boldStyle(theme.gaugeMid))
+	c.setClip(x, inner.y, inner.right(), padLeft("Cost"+sortIndicator(m.sortField == sortCost, m.sortAsc), 10), boldStyle(theme.gaugeMid))
 	x += 11
 	if showDetailCols {
-		c.set(x, inner.y, padLeft("Input", 10), boldStyle(theme.gemini))
+		c.setClip(x, inner.y, inner.right(), padLeft("Input", 10), boldStyle(theme.gemini))
 		x += 11
-		c.set(x, inner.y, padLeft("Output", 10), boldStyle(rgb(167, 139, 250)))
+		c.setClip(x, inner.y, inner.right(), padLeft("Output", 10), boldStyle(rgb(167, 139, 250)))
 		x += 11
-		c.set(x, inner.y, padLeft(cacheRHeader, cacheWidth), boldStyle(cacheColor))
+		c.setClip(x, inner.y, inner.right(), padLeft(cacheRHeader, cacheWidth), boldStyle(cacheColor))
 		x += cacheWidth + 1
-		c.set(x, inner.y, padLeft(cacheWHeader, cacheWidth), boldStyle(cacheColor))
+		c.setClip(x, inner.y, inner.right(), padLeft(cacheWHeader, cacheWidth), boldStyle(cacheColor))
 		x += cacheWidth + 1
 	}
-	c.set(x, inner.y, padLeft("Msgs", 8), boldStyle(theme.gemini))
+	c.setClip(x, inner.y, inner.right(), padLeft("Msgs", 8), boldStyle(theme.gemini))
 	x += 9
 	if showWow {
 		header := "Token vs 7d"
 		if m.dailyMetric == metricCost {
 			header = "Cost vs 7d"
 		}
-		c.set(x, inner.y, padLeft(header, wowWidth), boldStyle(theme.dim))
+		c.setClip(x, inner.y, inner.right(), padLeft(header, wowWidth), boldStyle(theme.dim))
 	}
 
 	visible := max(inner.h-1, 0)
@@ -95,6 +100,9 @@ func (m *model) drawDaily(c *canvas, area rect) {
 		if selectedRow {
 			rowBg = theme.selectedBg
 		}
+		if rowBg != "" {
+			c.fill(inner.x, y, inner.w, 1, textStyle{bg: rowBg})
+		}
 		col := func(color lipgloss.Color, bold bool) textStyle {
 			return textStyle{fg: color, bg: rowBg, bold: bold}
 		}
@@ -105,23 +113,23 @@ func (m *model) drawDaily(c *canvas, area rect) {
 			}
 		}
 		x = inner.x
-		c.set(x, y, padRight(dateText, dateWidth), col(theme.accentSoft, isToday))
+		c.setClip(x, y, inner.right(), padRight(dateText, dateWidth), col(theme.accentSoft, isToday))
 		x += dateWidth + 1
-		c.set(x, y, padLeft(formatCompact(day.Tokens), 10), col(theme.codex, false))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Tokens), 10), col(theme.codex, false))
 		x += 11
-		c.set(x, y, padLeft(formatCost(day.Cost), 10), col(theme.gaugeMid, false))
+		c.setClip(x, y, inner.right(), padLeft(formatCost(day.Cost), 10), col(theme.gaugeMid, false))
 		x += 11
 		if showDetailCols {
-			c.set(x, y, padLeft(formatCompact(day.Input), 10), col(theme.gemini, false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Input), 10), col(theme.gemini, false))
 			x += 11
-			c.set(x, y, padLeft(formatCompact(day.Output), 10), col(rgb(167, 139, 250), false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Output), 10), col(rgb(167, 139, 250), false))
 			x += 11
-			c.set(x, y, padLeft(formatCompact(day.CacheRead), cacheWidth), col(cacheColor, false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.CacheRead), cacheWidth), col(cacheColor, false))
 			x += cacheWidth + 1
-			c.set(x, y, padLeft(formatCompact(day.CacheWrite), cacheWidth), col(cacheColor, false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.CacheWrite), cacheWidth), col(cacheColor, false))
 			x += cacheWidth + 1
 		}
-		c.set(x, y, padLeft(formatCompact(day.Messages), 8), col(theme.gemini, false))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Messages), 8), col(theme.gemini, false))
 		x += 9
 		if showWow {
 			priorDate := ""
@@ -137,9 +145,131 @@ func (m *model) drawDaily(c *canvas, area rect) {
 				current = day.Cost
 			}
 			text := percentDeltaText(current, prior)
-			c.set(x, y, padLeft(text, wowWidth), col(percentDeltaColor(theme, current, prior), false))
+			c.setClip(x, y, inner.right(), padLeft(text, wowWidth), col(percentDeltaColor(theme, current, prior), false))
 		}
 	}
+}
+
+func (m *model) drawDayDetail(c *canvas, area rect) {
+	theme := m.theme()
+	detail := m.dayDetail
+	box := popup(area, min(106, area.w-4), min(26, area.h-2))
+	c.box(box.x, box.y, box.w, box.h, " Day "+detail.Date+" ", boldStyle(theme.companyColor("other")), fgStyle(theme.border))
+	inner := box.inner()
+	var lines []string
+	cacheWriteTotal := "—"
+	if detail.Totals.CacheWrite > 0 {
+		cacheWriteTotal = formatCompact(detail.Totals.CacheWrite)
+	}
+	lines = append(lines,
+		fmt.Sprintf("Cost %s   Tokens %s   Messages %s   Sessions %s",
+			formatCost(detail.Totals.Cost), formatCompact(detail.Totals.Tokens),
+			formatIntCommas(detail.Totals.Messages), formatIntCommas(detail.Totals.Sessions)),
+		fmt.Sprintf("Input %s   Output %s   Cache read %s   Cache write %s",
+			formatCompact(detail.Totals.Input), formatCompact(detail.Totals.Output),
+			formatCompact(detail.Totals.CacheRead), cacheWriteTotal),
+		"",
+	)
+	for _, agent := range detail.Agents {
+		lines = append(lines, fmt.Sprintf("%s  %s", displayAgentName(agent.Agent), formatCost(agent.Totals.Cost)))
+		for _, model := range agent.Models {
+			cw := "—"
+			if model.CacheWrite > 0 {
+				cw = formatCompact(model.CacheWrite)
+			}
+			lines = append(lines, fmt.Sprintf("  %-30s %10s  %9s  CR %9s  CW %9s  Hit %s",
+				truncate(model.Model, 30), formatCost(model.Cost), formatCompact(model.Tokens),
+				formatCompact(model.CacheRead), cw, cacheHitPercent(model.CacheRead, model.Tokens)))
+		}
+	}
+	lines = append(lines, "", "Esc closes")
+	start := clampInt(m.detailScroll, 0, max(len(lines)-inner.h, 0))
+	m.detailScroll = start
+	for index := 0; index < inner.h && start+index < len(lines); index++ {
+		c.set(inner.x, inner.y+index, truncate(lines[start+index], inner.w), fgStyle(theme.fg))
+	}
+}
+
+func (m *model) handleDailyKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "c", "t", "d":
+		toggleSort(key, &m.sortField, &m.sortAsc)
+		m.dailySel, m.dailyOff = 0, 0
+	case "v":
+		if m.dailyMetric == metricTokens {
+			m.dailyMetric = metricCost
+		} else {
+			m.dailyMetric = metricTokens
+		}
+	case "down", "j":
+		if m.dailySel < len(m.report.Days)-1 {
+			m.dailySel++
+		}
+	case "up", "k":
+		if m.dailySel > 0 {
+			m.dailySel--
+		}
+	case "enter":
+		days := m.sortedDays()
+		if len(days) == 0 {
+			return m, nil
+		}
+		date := days[clampInt(m.dailySel, 0, len(days)-1)].Date
+		return m, m.loadDayDetailCmd(date)
+	}
+	return m, nil
+}
+
+func (m *model) loadDayDetailCmd(date string) tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	agents := m.selectedAgents()
+	key := m.dayDetailKey(date)
+	m.detailSeq++
+	seq := m.detailSeq
+	return func() tea.Msg {
+		value, err := client.UsageDay(date, agents)
+		if err != nil {
+			return toastMsg{"Day: " + err.Error()}
+		}
+		return dayDetailMsg{key: key, date: date, seq: seq, value: value}
+	}
+}
+
+func (m *model) sortedDays() []report.DaySummary {
+	days := append([]report.DaySummary(nil), m.report.Days...)
+	sortDays(days, m.sortField, m.sortAsc)
+	return days
+}
+
+func sortDays(days []report.DaySummary, field int, ascending bool) {
+	if len(days) < 2 {
+		return
+	}
+	sort.SliceStable(days, func(i, j int) bool {
+		left, right := days[i], days[j]
+		var less, equal bool
+		switch field {
+		case sortCost:
+			less = left.Cost < right.Cost
+			equal = left.Cost == right.Cost
+		case sortTokens:
+			less = left.Tokens < right.Tokens
+			equal = left.Tokens == right.Tokens
+		default:
+			less = left.Date < right.Date
+			equal = left.Date == right.Date
+		}
+		if equal {
+			return left.Date < right.Date
+		}
+		if ascending {
+			return less
+		}
+		return !less && !equal
+	})
 }
 
 // dailyValueMap combines the range report with the earlier-dates report so a

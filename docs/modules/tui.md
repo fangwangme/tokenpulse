@@ -47,8 +47,8 @@ of scanning. A stale socket is ignored and the TUI takes ownership again.
 
 ## Keys
 
-`q`/`Ctrl+C` quit, `←`/`→`/`h`/`l`/`Tab`/`Shift+Tab` switch tabs, a click on a
-tab selects it, `s` filters agents, `b` cycles the theme, `r` refreshes and `?`
-opens the help overlay. Overview, Models and Daily add `1`–`6` presets, `[`/`]`
-range shifting and `n` back to today; the page-specific keys are in
-`tui-usage.md`.
+`q`/`Ctrl+C` quit, `←`/`→`/`h`/`l`/`Tab`/`Shift+Tab` switch tabs (on Keeper,
+`Tab`/`Shift+Tab` select agent cards instead), a click on a tab selects it, `s`
+filters agents, `b` cycles the theme, `r` refreshes and `?` opens the help
+overlay. Overview, Models and Daily add `1`–`6` presets, `[`/`]` range shifting
+and `n` back to today; the page-specific keys are in `tui-usage.md`.

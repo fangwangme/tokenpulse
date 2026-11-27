@@ -8,10 +8,13 @@ import (
 	"time"
 	"unicode/utf8"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/fangwangme/tokenpulse/internal/config"
 	"github.com/fangwangme/tokenpulse/internal/keeper"
 	"github.com/fangwangme/tokenpulse/internal/provider"
 	"github.com/fangwangme/tokenpulse/internal/remote"
+	"github.com/fangwangme/tokenpulse/internal/report"
 	rt "github.com/fangwangme/tokenpulse/internal/runtime"
 	"github.com/fangwangme/tokenpulse/internal/scan"
 )
@@ -260,5 +263,212 @@ func TestKeeperUsesNewestRecord(t *testing.T) {
 	out := next.(*model).renderKeeper(180)
 	if !strings.Contains(out, "Model: newer") {
 		t.Fatalf("Keeper card did not pick the newest record:\n%s", out)
+	}
+}
+
+func TestOverviewTopModelsCostShare(t *testing.T) {
+	now := today()
+	h := startTUI(t, newLedger(t, []ledgerRow{
+		{date: now, model: "claude-sonnet-4-5", tokens: 100_000, cost: 3},
+		{date: now, model: "gpt-5", tokens: 300_000, cost: 1},
+	}))
+	h.key("c")
+	lines := h.screen()
+	if !hasLine(lines, "claude-sonnet-4-5", "75.00%") || !hasLine(lines, "gpt-5", "25.00%") {
+		t.Fatalf("Overview cost mode did not compute cost share:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestActivityReloadsAfterUsageUpdated(t *testing.T) {
+	now := today()
+	h := startTUI(t, newLedger(t, []ledgerRow{
+		{date: now, model: "claude-sonnet-4-5", tokens: 500, cost: 1},
+	}))
+	h.key("tab", "tab", "tab")
+	before := len(h.client.usage())
+	h.send(eventMsg{event: rt.Event{Type: "usage_updated"}})
+	if len(h.client.usage()) <= before {
+		t.Fatalf("Activity did not reload after usage_updated; calls = %d", len(h.client.usage()))
+	}
+	if !h.m.(*model).activityLoaded {
+		t.Fatal("Activity stayed unloaded after usage_updated")
+	}
+}
+
+func TestDailyTodayJumpRespectsSharedSort(t *testing.T) {
+	now := today()
+	h := startTUI(t, newLedger(t, []ledgerRow{
+		{date: now.AddDate(0, 0, -2), model: "claude-sonnet-4-5", tokens: 5000, cost: 50},
+		{date: now, model: "claude-sonnet-4-5", tokens: 100, cost: 1},
+	}))
+	h.key("tab", "tab")
+	m := h.m.(*model)
+	if m.sortField != sortTokens {
+		t.Fatalf("sortField = %d, want sortTokens (%d)", m.sortField, sortTokens)
+	}
+	h.key("n")
+	days := m.sortedDays()
+	if got := days[m.dailySel].Date; got != ymd(now) {
+		t.Fatalf("after `n` on Daily (tokens sort), selected date = %s, want %s", got, ymd(now))
+	}
+}
+
+func TestModelDetailScrolls(t *testing.T) {
+	cfg := config.Default()
+	agents := make([]report.AgentTotals, 12)
+	for i := range agents {
+		agents[i] = report.AgentTotals{Agent: "claude", Totals: report.Totals{Tokens: int64(100 + i), Cost: float64(i)}}
+	}
+	m := &model{
+		opts:   Options{Config: cfg},
+		cfg:    cfg,
+		width:  100,
+		height: 16,
+		report: report.Report{Range: report.Range{From: "2026-11-01", To: "2026-11-27"}},
+		modelDetail: &report.ModelDetail{
+			Model:   "claude-sonnet-4-5",
+			Company: "anthropic",
+			Agents:  agents,
+		},
+	}
+	top := m.View()
+	m.detailScroll = 20
+	scrolled := m.View()
+	if top == scrolled {
+		t.Fatal("drawModelDetail ignored detailScroll")
+	}
+	if !strings.Contains(scrolled, "Esc closes") {
+		t.Fatalf("scrolled model detail did not reveal bottom line:\n%s", scrolled)
+	}
+}
+
+func TestReportErrorClearsStaleAndRendersOnOverviewAndModels(t *testing.T) {
+	now := today()
+	h := startTUI(t, newLedger(t, []ledgerRow{
+		{date: now, model: "claude-sonnet-4-5", tokens: 500, cost: 2},
+	}))
+	m := h.m.(*model)
+	key := m.rangeKey()
+	h.send(reportMsg{key: key, err: errors.New("server unreachable")})
+	if len(m.report.Models) != 0 {
+		t.Fatalf("stale report retained after error: %+v", m.report.Models)
+	}
+	if out := strings.Join(h.screen(), "\n"); !strings.Contains(out, "server unreachable") {
+		t.Fatalf("Overview did not render reportErr:\n%s", out)
+	}
+	m.tab = tabModels
+	if out := strings.Join(h.screen(), "\n"); !strings.Contains(out, "server unreachable") {
+		t.Fatalf("Models did not render reportErr:\n%s", out)
+	}
+}
+
+func TestScanAntigravityDisabledExcludesAntigravity(t *testing.T) {
+	cfg := config.Default()
+	cfg.Display.ScanAntigravity = false
+	m := newModel(Options{Config: cfg}, nil)
+	if m.agents["antigravity"] {
+		t.Fatal("antigravity should be deselected when scan_antigravity is false")
+	}
+}
+
+func TestPartialCompanyFailureDoesNotMisclassifyAsOthers(t *testing.T) {
+	now := today()
+	h := startTUI(t, newLedger(t, []ledgerRow{
+		{date: now.AddDate(0, 0, -1), model: "claude-sonnet-4-5", tokens: 300, cost: 3},
+		{date: now, model: "gpt-5", tokens: 200, cost: 2},
+	}))
+	m := h.m.(*model)
+	key := m.rangeKey()
+	h.send(modelDetailMsg{key: key, purpose: "company", seq: m.companySeq, err: errors.New("timeout")})
+	series := m.chartSeries(10)
+	for _, day := range series {
+		if len(day.segments) != 0 {
+			t.Fatalf("partial company failure still emitted stacked segments: %+v", day.segments)
+		}
+	}
+}
+
+func TestStaleModelDetailResponseIgnored(t *testing.T) {
+	cfg := config.Default()
+	m := newModel(Options{Config: cfg}, nil)
+	m.detailSeq = 2
+	key := m.rangeKey()
+	m.Update(modelDetailMsg{key: key, purpose: "detail", seq: 1, value: report.ModelDetail{Model: "old-model"}})
+	if m.modelDetail != nil {
+		t.Fatalf("stale modelDetailMsg was accepted: %+v", m.modelDetail)
+	}
+	m.Update(modelDetailMsg{key: key, purpose: "detail", seq: 2, value: report.ModelDetail{Model: "new-model"}})
+	if m.modelDetail == nil || m.modelDetail.Model != "new-model" {
+		t.Fatalf("current modelDetailMsg was not accepted: %+v", m.modelDetail)
+	}
+}
+
+func TestQuotaCompactRenderingAtSmallHeight(t *testing.T) {
+	cfg := config.Default()
+	m := &model{
+		opts:   Options{Config: cfg},
+		cfg:    cfg,
+		width:  80,
+		height: 20,
+		tab:    tabQuota,
+		snapshots: []provider.QuotaSnapshot{
+			{Provider: "claude", Windows: []provider.RateWindow{{Label: "5h", UsedPercent: 20}}},
+			{Provider: "codex", Windows: []provider.RateWindow{{Label: "5h", UsedPercent: 40}}},
+			{Provider: "opencode", Windows: []provider.RateWindow{{Label: "5h", UsedPercent: 60}}},
+			{Provider: "antigravity", Windows: []provider.RateWindow{{Label: "5h", UsedPercent: 80}}},
+		},
+	}
+	out := ansi.ReplaceAllString(m.View(), "")
+	for _, name := range []string{"CLAUDE CODE", "CODEX", "OPENCODE GO", "ANTIGRAVITY"} {
+		if !strings.Contains(out, name) {
+			t.Fatalf("80x20 Quota view omitted %q:\n%s", name, out)
+		}
+	}
+}
+
+func TestKeeperFailedRemoteRecordHidesOmittedFields(t *testing.T) {
+	cfg := config.Default()
+	m := &model{
+		opts: Options{Config: cfg},
+		cfg:  cfg,
+		keeperLog: []keeper.ExecutionRecord{{
+			Agent:         "claude",
+			Timestamp:     time.Now(),
+			Success:       false,
+			OutputSnippet: "auth failed",
+		}},
+	}
+	out := ansi.ReplaceAllString(m.renderKeeper(120), "")
+	if strings.Contains(out, "0ms") || strings.Contains(out, "exit ERR") {
+		t.Fatalf("failed remote Keeper record printed fabricated fields:\n%s", out)
+	}
+	if !strings.Contains(out, "✗ Failed") {
+		t.Fatalf("failed Keeper record missing status:\n%s", out)
+	}
+}
+
+func TestMouseTabClickMatchesDrawnColumns(t *testing.T) {
+	cfg := config.Default()
+	m := newModel(Options{Config: cfg}, nil)
+	m.width, m.height = 180, 60
+	inner := rect{x: 0, y: 4, w: 180, h: 3}.inner()
+	for expected, col := range splitH(inner, tabCount) {
+		m.tab = (expected + 1) % tabCount
+		m.handleMouse(tea.MouseMsg{X: col.x, Y: 5, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+		if m.tab != expected {
+			t.Fatalf("clicking x=%d (start of tab %d) selected tab %d", col.x, expected, m.tab)
+		}
+	}
+}
+
+func TestOverviewSmallNonZeroBarRenders(t *testing.T) {
+	now := today()
+	h := startTUI(t, newLedger(t, []ledgerRow{
+		{date: now.AddDate(0, 0, -1), model: "claude-sonnet-4-5", tokens: 1_000_000},
+		{date: now, model: "claude-sonnet-4-5", tokens: 100},
+	}))
+	out := strings.Join(h.screen(), "\n")
+	if !strings.Contains(out, "▁") {
+		t.Fatalf("tiny non-zero day did not render a 1/8 block:\n%s", out)
 	}
 }

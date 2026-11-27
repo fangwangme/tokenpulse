@@ -49,6 +49,7 @@ Theme, table layout and truncation follow `tui-theme.md` and
    - Until the company values arrive, bars show the day total in one color.
    - A single-day range has no chart; the model table takes its space.
 3. **Top models** — the 0.6.16 table: `Model`, `Agent`, `Tokens`, `Cost`, `%`.
+   `Enter` opens the selected model's detail popup (same as Models).
 
 ## Models
 
@@ -70,8 +71,8 @@ Theme, table layout and truncation follow `tui-theme.md` and
   value or zero. The earlier dates come from one extra report whose start is
   never before the first data day.
 - `c`, `t` and `d` sort; `Enter` opens the day detail of the phone (totals, per
-  agent its cost, per model its cost, tokens, cache read and cache hit with two
-  decimals). `Esc` closes it.
+  agent its cost, per model its cost, tokens, cache read, cache write (`—` when
+  0) and cache hit with two decimals). `Esc` closes it.
 
 ## Activity
 
@@ -118,10 +119,11 @@ Theme, table layout and truncation follow `tui-theme.md` and
 
 ## Global keys
 
-`q`/`Ctrl+C` quit; `←`/`→`/`h`/`l`/`Tab`/`Shift+Tab` switch tabs, and a click
-on a tab selects it; `j`/`k` move; `s` agent filter; `b` theme; `r` refresh;
-`?` toggles the 0.6.16 help overlay listing the current page's keys. `Esc`
-closes a detail, the overlay or the help, and never quits.
+`q`/`Ctrl+C` quit; `←`/`→`/`h`/`l`/`Tab`/`Shift+Tab` switch tabs (except on
+Keeper, where `Tab`/`Shift+Tab` move between agent cards), and a click on a tab
+selects it; `j`/`k` move; `s` agent filter; `b` theme; `r` refresh; `?` toggles
+the 0.6.16 help overlay listing the current page's keys. `Esc` closes a detail,
+the overlay or the help, and never quits.
 
 On Overview, Models and Daily:
 

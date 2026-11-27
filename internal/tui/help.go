@@ -14,7 +14,9 @@ func (m *model) helpBindings() []keyHelp {
 		{"←→ / Tab", "switch tab"},
 		{"↑↓ / j k", "navigate lists"},
 		{"s", "toggle agent filter"},
+		{"b", "toggle light / dark theme"},
 		{"r", "refresh usage and quota"},
+		{"Esc", "close detail or overlay"},
 		{"?", "toggle this help overlay"},
 		{"q / Ctrl+C", "quit dashboard"},
 	}
@@ -23,6 +25,7 @@ func (m *model) helpBindings() []keyHelp {
 		bindings = append(bindings,
 			keyHelp{"t", "chart and top models by tokens"},
 			keyHelp{"c", "chart and top models by cost"},
+			keyHelp{"Enter", "open the selected model detail"},
 			keyHelp{"1–6", "range preset today/7d/30d/year/all/custom"},
 			keyHelp{"[ / ]", "shift the range earlier / later"},
 			keyHelp{"n", "back to the preset range ending today"},
@@ -83,7 +86,6 @@ func (m *model) drawHelp(c *canvas, area rect) {
 	width := min(keyWidth+descWidth+4, area.w-4)
 	height := min(len(bindings)+4, area.h-2)
 	box := popup(area, width, height)
-	c.fill(box.x, box.y, box.w, box.h, textStyle{})
 	c.box(box.x, box.y, box.w, box.h, " Dashboard Keybindings ", boldStyle(theme.accent), fgStyle(theme.accent))
 	inner := box.inner()
 	y := inner.y
@@ -108,7 +110,6 @@ func (m *model) drawFilter(c *canvas, area rect) {
 	width := min(46, area.w-4)
 	height := min(len(report.AllAgents)+6, area.h-2)
 	box := popup(area, width, height)
-	c.fill(box.x, box.y, box.w, box.h, textStyle{})
 	c.box(box.x, box.y, box.w, box.h, " Filter Sources ", boldStyle(theme.accent), fgStyle(theme.accent))
 	inner := box.inner()
 	if inner.h <= 0 {

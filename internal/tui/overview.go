@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/fangwangme/tokenpulse/internal/report"
@@ -34,6 +35,10 @@ func (m *model) drawOverview(c *canvas, area rect) {
 	barHeight := m.drawRangeBar(c, area)
 	body := rect{x: area.x, y: area.y + barHeight, w: area.w, h: area.h - barHeight}
 	if body.h <= 0 {
+		return
+	}
+	if m.reportErr != "" {
+		c.setClip(body.x, body.y, body.right(), m.reportErr, fgStyle(m.theme().gaugeHigh))
 		return
 	}
 
@@ -135,22 +140,18 @@ func (m *model) drawOverviewKPI(c *canvas, area rect, unpriced bool) {
 		x := area.x
 		if unpriced && area.h == 2 {
 			notice := "Some models have no pricing data available."
-			c.set(x, y, notice, fgStyle(theme.gaugeMid))
+			c.setClip(x, y, area.right(), notice, fgStyle(theme.gaugeMid))
 			x += len([]rune(notice)) + 2
 		}
 		if comparison != nil {
 			text := "vs " + comparison.From + " → " + comparison.To
-			c.set(x, y, text, fgStyle(theme.dim))
-			x += len([]rune(text))
-			if m.report.ScannedAt != 0 {
-				c.set(x+3, y, "scanned "+formatScanned(m.report.ScannedAt), fgStyle(theme.dim))
-			}
-		} else if m.report.ScannedAt != 0 {
-			c.set(x, y, "scanned "+formatScanned(m.report.ScannedAt), fgStyle(theme.dim))
+			c.setClip(x, y, area.right(), text, fgStyle(theme.dim))
+			x += len([]rune(text)) + 3
 		}
+		c.setClip(x, y, area.right(), "Est. API pricing (subscriptions not billed by API)", fgStyle(theme.dim))
 	}
 	if unpriced && area.h >= 3 {
-		c.set(area.x, area.y+2, "Some models have no pricing data available.", fgStyle(theme.gaugeMid))
+		c.setClip(area.x, area.y+2, area.right(), "Some models have no pricing data available.", fgStyle(theme.gaugeMid))
 	}
 }
 
@@ -234,7 +235,7 @@ func (m *model) drawOverviewChart(c *canvas, area rect) {
 		if day.total <= 0 {
 			continue
 		}
-		heightEighths := int(math.Round(day.total / maxValue * float64(chartHeight*8)))
+		heightEighths := max(1, int(math.Round(day.total/maxValue*float64(chartHeight*8))))
 		fullRows := heightEighths / 8
 		partial := heightEighths % 8
 		segments := day.segments
@@ -323,7 +324,7 @@ func (m *model) chartSeries(limit int) []chartDay {
 			total = summary.Cost
 		}
 		entry := chartDay{date: date, total: total}
-		if !m.company.empty() && !m.companyLoading {
+		if !m.company.empty() && !m.companyLoading && !m.companyErr {
 			var known float64
 			for _, company := range []string{"anthropic", "openai", "google"} {
 				var value float64
@@ -437,8 +438,7 @@ func formatYAxis(value float64, metric int) string {
 	return formatCompact(int64(math.Round(value)))
 }
 
-func (m *model) drawTopModels(c *canvas, area rect) {
-	theme := m.theme()
+func (m *model) overviewModels() []report.ModelSummary {
 	models := append([]report.ModelSummary(nil), m.report.Models...)
 	value := func(entry report.ModelSummary) float64 {
 		if m.overviewMetric == metricCost {
@@ -455,14 +455,55 @@ func (m *model) drawTopModels(c *canvas, area rect) {
 		}
 		return value(models[i]) > value(models[j])
 	})
+	return models
+}
+
+func (m *model) handleOverviewKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "t":
+		if m.overviewMetric != metricTokens {
+			m.overviewMetric = metricTokens
+			m.overviewSel, m.overviewOff = 0, 0
+		}
+	case "c":
+		if m.overviewMetric != metricCost {
+			m.overviewMetric = metricCost
+			m.overviewSel, m.overviewOff = 0, 0
+		}
+	case "down", "j":
+		if m.overviewSel < len(m.report.Models)-1 {
+			m.overviewSel++
+		}
+	case "up", "k":
+		if m.overviewSel > 0 {
+			m.overviewSel--
+		}
+	case "enter":
+		models := m.overviewModels()
+		if len(models) == 0 {
+			return m, nil
+		}
+		entry := models[clampInt(m.overviewSel, 0, len(models)-1)]
+		return m, m.loadModelDetailCmd(entry.Model)
+	}
+	return m, nil
+}
+
+func (m *model) drawTopModels(c *canvas, area rect) {
+	theme := m.theme()
+	models := m.overviewModels()
 	totalRows := len(models)
-	rowsVisible := max(area.h-3, 0)
-	selected := clampInt(m.overviewSel, 0, max(totalRows-1, 0))
-	offset := normalizeScroll(m.overviewOff, selected, rowsVisible, totalRows)
-	m.overviewOff = offset
-	title := fmt.Sprintf(" Top Models (%d) %s ", totalRows, scrollHintWindow(offset, rowsVisible, totalRows))
-	c.box(area.x, area.y, area.w, area.h, title, boldStyle(theme.accentSoft), fgStyle(theme.border))
 	inner := area.inner()
+	hintSpace := 1
+	if inner.h <= 2 {
+		hintSpace = 0
+	}
+	dataRows := max(inner.h-1-hintSpace, 0)
+	selected := clampInt(m.overviewSel, 0, max(totalRows-1, 0))
+	offset := normalizeScroll(m.overviewOff, selected, dataRows, totalRows)
+	m.overviewOff = offset
+	title := fmt.Sprintf(" Top Models (%d) %s ", totalRows, scrollHintWindow(offset, dataRows, totalRows))
+	c.box(area.x, area.y, area.w, area.h, title, boldStyle(theme.accentSoft), fgStyle(theme.border))
 	if inner.h <= 0 {
 		return
 	}
@@ -473,27 +514,23 @@ func (m *model) drawTopModels(c *canvas, area rect) {
 	pctWidth, costWidth, tokensWidth := 7, 10, 9
 	fixed := tokensWidth + costWidth + pctWidth + 4
 	modelWidth, agentWidth := calculateModelAgentWidths(sortedModelRows(models), max(inner.w-fixed, 0))
-	var shareTotal float64
-	for _, entry := range models {
-		shareTotal += value(entry)
+	shareField := sortTokens
+	if m.overviewMetric == metricCost {
+		shareField = sortCost
 	}
+	shareTotal := modelShareTotal(models, shareField)
 
 	x := inner.x
-	c.set(x, inner.y, padRight(truncate("Model", modelWidth), modelWidth), boldStyle(theme.accentSoft))
+	c.setClip(x, inner.y, inner.right(), padRight(truncate("Model", modelWidth), modelWidth), boldStyle(theme.accentSoft))
 	x += modelWidth + 1
-	c.set(x, inner.y, padRight(truncate("Agent", agentWidth), agentWidth), boldStyle(theme.accent))
+	c.setClip(x, inner.y, inner.right(), padRight(truncate("Agent", agentWidth), agentWidth), boldStyle(theme.accent))
 	x += agentWidth + 1
-	c.set(x, inner.y, padLeft("Tokens", tokensWidth), boldStyle(theme.codex))
+	c.setClip(x, inner.y, inner.right(), padLeft("Tokens", tokensWidth), boldStyle(theme.codex))
 	x += tokensWidth + 1
-	c.set(x, inner.y, padLeft("Cost", costWidth), boldStyle(theme.gaugeMid))
+	c.setClip(x, inner.y, inner.right(), padLeft("Cost", costWidth), boldStyle(theme.gaugeMid))
 	x += costWidth + 1
-	c.set(x, inner.y, padLeft("%", pctWidth), boldStyle(theme.gemini))
+	c.setClip(x, inner.y, inner.right(), padLeft("%", pctWidth), boldStyle(theme.gemini))
 
-	hintSpace := 1
-	if inner.h <= 2 {
-		hintSpace = 0
-	}
-	dataRows := max(inner.h-1-hintSpace, 0)
 	for index := 0; index < dataRows; index++ {
 		rowIndex := offset + index
 		if rowIndex >= totalRows {
@@ -501,24 +538,25 @@ func (m *model) drawTopModels(c *canvas, area rect) {
 		}
 		entry := models[rowIndex]
 		y := inner.y + 1 + index
-		rowStyle := textStyle{}
+		rowBg := lipgloss.Color("")
 		selectedRow := rowIndex == selected
 		if selectedRow {
-			rowStyle = textStyle{bg: theme.selectedBg}
+			rowBg = theme.selectedBg
+			c.fill(inner.x, y, inner.w, 1, textStyle{bg: rowBg})
 		}
 		style := func(color lipgloss.Color, bold bool) textStyle {
-			return textStyle{fg: color, bg: rowStyle.bg, bold: bold}
+			return textStyle{fg: color, bg: rowBg, bold: bold}
 		}
 		x = inner.x
-		c.set(x, y, padRight(truncate(entry.Model, modelWidth), modelWidth), style(theme.companyColor(entry.Company), selectedRow))
+		c.setClip(x, y, inner.right(), padRight(truncate(entry.Model, modelWidth), modelWidth), style(theme.companyColor(entry.Company), selectedRow))
 		x += modelWidth + 1
-		c.set(x, y, padRight(truncate(displaySourceList(entry.Agents), agentWidth), agentWidth), style(theme.accent, selectedRow))
+		c.setClip(x, y, inner.right(), padRight(truncate(displaySourceList(entry.Agents), agentWidth), agentWidth), style(theme.accent, selectedRow))
 		x += agentWidth + 1
-		c.set(x, y, padLeft(formatCompact(entry.Tokens), tokensWidth), style(theme.codex, selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.Tokens), tokensWidth), style(theme.codex, selectedRow))
 		x += tokensWidth + 1
-		c.set(x, y, padLeft(formatCost(entry.Cost), costWidth), style(theme.gaugeMid, selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(formatCost(entry.Cost), costWidth), style(theme.gaugeMid, selectedRow))
 		x += costWidth + 1
-		c.set(x, y, padLeft(fmt.Sprintf("%.2f%%", modelShare(entry, shareTotal, sortTokens)), pctWidth), style(theme.gemini, selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(fmt.Sprintf("%.2f%%", modelShare(entry, shareTotal, shareField)), pctWidth), style(theme.gemini, selectedRow))
 	}
 	if hintSpace == 1 {
 		drawn := min(dataRows, max(totalRows-offset, 0))

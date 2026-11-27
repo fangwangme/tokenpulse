@@ -186,13 +186,13 @@ func (m *model) drawSettings(c *canvas, area rect) {
 			if row.value == "true" {
 				checkbox = "[x]"
 			}
-			c.set(inner.x, y, fmt.Sprintf("%s %s ", marker, checkbox), fgStyle(boolColor(theme, row.value == "true")))
-			c.set(inner.x+6, y, row.label, boldStyle(row.color))
+			c.setClip(inner.x, y, inner.right(), fmt.Sprintf("%s %s ", marker, checkbox), fgStyle(boolColor(theme, row.value == "true")))
+			c.setClip(inner.x+6, y, inner.right(), row.label, boldStyle(row.color))
 		} else {
 			name := settingName(row.key)
-			c.set(inner.x, y, marker, fgStyle(theme.accent))
-			c.set(inner.x+2, y, name, boldStyle(theme.fg))
-			c.set(inner.x+2+len([]rune(name))+3, y, truncate(row.value, max(inner.w-2-len([]rune(name))-3, 0)), fgStyle(row.color))
+			c.setClip(inner.x, y, inner.right(), marker, fgStyle(theme.accent))
+			c.setClip(inner.x+2, y, inner.right(), name, boldStyle(theme.fg))
+			c.setClip(inner.x+2+len([]rune(name))+3, y, inner.right(), row.value, fgStyle(row.color))
 		}
 	}
 }
@@ -228,43 +228,44 @@ func (m *model) changeSetting() tea.Cmd {
 	if len(rows) == 0 {
 		return nil
 	}
+	cfg := m.configValue()
 	row := rows[clampInt(m.settingsCursor, 0, len(rows)-1)]
 	switch row.key {
 	case "quota_display_mode":
 		next := config.QuotaUsed
-		if m.cfg.Display.QuotaDisplayMode == config.QuotaUsed {
+		if cfg.Display.QuotaDisplayMode == config.QuotaUsed {
 			next = config.QuotaRemaining
 		}
 		return m.patchSettings(map[string]any{"display.quota_display_mode": string(next)}, "Quota display")
 	case "show_empty_providers":
-		return m.patchSettings(map[string]any{"display.show_empty_providers": !m.cfg.Display.ShowEmptyProviders}, "Show empty providers")
+		return m.patchSettings(map[string]any{"display.show_empty_providers": !cfg.Display.ShowEmptyProviders}, "Show empty providers")
 	case "account_display":
-		return m.patchSettings(map[string]any{"display.account_display": string(m.cfg.Display.AccountDisplay.Next())}, "Account display")
+		return m.patchSettings(map[string]any{"display.account_display": string(cfg.Display.AccountDisplay.Next())}, "Account display")
 	case "auto_refresh_interval":
 		return m.patchSettings(map[string]any{"display.auto_refresh_secs": int(m.nextRefreshInterval())}, "Auto refresh")
 	case "theme":
 		m.themeOverride = -1
-		return m.patchSettings(map[string]any{"display.theme": string(m.cfg.Display.Theme.Next())}, "Theme")
+		return m.patchSettings(map[string]any{"display.theme": string(cfg.Display.Theme.Next())}, "Theme")
 	case "scan_antigravity":
-		return m.patchSettings(map[string]any{"display.scan_antigravity": !m.cfg.Display.ScanAntigravity}, "Scan Antigravity")
+		return m.patchSettings(map[string]any{"display.scan_antigravity": !cfg.Display.ScanAntigravity}, "Scan Antigravity")
 	case "refresh_quota":
-		return m.patchSettings(map[string]any{"display.refresh_quota": !m.cfg.Display.RefreshQuota}, "Refresh quota")
+		return m.patchSettings(map[string]any{"display.refresh_quota": !cfg.Display.RefreshQuota}, "Refresh quota")
 	case "notification_level":
-		return m.patchSettings(map[string]any{"display.notification_level": string(m.cfg.Display.NotificationLevel.Next())}, "Notification level")
+		return m.patchSettings(map[string]any{"display.notification_level": string(cfg.Display.NotificationLevel.Next())}, "Notification level")
 	case "notification_sound":
-		next := nextNotificationSound(m.cfg.Display.NotificationSound)
+		next := nextNotificationSound(cfg.Display.NotificationSound)
 		notification.PlayAlertSound(next)
 		return m.patchSettings(map[string]any{"display.notification_sound": next}, "Notification sound")
 	case "keeper_engine":
-		return m.patchSettings(map[string]any{"keeper.enabled": !m.cfg.Keeper.Enabled}, "Keeper engine")
+		return m.patchSettings(map[string]any{"keeper.enabled": !cfg.Keeper.Enabled}, "Keeper engine")
 	case "keeper_antigravity_groups":
-		return m.patchSettings(map[string]any{"keeper.agents.agy.weekly_all_groups": !m.cfg.Keeper.AntigravityAllGroups()}, "Antigravity groups")
+		return m.patchSettings(map[string]any{"keeper.agents.agy.weekly_all_groups": !cfg.Keeper.AntigravityAllGroups()}, "Antigravity groups")
 	case "web_remote":
 		return m.toggleWebRemote()
 	}
 	if strings.HasPrefix(row.key, "provider:") {
 		id := strings.TrimPrefix(row.key, "provider:")
-		return m.patchSettings(map[string]any{"providers." + id + ".enabled": !m.cfg.Providers[id].Enabled}, "Provider "+id)
+		return m.patchSettings(map[string]any{"providers." + id + ".enabled": !cfg.Providers[id].Enabled}, "Provider "+id)
 	}
 	return nil
 }
@@ -274,7 +275,7 @@ func (m *model) nextRefreshInterval() uint32 {
 	if m.client != nil && m.client.IsRemote() {
 		options = []uint32{60, 120, 300, 600, 900}
 	}
-	current := m.cfg.Display.AutoRefreshSecs
+	current := m.configValue().Display.AutoRefreshSecs
 	for index, value := range options {
 		if value == current {
 			return options[(index+1)%len(options)]
@@ -305,7 +306,7 @@ func (m *model) moveProvider(down bool) tea.Cmd {
 		return nil
 	}
 	id := strings.TrimPrefix(row.key, "provider:")
-	order := m.cfg.QuotaProviderOrder(quota.ProviderIDs)
+	order := m.configValue().QuotaProviderOrder(quota.ProviderIDs)
 	index := -1
 	for i, candidate := range order {
 		if candidate == id {

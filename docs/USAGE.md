@@ -1,9 +1,15 @@
 # Usage & Configuration Guide
 
-Detailed reference for TokenPulse's web dashboard, CLI, TUI, configuration,
-local storage, and building from source.
+Detailed reference for TokenPulse's mobile web dashboard, terminal dashboard
+(TUI), CLI, configuration, local storage, and building from source.
 
-## Web Dashboard & Service
+TokenPulse exposes the same live usage report, quota snapshots, Session Keeper,
+and settings through two interactive surfaces — the **Mobile Web Dashboard** and
+the **Terminal Dashboard (TUI)** — plus scriptable CLI outputs.
+
+## Mobile Web Dashboard
+
+### Starting & Pairing
 
 Start the background server on the computer that holds your agent sessions:
 
@@ -13,20 +19,105 @@ tokenpulse serve
 
 `serve` prints a pairing URL and QR code. The token lives in the URL fragment so
 it never reaches a request line or server log. Open the URL on a phone on the
-same tailnet; you can add the web app to your home screen as a PWA.
+same tailnet; you can add the web app to your home screen as an installable PWA.
 
 Default ports are `4120` (local HTTP) and `8444` (Tailscale Serve HTTPS); test
 runs (`TOKENPULSE_ENV=test`) use `14120` and `18444`.
 
 - `--no-tailscale` binds localhost only.
 - `--lan` binds all interfaces and warns that LAN traffic is not encrypted.
-- `tokenpulse remote url` prints the pairing URL again.
+- `tokenpulse remote url` prints the pairing URL and QR code again.
 - `tokenpulse remote reset-token` invalidates all paired phone sessions.
 - `tokenpulse service install` installs a systemd user unit on Linux (or a
   launchd agent on macOS) that runs `serve` and restarts it on failure.
 - One runtime owns refreshing behind `runtime.lock`. You can also toggle
   **Web remote** from the TUI Settings tab to start or stop a background `serve`
   without leaving the dashboard.
+
+### Mobile Pages
+
+The bottom tab bar switches between four mobile-first views:
+
+- **Usage** — opens on `today` with range presets (`today`, `7d`, `30d`, `year`,
+  `all`, `custom`), KPI cards (cost, tokens, sessions, period comparison),
+  Token/Cost switch, agent filter, adaptive heatmap (strip / week rows / week
+  columns with streaks), and a `By date | By model` list that opens day and
+  model detail sheets.
+- **Quota** — per-provider cards in `display.quota_provider_order` with plan and
+  account info, rate-limit bars, pace, reset times, extra usage, and banked
+  reset credits.
+- **Keeper** — master switch, per-agent 5h/weekly toggles, wakeup time editing,
+  Antigravity group option, manual test pings, and recent executions.
+- **Settings** — refresh interval, quota display mode, drag-to-reorder and
+  enable/disable quota providers, theme (light/dark/system), language, and Web
+  Push alerts for quota recovery (on iOS, add the app to the Home Screen first).
+
+Full remote/PWA behavior is specified in [`specs/remote.md`](specs/remote.md).
+
+## Terminal Dashboard (TUI)
+
+Launch the interactive desktop dashboard in any terminal:
+
+```bash
+tokenpulse
+```
+
+If `tokenpulse serve` is already running, the TUI attaches over the local Unix
+socket (`● web`) and stays in sync with the phone; otherwise it runs an
+in-process runtime (`● local`). Pass `--since YYYY-MM-DD` to open on a custom
+range from that date to today, or `--no-scan` to read only the cached ledger.
+
+### Tabs
+
+The TUI has seven tabs (switch with `←`/`→`, `h`/`l`, `Tab`/`Shift+Tab`, or by
+clicking a tab):
+
+- **Overview** — KPI row (cost, tokens, sessions, comparison deltas, estimate
+  and unpriced notices), stacked daily bar chart split by company (`Anthropic`,
+  `OpenAI`, `Google`, `Others`), and Top Models table (`Enter` opens model
+  detail).
+- **Models** — full sortable model breakdown (`Tokens`, `Cost`, `Input`,
+  `Output`, `Cache R`, `Cache W`, `Hit %`, `%`, `Msgs`, `Last`); `Enter` opens
+  model detail.
+- **Daily** — per-date breakdown with `Token vs 7d` / `Cost vs 7d` comparison
+  against 7 days earlier; `Enter` opens day detail (per-agent and per-model
+  cost, tokens, `CR`, `CW`, and `Hit %`).
+- **Activity** — fixed one-year Monday-start heatmap with streaks, period
+  overview (`Today`, `Week`, `Month`, `Year`, `Last 7 days`, `Last 30 days`),
+  and selected-day breakdown. Ignores the shared range.
+- **Quota** — multi-column provider cards in `display.quota_provider_order` with
+  gauges, pace, reset times, extra usage, and banked reset credits.
+- **Keeper** — engine master switch, per-agent cards (5h wakeup, weekly sync,
+  last run, manual ping), and live execution stream (newest first).
+- **Settings** — live config editor (display options, theme, notifications,
+  Keeper, **Web remote** start/stop, and quota provider toggles + reordering).
+
+Overview, Models, and Daily share one range bar (default `30d`) and the global
+agent filter (`s`).
+
+### TUI Keybindings
+
+| Scope | Key | Action |
+| :--- | :--- | :--- |
+| Global | `←` / `→`, `h` / `l`, `Tab` / `Shift+Tab` | Switch tabs (`Tab`/`Shift+Tab` select agent cards on Keeper; mouse click on tabs also works) |
+| Global | `↑` / `↓`, `j` / `k` | Navigate lists / scroll open detail popups |
+| Global | `s` | Open agent filter overlay (`Space`/`Enter` toggle, `a` select all) |
+| Global | `b` | Toggle light / dark theme |
+| Global | `r` | Refresh usage and quota |
+| Global | `?` | Toggle per-page keybinding help overlay |
+| Global | `Esc` | Close detail popup, custom range input, filter, or help (never quits) |
+| Global | `q` / `Ctrl+C` | Quit |
+| Overview, Models, Daily | `1`–`6` | Select range preset (`today`, `7d`, `30d`, `year`, `all`, `custom`) |
+| Overview, Models, Daily | `[` / `]` | Shift range one window earlier / later |
+| Overview, Models, Daily | `n` | Return to preset ending today (on Daily, also select today's row) |
+| Overview | `t` / `c`, `Enter` | Switch chart & top models to tokens / cost; open selected model detail |
+| Models | `c` / `t` / `d`, `Enter` | Sort by cost / tokens / last used (repeat to reverse); open model detail |
+| Daily | `c` / `t` / `d`, `v`, `Enter` | Sort by cost / tokens / date; toggle vs-7d metric; open day detail |
+| Activity | `↑` / `↓` (`j`/`k`), `n`, `t` / `c`, `[` / `]` | Move selected day; jump to today; tokens/cost heatmap; scroll day detail |
+| Keeper | `↑` / `↓` / `Tab`, `1` / `d`, `2` / `w`, `p`, `e` | Select agent card; toggle 5h / weekly keeper; manual ping; toggle engine |
+| Settings | `↑` / `↓` (`j`/`k`), `Space` / `Enter`, `J` / `K` | Move selection; cycle/toggle setting; reorder quota provider down / up |
+
+Full TUI behavior is specified in [`specs/tui-usage.md`](specs/tui-usage.md).
 
 ## CLI & Exports
 
@@ -76,21 +167,6 @@ tokenpulse --log
 > [!IMPORTANT]
 > **Antigravity sync after rebuild**: After running `--rebuild-all`, launch the
 > Antigravity CLI and Desktop together once so both can sync and align history.
-
-## TUI Keybindings
-
-- `Tab` / `Shift+Tab` — switch between Usage, Quota, Keeper, and Settings;
-  `q` / `Ctrl+C` quits.
-- **Usage**: `1`–`6` presets (`today`, `7d`, `30d`, `year`, `all`, `custom`),
-  `m` toggles Token/Cost, `v` toggles dates/models list, `f` switches focus
-  between heatmap and list, `Enter` opens detail, `[` / `]` shifts the range,
-  `s` opens the agent filter, `r` refreshes.
-- **Quota**: `↑` / `↓` selects a provider.
-- **Keeper**: `e` toggles the engine, `Enter` / `Space` toggles the 5h keeper,
-  `w` toggles the weekly keeper, `p` sends a test ping.
-- **Settings**: `↑` / `↓` moves, `Enter` / `Space` changes the row; the
-  quota-provider row cycles through your providers in the configured order.
-- `b` cycles the theme; `Esc` closes an overlay without quitting.
 
 ## Configuration
 

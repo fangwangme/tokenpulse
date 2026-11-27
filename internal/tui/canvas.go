@@ -48,15 +48,20 @@ func newCanvas(width, height int) *canvas {
 }
 
 func (c *canvas) set(x, y int, text string, style textStyle) {
+	c.setClip(x, y, c.w, text, style)
+}
+
+func (c *canvas) setClip(x, y, maxRight int, text string, style textStyle) {
 	if y < 0 || y >= c.h {
 		return
 	}
+	limit := min(maxRight, c.w)
 	for _, r := range text {
 		if x < 0 {
 			x++
 			continue
 		}
-		if x >= c.w {
+		if x >= limit {
 			return
 		}
 		c.cells[y*c.w+x] = cell{text: string(r), style: style}

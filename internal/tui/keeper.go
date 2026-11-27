@@ -68,7 +68,7 @@ func (m *model) drawKeeperHeader(c *canvas, area rect) {
 	x := inner.x
 	c.set(x, y, "Master Switch: ", boldStyle(theme.fg))
 	x += len("Master Switch: ")
-	enabled := m.cfg.Keeper.Enabled
+	enabled := m.configValue().Keeper.Enabled
 	status := " [DISABLED] "
 	style := textStyle{fg: theme.fg, bg: theme.dim, bold: true}
 	if enabled {
@@ -108,7 +108,7 @@ func (m *model) drawKeeperCards(c *canvas, area rect) {
 				break
 			}
 			agent := keeper.Agents[index]
-			agentCfg, ok := m.cfg.Keeper.Agents[agent]
+			agentCfg, ok := m.configValue().Keeper.Agents[agent]
 			if !ok {
 				agentCfg = defaults[agent]
 			}
@@ -172,19 +172,13 @@ func (m *model) keeperCardLines(agent string, agentCfg config.AgentKeeperConfig,
 		}
 	}
 	modelName := "—"
-	for index := 0; index < len(m.keeperLog); index++ {
-		if m.keeperLog[index].Agent == agent {
-			if m.keeperLog[index].Model != "" {
-				modelName = m.keeperLog[index].Model
-			}
-			break
-		}
-	}
 	last := "Never triggered"
-	for index := 0; index < len(m.keeperLog); index++ {
-		record := m.keeperLog[index]
+	for _, record := range m.keeperLog {
 		if record.Agent != agent {
 			continue
+		}
+		if record.Model != "" {
+			modelName = record.Model
 		}
 		if record.Success {
 			last = "✓ Success"
@@ -245,7 +239,10 @@ func (m *model) drawKeeperLog(c *canvas, area rect) {
 				status += fmt.Sprintf(" (%dms, exit %d)", record.DurationMs, exitCode(record))
 			}
 		} else {
-			status = fmt.Sprintf("✗ Failed (%dms, exit %s)", record.DurationMs, exitCodeText(record))
+			status = "✗ Failed"
+			if record.DurationMs > 0 || record.ExitCode != nil {
+				status += fmt.Sprintf(" (%dms, exit %s)", record.DurationMs, exitCodeText(record))
+			}
 		}
 		header := fmt.Sprintf("[%s] [%s] ", record.Timestamp.Local().Format("2006-01-02 15:04:05"), keeperAgentName(record.Agent))
 		if record.Trigger != "" {
@@ -308,8 +305,9 @@ func (m *model) moveKeeperCursor(direction int) {
 }
 
 func (m *model) handleKeeperKey(key string) (tea.Model, tea.Cmd) {
+	cfg := m.configValue()
 	agent := keeper.Agents[clampInt(m.keeperCursor, 0, len(keeper.Agents)-1)]
-	agentCfg, ok := m.cfg.Keeper.Agents[agent]
+	agentCfg, ok := cfg.Keeper.Agents[agent]
 	if !ok {
 		agentCfg = config.DefaultKeeperAgents()[agent]
 	}
@@ -327,7 +325,7 @@ func (m *model) handleKeeperKey(key string) (tea.Model, tea.Cmd) {
 			"keeper.agents." + agent + ".weekly_keeper_enabled": !agentCfg.WeeklyKeeperEnabled,
 		}, keeperAgentName(agent)+" weekly keeper")
 	case "e":
-		return m, m.patchSettings(map[string]any{"keeper.enabled": !m.cfg.Keeper.Enabled}, "Keeper engine")
+		return m, m.patchSettings(map[string]any{"keeper.enabled": !cfg.Keeper.Enabled}, "Keeper engine")
 	case "p":
 		client := m.client
 		if client == nil {

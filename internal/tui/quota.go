@@ -99,7 +99,11 @@ func (m *model) drawQuotaGrid(c *canvas, area rect, snapshots []provider.QuotaSn
 
 func (m *model) drawQuotaCard(c *canvas, area rect, snapshot provider.QuotaSnapshot) {
 	theme := m.theme()
-	if area.w < 4 || area.h < 3 {
+	if area.w < 4 || area.h <= 0 {
+		return
+	}
+	if area.h < 3 {
+		m.drawCompactQuotaRow(c, area, snapshot)
 		return
 	}
 	c.box(area.x, area.y, area.w, area.h, " "+quota.DisplayName(snapshot.Provider)+" ", boldStyle(theme.providerColor(snapshot.Provider)), fgStyle(theme.border))
@@ -139,12 +143,6 @@ func (m *model) drawQuotaCard(c *canvas, area rect, snapshot provider.QuotaSnaps
 		return
 	}
 	tags := windowTags(windows)
-	tagWidth := 0
-	for _, tag := range tags {
-		if len([]rune(tag)) > tagWidth {
-			tagWidth = len([]rune(tag))
-		}
-	}
 
 	fixed := 0
 	hasCredits := snapshot.Credits != nil || snapshot.ExtraUsage != nil
@@ -177,11 +175,11 @@ func (m *model) drawQuotaCard(c *canvas, area rect, snapshot provider.QuotaSnaps
 			if window.ResetsAt != nil {
 				reset = formatResetDuration(time.Until(*window.ResetsAt))
 			}
-			m.drawQuotaGaugeLine(c, rect{x: inner.x, y: y, w: inner.w, h: 1}, window, tag, tagWidth, displayMode, true, reset)
+			m.drawQuotaGaugeLine(c, rect{x: inner.x, y: y, w: inner.w, h: 1}, window, tag, displayMode, true, reset)
 			y++
 			continue
 		}
-		m.drawQuotaGaugeLine(c, rect{x: inner.x, y: y, w: inner.w, h: 1}, window, tag, tagWidth, displayMode, false, "")
+		m.drawQuotaGaugeLine(c, rect{x: inner.x, y: y, w: inner.w, h: 1}, window, tag, displayMode, false, "")
 		y++
 		if y < inner.bottom() {
 			m.drawQuotaDetailLine(c, rect{x: inner.x, y: y, w: inner.w, h: 1}, window, tag, displayMode)
@@ -205,7 +203,42 @@ func (m *model) drawQuotaCard(c *canvas, area rect, snapshot provider.QuotaSnaps
 	m.drawResetCredits(c, rect{x: inner.x, y: y, w: inner.w, h: inner.bottom() - y}, snapshot)
 }
 
-func (m *model) drawQuotaGaugeLine(c *canvas, area rect, window provider.RateWindow, tag string, tagWidth int, displayMode config.QuotaDisplayMode, compact bool, reset string) {
+func (m *model) drawCompactQuotaRow(c *canvas, area rect, snapshot provider.QuotaSnapshot) {
+	theme := m.theme()
+	name := quota.DisplayName(snapshot.Provider)
+	c.setClip(area.x, area.y, area.right(), name, boldStyle(theme.providerColor(snapshot.Provider)))
+	x := area.x + len([]rune(name)) + 2
+	if message := m.quotaErrors[snapshot.Provider]; message != "" {
+		c.setClip(x, area.y, area.right(), message, fgStyle(theme.gaugeHigh))
+		return
+	}
+	windows := quota.OrderWindows(snapshot.Windows)
+	if len(windows) == 0 {
+		c.setClip(x, area.y, area.right(), "No quota data", fgStyle(theme.dim))
+		return
+	}
+	cfg := m.configValue()
+	tags := windowTags(windows)
+	if area.h >= 2 {
+		reset := ""
+		if windows[0].ResetsAt != nil {
+			reset = formatResetDuration(time.Until(*windows[0].ResetsAt))
+		}
+		m.drawQuotaGaugeLine(c, rect{x: area.x, y: area.y + 1, w: area.w, h: 1}, windows[0], tags[0], cfg.Display.QuotaDisplayMode, true, reset)
+		return
+	}
+	var parts []string
+	for i, w := range windows {
+		shown := w.UsedPercent
+		if cfg.Display.QuotaDisplayMode == config.QuotaRemaining {
+			shown = clampFloat(100-shown, 0, 100)
+		}
+		parts = append(parts, fmt.Sprintf("%s %.0f%%", tags[i], shown))
+	}
+	c.setClip(x, area.y, area.right(), strings.Join(parts, " · "), fgStyle(theme.fg))
+}
+
+func (m *model) drawQuotaGaugeLine(c *canvas, area rect, window provider.RateWindow, tag string, displayMode config.QuotaDisplayMode, compact bool, reset string) {
 	theme := m.theme()
 	if area.w <= 0 {
 		return

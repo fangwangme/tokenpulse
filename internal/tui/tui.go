@@ -116,6 +116,8 @@ type model struct {
 	companyKey     string
 	companyLoading bool
 	companyPending int
+	companyErr     bool
+	companySeq     int
 	epoch          int
 
 	prior        report.Report
@@ -136,6 +138,7 @@ type model struct {
 	modelDetail  *report.ModelDetail
 	dayDetail    *report.DayDetail
 	detailScroll int
+	detailSeq    int
 
 	activity        report.Report
 	activityErr     string
@@ -238,14 +241,15 @@ type activityMsg struct {
 }
 type modelDetailMsg struct {
 	key     string
-	model   string
 	purpose string
+	seq     int
 	value   report.ModelDetail
 	err     error
 }
 type dayDetailMsg struct {
 	key   string
 	date  string
+	seq   int
 	value report.DayDetail
 	err   error
 }
@@ -273,6 +277,9 @@ func newModel(opts Options, client rt.Client) *model {
 	agents := map[string]bool{}
 	for _, agent := range report.AllAgents {
 		agents[agent] = true
+	}
+	if !cfg.Display.ScanAntigravity {
+		agents["antigravity"] = false
 	}
 	m := &model{
 		opts:           opts,
@@ -458,6 +465,10 @@ func (m *model) activityWindow() (string, string, bool) {
 	return dateString(start), dateString(today), true
 }
 
+func (m *model) activityCacheKey(from, to string) string {
+	return fmt.Sprintf("activity|%s|%s|%s|%d", from, to, strings.Join(m.selectedAgents(), ","), m.epoch)
+}
+
 func (m *model) loadActivityCmd() tea.Cmd {
 	client := m.client
 	if client == nil {
@@ -467,7 +478,7 @@ func (m *model) loadActivityCmd() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	key := fmt.Sprintf("activity|%s|%s|%s", from, to, strings.Join(m.selectedAgents(), ","))
+	key := m.activityCacheKey(from, to)
 	params := report.Params{Preset: "custom", From: from, To: to, Agents: m.selectedAgents()}
 	m.activityKey = key
 	m.activityLoading = true
@@ -478,17 +489,14 @@ func (m *model) loadActivityCmd() tea.Cmd {
 }
 
 func (m *model) ensureActivity() tea.Cmd {
-	if m.client == nil {
-		return nil
-	}
-	if !m.reportLoaded {
+	if m.client == nil || !m.reportLoaded {
 		return nil
 	}
 	from, to, ok := m.activityWindow()
 	if !ok {
 		return nil
 	}
-	key := fmt.Sprintf("activity|%s|%s|%s", from, to, strings.Join(m.selectedAgents(), ","))
+	key := m.activityCacheKey(from, to)
 	if m.activityKey == key && (m.activityLoaded || m.activityLoading) {
 		return nil
 	}
@@ -496,25 +504,22 @@ func (m *model) ensureActivity() tea.Cmd {
 }
 
 func (m *model) ensureCompany() tea.Cmd {
-	if m.client == nil || !m.reportLoaded {
+	if m.client == nil || !m.reportLoaded || m.report.Range.From == m.report.Range.To {
 		return nil
 	}
 	key := m.rangeKey()
-	if m.companyKey == key && (m.companyLoading || !m.company.empty()) {
+	if m.companyKey == key && !m.companyErr && (m.companyLoading || !m.company.empty()) {
 		return nil
 	}
 	var cmds []tea.Cmd
 	client := m.client
 	from, to := m.report.Range.From, m.report.Range.To
 	agents := m.selectedAgents()
+	m.company = companyData{}
 	m.companyKey = key
-	m.companyLoading = true
-	m.companyPending = 0
-	for _, entry := range m.report.Models {
-		if entry.Company == "anthropic" || entry.Company == "openai" || entry.Company == "google" {
-			m.companyPending++
-		}
-	}
+	m.companyErr = false
+	m.companySeq++
+	seq := m.companySeq
 	for _, entry := range m.report.Models {
 		if entry.Company != "anthropic" && entry.Company != "openai" && entry.Company != "google" {
 			continue
@@ -522,12 +527,11 @@ func (m *model) ensureCompany() tea.Cmd {
 		name := entry.Model
 		cmds = append(cmds, func() tea.Msg {
 			value, err := client.UsageModel(name, from, to, agents)
-			return modelDetailMsg{key: key, model: name, purpose: "company", value: value, err: err}
+			return modelDetailMsg{key: key, purpose: "company", seq: seq, value: value, err: err}
 		})
 	}
-	if len(cmds) == 0 || m.companyPending == 0 {
-		m.companyLoading = false
-	}
+	m.companyPending = len(cmds)
+	m.companyLoading = len(cmds) > 0
 	return tea.Batch(cmds...)
 }
 
@@ -703,8 +707,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modelDetailMsg:
 		return m.handleModelDetail(msg)
 	case dayDetailMsg:
-		if msg.key == m.dayDetailKey(msg.date) {
+		if msg.key == m.dayDetailKey(msg.date) && msg.seq == m.detailSeq {
 			m.dayDetail = &msg.value
+			m.detailScroll = 0
 		}
 		return m, nil
 	case activityDayMsg:
@@ -849,6 +854,7 @@ func (m *model) handleReport(msg reportMsg) (tea.Model, tea.Cmd) {
 	}
 	m.reportLoading = false
 	if msg.err != nil {
+		m.report = report.Report{}
 		m.reportLoaded = false
 		m.reportErr = msg.err.Error()
 		m.setStatus(msg.err.Error(), 2)
@@ -864,8 +870,9 @@ func (m *model) handleReport(msg reportMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	if m.dailyToToday {
 		m.dailyToToday = false
-		for i, day := range m.report.Days {
-			if day.Date == dateString(startOfToday()) {
+		today := dateString(startOfToday())
+		for i, day := range m.sortedDays() {
+			if day.Date == today {
 				m.dailySel = i
 				break
 			}
@@ -925,10 +932,11 @@ func activityDayExists(days []report.DaySummary, date string) bool {
 
 func (m *model) handleModelDetail(msg modelDetailMsg) (tea.Model, tea.Cmd) {
 	if msg.purpose == "company" {
-		if msg.key != m.rangeKey() {
+		if msg.key != m.rangeKey() || msg.seq != m.companySeq {
 			return m, nil
 		}
 		if msg.err != nil {
+			m.companyErr = true
 			m.setStatus("Company: "+msg.err.Error(), 2)
 		} else {
 			m.company.add(msg.value)
@@ -942,7 +950,7 @@ func (m *model) handleModelDetail(msg modelDetailMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if msg.purpose == "detail" {
-		if msg.key != m.rangeKey() {
+		if msg.key != m.rangeKey() || msg.seq != m.detailSeq {
 			return m, nil
 		}
 		if msg.err != nil {
@@ -998,12 +1006,15 @@ func (m *model) handleWebToggle(msg webToggleMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) invalidateUsage() {
+	m.reportErr = ""
 	m.reportLoaded = false
 	m.reportKey = ""
 	m.company = companyData{}
 	m.companyKey = ""
 	m.companyLoading = false
 	m.companyPending = 0
+	m.companyErr = false
+	m.companySeq++
 	m.epoch++
 	m.prior = report.Report{}
 	m.priorKey = ""
@@ -1018,6 +1029,7 @@ func (m *model) invalidateUsage() {
 	m.activityDetailLoad = false
 	m.modelDetail = nil
 	m.dayDetail = nil
+	m.detailSeq++
 }
 
 func (m *model) currentTabCmd() tea.Cmd {
@@ -1029,6 +1041,9 @@ func (m *model) currentTabCmd() tea.Cmd {
 	case tabDaily:
 		return tea.Batch(m.ensureReport(), m.ensurePrior())
 	case tabActivity:
+		if !m.reportLoaded {
+			return m.ensureReport()
+		}
 		return tea.Batch(m.ensureActivity(), m.ensureActivityDetail())
 	case tabQuota:
 		if !m.quotaLoaded {
@@ -1053,6 +1068,7 @@ func (m *model) switchTab(direction int) {
 	m.activityDetailOff = 0
 	m.modelDetail = nil
 	m.dayDetail = nil
+	m.detailSeq++
 	m.showHelp = false
 }
 
@@ -1189,6 +1205,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.modelDetail = nil
 			m.dayDetail = nil
 			m.detailScroll = 0
+			m.detailSeq++
 		case "j", "down":
 			m.detailScroll++
 		case "k", "up":
@@ -1341,16 +1358,23 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	area := rect{x: 0, y: 0, w: m.frameWidth(), h: m.frameHeight()}
-	header := rect{x: 0, y: 0, w: area.w, h: 4}
-	tabs := rect{x: 0, y: header.h, w: area.w, h: 3}
-	if msg.Y < tabs.y || msg.Y >= tabs.y+tabs.h {
+	headerHeight := min(4, area.h)
+	tabsHeight := min(3, max(area.h-headerHeight, 0))
+	tabs := rect{x: 0, y: headerHeight, w: area.w, h: tabsHeight}
+	if tabs.h <= 0 || msg.Y < tabs.y || msg.Y >= tabs.y+tabs.h {
 		return m, nil
 	}
 	inner := tabs.inner()
 	if msg.X < inner.x || msg.X >= inner.right() {
 		return m, nil
 	}
-	index := (msg.X - inner.x) * tabCount / max(inner.w, 1)
+	index := -1
+	for i, column := range splitH(inner, tabCount) {
+		if msg.X >= column.x && msg.X < column.right() {
+			index = i
+			break
+		}
+	}
 	if index < 0 || index >= tabCount {
 		return m, nil
 	}
@@ -1571,10 +1595,10 @@ func (m *model) drawHeader(c *canvas, area rect) {
 	}
 	y++
 	rangeText := "—"
-	if m.report.FirstDay != nil {
-		rangeText = *m.report.FirstDay + " → " + dateString(startOfToday())
-	} else if m.reportLoaded {
+	if m.reportLoaded {
 		rangeText = m.report.Range.From + " → " + m.report.Range.To
+	} else if m.report.FirstDay != nil {
+		rangeText = *m.report.FirstDay + " → " + dateString(startOfToday())
 	}
 	c.set(inner.x, y, "Total Cost ", fgStyle(theme.dim))
 	x := inner.x + len("Total Cost ")
@@ -1738,7 +1762,6 @@ func (m *model) drawToast(c *canvas, area rect) {
 	if box.w < 10 || box.h < 3 {
 		return
 	}
-	c.fill(box.x, box.y, box.w, box.h, textStyle{})
 	c.box(box.x, box.y, box.w, box.h, "", textStyle{}, fgStyle(theme.accent))
 	c.set(box.x+2, box.y+1, truncate(m.toast, box.w-4), fgStyle(theme.fg))
 }
@@ -1755,7 +1778,6 @@ func (m *model) drawRecoveryToast(c *canvas, area rect) {
 		return
 	}
 	accent := rgb(52, 211, 153)
-	c.fill(box.x, box.y, box.w, box.h, textStyle{})
 	c.box(box.x, box.y, box.w, box.h, " Quota Restored ", boldStyle(accent), fgStyle(accent))
 	icon := []string{"●", "◉", "⦿", "✦"}[int(time.Since(m.recovery.started).Milliseconds()/250)%4]
 	y := box.y + 1

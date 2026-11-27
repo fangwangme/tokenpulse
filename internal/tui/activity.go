@@ -96,7 +96,7 @@ func (m *model) drawHeatmap(c *canvas, area rect) {
 		}
 		return
 	}
-	start := mustMonday(from)
+	start := mondayOf(from)
 	totalDays := int(to.Sub(start).Hours()/24) + 1
 	totalWeeks := max((totalDays+6)/7, 1)
 	displayCols := max(min(gridWidth/2, totalWeeks), 1)
@@ -174,10 +174,6 @@ func (m *model) drawHeatmap(c *canvas, area rect) {
 	}
 }
 
-func mustMonday(day time.Time) time.Time {
-	return mondayOf(day)
-}
-
 func emptyHeatColor(value, maxValue float64, thresholds [4]float64, palette [5]lipgloss.Color, theme tuiTheme) lipgloss.Color {
 	if value <= 0 || maxValue <= 0 {
 		return theme.emptyHeatmap
@@ -208,7 +204,7 @@ func (m *model) drawActivitySummary(c *canvas, area rect) {
 	if inner.h <= 0 {
 		return
 	}
-	days := m.activitySummaryDays()
+	days := m.activity.Days
 	active := 0
 	for _, day := range days {
 		if day.Tokens > 0 {
@@ -239,7 +235,6 @@ func (m *model) drawActivitySummary(c *canvas, area rect) {
 		y++
 	}
 	rows := m.activityPeriodRows()
-	rolling := map[string]bool{"Last 7 days": true, "Last 30 days": true}
 	order := []string{"Today", "Week", "Month", "Year", "Last 7 days", "Last 30 days"}
 	if y+len(order) > inner.y+inner.h {
 		order = []string{"Today", "Week", "Month", "Year", "Last 7 days"}
@@ -248,9 +243,6 @@ func (m *model) drawActivitySummary(c *canvas, area rect) {
 		order = []string{"Today", "Week", "Month", "Year"}
 	}
 	for _, label := range order {
-		if rolling[label] && y+1 > inner.y+inner.h-1 {
-			continue
-		}
 		if y >= inner.y+inner.h {
 			break
 		}
@@ -266,8 +258,6 @@ type periodRow struct {
 	tokens int64
 	cost   float64
 }
-
-func (m *model) activitySummaryDays() []report.DaySummary { return m.activity.Days }
 
 func (m *model) activityPeriodRows() map[string]periodRow {
 	today := startOfToday()
@@ -408,6 +398,7 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 		}
 	}
 	start := clampInt(m.activityDetailOff, 0, max(len(lines)-right.h, 0))
+	m.activityDetailOff = start
 	for index := 0; index < right.h && start+index < len(lines); index++ {
 		line := lines[start+index]
 		color := theme.fg
