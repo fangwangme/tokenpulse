@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.8.3] - 2026-11-27
 
 ### Changed
-- **Phone app startup**: a previously paired phone renders the tab shell and the opening Usage view before `/api/state` resolves, starts the first-screen state, usage, and quota requests together, and shows the last successful `today` view until the fresh responses replace it. A 401 still returns to pairing and clears the stored values; other load failures keep the shell visible.
+- **Phone app startup**: a previously paired phone renders the tab shell and the opening Usage skeleton before `/api/state` resolves, starts the first-screen state, usage, and quota requests together, and fills values only from the fresh responses. No usage or quota value from a previous session is shown while waiting; a 401 still returns to pairing and clears the marker, and other load failures keep the shell visible.
 
 ## [0.8.2] - 2026-11-27
 

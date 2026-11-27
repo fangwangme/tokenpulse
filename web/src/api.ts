@@ -1,11 +1,6 @@
 import { rememberPairing, showToast, state } from "./store";
 import { t } from "./i18n";
 import { QUOTA_PROVIDER_KEYS, secondsToScanInterval } from "./shared/defaults";
-import {
-  readCachedState,
-  writeCachedState,
-  type CachedState,
-} from "./shared/boot-cache";
 import type {
   QuotaGetPayload,
   QuotaProviderState,
@@ -69,6 +64,16 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
     throw new ApiError(data?.error || response.statusText || "request failed", response.status);
   }
   return data as T;
+}
+
+interface RawState {
+  version: string;
+  scannedAt: number;
+  fetchedAt: number;
+  pricesAvailable: boolean;
+  agents: string[];
+  settings: Record<string, unknown>;
+  keeperEngine: boolean;
 }
 
 interface RawUsageDay {
@@ -161,40 +166,17 @@ function applySettings(values: Record<string, unknown>): void {
   state.quotaEnabled = values["display.refresh_quota"] !== false;
 }
 
-function applyState(raw: CachedState): void {
+export async function loadState(): Promise<void> {
+  const raw = await api<RawState>("/api/state");
   state.version = raw.version;
   state.scannedAt = raw.scannedAt;
   state.usageScannedAt = raw.scannedAt;
-  state.agents = raw.agents;
+  state.agents = raw.agents || [];
   state.keeperEngine = raw.keeperEngine;
   state.quotaUpdated = raw.fetchedAt || null;
-  applySettings(raw.settings);
+  applySettings(raw.settings || {});
   state.usageEnabled = true;
   state.configReady = true;
-}
-
-export function prepareBoot(): void {
-  if (typeof window === "undefined") return;
-  if (window.location.hash.startsWith("#token=")) {
-    state.paired = null;
-    return;
-  }
-  const cachedState = readCachedState();
-  if (cachedState) applyState(cachedState);
-}
-
-export async function loadState(): Promise<void> {
-  const raw = await api<CachedState>("/api/state");
-  const value: CachedState = {
-    version: raw.version,
-    scannedAt: raw.scannedAt,
-    fetchedAt: raw.fetchedAt,
-    agents: raw.agents || [],
-    settings: raw.settings || {},
-    keeperEngine: raw.keeperEngine,
-  };
-  applyState(value);
-  writeCachedState(value);
   if (state.paired !== true) state.paired = true;
   rememberPairing();
 }

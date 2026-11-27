@@ -2,7 +2,6 @@ import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Sh
 import { createScrollNavHandler, state } from "../store";
 import { request } from "../api";
 import { scanIntervalToMs, USAGE_AGENT_KINDS as AGENT_KEYS } from "../shared/defaults";
-import { cachedUsageMatches, readCachedUsage, sameAgentSet, writeCachedUsage } from "../shared/boot-cache";
 import { cacheHitPercent, daysBetween, formatYMD, heatmapLayout, type UsagePreset } from "../shared/usage";
 import { formatCost } from "../shared/money";
 import type {
@@ -154,24 +153,19 @@ function UsageBottomSheet(props: { onClose: () => void; maxHeight?: string; scro
 }
 
 export function UsagePage() {
-  const initialRange = (): UsagePreset =>
-    state.route.name === "usage" && state.route.initialPreset ? state.route.initialPreset : "today";
-  const cachedUsage = readCachedUsage();
-  const [range, setRange] = createSignal<UsagePreset>(initialRange());
+  const [range, setRange] = createSignal<UsagePreset>(
+    state.route.name === "usage" && state.route.initialPreset ? state.route.initialPreset : "today"
+  );
   const [metric, setMetric] = createSignal<"tokens" | "cost">("tokens");
   const [group, setGroup] = createSignal<"date" | "model">("date");
-  const initialAgents = () => {
-    if (state.configReady) return new Set(enabledAgentKeys());
-    if (cachedUsage && cachedUsage.preset === "today") return new Set(cachedUsage.agents);
-    return new Set(AGENT_KEYS);
-  };
-  const [activeAgents, setActiveAgents] = createSignal<Set<string>>(initialAgents());
+  const [activeAgents, setActiveAgents] = createSignal<Set<string>>(new Set(AGENT_KEYS));
   let agentsTouched = false;
   createEffect(() => {
     if (!state.configReady || agentsTouched) return;
     const enabled = enabledAgentKeys();
     if (enabled.length === 0) return;
-    if (sameAgentSet(Array.from(activeAgents()), enabled)) return;
+    const current = activeAgents();
+    if (current.size === enabled.length && enabled.every((agent) => current.has(agent))) return;
     setActiveAgents(new Set(enabled));
   });
   const [rowsLimit, setRowsLimit] = createSignal(10);
@@ -181,14 +175,7 @@ export function UsagePage() {
   const [draftFrom, setDraftFrom] = createSignal("");
   const [draftTo, setDraftTo] = createSignal("");
 
-  const [usageReport, setUsageReport] = createSignal<UsageGetPayload | null>(
-    cachedUsage &&
-      range() === "today" &&
-      cachedUsage.report.range.to === todayYMD() &&
-      cachedUsageMatches(cachedUsage, "today", Array.from(activeAgents()))
-      ? cachedUsage.report
-      : null,
-  );
+  const [usageReport, setUsageReport] = createSignal<UsageGetPayload | null>(null);
   const [loading, setLoading] = createSignal(state.usageEnabled && activeAgents().size > 0);
   const [reportError, setReportError] = createSignal<string | null>(null);
   const isLoading = () => loading();
@@ -235,9 +222,6 @@ export function UsagePage() {
       })) as UsageGetPayload;
       if (seq !== usageReqSeq) return;
       setUsageReport(res);
-      if (range() === "today" && sameAgentSet(agents, enabledAgentKeys())) {
-        writeCachedUsage({ preset: "today", agents, report: res, savedAt: Date.now() });
-      }
       if (!customFrom() && res.firstDay) {
         setCustomFrom(res.firstDay);
         setCustomTo(todayYMD());

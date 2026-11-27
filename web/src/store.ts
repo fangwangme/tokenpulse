@@ -1,12 +1,6 @@
 import { createMutable } from "solid-js/store";
 import type { QuotaProviderState, Route, ThemeMode } from "./types";
 import { QUOTA_PROVIDER_KEYS, type UsageScanInterval } from "./shared/defaults";
-import {
-  clearBootCache,
-  clearPairingMarker,
-  readPairingMarker,
-  writePairingMarker,
-} from "./shared/boot-cache";
 import type { LocalePref } from "./i18n";
 
 export interface KeeperExecution {
@@ -77,10 +71,30 @@ function stored<T extends string>(key: string, allowed: readonly T[], fallback: 
   return (allowed as readonly string[]).includes(value ?? "") ? (value as T) : fallback;
 }
 
+const PAIRED_KEY = "tokenpulse.paired";
+
+function storedFlag(key: string): boolean {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeFlag(key: string, value: boolean): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    if (value) localStorage.setItem(key, "1");
+    else localStorage.removeItem(key);
+  } catch {
+    return;
+  }
+}
+
 if (typeof localStorage !== "undefined") localStorage.removeItem("tokenpulse-accent");
 
 export const state = createMutable<AppState>({
-  paired: readPairingMarker() ? true : null,
+  paired: storedFlag(PAIRED_KEY) ? true : null,
   bootError: "",
   connected: false,
   everConnected: false,
@@ -112,12 +126,11 @@ export const state = createMutable<AppState>({
 });
 
 export function rememberPairing(): void {
-  writePairingMarker();
+  writeFlag(PAIRED_KEY, true);
 }
 
 export function forgetPairing(): void {
-  clearPairingMarker();
-  clearBootCache();
+  writeFlag(PAIRED_KEY, false);
 }
 
 export function navigate(route: Route): void {
