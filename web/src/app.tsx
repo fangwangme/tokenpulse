@@ -110,8 +110,9 @@ export function App() {
 
   const onPaired = async () => {
     state.bootError = "";
+    await loadState();
     state.paired = true;
-    void loadQuota().catch(() => {});
+    await loadQuota().catch(() => {});
   };
 
   onMount(() => {

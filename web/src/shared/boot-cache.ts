@@ -1,9 +1,8 @@
-import type { QuotaProviderState, UsageGetPayload, UsagePreset } from "../types";
+import type { UsageGetPayload, UsagePreset } from "../types";
 
 export const BOOT_CACHE_VERSION = 1;
 
 const STATE_KEY = `tokenpulse.boot.v${BOOT_CACHE_VERSION}.state`;
-const QUOTA_KEY = `tokenpulse.boot.v${BOOT_CACHE_VERSION}.quota`;
 const USAGE_KEY = `tokenpulse.boot.v${BOOT_CACHE_VERSION}.usage`;
 const PAIRED_KEY = "tokenpulse.paired";
 
@@ -11,15 +10,9 @@ export interface CachedState {
   version: string;
   scannedAt: number;
   fetchedAt: number;
-  pricesAvailable: boolean;
   agents: string[];
   settings: Record<string, unknown>;
   keeperEngine: boolean;
-}
-
-export interface CachedQuota {
-  providers: QuotaProviderState[];
-  fetchedAt: number | null;
 }
 
 export interface CachedUsage {
@@ -79,85 +72,43 @@ function decode<T>(raw: string | null | undefined, valid: (value: unknown) => va
   return valid(envelope.data) ? envelope.data : null;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function isCachedState(value: unknown): value is CachedState {
-  if (!value || typeof value !== "object") return false;
-  const entry = value as Partial<CachedState>;
+  if (!isRecord(value)) return false;
   return (
-    typeof entry.version === "string" &&
-    typeof entry.scannedAt === "number" &&
-    typeof entry.fetchedAt === "number" &&
-    typeof entry.pricesAvailable === "boolean" &&
-    Array.isArray(entry.agents) &&
-    entry.agents.every((agent) => typeof agent === "string") &&
-    Boolean(entry.settings) &&
-    typeof entry.settings === "object" &&
-    !Array.isArray(entry.settings) &&
-    typeof entry.keeperEngine === "boolean"
-  );
-}
-
-function isQuotaProviderState(value: unknown): value is QuotaProviderState {
-  if (!value || typeof value !== "object") return false;
-  const entry = value as Partial<QuotaProviderState>;
-  if (typeof entry.provider !== "string" || typeof entry.enabled !== "boolean") return false;
-  if (entry.error !== null) {
-    if (!entry.error || typeof entry.error !== "object") return false;
-    if (typeof (entry.error as { message?: unknown }).message !== "string") return false;
-  }
-  if (entry.snapshot === null) return true;
-  const snapshot = entry.snapshot;
-  return (
-    Boolean(snapshot) &&
-    typeof snapshot!.provider === "string" &&
-    typeof snapshot!.fetchedAt === "number" &&
-    Array.isArray(snapshot!.windows) &&
-    snapshot!.windows.every(
-      (window) => Boolean(window) && typeof window.id === "string" && typeof window.usedPercent === "number",
-    )
-  );
-}
-
-function isCachedQuota(value: unknown): value is CachedQuota {
-  if (!value || typeof value !== "object") return false;
-  const entry = value as Partial<CachedQuota>;
-  return (
-    Array.isArray(entry.providers) &&
-    entry.providers.every(isQuotaProviderState) &&
-    (entry.fetchedAt === null || typeof entry.fetchedAt === "number")
+    typeof value.version === "string" &&
+    typeof value.scannedAt === "number" &&
+    typeof value.fetchedAt === "number" &&
+    Array.isArray(value.agents) &&
+    value.agents.every((agent) => typeof agent === "string") &&
+    isRecord(value.settings) &&
+    typeof value.keeperEngine === "boolean"
   );
 }
 
 function isUsageReport(value: unknown): value is UsageGetPayload {
-  if (!value || typeof value !== "object") return false;
-  const report = value as Partial<UsageGetPayload>;
+  if (!isRecord(value) || !isRecord(value.range) || !isRecord(value.totals)) return false;
   return (
-    Boolean(report.range) &&
-    typeof report.range?.from === "string" &&
-    typeof report.range?.to === "string" &&
-    typeof report.scannedAt === "number" &&
-    Boolean(report.totals) &&
-    typeof report.totals?.cost === "number" &&
-    Array.isArray(report.days) &&
-    report.days.every(
-      (day) => Boolean(day) && typeof day.date === "string" && typeof day.tokens === "number" && typeof day.cost === "number",
-    ) &&
-    Array.isArray(report.models) &&
-    report.models.every(
-      (model) =>
-        Boolean(model) && typeof model.model === "string" && typeof model.tokens === "number" && typeof model.cost === "number",
-    )
+    typeof value.range.from === "string" &&
+    typeof value.range.to === "string" &&
+    typeof value.scannedAt === "number" &&
+    typeof value.totals.cost === "number" &&
+    Array.isArray(value.days) &&
+    Array.isArray(value.models)
   );
 }
 
 function isCachedUsage(value: unknown): value is CachedUsage {
-  if (!value || typeof value !== "object") return false;
-  const entry = value as Partial<CachedUsage>;
+  if (!isRecord(value)) return false;
   return (
-    typeof entry.preset === "string" &&
-    Array.isArray(entry.agents) &&
-    entry.agents.every((agent) => typeof agent === "string") &&
-    typeof entry.savedAt === "number" &&
-    isUsageReport(entry.report)
+    typeof value.preset === "string" &&
+    Array.isArray(value.agents) &&
+    value.agents.every((agent) => typeof agent === "string") &&
+    typeof value.savedAt === "number" &&
+    isUsageReport(value.report)
   );
 }
 
@@ -187,14 +138,6 @@ export function writeCachedState(value: CachedState): void {
   writeRaw(STATE_KEY, encode(value));
 }
 
-export function readCachedQuota(): CachedQuota | null {
-  return decode(readRaw(QUOTA_KEY), isCachedQuota);
-}
-
-export function writeCachedQuota(value: CachedQuota): void {
-  writeRaw(QUOTA_KEY, encode(value));
-}
-
 export function readCachedUsage(): CachedUsage | null {
   return decode(readRaw(USAGE_KEY), isCachedUsage);
 }
@@ -205,7 +148,6 @@ export function writeCachedUsage(value: CachedUsage): void {
 
 export function clearBootCache(): void {
   removeRaw(STATE_KEY);
-  removeRaw(QUOTA_KEY);
   removeRaw(USAGE_KEY);
 }
 

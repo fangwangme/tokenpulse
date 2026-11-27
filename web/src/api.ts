@@ -2,9 +2,7 @@ import { rememberPairing, showToast, state } from "./store";
 import { t } from "./i18n";
 import { QUOTA_PROVIDER_KEYS, secondsToScanInterval } from "./shared/defaults";
 import {
-  readCachedQuota,
   readCachedState,
-  writeCachedQuota,
   writeCachedState,
   type CachedState,
 } from "./shared/boot-cache";
@@ -175,23 +173,14 @@ function applyState(raw: CachedState): void {
   state.configReady = true;
 }
 
-export function restoreBootCache(): void {
-  const cachedState = readCachedState();
-  if (cachedState) applyState(cachedState);
-  const cachedQuota = readCachedQuota();
-  if (cachedQuota) {
-    state.quotaSnapshots = cachedQuota.providers;
-    state.quotaUpdated = cachedQuota.fetchedAt;
-  }
-}
-
 export function prepareBoot(): void {
   if (typeof window === "undefined") return;
   if (window.location.hash.startsWith("#token=")) {
     state.paired = null;
     return;
   }
-  restoreBootCache();
+  const cachedState = readCachedState();
+  if (cachedState) applyState(cachedState);
 }
 
 export async function loadState(): Promise<void> {
@@ -200,7 +189,6 @@ export async function loadState(): Promise<void> {
     version: raw.version,
     scannedAt: raw.scannedAt,
     fetchedAt: raw.fetchedAt,
-    pricesAvailable: Boolean(raw.pricesAvailable),
     agents: raw.agents || [],
     settings: raw.settings || {},
     keeperEngine: raw.keeperEngine,
@@ -335,7 +323,6 @@ async function performQuotaLoad(refresh: boolean): Promise<void> {
   const providers = mapQuota(raw);
   state.quotaSnapshots = providers;
   if (raw.fetchedAt) state.quotaUpdated = raw.fetchedAt;
-  writeCachedQuota({ providers, fetchedAt: state.quotaUpdated });
 }
 
 export function loadQuota(refresh = false): Promise<void> {
