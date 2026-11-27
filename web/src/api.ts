@@ -1,4 +1,4 @@
-import { showToast, state } from "./store";
+import { rememberPairing, showToast, state } from "./store";
 import { t } from "./i18n";
 import { QUOTA_PROVIDER_KEYS, secondsToScanInterval } from "./shared/defaults";
 import type {
@@ -166,8 +166,12 @@ function applySettings(values: Record<string, unknown>): void {
   state.quotaEnabled = values["display.refresh_quota"] !== false;
 }
 
-export async function loadState(): Promise<void> {
+let stateInFlight: Promise<void> | null = null;
+
+async function performStateLoad(): Promise<void> {
+  const epoch = state.authEpoch;
   const raw = await api<RawState>("/api/state");
+  if (epoch !== state.authEpoch) return;
   state.version = raw.version;
   state.scannedAt = raw.scannedAt;
   state.usageScannedAt = raw.scannedAt;
@@ -178,6 +182,18 @@ export async function loadState(): Promise<void> {
   state.usageEnabled = true;
   state.configReady = true;
   if (state.paired !== true) state.paired = true;
+  rememberPairing();
+}
+
+export function loadState(): Promise<void> {
+  if (stateInFlight) return stateInFlight;
+  const run = performStateLoad();
+  stateInFlight = run;
+  const clear = () => {
+    if (stateInFlight === run) stateInFlight = null;
+  };
+  void run.then(clear, clear);
+  return run;
 }
 
 interface RefreshResult {
@@ -290,21 +306,37 @@ function mapQuota(raw: RawQuota): QuotaProviderState[] {
   });
 }
 
-export async function loadQuota(refresh = false): Promise<void> {
-  state.quotaLoading = true;
-  try {
-    if (refresh) {
-      const res = await manualRefresh({ usage: false, quota: true });
-      if (res.throttled && !res.accepted && state.quotaSnapshots.length > 0) {
-        return;
-      }
+let quotaInFlight: Promise<void> | null = null;
+let quotaLoads = 0;
+
+async function performQuotaLoad(refresh: boolean): Promise<void> {
+  if (refresh) {
+    const res = await manualRefresh({ usage: false, quota: true });
+    if (res.throttled && !res.accepted && state.quotaSnapshots.length > 0) {
+      return;
     }
-    const raw = await api<RawQuota>("/api/quota");
-    state.quotaSnapshots = mapQuota(raw);
-    if (raw.fetchedAt) state.quotaUpdated = raw.fetchedAt;
-  } finally {
-    state.quotaLoading = false;
   }
+  const raw = await api<RawQuota>("/api/quota");
+  const providers = mapQuota(raw);
+  state.quotaSnapshots = providers;
+  if (raw.fetchedAt) state.quotaUpdated = raw.fetchedAt;
+}
+
+export function loadQuota(refresh = false): Promise<void> {
+  if (!refresh && quotaInFlight) return quotaInFlight;
+  quotaLoads += 1;
+  state.quotaLoading = true;
+  const run = performQuotaLoad(refresh).finally(() => {
+    quotaLoads -= 1;
+    if (quotaLoads === 0) state.quotaLoading = false;
+  });
+  if (refresh) return run;
+  quotaInFlight = run;
+  const clear = () => {
+    if (quotaInFlight === run) quotaInFlight = null;
+  };
+  void run.then(clear, clear);
+  return run;
 }
 
 export async function fetchQuota(refresh = false): Promise<void> {

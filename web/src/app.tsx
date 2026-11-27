@@ -6,7 +6,7 @@ import { QuotaPage } from "./components/QuotaPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { UsagePage } from "./components/UsagePage";
 import { QUOTA_PROVIDER_NAMES } from "./shared/defaults";
-import { showToast, state } from "./store";
+import { forgetPairing, showToast, state } from "./store";
 import { applyTheme } from "./themes";
 import { resolveLocale, setLocale, t } from "./i18n";
 import { Icon } from "./components/ui";
@@ -27,6 +27,17 @@ export function App() {
     }, Math.min(30000, 1000 * 2 ** Math.min(attempt, 5)));
   };
 
+  const retryBootstrap = () => {
+    if (state.paired !== true || state.configReady) return;
+    void loadState()
+      .then(() => {
+        if (!state.configReady || state.paired !== true) return;
+        state.reconnectNonce += 1;
+        void loadQuota().catch(() => {});
+      })
+      .catch(() => {});
+  };
+
   const connect = () => {
     if (stopped || socket || state.paired !== true) return;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -37,13 +48,16 @@ export function App() {
       state.connected = true;
       state.everConnected = true;
       attempt = 0;
-      if (hadConnection) {
+      const reconnected = hadConnection;
+      hadConnection = true;
+      if (!state.configReady) {
+        retryBootstrap();
+      } else if (reconnected) {
         state.reconnectNonce += 1;
         showToast(t("common.reconnected"));
         void loadState().catch(() => {});
         void loadQuota().catch(() => {});
       }
-      hadConnection = true;
     };
     socket.onmessage = (event) => {
       let payload: any;
@@ -79,28 +93,41 @@ export function App() {
 
   const initialize = async () => {
     state.bootError = "";
+    const epoch = state.authEpoch;
+    const knownDevice = state.paired === true;
+    const hash = window.location.hash;
+    const pairing = hash.startsWith("#token=");
+    const quotaRequest = knownDevice && !pairing ? loadQuota().catch(() => {}) : null;
     try {
-      const hash = window.location.hash;
-      if (hash.startsWith("#token=")) {
+      if (pairing) {
         const token = decodeURIComponent(hash.slice("#token=".length));
         history.replaceState(null, "", window.location.pathname + window.location.search);
         await pair(token);
       } else {
         await loadState();
       }
-      state.paired = true;
-      await loadQuota().catch(() => {});
+      if (epoch === state.authEpoch) state.paired = true;
     } catch (error: any) {
-      state.paired = false;
-      if (error?.status !== 401) {
+      if (error?.status === 401) {
+        forgetPairing();
+        state.paired = false;
+        state.bootError = "";
+      } else if (knownDevice) {
+        state.connected = false;
+      } else {
+        state.paired = false;
         state.bootError = error?.message || "offline";
       }
     }
+    if (quotaRequest) await quotaRequest;
+    else if (state.paired === true) void loadQuota().catch(() => {});
   };
 
   const onPaired = async () => {
     state.bootError = "";
+    const epoch = state.authEpoch;
     await loadState();
+    if (epoch !== state.authEpoch) return;
     state.paired = true;
     await loadQuota().catch(() => {});
   };
@@ -116,6 +143,7 @@ export function App() {
       if (state.paired === true) {
         if (socket?.readyState === WebSocket.OPEN) {
           state.connected = true;
+          retryBootstrap();
           return;
         }
         if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
@@ -124,6 +152,7 @@ export function App() {
       }
     };
     const unauthorized = () => {
+      forgetPairing();
       state.paired = false;
       state.connected = false;
       state.route = { name: "usage" };

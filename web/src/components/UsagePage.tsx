@@ -158,11 +158,18 @@ export function UsagePage() {
   );
   const [metric, setMetric] = createSignal<"tokens" | "cost">("tokens");
   const [group, setGroup] = createSignal<"date" | "model">("date");
-  const [activeAgents, setActiveAgents] = createSignal<Set<string>>(new Set());
+  const [activeAgents, setActiveAgents] = createSignal<Set<string>>(new Set(AGENT_KEYS));
   createEffect(() => {
-    if (state.configReady && activeAgents().size === 0) {
-      setActiveAgents(new Set(enabledAgentKeys()));
+    if (!state.configReady) return;
+    const enabled = enabledAgentKeys();
+    if (enabled.length === 0) return;
+    const current = activeAgents();
+    const next = new Set([...current].filter((agent) => enabled.includes(agent)));
+    if (next.size === 0) {
+      for (const agent of enabled) next.add(agent);
     }
+    if (next.size === current.size && [...next].every((agent) => current.has(agent))) return;
+    setActiveAgents(next);
   });
   const [rowsLimit, setRowsLimit] = createSignal(10);
 
@@ -172,9 +179,9 @@ export function UsagePage() {
   const [draftTo, setDraftTo] = createSignal("");
 
   const [usageReport, setUsageReport] = createSignal<UsageGetPayload | null>(null);
-  const [loading, setLoading] = createSignal(false);
+  const [loading, setLoading] = createSignal(state.usageEnabled && activeAgents().size > 0);
   const [reportError, setReportError] = createSignal<string | null>(null);
-  const isLoading = () => !state.configReady || loading();
+  const isLoading = () => loading();
 
   // Sheets
   const [sheet, setSheet] = createSignal<"none" | "day" | "model" | "custom" | "filter">("none");
@@ -201,6 +208,7 @@ export function UsagePage() {
 
   const loadUsage = async (force = false) => {
     if (!state.usageEnabled || activeAgents().size === 0) return;
+    const agents = Array.from(activeAgents());
     const seq = ++usageReqSeq;
     setLoading(true);
     setReportError(null);
@@ -211,7 +219,7 @@ export function UsagePage() {
           preset: range(),
           from: range() === "custom" ? customFrom() : undefined,
           to: range() === "custom" ? customTo() : undefined,
-          agents: Array.from(activeAgents()),
+          agents,
           force,
         },
       })) as UsageGetPayload;
@@ -236,7 +244,7 @@ export function UsagePage() {
   };
 
   createEffect(() => {
-    if (!state.configReady || !state.usageEnabled || activeAgents().size === 0) return;
+    if (!state.usageEnabled || activeAgents().size === 0) return;
     // Re-fetch when range or activeAgents change
     const p = range();
     activeAgents(); // tracked: a filter change reloads
