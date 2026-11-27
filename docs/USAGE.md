@@ -203,9 +203,9 @@ tokenpulse config set quota_provider_order=opencode,claude,codex,antigravity
 tokenpulse config set quota_display_mode=used
 
 # Theme: auto (default), dark, light
-# "auto" picks TOKENPULSE_THEME, COLORFGBG, TERM_BACKGROUND, then the OS
-# appearance (Linux portal/gsettings, macOS), falling back to the terminal
-# background at startup, and checks OS light/dark switches on refresh.
+# "auto" checks TOKENPULSE_THEME, COLORFGBG, TERM_BACKGROUND, OS appearance
+# (Linux portal/gsettings, macOS), and finally the terminal background at
+# startup; OS light/dark switches are picked up on refresh.
 tokenpulse config set theme=dark
 
 # Auto-refresh interval in minutes for quota + usage (0, 1, 2, 5, 10, 15; 0 = disabled)

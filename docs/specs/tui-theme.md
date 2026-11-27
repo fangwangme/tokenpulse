@@ -16,12 +16,12 @@ When `display.theme` is `auto` and no manual `b` override is active, the TUI res
 1. `TOKENPULSE_THEME` (`light` or `dark`, case-insensitive).
 2. `COLORFGBG` (ANSI background index: `<= 6` or `8` is dark, otherwise light).
 3. `TERM_BACKGROUND` (`light` or `dark`, case-insensitive).
-4. OS appearance: on Linux, Freedesktop Portal `org.freedesktop.appearance` `color-scheme` via `busctl`, falling back to `gsettings get org.gnome.desktop.interface color-scheme`; on macOS, `defaults read -g AppleInterfaceStyle`.
-5. Terminal background luminance via an OSC 11 query once at startup when attached to a TTY (never from inside the Bubble Tea event loop or non-TTY sessions). Some terminal hosts answer with their own chrome color rather than the visible background, so this is only a last-resort fallback.
+4. OS appearance: on Linux, Freedesktop Portal `org.freedesktop.appearance` `color-scheme` via `busctl`, falling back to `gsettings get org.gnome.desktop.interface color-scheme`; on macOS, `defaults read -g AppleInterfaceStyle` (a missing key means light; command errors or timeouts fall through).
+5. Terminal background luminance via an OSC 11 query once at startup when attached to a TTY (never inside the Bubble Tea event loop or non-TTY sessions). Because some terminal hosts report their chrome color rather than the visible background, this is only a last-resort fallback.
 
-OS appearance wins over the OSC 11 query so a misleading terminal reply cannot override a light desktop. Default to dark if no source is available.
+Defaults to dark if no source is available.
 
-While running in `auto` mode without a manual override or explicit `TOKENPULSE_THEME` / `TERM_BACKGROUND` override, the TUI checks OS appearance when the app refreshes: a manual `r` and each auto-refresh scan. A changed reading updates the active theme on the next frame; there is no separate theme timer.
+While running in `auto` mode without a manual `b` override or explicit `TOKENPULSE_THEME` / `TERM_BACKGROUND`, the TUI re-checks OS appearance on manual `r` and auto-refresh scans and applies changes on the next frame (no separate theme timer).
 
 ## Light-Mode Contrast
 
