@@ -6,7 +6,7 @@ import { QuotaPage } from "./components/QuotaPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { UsagePage } from "./components/UsagePage";
 import { QUOTA_PROVIDER_NAMES } from "./shared/defaults";
-import { showToast, state } from "./store";
+import { forgetPairing, showToast, state } from "./store";
 import { applyTheme } from "./themes";
 import { resolveLocale, setLocale, t } from "./i18n";
 import { Icon } from "./components/ui";
@@ -79,9 +79,12 @@ export function App() {
 
   const initialize = async () => {
     state.bootError = "";
+    const knownDevice = state.paired === true;
+    const hash = window.location.hash;
+    const pairing = hash.startsWith("#token=");
+    const quotaRequest = knownDevice && !pairing ? loadQuota().catch(() => {}) : null;
     try {
-      const hash = window.location.hash;
-      if (hash.startsWith("#token=")) {
+      if (pairing) {
         const token = decodeURIComponent(hash.slice("#token=".length));
         history.replaceState(null, "", window.location.pathname + window.location.search);
         await pair(token);
@@ -89,20 +92,26 @@ export function App() {
         await loadState();
       }
       state.paired = true;
-      await loadQuota().catch(() => {});
     } catch (error: any) {
-      state.paired = false;
-      if (error?.status !== 401) {
+      if (error?.status === 401) {
+        forgetPairing();
+        state.paired = false;
+        state.bootError = "";
+      } else if (knownDevice) {
+        state.connected = false;
+      } else {
+        state.paired = false;
         state.bootError = error?.message || "offline";
       }
     }
+    if (quotaRequest) await quotaRequest;
+    else if (state.paired === true) void loadQuota().catch(() => {});
   };
 
   const onPaired = async () => {
     state.bootError = "";
-    await loadState();
     state.paired = true;
-    await loadQuota().catch(() => {});
+    void loadQuota().catch(() => {});
   };
 
   onMount(() => {
@@ -124,6 +133,7 @@ export function App() {
       }
     };
     const unauthorized = () => {
+      forgetPairing();
       state.paired = false;
       state.connected = false;
       state.route = { name: "usage" };

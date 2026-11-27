@@ -1,6 +1,13 @@
-import { showToast, state } from "./store";
+import { rememberPairing, showToast, state } from "./store";
 import { t } from "./i18n";
 import { QUOTA_PROVIDER_KEYS, secondsToScanInterval } from "./shared/defaults";
+import {
+  readCachedQuota,
+  readCachedState,
+  writeCachedQuota,
+  writeCachedState,
+  type CachedState,
+} from "./shared/boot-cache";
 import type {
   QuotaGetPayload,
   QuotaProviderState,
@@ -64,16 +71,6 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
     throw new ApiError(data?.error || response.statusText || "request failed", response.status);
   }
   return data as T;
-}
-
-interface RawState {
-  version: string;
-  scannedAt: number;
-  fetchedAt: number;
-  pricesAvailable: boolean;
-  agents: string[];
-  settings: Record<string, unknown>;
-  keeperEngine: boolean;
 }
 
 interface RawUsageDay {
@@ -166,18 +163,52 @@ function applySettings(values: Record<string, unknown>): void {
   state.quotaEnabled = values["display.refresh_quota"] !== false;
 }
 
-export async function loadState(): Promise<void> {
-  const raw = await api<RawState>("/api/state");
+function applyState(raw: CachedState): void {
   state.version = raw.version;
   state.scannedAt = raw.scannedAt;
   state.usageScannedAt = raw.scannedAt;
-  state.agents = raw.agents || [];
+  state.agents = raw.agents;
   state.keeperEngine = raw.keeperEngine;
   state.quotaUpdated = raw.fetchedAt || null;
-  applySettings(raw.settings || {});
+  applySettings(raw.settings);
   state.usageEnabled = true;
   state.configReady = true;
+}
+
+export function restoreBootCache(): void {
+  const cachedState = readCachedState();
+  if (cachedState) applyState(cachedState);
+  const cachedQuota = readCachedQuota();
+  if (cachedQuota) {
+    state.quotaSnapshots = cachedQuota.providers;
+    state.quotaUpdated = cachedQuota.fetchedAt;
+  }
+}
+
+export function prepareBoot(): void {
+  if (typeof window === "undefined") return;
+  if (window.location.hash.startsWith("#token=")) {
+    state.paired = null;
+    return;
+  }
+  restoreBootCache();
+}
+
+export async function loadState(): Promise<void> {
+  const raw = await api<CachedState>("/api/state");
+  const value: CachedState = {
+    version: raw.version,
+    scannedAt: raw.scannedAt,
+    fetchedAt: raw.fetchedAt,
+    pricesAvailable: Boolean(raw.pricesAvailable),
+    agents: raw.agents || [],
+    settings: raw.settings || {},
+    keeperEngine: raw.keeperEngine,
+  };
+  applyState(value);
+  writeCachedState(value);
   if (state.paired !== true) state.paired = true;
+  rememberPairing();
 }
 
 interface RefreshResult {
@@ -290,21 +321,38 @@ function mapQuota(raw: RawQuota): QuotaProviderState[] {
   });
 }
 
-export async function loadQuota(refresh = false): Promise<void> {
-  state.quotaLoading = true;
-  try {
-    if (refresh) {
-      const res = await manualRefresh({ usage: false, quota: true });
-      if (res.throttled && !res.accepted && state.quotaSnapshots.length > 0) {
-        return;
-      }
+let quotaInFlight: Promise<void> | null = null;
+let quotaLoads = 0;
+
+async function performQuotaLoad(refresh: boolean): Promise<void> {
+  if (refresh) {
+    const res = await manualRefresh({ usage: false, quota: true });
+    if (res.throttled && !res.accepted && state.quotaSnapshots.length > 0) {
+      return;
     }
-    const raw = await api<RawQuota>("/api/quota");
-    state.quotaSnapshots = mapQuota(raw);
-    if (raw.fetchedAt) state.quotaUpdated = raw.fetchedAt;
-  } finally {
-    state.quotaLoading = false;
   }
+  const raw = await api<RawQuota>("/api/quota");
+  const providers = mapQuota(raw);
+  state.quotaSnapshots = providers;
+  if (raw.fetchedAt) state.quotaUpdated = raw.fetchedAt;
+  writeCachedQuota({ providers, fetchedAt: state.quotaUpdated });
+}
+
+export function loadQuota(refresh = false): Promise<void> {
+  if (!refresh && quotaInFlight) return quotaInFlight;
+  quotaLoads += 1;
+  state.quotaLoading = true;
+  const run = performQuotaLoad(refresh).finally(() => {
+    quotaLoads -= 1;
+    if (quotaLoads === 0) state.quotaLoading = false;
+  });
+  if (refresh) return run;
+  quotaInFlight = run;
+  const clear = () => {
+    if (quotaInFlight === run) quotaInFlight = null;
+  };
+  void run.then(clear, clear);
+  return run;
 }
 
 export async function fetchQuota(refresh = false): Promise<void> {

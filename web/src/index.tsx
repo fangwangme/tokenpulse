@@ -1,6 +1,7 @@
 import { render } from "solid-js/web";
 import "./styles.css";
 import { App } from "./app";
+import { prepareBoot } from "./api";
 
 const isTextField = (element: Element | null) => Boolean(element?.matches?.("input, textarea, [contenteditable]"));
 
@@ -57,4 +58,5 @@ if (typeof window !== "undefined") {
   fitToVisualViewport();
 }
 
+prepareBoot();
 render(() => <App />, document.getElementById("root")!);

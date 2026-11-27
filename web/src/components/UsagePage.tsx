@@ -2,6 +2,7 @@ import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Sh
 import { createScrollNavHandler, state } from "../store";
 import { request } from "../api";
 import { scanIntervalToMs, USAGE_AGENT_KINDS as AGENT_KEYS } from "../shared/defaults";
+import { cachedUsageMatches, readCachedUsage, sameAgentSet, writeCachedUsage } from "../shared/boot-cache";
 import { cacheHitPercent, daysBetween, formatYMD, heatmapLayout, type UsagePreset } from "../shared/usage";
 import { formatCost } from "../shared/money";
 import type {
@@ -153,16 +154,25 @@ function UsageBottomSheet(props: { onClose: () => void; maxHeight?: string; scro
 }
 
 export function UsagePage() {
-  const [range, setRange] = createSignal<UsagePreset>(
-    state.route.name === "usage" && state.route.initialPreset ? state.route.initialPreset : "today"
-  );
+  const initialRange = (): UsagePreset =>
+    state.route.name === "usage" && state.route.initialPreset ? state.route.initialPreset : "today";
+  const cachedUsage = readCachedUsage();
+  const [range, setRange] = createSignal<UsagePreset>(initialRange());
   const [metric, setMetric] = createSignal<"tokens" | "cost">("tokens");
   const [group, setGroup] = createSignal<"date" | "model">("date");
-  const [activeAgents, setActiveAgents] = createSignal<Set<string>>(new Set());
+  const initialAgents = () => {
+    if (state.configReady) return new Set(enabledAgentKeys());
+    if (cachedUsage && cachedUsage.preset === "today") return new Set(cachedUsage.agents);
+    return new Set(AGENT_KEYS);
+  };
+  const [activeAgents, setActiveAgents] = createSignal<Set<string>>(initialAgents());
+  let agentsTouched = false;
   createEffect(() => {
-    if (state.configReady && activeAgents().size === 0) {
-      setActiveAgents(new Set(enabledAgentKeys()));
-    }
+    if (!state.configReady || agentsTouched) return;
+    const enabled = enabledAgentKeys();
+    if (enabled.length === 0) return;
+    if (sameAgentSet(Array.from(activeAgents()), enabled)) return;
+    setActiveAgents(new Set(enabled));
   });
   const [rowsLimit, setRowsLimit] = createSignal(10);
 
@@ -171,10 +181,17 @@ export function UsagePage() {
   const [draftFrom, setDraftFrom] = createSignal("");
   const [draftTo, setDraftTo] = createSignal("");
 
-  const [usageReport, setUsageReport] = createSignal<UsageGetPayload | null>(null);
-  const [loading, setLoading] = createSignal(false);
+  const [usageReport, setUsageReport] = createSignal<UsageGetPayload | null>(
+    cachedUsage &&
+      range() === "today" &&
+      cachedUsage.report.range.to === todayYMD() &&
+      cachedUsageMatches(cachedUsage, "today", Array.from(activeAgents()))
+      ? cachedUsage.report
+      : null,
+  );
+  const [loading, setLoading] = createSignal(state.usageEnabled && activeAgents().size > 0);
   const [reportError, setReportError] = createSignal<string | null>(null);
-  const isLoading = () => !state.configReady || loading();
+  const isLoading = () => loading();
 
   // Sheets
   const [sheet, setSheet] = createSignal<"none" | "day" | "model" | "custom" | "filter">("none");
@@ -201,6 +218,7 @@ export function UsagePage() {
 
   const loadUsage = async (force = false) => {
     if (!state.usageEnabled || activeAgents().size === 0) return;
+    const agents = Array.from(activeAgents());
     const seq = ++usageReqSeq;
     setLoading(true);
     setReportError(null);
@@ -211,12 +229,15 @@ export function UsagePage() {
           preset: range(),
           from: range() === "custom" ? customFrom() : undefined,
           to: range() === "custom" ? customTo() : undefined,
-          agents: Array.from(activeAgents()),
+          agents,
           force,
         },
       })) as UsageGetPayload;
       if (seq !== usageReqSeq) return;
       setUsageReport(res);
+      if (range() === "today" && sameAgentSet(agents, enabledAgentKeys())) {
+        writeCachedUsage({ preset: "today", agents, report: res, savedAt: Date.now() });
+      }
       if (!customFrom() && res.firstDay) {
         setCustomFrom(res.firstDay);
         setCustomTo(todayYMD());
@@ -236,7 +257,7 @@ export function UsagePage() {
   };
 
   createEffect(() => {
-    if (!state.configReady || !state.usageEnabled || activeAgents().size === 0) return;
+    if (!state.usageEnabled || activeAgents().size === 0) return;
     // Re-fetch when range or activeAgents change
     const p = range();
     activeAgents(); // tracked: a filter change reloads
@@ -1881,7 +1902,10 @@ export function UsagePage() {
             <div style={{ display: "flex", "align-items": "center" }}>
               <span style={{ "font-weight": 650, "font-size": "16px", flex: 1 }}>{t("usage.filterTitle")}</span>
               <button
-                onClick={() => setActiveAgents(new Set(enabledAgentKeys()))}
+                onClick={() => {
+                  agentsTouched = true;
+                  setActiveAgents(new Set(enabledAgentKeys()));
+                }}
                 style={{ height: "32px", padding: "0 10px", border: 0, background: "none", color: "var(--accent)", font: "inherit", "font-size": "14px" }}
               >
                 {t("usage.selectAll")}
@@ -1904,6 +1928,7 @@ export function UsagePage() {
                   } else {
                     s.add(ag);
                   }
+                  agentsTouched = true;
                   setActiveAgents(s);
                 };
 

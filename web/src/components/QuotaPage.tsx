@@ -303,7 +303,7 @@ export function QuotaPage() {
                           >
                             {QUOTA_PROVIDER_NAMES[p.provider] || p.provider}
                           </span>
-                          <Show when={state.accountDisplay !== "none" && p.snapshot?.plan}>
+                          <Show when={state.configReady && state.accountDisplay !== "none" && p.snapshot?.plan}>
                             <span
                               class="tp-pill"
                               style={{
@@ -316,7 +316,7 @@ export function QuotaPage() {
                             </span>
                           </Show>
                         </div>
-                        <Show when={state.accountDisplay === "full" && p.snapshot?.account}>
+                        <Show when={state.configReady && state.accountDisplay === "full" && p.snapshot?.account}>
                           <div style={{ "font-size": "12px", color: "var(--muted)", "margin-top": "3px", "padding-left": "18px" }}>
                             {p.snapshot?.account}
                           </div>

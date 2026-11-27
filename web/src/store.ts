@@ -1,6 +1,12 @@
 import { createMutable } from "solid-js/store";
 import type { QuotaProviderState, Route, ThemeMode } from "./types";
 import { QUOTA_PROVIDER_KEYS, type UsageScanInterval } from "./shared/defaults";
+import {
+  clearBootCache,
+  clearPairingMarker,
+  readPairingMarker,
+  writePairingMarker,
+} from "./shared/boot-cache";
 import type { LocalePref } from "./i18n";
 
 export interface KeeperExecution {
@@ -74,7 +80,7 @@ function stored<T extends string>(key: string, allowed: readonly T[], fallback: 
 if (typeof localStorage !== "undefined") localStorage.removeItem("tokenpulse-accent");
 
 export const state = createMutable<AppState>({
-  paired: null,
+  paired: readPairingMarker() ? true : null,
   bootError: "",
   connected: false,
   everConnected: false,
@@ -104,6 +110,15 @@ export const state = createMutable<AppState>({
   toast: "",
   navHidden: false,
 });
+
+export function rememberPairing(): void {
+  writePairingMarker();
+}
+
+export function forgetPairing(): void {
+  clearPairingMarker();
+  clearBootCache();
+}
 
 export function navigate(route: Route): void {
   state.route = route;

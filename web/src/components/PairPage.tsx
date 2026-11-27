@@ -1,6 +1,6 @@
 import { createSignal, Show } from "solid-js";
 import { pair, ApiError } from "../api";
-import { state } from "../store";
+import { forgetPairing, state } from "../store";
 import { Icon } from "./ui";
 import { t } from "../i18n";
 
@@ -20,6 +20,7 @@ export function PairPage(props: { onPaired: () => Promise<void> }) {
     } catch (err: any) {
       setError(err?.message || t("pair.failed"));
       if (err instanceof ApiError && err.status === 401) {
+        forgetPairing();
         state.paired = false;
       }
     } finally {
