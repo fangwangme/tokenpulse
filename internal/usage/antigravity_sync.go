@@ -718,7 +718,7 @@ func discoverLocalConversationIDs(home string) []localConversationID {
 }
 
 func syncLanguageServers(db *sql.DB, home string, connections []antigravityConnection,
-	cached map[[2]string][2]*int64, rebuild bool, aliases map[string]ModelAlias, releases ReleaseMap) error {
+	cached map[[2]string]cachedAntigravitySession, rebuild bool, aliases map[string]ModelAlias, releases ReleaseMap) error {
 	locals := discoverLocalConversationIDs(home)
 	work := map[[2]string]*antigravityWorkItem{}
 	for _, local := range locals {
@@ -774,10 +774,10 @@ func syncLanguageServers(db *sql.DB, home string, connections []antigravityConne
 		if !rebuild {
 			if cachedEntry, ok := cached[[2]string{client, item.sessionID}]; ok {
 				unchanged := false
-				if cachedEntry[0] != nil && item.summary.LastModifiedMs != nil {
-					unchanged = *cachedEntry[0] >= *item.summary.LastModifiedMs
-				} else if cachedEntry[1] != nil && item.summary.StepCount != nil {
-					unchanged = *cachedEntry[1] >= *item.summary.StepCount
+				if cachedEntry.lastModifiedMs != nil && item.summary.LastModifiedMs != nil {
+					unchanged = *cachedEntry.lastModifiedMs >= *item.summary.LastModifiedMs
+				} else if cachedEntry.stepCount != nil && item.summary.StepCount != nil {
+					unchanged = *cachedEntry.stepCount >= *item.summary.StepCount
 				}
 				if unchanged {
 					continue

@@ -452,7 +452,7 @@ func familyFromLabel(label string) string {
 	var words []string
 	for _, token := range strings.Fields(strings.ToLower(cleaned)) {
 		if token == "gemini" || token == "orchestrator" || token == "worker" ||
-			token == "agent" || token == "step" || token == "high" || token == "medium" ||
+			token == "agent" || token == "step" || token == "xhigh" || token == "high" || token == "medium" ||
 			token == "low" || token == "thinking" || token == "image" {
 			continue
 		}

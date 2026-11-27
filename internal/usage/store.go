@@ -140,6 +140,12 @@ ON CONFLICT(source) DO UPDATE SET last_refresh_started_ms = MAX(last_refresh_sta
 	return err
 }
 
+// LastRefreshStartedMs returns the exact wall-clock start time (ms) of the
+// previous successful refresh for source, or nil when none is recorded.
+func (s *Store) LastRefreshStartedMs(source string) (*int64, error) {
+	return s.lastRefreshStartedMs(source)
+}
+
 func (s *Store) lastRefreshStartedMs(source string) (*int64, error) {
 	db, err := s.Open()
 	if err != nil {
@@ -867,6 +873,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_messages_date ON usage_messages(date);
 CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date ON usage_messages(source, date);
 CREATE INDEX IF NOT EXISTS idx_usage_messages_source_date_canonical ON usage_messages(source, date, canonical_model_id);
 CREATE INDEX IF NOT EXISTS idx_usage_messages_source_parser_version ON usage_messages(source, parser_version);
+CREATE INDEX IF NOT EXISTS idx_usage_messages_session ON usage_messages(source, client, session_id);
 CREATE INDEX IF NOT EXISTS idx_usage_messages_zero_cost ON usage_messages(date, source) WHERE cost_usd <= 0 AND total_tokens > 0;
 
 CREATE TABLE IF NOT EXISTS daily_model_usage (

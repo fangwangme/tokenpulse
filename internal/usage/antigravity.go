@@ -1,8 +1,12 @@
 package usage
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +29,8 @@ type AntigravityParser struct {
 	// SkipLanguageServers keeps fixtures and tests away from this machine's
 	// real Antigravity processes; local conversation databases still sync.
 	SkipLanguageServers bool
+	SyncCursorMs        *int64
+	DebugLogger         *log.Logger
 }
 
 func NewAntigravityParser(cacheRoot string, releases ReleaseMap) *AntigravityParser {
@@ -51,6 +57,9 @@ type antigravityRow struct {
 	displayName string
 }
 
+func (p *AntigravityParser) SetSyncCursor(ms *int64)      { p.SyncCursorMs = ms }
+func (p *AntigravityParser) SetDebugLogger(l *log.Logger) { p.DebugLogger = l }
+
 func (p *AntigravityParser) Parse(since *time.Time) ([]provider.UnifiedMessage, error) {
 	if !p.SkipSync {
 		if err := p.sync(since); err != nil {
@@ -58,7 +67,7 @@ func (p *AntigravityParser) Parse(since *time.Time) ([]provider.UnifiedMessage, 
 		}
 	}
 	aliases := loadAliasHistory(p.CacheRoot)
-	if err := p.normalizeCache(aliases); err != nil {
+	if err := p.normalizeCache(aliases, since); err != nil {
 		_ = err
 	}
 
@@ -68,20 +77,23 @@ func (p *AntigravityParser) Parse(since *time.Time) ([]provider.UnifiedMessage, 
 	}
 	defer conn.Close()
 
-	query := `SELECT client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
+	const cols = `client, model_id, provider_id, session_id, COALESCE(response_id, id), timestamp,
        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-       pricing_day, COALESCE(served_model, ''), COALESCE(model_enum, ''), COALESCE(display_name, '')
-FROM session_usage`
+       pricing_day, COALESCE(served_model, ''), COALESCE(model_enum, ''), COALESCE(display_name, '')`
+	query := "SELECT " + cols + " FROM session_usage ORDER BY timestamp ASC"
 	var args []any
 	if since != nil {
 		sinceMs := midnightMillis(*since, time.Local)
-		query += ` WHERE timestamp >= ?1
-   OR (client || ':' || session_id) IN (
-       SELECT client || ':' || session_id FROM sessions WHERE synced_at >= ?1
-   )`
-		args = append(args, sinceMs)
+		syncedCursor := sinceMs
+		if p.SyncCursorMs != nil {
+			syncedCursor = *p.SyncCursorMs
+		}
+		query = `SELECT ` + cols + ` FROM session_usage WHERE timestamp >= ?1
+UNION
+SELECT ` + cols + ` FROM session_usage WHERE session_id IN (SELECT session_id FROM sessions WHERE synced_at >= ?2)
+ORDER BY timestamp ASC`
+		args = append(args, sinceMs, syncedCursor)
 	}
-	query += " ORDER BY timestamp ASC"
 	rows, err := conn.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -197,6 +209,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     parent_conversation_id TEXT,
     mendel_experiment_ids TEXT,
     synced_at INTEGER NOT NULL,
+    parser_version TEXT,
     PRIMARY KEY (session_id, client)
 );
 CREATE TABLE IF NOT EXISTS session_usage (
@@ -222,6 +235,12 @@ CREATE TABLE IF NOT EXISTS session_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_session_usage_session_id ON session_usage(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_usage_pricing_day ON session_usage(pricing_day);
+CREATE INDEX IF NOT EXISTS idx_session_usage_timestamp ON session_usage(timestamp);
+CREATE INDEX IF NOT EXISTS idx_sessions_synced_at ON sessions(synced_at);
+CREATE TABLE IF NOT EXISTS cache_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 `)
 	if err != nil {
 		return err
@@ -235,20 +254,54 @@ CREATE INDEX IF NOT EXISTS idx_session_usage_pricing_day ON session_usage(pricin
 			}
 		}
 	}
+	var sessionPV int
+	_ = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'parser_version'").Scan(&sessionPV)
+	if sessionPV == 0 {
+		if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN parser_version TEXT;"); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-// normalizeCache re-resolves every cached row from the raw identities it keeps,
-// so an alias learned later corrects history. Each row resolves against its own
-// date for unversioned families.
-func (p *AntigravityParser) normalizeCache(aliases map[string]ModelAlias) error {
+func normalizeFingerprint(aliases map[string]ModelAlias, releases ReleaseMap) string {
+	h := sha256.New()
+	enc := json.NewEncoder(h)
+	_ = enc.Encode(aliases)
+	_ = enc.Encode(releases)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// normalizeCache re-resolves cached rows from the raw identities they keep,
+// so an alias or release map learned later corrects history. Full-table
+// normalization runs only when RebuildCache is set or the (aliases, releases)
+// fingerprint changes; steady-state incremental runs scope to recently dated
+// or synced rows.
+func (p *AntigravityParser) normalizeCache(aliases map[string]ModelAlias, since *time.Time) error {
 	db, err := openAntigravityCache(p.CacheRoot)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	rows, err := db.Query("SELECT id, client, session_id, model_id, COALESCE(model_enum, ''), COALESCE(served_model, ''), COALESCE(display_name, ''), timestamp FROM session_usage")
+	fp := normalizeFingerprint(aliases, p.Releases)
+	var storedFP string
+	_ = db.QueryRow("SELECT value FROM cache_meta WHERE key = 'normalize_fingerprint'").Scan(&storedFP)
+	fullPass := p.RebuildCache || since == nil || storedFP != fp
+
+	const normCols = "id, client, session_id, model_id, COALESCE(model_enum, ''), COALESCE(served_model, ''), COALESCE(display_name, ''), timestamp"
+	query := "SELECT " + normCols + " FROM session_usage"
+	var args []any
+	if !fullPass {
+		sinceMs := midnightMillis(*since, time.Local)
+		syncedCursor := sinceMs
+		if p.SyncCursorMs != nil {
+			syncedCursor = *p.SyncCursorMs
+		}
+		query = "SELECT " + normCols + " FROM session_usage WHERE timestamp >= ?1 UNION SELECT " + normCols + " FROM session_usage WHERE session_id IN (SELECT session_id FROM sessions WHERE synced_at >= ?2)"
+		args = append(args, sinceMs, syncedCursor)
+	}
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return err
 	}
@@ -293,7 +346,18 @@ func (p *AntigravityParser) normalizeCache(aliases map[string]ModelAlias) error 
 		}
 		changes = append(changes, change{id: row.id, from: row.modelID, to: target, served: served, display: display})
 	}
+	if p.DebugLogger != nil {
+		mode := "scoped"
+		if fullPass {
+			mode = "full"
+		}
+		p.DebugLogger.Printf("antigravity normalize mode=%s scanned=%d changed=%d", mode, len(cached), len(changes))
+	}
 	if len(changes) == 0 {
+		if fullPass {
+			_, _ = db.Exec(`INSERT INTO cache_meta (key, value) VALUES ('normalize_fingerprint', ?1)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`, fp)
+		}
 		return nil
 	}
 	tx, err := db.Begin()
@@ -310,6 +374,12 @@ func (p *AntigravityParser) normalizeCache(aliases map[string]ModelAlias) error 
 		if _, err := tx.Exec(`UPDATE sessions SET model_id = ?1, synced_at = ?2
 WHERE model_id = ?3 AND (session_id, client) IN (SELECT session_id, client FROM session_usage WHERE id = ?4)`,
 			c.to, now, c.from, c.id); err != nil {
+			return err
+		}
+	}
+	if fullPass {
+		if _, err := tx.Exec(`INSERT INTO cache_meta (key, value) VALUES ('normalize_fingerprint', ?1)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`, fp); err != nil {
 			return err
 		}
 	}
@@ -623,27 +693,33 @@ func midnightMillis(t time.Time, location *time.Location) int64 {
 	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location).UnixMilli()
 }
 
-func loadCachedSessions(db *sql.DB) map[[2]string][2]*int64 {
-	out := map[[2]string][2]*int64{}
-	rows, err := db.Query("SELECT client, session_id, last_modified_ms, step_count FROM sessions")
+type cachedAntigravitySession struct {
+	lastModifiedMs *int64
+	stepCount      *int64
+	parserVersion  string
+}
+
+func loadCachedSessions(db *sql.DB) map[[2]string]cachedAntigravitySession {
+	out := map[[2]string]cachedAntigravitySession{}
+	rows, err := db.Query("SELECT client, session_id, last_modified_ms, step_count, COALESCE(parser_version, '') FROM sessions")
 	if err != nil {
 		return out
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var client, session string
+		var client, session, pv string
 		var modified, steps sql.NullInt64
-		if err := rows.Scan(&client, &session, &modified, &steps); err != nil {
+		if err := rows.Scan(&client, &session, &modified, &steps, &pv); err != nil {
 			continue
 		}
-		entry := [2]*int64{}
+		entry := cachedAntigravitySession{parserVersion: pv}
 		if modified.Valid {
 			v := modified.Int64
-			entry[0] = &v
+			entry.lastModifiedMs = &v
 		}
 		if steps.Valid {
 			v := steps.Int64
-			entry[1] = &v
+			entry.stepCount = &v
 		}
 		out[[2]string{client, session}] = entry
 	}
@@ -666,7 +742,7 @@ func sessionsWithCurrentUsage(db *sql.DB) map[[2]string]bool {
 	return out
 }
 
-func syncLocalConversations(db *sql.DB, home string, cached map[[2]string][2]*int64, rebuild bool, aliases map[string]ModelAlias, releases ReleaseMap) error {
+func syncLocalConversations(db *sql.DB, home string, cached map[[2]string]cachedAntigravitySession, rebuild bool, aliases map[string]ModelAlias, releases ReleaseMap) error {
 	alreadyParsed := sessionsWithCurrentUsage(db)
 	now := time.Now().UnixMilli()
 	tx, err := db.Begin()
@@ -693,9 +769,10 @@ func syncLocalConversations(db *sql.DB, home string, cached map[[2]string][2]*in
 			path := filepath.Join(dir, file.Name())
 			modified, hasModified := localConversationModifiedMs(path)
 			key := [2]string{client, sessionID}
-			if !rebuild && alreadyParsed[key] {
+			if !rebuild {
 				if entry, ok := cached[key]; ok {
-					if entry[0] != nil && hasModified && *entry[0] >= modified {
+					parsedCurrent := alreadyParsed[key] || entry.parserVersion == antigravityParserVersion
+					if parsedCurrent && entry.lastModifiedMs != nil && hasModified && *entry.lastModifiedMs >= modified {
 						continue
 					}
 				}
@@ -828,8 +905,8 @@ func upsertAntigravitySession(db sqlExecer, sessionID, client string, summary an
         session_id, trajectory_id, client, title, model_id, status, step_count,
         created_time_ms, last_modified_ms, last_user_input_time_ms, project_id,
         workspace_path, git_root, repository, git_origin_url, branch_name,
-        parent_conversation_id, mendel_experiment_ids, synced_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        parent_conversation_id, mendel_experiment_ids, synced_at, parser_version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(session_id, client) DO UPDATE SET
         trajectory_id = COALESCE(excluded.trajectory_id, sessions.trajectory_id),
         title = COALESCE(excluded.title, sessions.title),
@@ -847,10 +924,11 @@ func upsertAntigravitySession(db sqlExecer, sessionID, client string, summary an
         branch_name = COALESCE(excluded.branch_name, sessions.branch_name),
         parent_conversation_id = COALESCE(excluded.parent_conversation_id, sessions.parent_conversation_id),
         mendel_experiment_ids = COALESCE(excluded.mendel_experiment_ids, sessions.mendel_experiment_ids),
-        synced_at = excluded.synced_at`,
+        synced_at = excluded.synced_at,
+        parser_version = excluded.parser_version`,
 		sessionID, summary.TrajectoryID, client, summary.Title, modelID, summary.Status, summary.StepCount,
 		summary.CreatedTimeMs, summary.LastModifiedMs, summary.LastUserInputTimeMs, summary.ProjectID,
 		summary.WorkspacePath, summary.GitRoot, summary.Repository, summary.GitOriginURL, summary.BranchName,
-		summary.ParentConversationID, summary.MendelExperimentIDs, syncedAt)
+		summary.ParentConversationID, summary.MendelExperimentIDs, syncedAt, antigravityParserVersion)
 	return err
 }

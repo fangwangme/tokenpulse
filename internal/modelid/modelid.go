@@ -74,7 +74,7 @@ func allDigits(s string) bool {
 	return true
 }
 
-var variantSuffixes = []string{"-high", "-medium", "-low", "-free", "-thinking", "-tiered"}
+var variantSuffixes = []string{"-xhigh", "-high", "-medium", "-low", "-free", "-thinking", "-tiered"}
 
 func stripVariantSuffixes(modelID string) string {
 	normalized := modelID
