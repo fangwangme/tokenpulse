@@ -1667,13 +1667,18 @@ func (m *model) drawTabs(c *canvas, area rect) {
 	columns := splitH(inner, tabCount)
 	for index, name := range tabNames {
 		column := columns[index]
-		style := fgStyle(theme.dim)
+		pillX, pillW := column.x, column.w
+		if column.w >= 4 {
+			pillX++
+			pillW -= 2
+		}
+		style := textStyle{fg: theme.fg, bg: theme.pillBg}
 		if index == m.tab {
 			style = textStyle{fg: theme.onAccent, bg: theme.accent, bold: true}
-			c.fill(column.x, column.y, column.w, column.h, style)
 		}
-		label := truncate(name, max(column.w-1, 1))
-		start := column.x + max((column.w-len([]rune(label)))/2, 0)
+		c.fill(pillX, column.y, pillW, column.h, style)
+		label := truncate(name, max(pillW-1, 1))
+		start := pillX + max((pillW-len([]rune(label)))/2, 0)
 		c.set(start, column.y, label, style)
 	}
 }
