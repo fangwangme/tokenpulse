@@ -115,7 +115,12 @@ cost). Selecting a day with usage opens its day detail.
 | `models` | one `UsageModelSummary` per canonical model, by tokens descending |
 
 `UsageTotals` = `{ cost, tokens, input, output, cacheRead, cacheWrite, messages,
-sessions }`. A day summary adds `date`. A model summary adds `model`, `company`
+sessions }`. A day summary adds `date` and optional `companies` — per-company
+(`anthropic`, `openai`, `google`, `other`) `{ tokens, cost }` totals computed
+in the same report query so stacked daily charts do not require per-model
+requests. Callers that only need daily summaries (such as the TUI Activity
+heatmap) may request a days-only report that skips model and comparison
+aggregation. A model summary adds `model`, `company`
 (`anthropic`, `openai`, `google`, `other`), `agents` (the agents that used it in
 the range), `lastUsed` (its latest date in the range) and `unpriced`.
 
