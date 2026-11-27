@@ -1729,7 +1729,7 @@ func (m *model) helpLine() string {
 	case tabDaily:
 		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  ↵ detail  n today  c/t/d sort (%s %s)  v metric (%s)  s filter  ? help", sortLabel(m.sortField), sortDirection(m.sortAsc), metricLabel(m.dailyMetric))
 	case tabActivity:
-		return fmt.Sprintf(" q quit  r refresh  ←→ tab  n today  [/] scroll  t/c metric (%s)  s filter  ? help", metricLabel(m.activityMetric))
+		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ day  n today  t/c metric (%s)  s filter  ? help", metricLabel(m.activityMetric))
 	case tabQuota:
 		return " q quit  r refresh  ←→ tab  ? help"
 	case tabKeeper:

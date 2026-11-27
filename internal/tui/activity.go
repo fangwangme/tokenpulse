@@ -631,10 +631,11 @@ func (m *model) handleActivityKey(key string) (tea.Model, tea.Cmd) {
 	case "c":
 		m.activityMetric = metricCost
 	case "up", "k":
-		m.moveActivitySelection(-1)
+		// m.activity.Days is newest-first; earlier dates sit higher on the heatmap.
+		m.moveActivitySelection(1)
 		return m, m.ensureActivityDetail()
 	case "down", "j":
-		m.moveActivitySelection(1)
+		m.moveActivitySelection(-1)
 		return m, m.ensureActivityDetail()
 	case "n":
 		m.activitySel = dateString(startOfToday())
