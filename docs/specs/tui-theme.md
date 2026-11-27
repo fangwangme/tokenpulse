@@ -19,7 +19,7 @@ When `display.theme` is `auto` and no manual `b` override is active, the TUI res
 4. `TERM_BACKGROUND` (`light` or `dark`, case-insensitive).
 5. OS appearance: on Linux, Freedesktop Portal `org.freedesktop.appearance` `color-scheme` via `busctl`, falling back to `gsettings get org.gnome.desktop.interface color-scheme`; on macOS, `defaults read -g AppleInterfaceStyle`. Default to dark if unavailable.
 
-While running in `auto` mode without a manual override or explicit `TOKENPULSE_THEME` / `TERM_BACKGROUND` override, the TUI periodically polls OS appearance (skipping OSC 11) and updates the active theme live when the system switches between light and dark.
+While running in `auto` mode without a manual override or explicit `TOKENPULSE_THEME` / `TERM_BACKGROUND` override, the TUI periodically polls OS appearance (skipping OSC 11). The first reading is only a baseline; the active theme changes when a later reading differs from the previous one, so a startup result from a higher-precedence source (such as OSC 11 on a dark terminal under a light OS) is kept until the OS actually switches.
 
 ## Light-Mode Contrast
 

@@ -394,8 +394,13 @@ func TestAutoThemeParsersAndLiveRefresh(t *testing.T) {
 	cfg.Display.Theme = config.ThemeAuto
 	m := newModel(Options{Config: cfg}, nil)
 	m.handleStatus(statusMsg{themeMode: 1})
+	if m.theme().mode != 0 {
+		t.Fatalf("first OS reading overrode the startup (dark) terminal theme")
+	}
+	m.handleStatus(statusMsg{themeMode: 0})
+	m.handleStatus(statusMsg{themeMode: 1})
 	if m.theme().mode != 1 {
-		t.Fatalf("statusMsg themeMode=1 did not switch auto theme to light")
+		t.Fatalf("OS switch to light did not switch auto theme")
 	}
 	// Manual override via 'b' stays pinned even if OS appearance poll arrives.
 	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})

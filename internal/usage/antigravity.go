@@ -90,7 +90,7 @@ func (p *AntigravityParser) Parse(since *time.Time) ([]provider.UnifiedMessage, 
 		}
 		query = `SELECT ` + cols + ` FROM session_usage WHERE timestamp >= ?1
 UNION
-SELECT ` + cols + ` FROM session_usage WHERE session_id IN (SELECT session_id FROM sessions WHERE synced_at >= ?2)
+SELECT ` + cols + ` FROM session_usage WHERE (client, session_id) IN (SELECT client, session_id FROM sessions WHERE synced_at >= ?2)
 ORDER BY timestamp ASC`
 		args = append(args, sinceMs, syncedCursor)
 	}
@@ -298,7 +298,7 @@ func (p *AntigravityParser) normalizeCache(aliases map[string]ModelAlias, since 
 		if p.SyncCursorMs != nil {
 			syncedCursor = *p.SyncCursorMs
 		}
-		query = "SELECT " + normCols + " FROM session_usage WHERE timestamp >= ?1 UNION SELECT " + normCols + " FROM session_usage WHERE session_id IN (SELECT session_id FROM sessions WHERE synced_at >= ?2)"
+		query = "SELECT " + normCols + " FROM session_usage WHERE timestamp >= ?1 UNION SELECT " + normCols + " FROM session_usage WHERE (client, session_id) IN (SELECT client, session_id FROM sessions WHERE synced_at >= ?2)"
 		args = append(args, sinceMs, syncedCursor)
 	}
 	rows, err := db.Query(query, args...)

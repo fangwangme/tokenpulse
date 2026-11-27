@@ -652,20 +652,24 @@ func (m *model) handleActivityKey(key string) (tea.Model, tea.Cmd) {
 
 func (m *model) moveActivitySelection(direction int) {
 	days := m.activity.Days
-	if len(days) == 0 {
-		return
-	}
-	index := -1
+	// days is newest-first; pos is the selection's slot, so a selected date
+	// without usage (an empty heatmap cell) steps to its nearest neighbour.
+	pos := len(days)
 	for i, day := range days {
-		if day.Date == m.activitySel {
-			index = i
+		if day.Date <= m.activitySel {
+			pos = i
 			break
 		}
 	}
-	if index < 0 {
-		index = 0
+	index := pos - 1
+	if pos < len(days) && days[pos].Date == m.activitySel {
+		index = pos + direction
+	} else if direction > 0 {
+		index = pos
 	}
-	index = clampInt(index+direction, 0, len(days)-1)
+	if index < 0 || index >= len(days) {
+		return
+	}
 	m.activitySel = days[index].Date
 	m.activityDetailOff = 0
 }

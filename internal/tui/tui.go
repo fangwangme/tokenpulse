@@ -77,6 +77,7 @@ type model struct {
 	tab           int
 	themeOverride int
 	autoThemeMode int
+	osThemeMode   int
 
 	rtStatus    rt.StatusSnapshot
 	eventCh     <-chan rt.Event
@@ -266,7 +267,8 @@ func newModel(opts Options, client rt.Client) *model {
 		client:         client,
 		cfg:            cfg,
 		themeOverride:  -1,
-		autoThemeMode:  -1,
+		autoThemeMode:  0,
+		osThemeMode:    -1,
 		agents:         agents,
 		preset:         "30d",
 		basePreset:     "30d",
@@ -495,6 +497,7 @@ func (m *model) refreshActivityTodayCmd() tea.Cmd {
 	if !m.activityLoaded || m.activityLoadedDate != today {
 		m.activityLoaded = false
 		m.activityKey = ""
+		m.activityDetailDate = ""
 		m.activityEpoch++
 		return m.ensureActivity()
 	}
@@ -763,7 +766,12 @@ func newestFirst(records []keeper.ExecutionRecord) []keeper.ExecutionRecord {
 
 func (m *model) handleStatus(msg statusMsg) (tea.Model, tea.Cmd) {
 	if msg.themeMode >= 0 && m.themeOverride < 0 && m.configValue().Display.Theme == config.ThemeAuto {
-		m.autoThemeMode = msg.themeMode
+		// Follow OS switches only: the first reading is a baseline so a higher-
+		// precedence startup source (OSC 11, COLORFGBG) is not overridden.
+		if m.osThemeMode >= 0 && msg.themeMode != m.osThemeMode {
+			m.autoThemeMode = msg.themeMode
+		}
+		m.osThemeMode = msg.themeMode
 	}
 	if msg.err != nil {
 		if m.client != nil && m.client.IsRemote() && !m.webBusy {
@@ -794,8 +802,8 @@ func (m *model) handleStatus(msg statusMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	if msg.status.ScannedAt != previous.ScannedAt {
 		m.refreshedAt = time.Now()
-		m.invalidateRangeUsage()
-		cmds = append(cmds, m.currentTabCmd(), m.refreshActivityTodayCmd())
+		m.refreshRangeUsage()
+		cmds = append(cmds, m.ensureReport(), m.currentTabCmd(), m.refreshActivityTodayCmd())
 	}
 	if msg.status.FetchedAt != previous.FetchedAt {
 		cmds = append(cmds, m.fetchQuotaCmd())
@@ -807,8 +815,15 @@ func (m *model) handleStatus(msg statusMsg) (tea.Model, tea.Cmd) {
 func (m *model) handleEvent(ev rt.Event) tea.Cmd {
 	switch ev.Type {
 	case "usage_updated":
-		m.invalidateRangeUsage()
-		return tea.Batch(m.currentTabCmd(), m.refreshActivityTodayCmd())
+		// The status poll reports the same scan; reload once per scannedAt.
+		if scanned, ok := eventScannedAt(ev.Data); ok {
+			if scanned == m.rtStatus.ScannedAt {
+				return nil
+			}
+			m.rtStatus.ScannedAt = scanned
+		}
+		m.refreshRangeUsage()
+		return tea.Batch(m.ensureReport(), m.currentTabCmd(), m.refreshActivityTodayCmd())
 	case "quota_updated":
 		return m.fetchQuotaCmd()
 	case "quota_recovered":
@@ -965,8 +980,10 @@ func (m *model) handleRefresh(msg refreshMsg) tea.Cmd {
 	}
 	m.setToast("Refresh complete")
 	m.refreshedAt = time.Now()
-	m.invalidateRangeUsage()
-	return tea.Batch(m.currentTabCmd(), m.refreshActivityTodayCmd(), m.fetchQuotaCmd())
+	m.refreshRangeUsage()
+	m.activityKey = ""
+	m.activityDetailDate = ""
+	return tea.Batch(m.ensureReport(), m.currentTabCmd(), m.fetchQuotaCmd())
 }
 
 func (m *model) handleWebToggle(msg webToggleMsg) (tea.Model, tea.Cmd) {
@@ -994,6 +1011,31 @@ func (m *model) handleWebToggle(msg webToggleMsg) (tea.Model, tea.Cmd) {
 		m.subscribeEvents(), m.statusPollCmd(), m.fetchConfigCmd(),
 		m.fetchQuotaCmd(), m.fetchKeeperLogCmd(), m.currentTabCmd(),
 	)
+}
+
+// refreshRangeUsage reloads the range data after new usage arrives while the
+// current report, prior and open popups stay on screen until the fresh
+// responses replace them.
+func (m *model) refreshRangeUsage() {
+	m.reportErr = ""
+	m.reportKey = ""
+	m.epoch++
+	m.priorKey = ""
+	m.detailSeq++
+}
+
+func eventScannedAt(data any) (int64, bool) {
+	values, ok := data.(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	switch value := values["scannedAt"].(type) {
+	case int64:
+		return value, true
+	case float64:
+		return int64(value), true
+	}
+	return 0, false
 }
 
 func (m *model) invalidateRangeUsage() {
@@ -1729,7 +1771,7 @@ func (m *model) helpLine() string {
 	case tabDaily:
 		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ select  ↵ detail  n today  c/t/d sort (%s %s)  v metric (%s)  s filter  ? help", sortLabel(m.sortField), sortDirection(m.sortAsc), metricLabel(m.dailyMetric))
 	case tabActivity:
-		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ day  n today  t/c metric (%s)  s filter  ? help", metricLabel(m.activityMetric))
+		return fmt.Sprintf(" q quit  r refresh  ←→ tab  ↑↓ day  [/] scroll  n today  t/c metric (%s)  s filter  ? help", metricLabel(m.activityMetric))
 	case tabQuota:
 		return " q quit  r refresh  ←→ tab  ? help"
 	case tabKeeper:

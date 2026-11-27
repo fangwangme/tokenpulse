@@ -160,6 +160,10 @@ func runUsage(args []string, subcommand bool) error {
 	if raw {
 		return runRaw(rawDate, jsonOut)
 	}
+	if logPerf {
+		// The TUI's in-process runtime reads debug mode from the environment.
+		_ = os.Setenv("TOKENPULSE_DEBUG", "1")
+	}
 	return runUsageReport(since, refreshDays, csvFormat, refreshPricing, rebuildAll, jsonOut, noTUI, noScan, logPerf)
 }
 

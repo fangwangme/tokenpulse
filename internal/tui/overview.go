@@ -146,15 +146,15 @@ func (m *model) drawOverviewChart(c *canvas, area rect) {
 	legendY := inner.y + inner.h - 1
 
 	chartWidth := chartArea.w - (chartYAxisWidth + 1)
-	barWidth := 1
-	if chartWidth >= 150 {
-		barWidth = 3
-	} else if chartWidth >= 60 {
-		barWidth = 2
-	}
-	limit := max(chartWidth/barWidth, 1)
-	data := m.chartSeries(limit)
+	data := m.chartSeries(max(chartWidth, 1))
 	days := len(data)
+	// Each day gets an equal slot across the full width; slots of 3+ columns
+	// keep one blank column so neighbouring bars stay distinguishable.
+	barWidth := max(chartWidth/max(days, 1), 1)
+	fillWidth := barWidth
+	if barWidth >= 3 {
+		fillWidth = barWidth - 1
+	}
 	metricName := "Token Usage"
 	if m.overviewMetric == metricCost {
 		metricName = "Cost Usage"
@@ -240,12 +240,12 @@ func (m *model) drawOverviewChart(c *canvas, area rect) {
 		}
 		for row := 0; row < fullRows; row++ {
 			y := chartArea.y + chartHeight - 1 - row
-			c.set(barX, y, strings.Repeat("█", barWidth), fgStyle(dominantBandColor(ranges, row*8, row*8+8)))
+			c.set(barX, y, strings.Repeat("█", fillWidth), fgStyle(dominantBandColor(ranges, row*8, row*8+8)))
 		}
 		if partial > 0 && fullRows < chartHeight {
 			y := chartArea.y + chartHeight - 1 - fullRows
 			blocks := []rune("▁▂▃▄▅▆▇█")
-			c.set(barX, y, strings.Repeat(string(blocks[partial-1]), barWidth), fgStyle(dominantBandColor(ranges, fullRows*8, fullRows*8+partial)))
+			c.set(barX, y, strings.Repeat(string(blocks[partial-1]), fillWidth), fgStyle(dominantBandColor(ranges, fullRows*8, fullRows*8+partial)))
 		}
 	}
 

@@ -39,8 +39,9 @@ Theme, table layout and truncation follow `tui-theme.md` and
    none (1-line KPI). The TUI omits the API-pricing estimate and unpriced-model
    disclaimer lines.
 2. **Chart** — the 0.6.16 stacked daily bar chart over the range's days, the
-   newest that fit when the range has more days than the width holds, with
-   0.6.16's bar widths, axis and date ticks. Its title is
+   newest that fit when the range has more days than the width holds. Each day
+   gets an equal share of the chart width (a share of three or more columns
+   keeps one blank column between bars), with 0.6.16's axis and date ticks. Its title is
    `Token Usage (N days)` or `Cost Usage (N days)`; `t` and `c` choose the
    metric.
    - Each bar is split by company directly from `Report.Days[].Companies`
@@ -151,11 +152,14 @@ On Overview, Models and Daily:
   report completes (skipping model and comparison aggregation) and is not
   invalidated when Overview, Models, or Daily change range presets.
 - A range change drops only the range-scoped caches (report, prior, popups);
-  an agent filter change drops all usage caches including Activity; `usage_updated`
-  drops range-scoped caches and refreshes Activity incrementally for today via
+  an agent filter change drops all usage caches including Activity. New usage
+  (`usage_updated`, or a status poll reporting a new `scannedAt`; one reload per
+  `scannedAt`) reloads the range-scoped data while the current report, prior
+  and popups stay on screen until the fresh responses replace them, and
+  refreshes Activity incrementally for today via
   `UsageDay(today)` when the calendar date and agent filter are unchanged
   (reloading the full 365-day window only when the date rolls over or Activity
-  is not yet loaded).
+  is not yet loaded). A manual `r` refresh reloads the full Activity window.
   `quota_updated` and a config change reload Quota, `keeper_updated` reloads
   Keeper, `settings_updated` reloads the config.
 - `r` refreshes usage and quota; when `serve` runs it asks `serve` instead
