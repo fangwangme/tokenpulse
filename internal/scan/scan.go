@@ -2,6 +2,8 @@
 package scan
 
 import (
+	"log"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -30,8 +32,18 @@ type Scanner struct {
 	Store   *usage.Store
 	Pricing *pricing.Service
 	Report  *report.Service
+	Logger  *log.Logger
+	Debug   bool
 
 	testParsers []usage.Parser
+}
+
+func (s *Scanner) debugEnabled() bool {
+	if s.Debug {
+		return true
+	}
+	v := os.Getenv("TOKENPULSE_DEBUG")
+	return v == "1" || v == "true"
 }
 
 func New(dataDir string) (*Scanner, error) {
@@ -95,6 +107,13 @@ func (s *Scanner) Run(options Options) error {
 		}
 	}
 
+	type syncCursorSetter interface {
+		SetSyncCursor(*int64)
+	}
+	type debugLoggerSetter interface {
+		SetDebugLogger(*log.Logger)
+	}
+	debugOn := s.debugEnabled()
 	type parseTarget struct {
 		parser usage.Parser
 		since  *time.Time
@@ -102,9 +121,10 @@ func (s *Scanner) Run(options Options) error {
 	}
 	targets := make([]parseTarget, 0, len(parsers))
 	for _, parser := range parsers {
-		since := options.Since
+		var since *time.Time
 		full := options.RebuildAll || options.RefreshFrom != nil || stale[parser.Name()] ||
 			(parser.Name() == "codex" && codexRepair)
+		var cursorMs *int64
 		if full {
 			since = nil
 		} else {
@@ -112,13 +132,28 @@ func (s *Scanner) Run(options Options) error {
 			if err != nil {
 				return err
 			}
+			if options.Since == nil {
+				cursorMs, _ = s.Store.LastRefreshStartedMs(parser.Name())
+			}
+		}
+		if setter, ok := parser.(syncCursorSetter); ok {
+			setter.SetSyncCursor(cursorMs)
+		}
+		if debugOn && s.Logger != nil {
+			if setter, ok := parser.(debugLoggerSetter); ok {
+				setter.SetDebugLogger(s.Logger)
+			}
 		}
 		targets = append(targets, parseTarget{parser, since, full})
 	}
 
+	// Capture refreshStarted before Parse so sessions updated during this scan
+	// are never stamped earlier than the recorded cursor.
+	refreshStarted := time.Now().UnixMilli()
 	type parsed struct {
 		target   parseTarget
 		messages []provider.UnifiedMessage
+		elapsed  time.Duration
 		err      error
 	}
 	results := make([]parsed, len(targets))
@@ -127,13 +162,25 @@ func (s *Scanner) Run(options Options) error {
 		wg.Add(1)
 		go func(index int, target parseTarget) {
 			defer wg.Done()
+			t0 := time.Now()
 			messages, err := target.parser.Parse(target.since)
-			results[index] = parsed{target: target, messages: messages, err: err}
+			results[index] = parsed{target: target, messages: messages, elapsed: time.Since(t0), err: err}
 		}(i, target)
 	}
 	wg.Wait()
+	if s.Logger != nil {
+		for _, r := range results {
+			if debugOn || r.elapsed >= 200*time.Millisecond || r.err != nil {
+				sinceStr := "all"
+				if r.target.since != nil {
+					sinceStr = r.target.since.Format("2006-01-02")
+				}
+				s.Logger.Printf("scan parse %s: %s msgs=%d since=%s full=%v err=%v",
+					r.target.parser.Name(), r.elapsed.Round(time.Millisecond), len(r.messages), sinceStr, r.target.full, r.err)
+			}
+		}
+	}
 
-	refreshStarted := time.Now().UnixMilli()
 	recordsRefresh := options.Since == nil && options.RefreshFrom == nil
 	for _, result := range results {
 		if result.err != nil {
@@ -170,6 +217,7 @@ func (s *Scanner) Run(options Options) error {
 			}
 			continue
 		}
+		ingestStart := time.Now()
 		if replaceParsedSessions {
 			_, err = s.Store.ReplaceParsedSessions(messages, cost)
 		} else if replaceSource {
@@ -178,6 +226,12 @@ func (s *Scanner) Run(options Options) error {
 			_, err = s.Store.ReplaceSessionsMessages(messages, cost)
 		} else {
 			_, err = s.Store.IngestMessages(messages, cost)
+		}
+		if s.Logger != nil {
+			if d := time.Since(ingestStart); debugOn || d >= 200*time.Millisecond {
+				s.Logger.Printf("scan ingest %s: %s msgs=%d replace=%v",
+					result.target.parser.Name(), d.Round(time.Millisecond), len(messages), replaceSource)
+			}
 		}
 		if err != nil {
 			return err

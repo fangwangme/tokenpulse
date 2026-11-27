@@ -58,12 +58,3 @@ func ConfigPath() (string, error) {
 	}
 	return filepath.Join(dir, "config.toml"), nil
 }
-
-// File returns a file inside DataDir.
-func File(name string) (string, error) {
-	dir, err := DataDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, name), nil
-}

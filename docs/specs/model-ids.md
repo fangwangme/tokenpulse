@@ -10,7 +10,7 @@ pricing.
 3. Keep the text after the last `/` (the provider prefix is dropped).
 4. Replace `.`, `_` and spaces with `-`, collapse repeated hyphens.
 5. Strip an `antigravity-` or `anti-gravity-` prefix.
-6. Strip `-high`, `-medium`, `-low`, `-free`, `-thinking` and `-tiered`
+6. Strip `-xhigh`, `-high`, `-medium`, `-low`, `-free`, `-thinking` and `-tiered`
    repeatedly, then one trailing `-0`, then leading/trailing hyphens.
 7. Drop any `preview` segment wherever it sits.
 

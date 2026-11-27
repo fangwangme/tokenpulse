@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -142,6 +143,7 @@ func runUsage(args []string, subcommand bool) error {
 	flags.BoolVar(&jsonOut, "json", false, "")
 	flags.BoolVar(&noTUI, "no-tui", false, "")
 	flags.BoolVar(&logPerf, "log", false, "")
+	flags.BoolVar(&logPerf, "debug", false, "")
 	flags.BoolVar(&raw, "raw", false, "")
 	flags.StringVar(&rawDate, "date", "", "")
 	versionFlag := flags.Bool("version", false, "")
@@ -157,6 +159,10 @@ func runUsage(args []string, subcommand bool) error {
 	}
 	if raw {
 		return runRaw(rawDate, jsonOut)
+	}
+	if logPerf {
+		// The TUI's in-process runtime reads debug mode from the environment.
+		_ = os.Setenv("TOKENPULSE_DEBUG", "1")
 	}
 	return runUsageReport(since, refreshDays, csvFormat, refreshPricing, rebuildAll, jsonOut, noTUI, noScan, logPerf)
 }
@@ -279,6 +285,12 @@ func runUsageReport(since, refreshDays, csvFormat string, refreshPricing, rebuil
 			defer lock.Release()
 			if !jsonOut {
 				fmt.Fprintln(os.Stderr, "Scanning usage… (--no-scan reads the cached ledger)")
+			}
+			if logPerf || os.Getenv("TOKENPULSE_DEBUG") == "1" || os.Getenv("TOKENPULSE_DEBUG") == "true" {
+				scanner.Debug = true
+				if jsonOut || noTUI || csvFormat != "" {
+					scanner.Logger = log.New(os.Stderr, "[debug] ", log.LstdFlags)
+				}
 			}
 			if err := scanner.Run(scan.Options{
 				Since: once(sinceDate), RefreshFrom: from, RefreshTo: to,

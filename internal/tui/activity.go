@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -10,6 +11,22 @@ import (
 
 	"github.com/fangwangme/tokenpulse/internal/report"
 )
+
+type styledSpan struct {
+	text  string
+	style textStyle
+}
+
+func drawSpans(c *canvas, x, y, maxRight int, spans []styledSpan) {
+	cur := x
+	for _, s := range spans {
+		if cur >= maxRight {
+			return
+		}
+		c.setClip(cur, y, maxRight, s.text, s.style)
+		cur += len([]rune(s.text))
+	}
+}
 
 func (m *model) drawActivity(c *canvas, area rect) {
 	if area.h <= 0 || area.w <= 0 {
@@ -43,13 +60,7 @@ func (m *model) drawActivity(c *canvas, area rect) {
 	}
 }
 
-func (m *model) drawHeatmap(c *canvas, area rect) {
-	theme := m.theme()
-	c.box(area.x, area.y, area.w, area.h, " Usage Activity - Past 365 Days ", boldStyle(theme.accent), fgStyle(theme.border))
-	inner := area.inner()
-	if inner.h <= 0 || inner.w <= 0 {
-		return
-	}
+func (m *model) heatmapBounds() (time.Time, time.Time, string, string, bool) {
 	fromText, toText, ok := m.activityWindow()
 	if m.activityLoaded {
 		fromText, toText = m.activity.Range.From, m.activity.Range.To
@@ -59,6 +70,65 @@ func (m *model) drawHeatmap(c *canvas, area rect) {
 	from, err1 := parseDate(fromText)
 	to, err2 := parseDate(toText)
 	if err1 != nil || err2 != nil {
+		return time.Time{}, time.Time{}, "", "", false
+	}
+	return from, to, fromText, toText, true
+}
+
+func (m *model) heatmapDateAt(bodyArea rect, col, row int) (string, bool) {
+	if bodyArea.h <= 1 || bodyArea.w <= 0 {
+		return "", false
+	}
+	// Activity range bar is always 1 line.
+	body := rect{x: bodyArea.x, y: bodyArea.y + 1, w: bodyArea.w, h: bodyArea.h - 1}
+	heatHeight := min(12, max(body.h/2, 9))
+	if heatHeight > body.h {
+		heatHeight = body.h
+	}
+	inner := rect{x: body.x, y: body.y, w: body.w, h: heatHeight}.inner()
+	if inner.h < 7 || inner.w < 7 {
+		return "", false
+	}
+	from, to, _, _, ok := m.heatmapBounds()
+	if !ok {
+		return "", false
+	}
+	gridX := inner.x + 5
+	gridY := inner.y
+	if inner.h >= 9 {
+		gridY = inner.y + 1
+	}
+	gridWidth := inner.w - 5
+	start := mondayOf(from)
+	totalDays := int(to.Sub(start).Hours()/24) + 1
+	totalWeeks := max((totalDays+6)/7, 1)
+	displayCols := max(min(gridWidth/2, totalWeeks), 1)
+	firstWeek := max(totalWeeks-displayCols, 0)
+
+	if row < gridY || row >= gridY+7 {
+		return "", false
+	}
+	if col < gridX || col >= gridX+displayCols*2 {
+		return "", false
+	}
+	week := (col - gridX) / 2
+	weekday := row - gridY
+	date := start.AddDate(0, 0, (firstWeek+week)*7+weekday)
+	if date.Before(from) || date.After(to) {
+		return "", false
+	}
+	return dateString(date), true
+}
+
+func (m *model) drawHeatmap(c *canvas, area rect) {
+	theme := m.theme()
+	c.box(area.x, area.y, area.w, area.h, " Usage Activity - Past 365 Days ", boldStyle(theme.accent), fgStyle(theme.border))
+	inner := area.inner()
+	if inner.h <= 0 || inner.w <= 0 {
+		return
+	}
+	from, to, fromText, toText, ok := m.heatmapBounds()
+	if !ok {
 		c.set(inner.x, inner.y, "No activity data", fgStyle(theme.dim))
 		return
 	}
@@ -197,9 +267,16 @@ func readableForeground(background lipgloss.Color) lipgloss.Color {
 	return rgb(15, 23, 42)
 }
 
+type rangeOverviewRow struct {
+	label   string
+	tokens  int64
+	cost    float64
+	rolling bool
+}
+
 func (m *model) drawActivitySummary(c *canvas, area rect) {
 	theme := m.theme()
-	c.box(area.x, area.y, area.w, area.h, " Range Overview ", boldStyle(theme.accentSoft), fgStyle(theme.border))
+	c.box(area.x, area.y, area.w, area.h, " Range Overview ", boldStyle(theme.accent), fgStyle(theme.border))
 	inner := area.inner()
 	if inner.h <= 0 {
 		return
@@ -212,79 +289,125 @@ func (m *model) drawActivitySummary(c *canvas, area rect) {
 		}
 	}
 	current, longest := streakValues(days, dateString(startOfToday()))
-	lines := []struct {
-		label string
-		value string
-	}{
-		{"Active Days", fmt.Sprintf("%d days", active)},
-		{"Streak", fmt.Sprintf("%d/%d cur/best", current, longest)},
+	overviewRows := m.activityPeriodRows()
+
+	headerLines := 4 // Active Days, Streak, blank spacer, table header
+	useSpacer := true
+	if headerLines+len(overviewRows) > inner.h {
+		useSpacer = false
+		headerLines = 3
 	}
-	y := inner.y
-	for _, line := range lines {
-		c.set(inner.x, y, padRight(line.label, 12), fgStyle(theme.dim))
-		c.set(inner.x+12, y, line.value, boldStyle(theme.fg))
-		y++
-	}
-	if y < inner.y+inner.h {
-		y++
-	}
-	if y < inner.y+inner.h {
-		c.set(inner.x, y, padRight("Period", 12), fgStyle(theme.dim))
-		c.set(inner.x+13, y, padRight("Tokens", 10), boldStyle(theme.codex))
-		c.set(inner.x+24, y, "Cost", boldStyle(theme.gaugeMid))
-		y++
-	}
-	rows := m.activityPeriodRows()
-	order := []string{"Today", "Week", "Month", "Year", "Last 7 days", "Last 30 days"}
-	if y+len(order) > inner.y+inner.h {
-		order = []string{"Today", "Week", "Month", "Year", "Last 7 days"}
-	}
-	if y+len(order) > inner.y+inner.h {
-		order = []string{"Today", "Week", "Month", "Year"}
-	}
-	for _, label := range order {
-		if y >= inner.y+inner.h {
+	// Drop rolling rows first when the card is short so calendar + Total/Average/Max stay visible.
+	for headerLines+len(overviewRows) > inner.h {
+		dropped := false
+		for i := len(overviewRows) - 1; i >= 0; i-- {
+			if overviewRows[i].rolling {
+				overviewRows = append(overviewRows[:i], overviewRows[i+1:]...)
+				dropped = true
+				break
+			}
+		}
+		if !dropped {
 			break
 		}
-		row := rows[label]
-		c.set(inner.x, y, padRight(label, 12), fgStyle(theme.dim))
-		c.set(inner.x+13, y, padLeft(formatCompact(row.tokens), 10), fgStyle(theme.codex))
-		c.set(inner.x+24, y, formatCost(row.cost), fgStyle(theme.gaugeMid))
+	}
+
+	y := inner.y
+	drawSpans(c, inner.x, y, inner.right(), []styledSpan{
+		{padRight("Active Days", 12), fgStyle(theme.dim)},
+		{fmt.Sprintf("%d days", active), boldStyle(theme.fg)},
+	})
+	y++
+	if y < inner.bottom() {
+		drawSpans(c, inner.x, y, inner.right(), []styledSpan{
+			{padRight("Streak", 12), fgStyle(theme.dim)},
+			{fmt.Sprintf("%d/%d", current, longest), boldStyle(theme.fg)},
+			{" cur/best", fgStyle(theme.dim)},
+		})
+		y++
+	}
+	if useSpacer && y < inner.bottom() {
+		y++
+	}
+	if y < inner.bottom() {
+		c.set(inner.x, y, padRight("Period", 12), fgStyle(theme.dim))
+		c.set(inner.x+13, y, padLeft("Tokens", 10), boldStyle(theme.dim))
+		c.set(inner.x+24, y, "Cost", boldStyle(theme.dim))
+		y++
+	}
+	for _, row := range overviewRows {
+		if y >= inner.bottom() {
+			break
+		}
+		c.set(inner.x, y, padRight(row.label, 12), fgStyle(theme.dim))
+		c.set(inner.x+13, y, padLeft(formatCompact(row.tokens), 10), fgStyle(theme.fg))
+		c.set(inner.x+24, y, formatCost(row.cost), fgStyle(theme.costColor))
 		y++
 	}
 }
 
-type periodRow struct {
-	tokens int64
-	cost   float64
-}
-
-func (m *model) activityPeriodRows() map[string]periodRow {
+func (m *model) activityPeriodRows() []rangeOverviewRow {
 	today := startOfToday()
 	monday := mondayOf(today)
-	rows := map[string]periodRow{}
-	add := func(label string, match func(day time.Time) bool) {
-		var row periodRow
-		for _, day := range m.activity.Days {
-			parsed, err := parseDate(day.Date)
-			if err != nil {
-				continue
-			}
-			if match(parsed) {
-				row.tokens += day.Tokens
-				row.cost += day.Cost
+	last7 := today.AddDate(0, 0, -6)
+	last30 := today.AddDate(0, 0, -29)
+
+	type accum struct {
+		label   string
+		rolling bool
+		tokens  int64
+		cost    float64
+	}
+	windows := []accum{
+		{label: "Today"},
+		{label: "Week"},
+		{label: "Last 7 days", rolling: true},
+		{label: "Month"},
+		{label: "Last 30 days", rolling: true},
+		{label: "Year"},
+		{label: "Total"},
+	}
+	var maxTokens int64
+	var maxCost float64
+	for _, day := range m.activity.Days {
+		parsed, err := parseDate(day.Date)
+		if err != nil {
+			continue
+		}
+		since := func(start time.Time) bool { return !parsed.Before(start) && !parsed.After(today) }
+		hits := [7]bool{
+			parsed.Equal(today),
+			since(monday),
+			since(last7),
+			parsed.Year() == today.Year() && parsed.Month() == today.Month() && !parsed.After(today),
+			since(last30),
+			parsed.Year() == today.Year() && !parsed.After(today),
+			true,
+		}
+		for i, hit := range hits {
+			if hit {
+				windows[i].tokens += day.Tokens
+				windows[i].cost += day.Cost
 			}
 		}
-		rows[label] = row
+		if day.Tokens > maxTokens {
+			maxTokens = day.Tokens
+		}
+		if day.Cost > maxCost {
+			maxCost = day.Cost
+		}
 	}
-	add("Today", func(day time.Time) bool { return day.Equal(today) })
-	add("Week", func(day time.Time) bool { return !day.Before(monday) && !day.After(today) })
-	add("Month", func(day time.Time) bool {
-		return day.Year() == today.Year() && day.Month() == today.Month() && !day.After(today)
-	})
-	add("Year", func(day time.Time) bool { return day.Year() == today.Year() && !day.After(today) })
-	add("Last 7 days", func(day time.Time) bool { return !day.Before(today.AddDate(0, 0, -6)) && !day.After(today) })
-	add("Last 30 days", func(day time.Time) bool { return !day.Before(today.AddDate(0, 0, -29)) && !day.After(today) })
+
+	rows := make([]rangeOverviewRow, 0, len(windows)+2)
+	for _, w := range windows {
+		rows = append(rows, rangeOverviewRow{label: w.label, tokens: w.tokens, cost: w.cost, rolling: w.rolling})
+	}
+	total := windows[len(windows)-1]
+	dayCount := float64(max(len(m.activity.Days), 1))
+	rows = append(rows,
+		rangeOverviewRow{label: "Average", tokens: int64(math.Round(float64(total.tokens) / dayCount)), cost: total.cost / dayCount},
+		rangeOverviewRow{label: "Max", tokens: maxTokens, cost: maxCost},
+	)
 	return rows
 }
 
@@ -330,7 +453,7 @@ func streakValues(days []report.DaySummary, today string) (int, int) {
 
 func (m *model) drawActivityDetail(c *canvas, area rect) {
 	theme := m.theme()
-	c.box(area.x, area.y, area.w, area.h, " Selected Day ", boldStyle(theme.companyColor("other")), fgStyle(theme.border))
+	c.box(area.x, area.y, area.w, area.h, " Selected Day ", boldStyle(theme.accent), fgStyle(theme.border))
 	inner := area.inner()
 	if inner.h <= 0 || inner.w <= 0 {
 		return
@@ -360,52 +483,138 @@ func (m *model) drawActivityDetail(c *canvas, area rect) {
 		}
 	}
 	left := panels[0]
-	overview := []string{
-		m.activitySel + "  " + activityMetricText(m.activityMetric, totals),
-		fmt.Sprintf("Cost %8s  Tokens %8s", formatCost(totals.Cost), formatCompact(totals.Tokens)),
-		fmt.Sprintf("In   %8s  Out    %8s", formatCompact(totals.Input), formatCompact(totals.Output)),
-		fmt.Sprintf("CR   %8s  CW     %8s", formatCompact(totals.CacheRead), formatCompact(totals.CacheWrite)),
-		fmt.Sprintf("Msgs %8s  Sess   %8s", formatIntCommas(totals.Messages), formatIntCommas(totals.Sessions)),
+	var overview [][]styledSpan
+	if left.w >= 34 && left.h >= 5 {
+		overview = [][]styledSpan{
+			{
+				{m.activitySel, boldStyle(theme.fg)},
+				{"  ", fgStyle(theme.fg)},
+				{activityMetricText(m.activityMetric, totals), boldStyle(theme.fg)},
+			},
+			{
+				{"Cost ", fgStyle(theme.dim)},
+				{padLeft(formatCost(totals.Cost), 8), fgStyle(theme.costColor)},
+				{"  Tokens ", fgStyle(theme.dim)},
+				{padLeft(formatCompact(totals.Tokens), 8), fgStyle(theme.fg)},
+			},
+			{
+				{"In   ", fgStyle(theme.dim)},
+				{padLeft(formatCompact(totals.Input), 8), fgStyle(theme.fg)},
+				{"  Out    ", fgStyle(theme.dim)},
+				{padLeft(formatCompact(totals.Output), 8), fgStyle(theme.fg)},
+			},
+			{
+				{"CR   ", fgStyle(theme.dim)},
+				{padLeft(formatCompact(totals.CacheRead), 8), fgStyle(theme.fg)},
+				{"  CW     ", fgStyle(theme.dim)},
+				{padLeft(formatCompact(totals.CacheWrite), 8), fgStyle(theme.fg)},
+			},
+			{
+				{"Msgs ", fgStyle(theme.dim)},
+				{padLeft(formatIntCommas(totals.Messages), 8), fgStyle(theme.fg)},
+				{"  Sess   ", fgStyle(theme.dim)},
+				{padLeft(formatIntCommas(totals.Sessions), 8), fgStyle(theme.fg)},
+			},
+		}
+	} else {
+		overview = [][]styledSpan{
+			{
+				{m.activitySel, boldStyle(theme.fg)},
+				{"  ", fgStyle(theme.fg)},
+				{activityMetricText(m.activityMetric, totals), boldStyle(theme.fg)},
+				{"  Cost ", fgStyle(theme.dim)},
+				{formatCost(totals.Cost), fgStyle(theme.costColor)},
+			},
+			{
+				{"T ", fgStyle(theme.dim)},
+				{formatCompact(totals.Tokens), fgStyle(theme.fg)},
+				{"  In ", fgStyle(theme.dim)},
+				{formatCompact(totals.Input), fgStyle(theme.fg)},
+				{"  Out ", fgStyle(theme.dim)},
+				{formatCompact(totals.Output), fgStyle(theme.fg)},
+				{"  CR ", fgStyle(theme.dim)},
+				{formatCompact(totals.CacheRead), fgStyle(theme.fg)},
+				{"  CW ", fgStyle(theme.dim)},
+				{formatCompact(totals.CacheWrite), fgStyle(theme.fg)},
+			},
+		}
 	}
-	for index, line := range overview {
+	for index, spans := range overview {
 		if index >= left.h {
 			break
 		}
-		c.set(left.x, left.y+index, truncate(line, left.w), fgStyle(theme.fg))
+		drawSpans(c, left.x, left.y+index, left.right(), spans)
 	}
 	if len(panels) < 2 {
 		return
 	}
 	right := panels[1]
-	if right.h <= 0 {
+	if right.h <= 0 || right.w <= 0 {
 		return
 	}
-	var lines []string
-	lines = append(lines, "Agent / Model Cost")
+
+	var lines [][]styledSpan
+	lines = append(lines, []styledSpan{{"Agent / Model Cost", boldStyle(theme.dim)}})
+	costWidth := max(min(10, max(right.w-12, 8)), 8)
+	modelWidth := min(28, max(right.w-costWidth-3, 10))
+	modelWidthInner := max(modelWidth-2, 8)
 	if m.activityDetailError != "" {
-		lines = append(lines, m.activityDetailError)
+		lines = append(lines, []styledSpan{{m.activityDetailError, fgStyle(theme.gaugeHigh)}})
 	} else if m.activityDetail == nil || m.activityDetail.Date != m.activitySel {
-		lines = append(lines, "Loading…")
+		lines = append(lines, []styledSpan{{"Loading…", fgStyle(theme.dim)}})
 	} else {
 		for _, agent := range m.activityDetail.Agents {
-			lines = append(lines, fmt.Sprintf("%s   %s", displayAgentName(agent.Agent), formatCost(agent.Totals.Cost)))
+			lines = append(lines, []styledSpan{
+				{padRight(truncate(displayAgentName(agent.Agent), modelWidth), modelWidth), boldStyle(theme.fg)},
+				{" ", fgStyle(theme.fg)},
+				{padLeft(formatCost(agent.Totals.Cost), costWidth), boldStyle(theme.costColor)},
+				{"  T ", fgStyle(theme.dim)},
+				{formatCompact(agent.Totals.Tokens), boldStyle(theme.fg)},
+			})
 			for _, model := range agent.Models {
-				lines = append(lines, fmt.Sprintf("  %-30s %9s  T %8s I %8s O %8s CR %8s CW %8s",
-					truncate(model.Model, 30), formatCost(model.Cost), formatCompact(model.Tokens),
-					formatCompact(model.Input), formatCompact(model.Output),
-					formatCompact(model.CacheRead), formatCompact(model.CacheWrite)))
+				lines = append(lines, []styledSpan{
+					{"  ", fgStyle(theme.fg)},
+					{padRight(truncate(model.Model, modelWidthInner), modelWidthInner), fgStyle(theme.companyColor(model.Company))},
+					{" ", fgStyle(theme.fg)},
+					{padLeft(formatCost(model.Cost), costWidth), fgStyle(theme.costColor)},
+				})
+				lines = append(lines, []styledSpan{
+					{"    T ", fgStyle(theme.dim)},
+					{padLeft(formatCompact(model.Tokens), 8), fgStyle(theme.dim)},
+					{" I ", fgStyle(theme.dim)},
+					{padLeft(formatCompact(model.Input), 8), fgStyle(theme.dim)},
+					{" O ", fgStyle(theme.dim)},
+					{padLeft(formatCompact(model.Output), 8), fgStyle(theme.dim)},
+					{" CR ", fgStyle(theme.dim)},
+					{padLeft(formatCompact(model.CacheRead), 8), fgStyle(theme.dim)},
+					{" CW ", fgStyle(theme.dim)},
+					{padLeft(formatCompact(model.CacheWrite), 8), fgStyle(theme.dim)},
+				})
 			}
 		}
 	}
-	start := clampInt(m.activityDetailOff, 0, max(len(lines)-right.h, 0))
+
+	visible := right.h
+	showHint := len(lines) > right.h && right.h > 1
+	if showHint {
+		visible = right.h - 1
+	}
+	start := clampInt(m.activityDetailOff, 0, max(len(lines)-visible, 0))
 	m.activityDetailOff = start
-	for index := 0; index < right.h && start+index < len(lines); index++ {
-		line := lines[start+index]
-		color := theme.fg
-		if index == 0 && start == 0 {
-			color = theme.accentSoft
+	for index := 0; index < visible && start+index < len(lines); index++ {
+		drawSpans(c, right.x, right.y+index, right.right(), lines[start+index])
+	}
+	if showHint {
+		up, down := " ", " "
+		if start > 0 {
+			up = "↑"
 		}
-		c.set(right.x, right.y+index, truncate(line, right.w), fgStyle(color))
+		if start+visible < len(lines) {
+			down = "↓"
+		}
+		hint := fmt.Sprintf("%s%s detail %d-%d / %d", up, down, start+1, min(start+visible, len(lines)), len(lines))
+		hintX := max(right.right()-len([]rune(hint)), right.x)
+		c.setClip(hintX, right.y+right.h-1, right.right(), hint, fgStyle(theme.dim))
 	}
 }
 
@@ -423,10 +632,11 @@ func (m *model) handleActivityKey(key string) (tea.Model, tea.Cmd) {
 	case "c":
 		m.activityMetric = metricCost
 	case "up", "k":
-		m.moveActivitySelection(-1)
+		// m.activity.Days is newest-first; earlier dates sit higher on the heatmap.
+		m.moveActivitySelection(1)
 		return m, m.ensureActivityDetail()
 	case "down", "j":
-		m.moveActivitySelection(1)
+		m.moveActivitySelection(-1)
 		return m, m.ensureActivityDetail()
 	case "n":
 		m.activitySel = dateString(startOfToday())
@@ -443,20 +653,24 @@ func (m *model) handleActivityKey(key string) (tea.Model, tea.Cmd) {
 
 func (m *model) moveActivitySelection(direction int) {
 	days := m.activity.Days
-	if len(days) == 0 {
-		return
-	}
-	index := -1
+	// days is newest-first; pos is the selection's slot, so a selected date
+	// without usage (an empty heatmap cell) steps to its nearest neighbour.
+	pos := len(days)
 	for i, day := range days {
-		if day.Date == m.activitySel {
-			index = i
+		if day.Date <= m.activitySel {
+			pos = i
 			break
 		}
 	}
-	if index < 0 {
-		index = 0
+	index := pos - 1
+	if pos < len(days) && days[pos].Date == m.activitySel {
+		index = pos + direction
+	} else if direction > 0 {
+		index = pos
 	}
-	index = clampInt(index+direction, 0, len(days)-1)
+	if index < 0 || index >= len(days) {
+		return
+	}
 	m.activitySel = days[index].Date
 	m.activityDetailOff = 0
 }

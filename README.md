@@ -5,17 +5,30 @@ mobile-first web dashboard over Tailscale. It tracks token usage, cost, and
 subscription quota in the background, with a terminal dashboard and plain-text,
 JSON, and CSV outputs also built in.
 
-<p>
-  <img src="docs/images/mobile-usage.png" width="360" alt="TokenPulse mobile usage, 7 days by model">
-  <img src="docs/images/mobile-quota.png" width="360" alt="TokenPulse mobile quota">
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/mobile-usage-dark.png">
+    <img src="docs/images/mobile-usage-light.png" width="360" alt="TokenPulse mobile usage, 7 days">
+  </picture>
+  &nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/mobile-quota-dark.png">
+    <img src="docs/images/mobile-quota-light.png" width="360" alt="TokenPulse mobile quota">
+  </picture>
 </p>
 
-<p>
-  <img src="docs/images/tui-overview.png" width="728" alt="TokenPulse TUI Overview with model detail popup">
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/tui-overview-dark.png">
+    <img src="docs/images/tui-overview-light.png" width="728" alt="TokenPulse TUI Overview, 30 days">
+  </picture>
 </p>
 
-<p>
-  <img src="docs/images/tui-quota.png" width="728" alt="TokenPulse TUI Quota provider cards">
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/tui-quota-dark.png">
+    <img src="docs/images/tui-quota-light.png" width="728" alt="TokenPulse TUI Quota provider cards">
+  </picture>
 </p>
 
 *Screenshots use synthetic demo data rather than a real account.*

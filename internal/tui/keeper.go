@@ -5,7 +5,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/fangwangme/tokenpulse/internal/config"
 	"github.com/fangwangme/tokenpulse/internal/keeper"
@@ -24,6 +23,37 @@ func (m *model) drawKeeper(c *canvas, area rect) {
 	if logHeight > 0 {
 		m.drawKeeperLog(c, rect{x: area.x, y: area.y + headerHeight + cardsHeight, w: area.w, h: logHeight})
 	}
+}
+
+func keeperAgentAt(area rect, col, row int) (int, bool) {
+	if area.h <= 0 || area.w <= 0 {
+		return 0, false
+	}
+	headerHeight := min(3, area.h)
+	cardsHeight := min(keeperCardsHeight(area.w), max(area.h-headerHeight, 0))
+	cards := rect{x: area.x, y: area.y + headerHeight, w: area.w, h: cardsHeight}
+	if row < cards.y || row >= cards.bottom() || col < cards.x || col >= cards.right() {
+		return 0, false
+	}
+	rows, columns := keeperGrid(cards.w)
+	rowHeight := max(cards.h/max(rows, 1), 1)
+	for r := 0; r < rows; r++ {
+		y := cards.y + r*rowHeight
+		height := min(rowHeight, cards.bottom()-y)
+		if row < y || row >= y+height {
+			continue
+		}
+		cells := splitH(rect{x: cards.x, y: y, w: cards.w, h: height}, columns)
+		for cIdx, cell := range cells {
+			if col >= cell.x && col < cell.right() {
+				index := r*columns + cIdx
+				if index < len(keeper.Agents) {
+					return index, true
+				}
+			}
+		}
+	}
+	return 0, false
 }
 
 func keeperCardsHeight(width int) int {
@@ -125,19 +155,12 @@ func (m *model) drawKeeperCards(c *canvas, area rect) {
 			if inner.h <= 0 {
 				continue
 			}
-			lines := m.keeperCardLines(agent, agentCfg, selected, now)
-			for lineIndex, line := range lines {
+			lines := m.keeperCardSpans(theme, agent, agentCfg, selected, now)
+			for lineIndex, spans := range lines {
 				if lineIndex >= inner.h {
 					break
 				}
-				c.set(inner.x, inner.y+lineIndex, truncate(line, inner.w), fgStyle(theme.fg))
-			}
-			// Re-color the fixed prefixes so each row keeps the 0.6.16 palette.
-			if inner.h >= 1 {
-				c.set(inner.x, inner.y, keeperCheck(agentCfg.SessionKeeperEnabled), fgStyle(checkColor(theme, agentCfg.SessionKeeperEnabled)))
-			}
-			if inner.h >= 2 {
-				c.set(inner.x, inner.y+1, keeperCheck(agentCfg.WeeklyKeeperEnabled), fgStyle(checkColor(theme, agentCfg.WeeklyKeeperEnabled)))
+				drawSpans(c, inner.x, inner.y+lineIndex, inner.right(), spans)
 			}
 		}
 	}
@@ -150,14 +173,14 @@ func keeperCheck(enabled bool) string {
 	return "[ ]"
 }
 
-func checkColor(theme tuiTheme, enabled bool) lipgloss.Color {
+func checkStyle(theme tuiTheme, enabled bool) textStyle {
 	if enabled {
-		return theme.gaugeLow
+		return boldStyle(theme.gaugeLow)
 	}
-	return theme.dim
+	return fgStyle(theme.dim)
 }
 
-func (m *model) keeperCardLines(agent string, agentCfg config.AgentKeeperConfig, selected bool, now time.Time) []string {
+func (m *model) keeperCardSpans(theme tuiTheme, agent string, agentCfg config.AgentKeeperConfig, selected bool, now time.Time) [][]styledSpan {
 	nextDaily := "--:--"
 	if trigger := keeper.NextDailyTrigger(agentCfg.DailyWakeupTime, nil, now); trigger != nil {
 		nextDaily = trigger.Format("15:04")
@@ -173,6 +196,7 @@ func (m *model) keeperCardLines(agent string, agentCfg config.AgentKeeperConfig,
 	}
 	modelName := "—"
 	last := "Never triggered"
+	lastColor := theme.dim
 	for _, record := range m.keeperLog {
 		if record.Agent != agent {
 			continue
@@ -185,23 +209,51 @@ func (m *model) keeperCardLines(agent string, agentCfg config.AgentKeeperConfig,
 			if record.DurationMs > 0 {
 				last += fmt.Sprintf(" (%dms)", record.DurationMs)
 			}
+			lastColor = theme.gaugeLow
 		} else {
 			last = "✗ Failed (" + truncate(record.OutputSnippet, 28) + ")"
+			lastColor = theme.gaugeHigh
 		}
 		break
 	}
-	lines := []string{
-		keeperCheck(agentCfg.SessionKeeperEnabled) + " 5h Wakeup: " + agentCfg.DailyWakeupTime + " (next " + nextDaily + ")",
-		keeperCheck(agentCfg.WeeklyKeeperEnabled) + " Weekly Sync: Auto Reset+1m",
-		"   Next: " + nextWeekly,
-		"Model: " + modelName,
-		"Last: " + last,
-		"",
+	lines := [][]styledSpan{
+		{
+			{keeperCheck(agentCfg.SessionKeeperEnabled), checkStyle(theme, agentCfg.SessionKeeperEnabled)},
+			{" 5h Wakeup: ", boldStyle(theme.fg)},
+			{agentCfg.DailyWakeupTime, fgStyle(theme.accentSoft)},
+			{" (next " + nextDaily + ")", fgStyle(theme.dim)},
+		},
+		{
+			{keeperCheck(agentCfg.WeeklyKeeperEnabled), checkStyle(theme, agentCfg.WeeklyKeeperEnabled)},
+			{" Weekly Sync: ", boldStyle(theme.fg)},
+			{"Auto Reset+1m", fgStyle(theme.accentSoft)},
+		},
+		{
+			{"   Next: " + nextWeekly, fgStyle(theme.dim)},
+		},
+		{
+			{"Model: ", fgStyle(theme.dim)},
+			{modelName, boldStyle(theme.fg)},
+		},
+		{
+			{"Last: ", fgStyle(theme.dim)},
+			{last, fgStyle(lastColor)},
+		},
+		nil,
 	}
 	if selected {
-		lines = append(lines, "[1/d] 5h [2/w] Wk [p] Ping")
+		lines = append(lines, []styledSpan{
+			{"[1/d] ", boldStyle(theme.accentSoft)},
+			{"5h ", fgStyle(theme.fg)},
+			{"[2/w] ", boldStyle(theme.accentSoft)},
+			{"Wk ", fgStyle(theme.fg)},
+			{"[p] ", boldStyle(theme.accentSoft)},
+			{"Ping", fgStyle(theme.fg)},
+		})
 	} else {
-		lines = append(lines, "Tab / ↑↓ to select")
+		lines = append(lines, []styledSpan{
+			{"Tab / ↑↓ to select", fgStyle(theme.dim)},
+		})
 	}
 	return lines
 }
@@ -217,7 +269,11 @@ func (m *model) keeperSnapshot(agent string) *provider.QuotaSnapshot {
 
 func (m *model) drawKeeperLog(c *canvas, area rect) {
 	theme := m.theme()
-	c.box(area.x, area.y, area.w, area.h, " Live Execution & Heartbeat Stream (Newest First) ", boldStyle(theme.accent), fgStyle(theme.border))
+	title := " Live Execution & Heartbeat Stream (Newest First) "
+	if m.keeperLogScroll > 0 {
+		title = fmt.Sprintf(" Live Execution & Heartbeat Stream (Scroll: line %d) ", m.keeperLogScroll)
+	}
+	c.box(area.x, area.y, area.w, area.h, title, boldStyle(theme.accent), fgStyle(theme.border))
 	inner := area.inner()
 	if inner.h <= 0 {
 		return
@@ -230,56 +286,70 @@ func (m *model) drawKeeperLog(c *canvas, area rect) {
 		c.set(inner.x, inner.y, truncate(message, inner.w), fgStyle(theme.dim))
 		return
 	}
-	y := inner.y
-	for index := 0; index < len(m.keeperLog) && y < inner.bottom(); index++ {
-		record := m.keeperLog[index]
+
+	var lines [][]styledSpan
+	for _, record := range m.keeperLog {
 		status := "✓ Success"
+		statusColor := theme.gaugeLow
 		if record.Success {
 			if record.DurationMs > 0 || record.ExitCode != nil {
 				status += fmt.Sprintf(" (%dms, exit %d)", record.DurationMs, exitCode(record))
 			}
 		} else {
 			status = "✗ Failed"
+			statusColor = theme.gaugeHigh
 			if record.DurationMs > 0 || record.ExitCode != nil {
 				status += fmt.Sprintf(" (%dms, exit %s)", record.DurationMs, exitCodeText(record))
 			}
 		}
-		header := fmt.Sprintf("[%s] [%s] ", record.Timestamp.Local().Format("2006-01-02 15:04:05"), keeperAgentName(record.Agent))
+		header := []styledSpan{
+			{fmt.Sprintf("[%s] ", record.Timestamp.Local().Format("2006-01-02 15:04:05")), fgStyle(theme.dim)},
+			{fmt.Sprintf("[%s] ", keeperAgentName(record.Agent)), boldStyle(theme.providerColor(record.Agent))},
+		}
 		if record.Trigger != "" {
-			header += "(" + record.Trigger.Label() + ") "
+			header = append(header, styledSpan{"(" + record.Trigger.Label() + ") ", fgStyle(theme.accentSoft)})
 		}
-		c.set(inner.x, y, truncate(header+status, inner.w), fgStyle(theme.fg))
-		y++
-		if y >= inner.bottom() {
-			break
-		}
+		header = append(header, styledSpan{status, boldStyle(statusColor)})
+		lines = append(lines, header)
+
 		if record.Model != "" {
-			c.set(inner.x, y, truncate("  ├─ Model:  "+record.Model, inner.w), fgStyle(theme.dim))
-			y++
-			if y >= inner.bottom() {
-				break
-			}
+			lines = append(lines, []styledSpan{
+				{"  ├─ Model:  ", fgStyle(theme.dim)},
+				{record.Model, boldStyle(theme.fg)},
+			})
 		}
 		if record.Prompt != "" {
-			c.set(inner.x, y, truncate("  ├─ Prompt: \""+record.Prompt+"\"", inner.w), fgStyle(theme.dim))
-			y++
-			if y >= inner.bottom() {
-				break
-			}
+			lines = append(lines, []styledSpan{
+				{"  ├─ Prompt: ", fgStyle(theme.dim)},
+				{"\"" + record.Prompt + "\"", fgStyle(theme.accentSoft)},
+			})
 		}
 		if record.CommandExecuted != "" {
-			c.set(inner.x, y, truncate("  ├─ Cmd:    "+record.CommandExecuted, inner.w), fgStyle(theme.dim))
-			y++
-			if y >= inner.bottom() {
-				break
-			}
+			lines = append(lines, []styledSpan{
+				{"  ├─ Cmd:    ", fgStyle(theme.dim)},
+				{record.CommandExecuted, fgStyle(theme.dim)},
+			})
 		}
 		prefix := "  └─ Reply:  "
+		replyColor := theme.fg
 		if !record.Success {
 			prefix = "  └─ Error:  "
+			replyColor = theme.gaugeHigh
 		}
-		c.set(inner.x, y, truncate(prefix+record.OutputSnippet, inner.w), fgStyle(theme.fg))
-		y += 2
+		lines = append(lines, []styledSpan{
+			{prefix, fgStyle(theme.dim)},
+			{record.OutputSnippet, fgStyle(replyColor)},
+		})
+		lines = append(lines, nil)
+	}
+
+	start := clampInt(m.keeperLogScroll, 0, max(len(lines)-inner.h, 0))
+	m.keeperLogScroll = start
+	for i := 0; i < inner.h && start+i < len(lines); i++ {
+		if len(lines[start+i]) == 0 {
+			continue
+		}
+		drawSpans(c, inner.x, inner.y+i, inner.right(), lines[start+i])
 	}
 }
 

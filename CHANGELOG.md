@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-11-27
+
+### Added
+- **Clickable range pills and mouse interactions**: the Overview/Models/Daily range presets (`1 today`..`6 custom`) render as clickable pill buttons and respond to left clicks; Activity supports clicking heatmap cells to select dates and mouse-wheel scrolling in the detail pane; Keeper supports clicking agent cards and mouse-wheel scrolling in the execution log.
+- **Per-day company breakdown in usage reports**: `report.Report.Days` now includes per-company (`anthropic`, `openai`, `google`, `other`) token and cost totals from a single query, and supports days-only requests for the Activity heatmap.
+- **Debug logging mode**: added `--debug` (alongside `--log`) and `TOKENPULSE_DEBUG=1` to emit per-parser parse/ingest timings, Antigravity normalization mode/counts, and refresh stage durations (to the rotating log in the TUI and `serve`, to stderr for report output), plus always-on slow-refresh warnings.
+
+### Changed
+- **Instant Overview chart and Activity heatmap**: Overview renders stacked company bars on the first frame without N+1 `UsageModel` requests; Activity preloads in the background, stays cached across Overview/Models/Daily range changes, and incrementally refreshes only today on `usage_updated`.
+- **Activity and Keeper visual polish**: Activity follows the same calm palette as Models/Daily/Overview (dim labels, foreground values, cost color, company color on model names only), Keeper restores 0.6.16 provider and status colors, two-line model rows (`model + cost` then `T/I/O/CR/CW`) to prevent `CW` truncation, per-agent total tokens next to the agent cost in Activity and the Daily day detail, and `Total` / `Average` / `Max` rows in `Range Overview`.
+- **Cleaner Overview KPI and count formatting**: removed the redundant API pricing estimate and unpriced-model disclaimer lines from the TUI Overview KPI (keeping `vs <from> → <to>` on period ranges), and formatted integer counts below 1,000 without `.00` while keeping decimals on currency amounts.
+- **Overview chart fills the width**: each day gets an equal share of the chart width instead of fixed 1–3 column bars, so a 30-day range no longer sits in a narrow centered strip.
+- **Theme-aware README screenshots**: README and `docs/USAGE.md` show light or dark screenshots matching the reader's browser theme.
+- **Model ID normalization**: folded the `-xhigh` thinking-level suffix into the base canonical model ID (e.g. `gemini-4-hydrogen-xhigh` → `gemini-4-hydrogen`, `gemini-4-neon-xhigh` → `gemini-4-neon`).
+
+### Fixed
+- **Overview no longer flickers on background refreshes**: new usage reloads the range data while the current report stays on screen, and each scan reloads once instead of twice (event plus status poll).
+- **Auto light/dark theme detection and live refresh**: `display.theme = auto` now detects terminal and OS appearance (`TOKENPULSE_THEME`, startup OSC 11, `COLORFGBG`, `TERM_BACKGROUND`, Linux Freedesktop Portal / `gsettings`, macOS `defaults`) and follows later OS light/dark switches without overriding the startup terminal background; improved light-mode contrast for company/metric colors and Quota pace markers.
+- **60-second background refresh bottleneck**: added the missing `usage_messages(source, client, session_id)` index, switched Antigravity's incremental `synced_at` query to the exact previous refresh start cursor, stamped `sessions.parser_version` so empty local `.db` conversations are not re-parsed on every refresh, and gated full-table `normalizeCache` passes behind an `(aliases, releases)` fingerprint.
+
 ## [0.8.0] - 2026-11-27
 
 ### Added

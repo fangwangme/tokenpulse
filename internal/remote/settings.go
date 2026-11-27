@@ -10,8 +10,6 @@ import (
 	"github.com/fangwangme/tokenpulse/internal/quota"
 )
 
-var soundCycle = []string{"chime", "Hero", "Glass", "Submarine", "none"}
-
 type SettingSpec struct {
 	Allowed []any
 }

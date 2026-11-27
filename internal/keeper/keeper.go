@@ -44,17 +44,6 @@ func (t TriggerType) Label() string {
 
 func (t TriggerType) String() string { return string(t) }
 
-func TriggerFromString(value string) TriggerType {
-	switch value {
-	case "daily":
-		return TriggerDaily
-	case "weekly":
-		return TriggerWeekly
-	default:
-		return TriggerManual
-	}
-}
-
 type ExecutionRecord struct {
 	Agent           string      `json:"agent"`
 	Trigger         TriggerType `json:"trigger"`
@@ -266,23 +255,10 @@ func ShouldTriggerWeekly(resetsAt *time.Time, lastTriggered *time.Time, now time
 	return lastTriggered.Before(*resetsAt)
 }
 
-// NextWeeklyTrigger is the expected reset time while it has not fired.
-func NextWeeklyTrigger(resetsAt *time.Time, lastTriggered *time.Time, now time.Time) *time.Time {
-	if resetsAt == nil {
-		return nil
-	}
-	if lastTriggered != nil && !lastTriggered.Before(*resetsAt) && !now.Before(*resetsAt) {
-		return nil
-	}
-	return resetsAt
-}
-
 type WeeklyTarget struct {
 	Key   string `json:"key"`
 	Group string `json:"group,omitempty"`
 }
-
-func (t WeeklyTarget) IsPrimary(agent string) bool { return t.Key == agent }
 
 // WeeklyGroups lists distinct families among weekly windows, in snapshot order.
 func WeeklyGroups(snapshot *provider.QuotaSnapshot) []string {
@@ -797,14 +773,6 @@ func (e *Engine) Manual(agent, group string) (Request, error) {
 	}
 	e.markLocked(key, true)
 	return Request{Agent: agent, Key: key, Trigger: TriggerManual, Config: cfg, Group: group}, nil
-}
-
-// AvailableGroups lists the Antigravity groups from a snapshot.
-func AvailableGroups(snapshot *provider.QuotaSnapshot) []string {
-	if snapshot == nil {
-		return nil
-	}
-	return WeeklyGroups(snapshot)
 }
 
 // ── history ──

@@ -140,7 +140,7 @@ tokenpulse --csv daily|models               # CSV tables
 tokenpulse --raw --date 2026-11-20          # raw model rows
 tokenpulse --since 2026-03-01
 tokenpulse --refresh-days 2026-03-01:2026-03-07
-tokenpulse --refresh-pricing | --rebuild-all | --no-scan | --log
+tokenpulse --refresh-pricing | --rebuild-all | --no-scan | --log | --debug
 tokenpulse init --default
 tokenpulse config show|enable|disable|set|test-notification
 tokenpulse reprice [--apply --yes --expect <fingerprint>] [--json]

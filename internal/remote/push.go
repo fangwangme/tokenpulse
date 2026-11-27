@@ -38,12 +38,6 @@ func newPushStore(dataDir string) *pushStore {
 	}
 }
 
-func (p *pushStore) load() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.loadLocked()
-}
-
 func (p *pushStore) loadLocked() error {
 	if p.vapid == nil {
 		if content, err := os.ReadFile(p.vapidPath); err == nil {

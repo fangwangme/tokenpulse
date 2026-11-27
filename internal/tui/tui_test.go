@@ -371,20 +371,39 @@ func TestScanAntigravityDisabledExcludesAntigravity(t *testing.T) {
 	}
 }
 
-func TestPartialCompanyFailureDoesNotMisclassifyAsOthers(t *testing.T) {
-	now := today()
-	h := startTUI(t, newLedger(t, []ledgerRow{
-		{date: now.AddDate(0, 0, -1), model: "claude-sonnet-4-5", tokens: 300, cost: 3},
-		{date: now, model: "gpt-5", tokens: 200, cost: 2},
-	}))
-	m := h.m.(*model)
-	key := m.rangeKey()
-	h.send(modelDetailMsg{key: key, purpose: "company", seq: m.companySeq, err: errors.New("timeout")})
-	series := m.chartSeries(10)
-	for _, day := range series {
-		if len(day.segments) != 0 {
-			t.Fatalf("partial company failure still emitted stacked segments: %+v", day.segments)
-		}
+func TestAutoThemeParsersAndLiveRefresh(t *testing.T) {
+	if mode, ok := parseBusctlColorScheme("v v u 1\n"); !ok || mode != 0 {
+		t.Errorf("busctl dark = (%d, %v), want (0, true)", mode, ok)
+	}
+	if mode, ok := parseBusctlColorScheme("v v u 2\n"); !ok || mode != 1 {
+		t.Errorf("busctl light = (%d, %v), want (1, true)", mode, ok)
+	}
+	if mode, ok := parseGsettingsColorScheme("'prefer-light'\n"); !ok || mode != 1 {
+		t.Errorf("gsettings light = (%d, %v), want (1, true)", mode, ok)
+	}
+	t.Setenv("TOKENPULSE_THEME", "")
+	t.Setenv("COLORFGBG", "")
+	t.Setenv("TERM_BACKGROUND", "")
+	cfg := config.Default()
+	cfg.Display.Theme = config.ThemeAuto
+	m := newModel(Options{Config: cfg}, nil)
+	m.handleStatus(statusMsg{themeMode: 1})
+	if m.theme().mode != 0 {
+		t.Fatalf("first OS reading overrode the startup (dark) terminal theme")
+	}
+	m.handleStatus(statusMsg{themeMode: 0})
+	m.handleStatus(statusMsg{themeMode: 1})
+	if m.theme().mode != 1 {
+		t.Fatalf("OS switch to light did not switch auto theme")
+	}
+	// Manual override via 'b' stays pinned even if OS appearance poll arrives.
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	if m.theme().mode != 0 {
+		t.Fatalf("manual 'b' toggle did not flip to dark")
+	}
+	m.handleStatus(statusMsg{themeMode: 1})
+	if m.theme().mode != 0 {
+		t.Fatalf("statusMsg overwrote manual 'b' theme override")
 	}
 }
 

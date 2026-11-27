@@ -308,7 +308,7 @@ func drawGauge(c *canvas, x, y, width int, percent float64, expected *float64, c
 		}
 		if i == marker && i >= filled {
 			char = "▏"
-			style = textStyle{fg: rgb(255, 255, 255), bold: true}
+			style = boldStyle(theme.fg)
 		}
 		c.set(x+i, y, char, style)
 	}

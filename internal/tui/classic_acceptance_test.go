@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -231,7 +230,7 @@ func compactTokens(value int64) string {
 	case value >= 1_000:
 		return fmt.Sprintf("%.2f K", float64(value)/1_000)
 	default:
-		return fmt.Sprintf("%.2f", float64(value))
+		return fmt.Sprintf("%d", value)
 	}
 }
 
@@ -340,8 +339,8 @@ func TestDailyComparesSevenDaysEarlier(t *testing.T) {
 	}
 }
 
-// Protects tui-usage.md "Overview": company segments come from the model
-// detail of Anthropic, OpenAI and Google models over the current range only.
+// Protects tui-usage.md "Overview": company segments come directly from
+// Report.Days[].Companies with zero UsageModel fan-out calls.
 func TestOverviewStacksByCompany(t *testing.T) {
 	now := today()
 	service := newLedger(t, []ledgerRow{
@@ -352,33 +351,20 @@ func TestOverviewStacksByCompany(t *testing.T) {
 	})
 	h := startTUI(t, service)
 
-	expected, err := service.Report(report.Params{Preset: "30d", Agents: []string{"claude"}})
-	if err != nil {
-		t.Fatal(err)
+	if calls := h.client.models(); len(calls) != 0 {
+		t.Fatalf("expected 0 UsageModel calls, got %v", calls)
 	}
-	var want []string
-	for _, model := range expected.Models {
-		if model.Company == "anthropic" || model.Company == "openai" || model.Company == "google" {
-			want = append(want, model.Model)
+	m := h.m.(*model)
+	seen := map[string]bool{}
+	for _, day := range m.chartSeries(10) {
+		for _, seg := range day.segments {
+			seen[seg.name] = true
 		}
 	}
-	sort.Strings(want)
-
-	requested := map[string]bool{}
-	for _, call := range h.client.models() {
-		if call.from != expected.Range.From || call.to != expected.Range.To {
-			t.Errorf("model detail %s requested over %s..%s, want the range %s..%s",
-				call.model, call.from, call.to, expected.Range.From, expected.Range.To)
+	for _, company := range []string{"anthropic", "openai", "google", "other"} {
+		if !seen[company] {
+			t.Errorf("chartSeries missing company %q", company)
 		}
-		requested[call.model] = true
-	}
-	var got []string
-	for model := range requested {
-		got = append(got, model)
-	}
-	sort.Strings(got)
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("model details requested for %v, want exactly %v", got, want)
 	}
 
 	screen := strings.Join(h.screen(), "\n")

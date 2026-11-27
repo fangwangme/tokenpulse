@@ -123,6 +123,9 @@ func New(dataDir string, manager *config.Manager, scanner *scan.Scanner, managed
 	if managedBy == "" {
 		managedBy = "standalone"
 	}
+	if scanner != nil && logger != nil && scanner.Logger == nil {
+		scanner.Logger = logger
+	}
 	return &Runtime{
 		DataDir:     dataDir,
 		Config:      manager,
@@ -622,6 +625,7 @@ func (r *Runtime) doRefresh(flags refreshFlags) {
 		cfg = config.Default()
 	}
 	r.Keeper.UpdateConfig(cfg.Keeper)
+	refreshStart := time.Now()
 	if r.Logger != nil {
 		r.Logger.Printf("refresh start usage=%v quota=%v", flags.usage, flags.quota)
 	}
@@ -630,6 +634,7 @@ func (r *Runtime) doRefresh(flags refreshFlags) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			usageStart := time.Now()
 			defer func() {
 				r.mu.Lock()
 				r.lastUsageRefresh = time.Now()
@@ -639,9 +644,17 @@ func (r *Runtime) doRefresh(flags refreshFlags) {
 				Providers: scan.ProvidersFromConfig(cfg), ScanAntigravity: cfg.Display.ScanAntigravity,
 			}); err != nil {
 				if r.Logger != nil {
-					r.Logger.Printf("usage refresh failed: %v", err)
+					r.Logger.Printf("usage refresh failed (%s): %v", time.Since(usageStart).Round(time.Millisecond), err)
 				}
 				return
+			}
+			if r.Logger != nil {
+				elapsed := time.Since(usageStart).Round(time.Millisecond)
+				if elapsed >= 10*time.Second {
+					r.Logger.Printf("WARN: usage refresh slow (%s)", elapsed)
+				} else {
+					r.Logger.Printf("usage refresh complete (%s)", elapsed)
+				}
 			}
 			if scanned, err := r.Report.ScannedAtValue(); err == nil {
 				r.mu.Lock()
@@ -655,6 +668,7 @@ func (r *Runtime) doRefresh(flags refreshFlags) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			quotaStart := time.Now()
 			defer func() {
 				r.mu.Lock()
 				r.lastQuotaRefresh = time.Now()
@@ -662,6 +676,9 @@ func (r *Runtime) doRefresh(flags refreshFlags) {
 			}()
 			results := quota.FetchAll(r.DataDir, FetchersFor(cfg))
 			r.ApplyQuotaResults(results)
+			if r.Logger != nil {
+				r.Logger.Printf("quota refresh complete (%s)", time.Since(quotaStart).Round(time.Millisecond))
+			}
 		}()
 	}
 	wg.Wait()
@@ -670,7 +687,7 @@ func (r *Runtime) doRefresh(flags refreshFlags) {
 	}
 	r.runKeeperChecks()
 	if r.Logger != nil {
-		r.Logger.Printf("refresh complete")
+		r.Logger.Printf("refresh complete (%s)", time.Since(refreshStart).Round(time.Millisecond))
 	}
 }
 

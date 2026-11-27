@@ -7,6 +7,24 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+type rangeHitbox struct {
+	index int
+	x0    int
+	x1    int
+}
+
+func rangePresetHitboxes(area rect) []rangeHitbox {
+	boxes := make([]rangeHitbox, 0, len(presets))
+	x := area.x
+	for index, preset := range presets {
+		label := fmt.Sprintf(" %d %s ", index+1, preset)
+		w := len([]rune(label))
+		boxes = append(boxes, rangeHitbox{index: index, x0: x, x1: x + w})
+		x += w + 1
+	}
+	return boxes
+}
+
 func (m *model) drawRangeBar(c *canvas, area rect) int {
 	if area.h <= 0 || area.w <= 0 {
 		return 0
@@ -16,15 +34,21 @@ func (m *model) drawRangeBar(c *canvas, area rect) int {
 	if m.currentRangeTab() {
 		x := area.x
 		for index, preset := range presets {
-			label := fmt.Sprintf("%d %s", index+1, preset)
-			style := fgStyle(theme.dim)
+			key := fmt.Sprintf("%d", index+1)
+			label := fmt.Sprintf(" %s %s ", key, preset)
+			w := len([]rune(label))
 			if preset == m.preset {
-				style = textStyle{fg: theme.onAccent, bg: theme.accent, bold: true}
-				label = " " + label + " "
-				c.fill(x, y, len([]rune(label)), 1, style)
+				style := textStyle{fg: theme.onAccent, bg: theme.accent, bold: true}
+				c.fill(x, y, w, 1, style)
+				c.set(x, y, label, style)
+			} else {
+				pillStyle := textStyle{fg: theme.fg, bg: theme.pillBg}
+				keyStyle := textStyle{fg: theme.accentSoft, bg: theme.pillBg, bold: true}
+				c.fill(x, y, w, 1, pillStyle)
+				c.set(x+1, y, key, keyStyle)
+				c.set(x+1+len(key), y, " "+preset, pillStyle)
 			}
-			c.set(x, y, label, style)
-			x += len([]rune(label)) + 2
+			x += w + 1
 		}
 		from, to := m.report.Range.From, m.report.Range.To
 		if !m.reportLoaded {
@@ -34,7 +58,7 @@ func (m *model) drawRangeBar(c *canvas, area rect) int {
 				from, to = "…", "…"
 			}
 		}
-		x += 2
+		x++
 		dates := from + " → " + to
 		c.set(x, y, dates, fgStyle(theme.fg))
 		x += len([]rune(dates))
@@ -148,33 +172,39 @@ func (m *model) drawModels(c *canvas, area rect) {
 	modelWidth, agentWidth := calculateModelAgentWidths(sortedModelRows(models), max(totalWidth-fixed-gaps, 23))
 	shareTotal := modelShareTotal(models, m.sortField)
 
+	headerStyle := func(active bool) textStyle {
+		if active {
+			return boldStyle(theme.accent)
+		}
+		return boldStyle(theme.dim)
+	}
 	x := inner.x
 	c.setClip(x, inner.y, inner.right(), padRight("#", rankWidth), boldStyle(theme.dim))
 	x += rankWidth + 1
-	c.setClip(x, inner.y, inner.right(), padRight(truncate("Model", modelWidth), modelWidth), boldStyle(theme.accent))
+	c.setClip(x, inner.y, inner.right(), padRight(truncate("Model", modelWidth), modelWidth), boldStyle(theme.dim))
 	x += modelWidth + 1
-	c.setClip(x, inner.y, inner.right(), padRight(truncate("Agent", agentWidth), agentWidth), boldStyle(theme.accentSoft))
+	c.setClip(x, inner.y, inner.right(), padRight(truncate("Agent", agentWidth), agentWidth), boldStyle(theme.dim))
 	x += agentWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft("Tokens"+sortIndicator(m.sortField == sortTokens, m.sortAsc), tokensWidth), boldStyle(theme.codex))
+	c.setClip(x, inner.y, inner.right(), padLeft("Tokens"+sortIndicator(m.sortField == sortTokens, m.sortAsc), tokensWidth), headerStyle(m.sortField == sortTokens))
 	x += tokensWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft("Cost"+sortIndicator(m.sortField == sortCost, m.sortAsc), costWidth), boldStyle(theme.gaugeMid))
+	c.setClip(x, inner.y, inner.right(), padLeft("Cost"+sortIndicator(m.sortField == sortCost, m.sortAsc), costWidth), headerStyle(m.sortField == sortCost))
 	x += costWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft("Input", inputWidth), boldStyle(theme.gemini))
+	c.setClip(x, inner.y, inner.right(), padLeft("Input", inputWidth), boldStyle(theme.dim))
 	x += inputWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft("Output", outputWidth), boldStyle(rgb(167, 139, 250)))
+	c.setClip(x, inner.y, inner.right(), padLeft("Output", outputWidth), boldStyle(theme.dim))
 	x += outputWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft(cacheRHeader, cacheReadWidth), boldStyle(rgb(251, 146, 60)))
+	c.setClip(x, inner.y, inner.right(), padLeft(cacheRHeader, cacheReadWidth), boldStyle(theme.dim))
 	x += cacheReadWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft(cacheWHeader, cacheWriteWidth), boldStyle(rgb(251, 146, 60)))
+	c.setClip(x, inner.y, inner.right(), padLeft(cacheWHeader, cacheWriteWidth), boldStyle(theme.dim))
 	x += cacheWriteWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft(hitHeader, hitWidth), boldStyle(rgb(251, 146, 60)))
+	c.setClip(x, inner.y, inner.right(), padLeft(hitHeader, hitWidth), boldStyle(theme.dim))
 	x += hitWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft("%", pctWidth), boldStyle(theme.gemini))
+	c.setClip(x, inner.y, inner.right(), padLeft("%", pctWidth), boldStyle(theme.dim))
 	x += pctWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft("Msgs", msgWidth), boldStyle(theme.gemini))
+	c.setClip(x, inner.y, inner.right(), padLeft("Msgs", msgWidth), boldStyle(theme.dim))
 	x += msgWidth + 1
 	if showLast {
-		c.setClip(x, inner.y, inner.right(), padLeft("Last"+sortIndicator(m.sortField == sortDate, m.sortAsc), lastWidth), boldStyle(theme.dim))
+		c.setClip(x, inner.y, inner.right(), padLeft("Last"+sortIndicator(m.sortField == sortDate, m.sortAsc), lastWidth), headerStyle(m.sortField == sortDate))
 	}
 
 	visible := max(inner.h-2, 0)
@@ -203,25 +233,25 @@ func (m *model) drawModels(c *canvas, area rect) {
 		x += rankWidth + 1
 		c.setClip(x, y, inner.right(), padRight(truncate(entry.Model, modelWidth), modelWidth), col(theme.companyColor(entry.Company), selectedRow))
 		x += modelWidth + 1
-		c.setClip(x, y, inner.right(), padRight(truncate(displaySourceList(entry.Agents), agentWidth), agentWidth), col(theme.accentSoft, selectedRow))
+		c.setClip(x, y, inner.right(), padRight(truncate(displaySourceList(entry.Agents), agentWidth), agentWidth), col(theme.dim, selectedRow))
 		x += agentWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.Tokens), tokensWidth), col(theme.codex, selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.Tokens), tokensWidth), col(theme.fg, selectedRow || m.sortField == sortTokens))
 		x += tokensWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(formatCost(entry.Cost), costWidth), col(theme.gaugeMid, selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(formatCost(entry.Cost), costWidth), col(theme.costColor, selectedRow || m.sortField == sortCost))
 		x += costWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.Input), inputWidth), col(theme.gemini, selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.Input), inputWidth), col(theme.fg, selectedRow))
 		x += inputWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.Output), outputWidth), col(rgb(167, 139, 250), selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.Output), outputWidth), col(theme.fg, selectedRow))
 		x += outputWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.CacheRead), cacheReadWidth), col(rgb(251, 146, 60), selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.CacheRead), cacheReadWidth), col(theme.fg, selectedRow))
 		x += cacheReadWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.CacheWrite), cacheWriteWidth), col(rgb(251, 146, 60), selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.CacheWrite), cacheWriteWidth), col(theme.fg, selectedRow))
 		x += cacheWriteWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(cacheHitPercent(entry.CacheRead, entry.Tokens), hitWidth), col(rgb(251, 146, 60), selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(cacheHitPercent(entry.CacheRead, entry.Tokens), hitWidth), col(theme.dim, selectedRow))
 		x += hitWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(fmt.Sprintf("%.1f%%", modelShare(entry, shareTotal, m.sortField)), pctWidth), col(theme.gemini, selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(fmt.Sprintf("%.1f%%", modelShare(entry, shareTotal, m.sortField)), pctWidth), col(theme.dim, selectedRow))
 		x += pctWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.Messages), msgWidth), col(theme.gemini, selectedRow))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(entry.Messages), msgWidth), col(theme.dim, selectedRow))
 		x += msgWidth + 1
 		if showLast {
 			last := entry.LastUsed

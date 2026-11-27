@@ -55,7 +55,7 @@ func formatCompact(value int64) string {
 	case abs >= 1_000:
 		return fmt.Sprintf("%.2f K", float64(value)/1_000)
 	default:
-		return fmt.Sprintf("%.2f  ", float64(value))
+		return fmt.Sprintf("%d", value)
 	}
 }
 

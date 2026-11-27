@@ -47,29 +47,33 @@ func (m *model) drawDaily(c *canvas, area rect) {
 		cacheWidth = 10
 		cacheRHeader, cacheWHeader = "Cache R", "Cache W"
 	}
-	cacheColor := rgb(251, 146, 60)
-
 	values := m.dailyValueMap()
 	dateWidth := 15
 	wowWidth := 11
+	headerStyle := func(active bool) textStyle {
+		if active {
+			return boldStyle(theme.accent)
+		}
+		return boldStyle(theme.dim)
+	}
 	x := inner.x
-	c.setClip(x, inner.y, inner.right(), padRight("Date"+sortIndicator(m.sortField == sortDate, m.sortAsc), dateWidth), boldStyle(theme.accentSoft))
+	c.setClip(x, inner.y, inner.right(), padRight("Date"+sortIndicator(m.sortField == sortDate, m.sortAsc), dateWidth), headerStyle(m.sortField == sortDate))
 	x += dateWidth + 1
-	c.setClip(x, inner.y, inner.right(), padLeft("Tokens"+sortIndicator(m.sortField == sortTokens, m.sortAsc), 10), boldStyle(theme.codex))
+	c.setClip(x, inner.y, inner.right(), padLeft("Tokens"+sortIndicator(m.sortField == sortTokens, m.sortAsc), 10), headerStyle(m.sortField == sortTokens))
 	x += 11
-	c.setClip(x, inner.y, inner.right(), padLeft("Cost"+sortIndicator(m.sortField == sortCost, m.sortAsc), 10), boldStyle(theme.gaugeMid))
+	c.setClip(x, inner.y, inner.right(), padLeft("Cost"+sortIndicator(m.sortField == sortCost, m.sortAsc), 10), headerStyle(m.sortField == sortCost))
 	x += 11
 	if showDetailCols {
-		c.setClip(x, inner.y, inner.right(), padLeft("Input", 10), boldStyle(theme.gemini))
+		c.setClip(x, inner.y, inner.right(), padLeft("Input", 10), boldStyle(theme.dim))
 		x += 11
-		c.setClip(x, inner.y, inner.right(), padLeft("Output", 10), boldStyle(rgb(167, 139, 250)))
+		c.setClip(x, inner.y, inner.right(), padLeft("Output", 10), boldStyle(theme.dim))
 		x += 11
-		c.setClip(x, inner.y, inner.right(), padLeft(cacheRHeader, cacheWidth), boldStyle(cacheColor))
+		c.setClip(x, inner.y, inner.right(), padLeft(cacheRHeader, cacheWidth), boldStyle(theme.dim))
 		x += cacheWidth + 1
-		c.setClip(x, inner.y, inner.right(), padLeft(cacheWHeader, cacheWidth), boldStyle(cacheColor))
+		c.setClip(x, inner.y, inner.right(), padLeft(cacheWHeader, cacheWidth), boldStyle(theme.dim))
 		x += cacheWidth + 1
 	}
-	c.setClip(x, inner.y, inner.right(), padLeft("Msgs", 8), boldStyle(theme.gemini))
+	c.setClip(x, inner.y, inner.right(), padLeft("Msgs", 8), boldStyle(theme.dim))
 	x += 9
 	if showWow {
 		header := "Token vs 7d"
@@ -113,23 +117,23 @@ func (m *model) drawDaily(c *canvas, area rect) {
 			}
 		}
 		x = inner.x
-		c.setClip(x, y, inner.right(), padRight(dateText, dateWidth), col(theme.accentSoft, isToday))
+		c.setClip(x, y, inner.right(), padRight(dateText, dateWidth), col(theme.fg, isToday || selectedRow))
 		x += dateWidth + 1
-		c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Tokens), 10), col(theme.codex, false))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Tokens), 10), col(theme.fg, selectedRow || m.sortField == sortTokens))
 		x += 11
-		c.setClip(x, y, inner.right(), padLeft(formatCost(day.Cost), 10), col(theme.gaugeMid, false))
+		c.setClip(x, y, inner.right(), padLeft(formatCost(day.Cost), 10), col(theme.costColor, selectedRow || m.sortField == sortCost))
 		x += 11
 		if showDetailCols {
-			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Input), 10), col(theme.gemini, false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Input), 10), col(theme.fg, selectedRow))
 			x += 11
-			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Output), 10), col(rgb(167, 139, 250), false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Output), 10), col(theme.fg, selectedRow))
 			x += 11
-			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.CacheRead), cacheWidth), col(cacheColor, false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.CacheRead), cacheWidth), col(theme.fg, selectedRow))
 			x += cacheWidth + 1
-			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.CacheWrite), cacheWidth), col(cacheColor, false))
+			c.setClip(x, y, inner.right(), padLeft(formatCompact(day.CacheWrite), cacheWidth), col(theme.fg, selectedRow))
 			x += cacheWidth + 1
 		}
-		c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Messages), 8), col(theme.gemini, false))
+		c.setClip(x, y, inner.right(), padLeft(formatCompact(day.Messages), 8), col(theme.dim, selectedRow))
 		x += 9
 		if showWow {
 			priorDate := ""
@@ -154,39 +158,45 @@ func (m *model) drawDayDetail(c *canvas, area rect) {
 	theme := m.theme()
 	detail := m.dayDetail
 	box := popup(area, min(106, area.w-4), min(26, area.h-2))
-	c.box(box.x, box.y, box.w, box.h, " Day "+detail.Date+" ", boldStyle(theme.companyColor("other")), fgStyle(theme.border))
+	c.box(box.x, box.y, box.w, box.h, " Day "+detail.Date+" ", boldStyle(theme.accent), fgStyle(theme.border))
 	inner := box.inner()
-	var lines []string
+	plain := func(text string) []styledSpan { return []styledSpan{{text, fgStyle(theme.fg)}} }
+	var lines [][]styledSpan
 	cacheWriteTotal := "—"
 	if detail.Totals.CacheWrite > 0 {
 		cacheWriteTotal = formatCompact(detail.Totals.CacheWrite)
 	}
 	lines = append(lines,
-		fmt.Sprintf("Cost %s   Tokens %s   Messages %s   Sessions %s",
+		plain(fmt.Sprintf("Cost %s   Tokens %s   Messages %s   Sessions %s",
 			formatCost(detail.Totals.Cost), formatCompact(detail.Totals.Tokens),
-			formatIntCommas(detail.Totals.Messages), formatIntCommas(detail.Totals.Sessions)),
-		fmt.Sprintf("Input %s   Output %s   Cache read %s   Cache write %s",
+			formatIntCommas(detail.Totals.Messages), formatIntCommas(detail.Totals.Sessions))),
+		plain(fmt.Sprintf("Input %s   Output %s   Cache read %s   Cache write %s",
 			formatCompact(detail.Totals.Input), formatCompact(detail.Totals.Output),
-			formatCompact(detail.Totals.CacheRead), cacheWriteTotal),
-		"",
+			formatCompact(detail.Totals.CacheRead), cacheWriteTotal)),
+		nil,
 	)
 	for _, agent := range detail.Agents {
-		lines = append(lines, fmt.Sprintf("%s  %s", displayAgentName(agent.Agent), formatCost(agent.Totals.Cost)))
+		lines = append(lines, []styledSpan{{fmt.Sprintf("%-32s %10s  %9s",
+			truncate(displayAgentName(agent.Agent), 32), formatCost(agent.Totals.Cost), formatCompact(agent.Totals.Tokens)), boldStyle(theme.fg)}})
 		for _, model := range agent.Models {
 			cw := "—"
 			if model.CacheWrite > 0 {
 				cw = formatCompact(model.CacheWrite)
 			}
-			lines = append(lines, fmt.Sprintf("  %-30s %10s  %9s  CR %9s  CW %9s  Hit %s",
-				truncate(model.Model, 30), formatCost(model.Cost), formatCompact(model.Tokens),
-				formatCompact(model.CacheRead), cw, cacheHitPercent(model.CacheRead, model.Tokens)))
+			lines = append(lines, []styledSpan{
+				{"  ", fgStyle(theme.fg)},
+				{fmt.Sprintf("%-30s", truncate(model.Model, 30)), fgStyle(theme.companyColor(model.Company))},
+				{fmt.Sprintf(" %10s  %9s  CR %9s  CW %9s  Hit %s",
+					formatCost(model.Cost), formatCompact(model.Tokens),
+					formatCompact(model.CacheRead), cw, cacheHitPercent(model.CacheRead, model.Tokens)), fgStyle(theme.fg)},
+			})
 		}
 	}
-	lines = append(lines, "", "Esc closes")
+	lines = append(lines, nil, []styledSpan{{"Esc closes", fgStyle(theme.dim)}})
 	start := clampInt(m.detailScroll, 0, max(len(lines)-inner.h, 0))
 	m.detailScroll = start
 	for index := 0; index < inner.h && start+index < len(lines); index++ {
-		c.set(inner.x, inner.y+index, truncate(lines[start+index], inner.w), fgStyle(theme.fg))
+		drawSpans(c, inner.x, inner.y+index, inner.right(), lines[start+index])
 	}
 }
 

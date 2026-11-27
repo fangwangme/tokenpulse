@@ -20,7 +20,9 @@ Theme, table layout and truncation follow `tui-theme.md` and
 - **Range.** Overview, Models and Daily share one range: the presets
   `today · 7d · 30d · year · all · custom` of `usage-report.md`, starting at
   `30d`. `--since` starts it as a custom range from that date to today. A bar
-  under the tabs shows the presets, the resolved dates and the scan time;
+  under the tabs renders the presets as distinct clickable pill buttons
+  (subtle chip background for inactive presets, accent fill for the active
+  preset), followed by the resolved dates and the scan time;
   custom opens an inline `from`/`to` entry limited to first day…today.
 - Activity, Quota, Keeper and Settings do not use the range; on Activity the
   bar names the Activity window instead.
@@ -32,21 +34,22 @@ Theme, table layout and truncation follow `tui-theme.md` and
 ## Overview
 
 1. **KPI row** — cost, tokens and sessions of the range. A period shows each
-   value's comparison change and the comparison dates
-   (`usage-report.md` "Comparison"); a single day shows none. The unpriced-model
-   and estimate notices appear as on the phone.
+   value's comparison change and the comparison dates (`vs <from> → <to>`) on
+   its own second line (`usage-report.md` "Comparison"); a single day shows
+   none (1-line KPI). The TUI omits the API-pricing estimate and unpriced-model
+   disclaimer lines.
 2. **Chart** — the 0.6.16 stacked daily bar chart over the range's days, the
-   newest that fit when the range has more days than the width holds, with
-   0.6.16's bar widths, axis and date ticks. Its title is
+   newest that fit when the range has more days than the width holds. Each day
+   gets an equal share of the chart width (a share of three or more columns
+   keeps one blank column between bars), with 0.6.16's axis and date ticks. Its title is
    `Token Usage (N days)` or `Cost Usage (N days)`; `t` and `c` choose the
    metric.
-   - Each bar is split by company: Anthropic, OpenAI and Google are the sums of
-     that company's models' per-day values (the model detail over the range,
-     one request per such model); **Others** is the day total minus those
-     three, floored at zero. Models with company `other` are not requested.
+   - Each bar is split by company directly from `Report.Days[].Companies`
+     (`anthropic`, `openai`, `google`, `other`) returned in the single report
+     request, so the chart renders in full company colors on the first frame
+     without issuing per-model `UsageModel` requests.
    - The legend is `● Anthropic  ● OpenAI  ● Google  ● Others` in the company
      colors.
-   - Until the company values arrive, bars show the day total in one color.
    - A single-day range has no chart; the model table takes its space.
 3. **Top models** — the 0.6.16 table: `Model`, `Agent`, `Tokens`, `Cost`, `%`.
    `Enter` opens the selected model's detail popup (same as Models).
@@ -71,8 +74,9 @@ Theme, table layout and truncation follow `tui-theme.md` and
   value or zero. The earlier dates come from one extra report whose start is
   never before the first data day.
 - `c`, `t` and `d` sort; `Enter` opens the day detail of the phone (totals, per
-  agent its cost, per model its cost, tokens, cache read, cache write (`—` when
-  0) and cache hit with two decimals). `Esc` closes it.
+  agent its cost and total tokens aligned with the model columns, per model its cost, tokens, cache read, cache write (`—` when
+  0) and cache hit with two decimals); model names use their company color and
+  the rest stays in the shared palette. `Esc` closes it.
 
 ## Activity
 
@@ -81,12 +85,19 @@ Theme, table layout and truncation follow `tui-theme.md` and
 - The 0.6.16 Monday-start year heatmap with active days, current and longest
   streak and the legend; `t` and `c` choose the metric.
 - **Period overview** — tokens and cost for `Today`, `Week` (Monday of this
-  week through today), `Month` (calendar month to date), `Year` (calendar year
-  to date), `Last 7 days` (today − 6 through today) and `Last 30 days`
-  (today − 29 through today). A short card drops the rolling rows first.
+  week through today), `Last 7 days` (today − 6 through today), `Month`
+  (calendar month to date), `Last 30 days` (today − 29 through today), `Year`
+  (calendar year to date), `Total`, `Average`, and `Max`. A short card drops
+  the rolling rows first.
 - **Selected day** — `↑`/`↓`/`j`/`k` move the selected day, `n` selects today,
-  `[`/`]` scroll its details; the details list each agent and model with its
-  cost from the day detail.
+  `[`/`]` or mouse wheel scroll its details, and left-clicking a heatmap cell
+  selects that date. Activity uses the same calm palette as Models, Daily and
+  Overview: dim labels and column headers, values in the foreground color,
+  costs in the cost color, and color identity only on model names (company
+  color). `Agent / Model Cost` shows each agent in bold with its cost and total
+  tokens (`T`), each model in its
+  company color, and splits each model into two lines (model name + cost on
+  line 1, indented dim `T / I / O / CR / CW` on line 2).
 
 ## Quota
 
@@ -100,7 +111,9 @@ Theme, table layout and truncation follow `tui-theme.md` and
 
 ## Keeper
 
-- The 0.6.16 agent cards and execution log. `↑`/`↓`/`Tab` select an agent,
+- The 0.6.16 agent cards and execution log with provider-colored agent titles/headers,
+  status colors (success/failure), highlighted wakeup/trigger/prompt spans, and
+  mouse click on cards plus wheel scroll on the execution log. `↑`/`↓`/`Tab` select an agent,
   `1`/`d` toggle its 5h keeper, `2`/`w` its weekly keeper, `p` runs a manual
   ping, `e` toggles the Keeper engine. Toggles go through `PatchSettings`,
   pings through `KeeperPing`.
@@ -120,8 +133,8 @@ Theme, table layout and truncation follow `tui-theme.md` and
 ## Global keys
 
 `q`/`Ctrl+C` quit; `←`/`→`/`h`/`l`/`Tab`/`Shift+Tab` switch tabs (except on
-Keeper, where `Tab`/`Shift+Tab` move between agent cards), and a click on a tab
-selects it; `j`/`k` move; `s` agent filter; `b` theme; `r` refresh; `?` toggles
+Keeper, where `Tab`/`Shift+Tab` move between agent cards), and left-clicking a
+tab or a range preset (`1 today`..`6 custom`) selects it; `j`/`k` move; `s` agent filter; `b` theme; `r` refresh; `?` toggles
 the 0.6.16 help overlay listing the current page's keys. `Esc` closes a detail,
 the overlay or the help, and never quits.
 
@@ -136,12 +149,21 @@ On Overview, Models and Daily:
 ## Data loading
 
 - Requests run as Bubble Tea commands, never on the update loop.
-- One report per range and agent filter feeds Overview, Models and Daily.
-  Daily's earlier-dates report and the Activity window report (one custom
-  range report each) load when their tab first needs them; Overview's company values load after the report;
-  details load on `Enter`.
-- `usage_updated`, a range change or a filter change drops the cached usage
-  data; the current tab reloads at once and the others when next shown.
+- One report per range and agent filter feeds Overview, Models and Daily
+  (including per-day company totals for Overview's chart). Daily's
+  earlier-dates report loads when Daily first needs it; details load on `Enter`.
+- The Activity 365-day report preloads in the background once the initial
+  report completes (skipping model and comparison aggregation) and is not
+  invalidated when Overview, Models, or Daily change range presets.
+- A range change drops only the range-scoped caches (report, prior, popups);
+  an agent filter change drops all usage caches including Activity. New usage
+  (`usage_updated`, or a status poll reporting a new `scannedAt`; one reload per
+  `scannedAt`) reloads the range-scoped data while the current report, prior
+  and popups stay on screen until the fresh responses replace them, and
+  refreshes Activity incrementally for today via
+  `UsageDay(today)` when the calendar date and agent filter are unchanged
+  (reloading the full 365-day window only when the date rolls over or Activity
+  is not yet loaded). A manual `r` refresh reloads the full Activity window.
   `quota_updated` and a config change reload Quota, `keeper_updated` reloads
   Keeper, `settings_updated` reloads the config.
 - `r` refreshes usage and quota; when `serve` runs it asks `serve` instead
@@ -150,7 +172,8 @@ On Overview, Models and Daily:
 
 ## Formats
 
-- Tokens use the 0.6.16 compact form: two decimals and ` K`, ` M` or ` B`
-  (`1.20 K`, `3.45 M`); below one thousand the plain value with two decimals.
-- Costs use the shared money format (`usage-report.md` "Numbers").
-- Models are colored by company with the 0.6.16 palette.
+- Counts (tokens and message counts) use compact form: two decimals and ` K`,
+  ` M` or ` B` from 1,000 upward (`1.20 K`, `3.45 M`); below 1,000 the plain
+  integer without `.00` (`0`, `983`).
+- Costs use the shared money format (`usage-report.md` "Numbers") with decimals.
+- Models are colored by company with the theme's company palette.
